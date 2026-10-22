@@ -1,0 +1,54 @@
+# ---- build outputs (rebuilt by build.ps1 / inject_test\build.ps1) ----------
+/build/
+/dist/
+/out/
+inject_test/build/
+inject_test/out/
+.vs/
+CMakeUserPresets.json
+*.pdb
+*.obj
+*.ilk
+*.exp
+*.lib
+# third_party ships sources only; re-include any vendored .lib if one is ever added
+!third_party/**/*.lib
+__pycache__/
+*.pyc
+
+# ---- game binaries / RE outputs (copyrighted, hundreds of MB) --------------
+# Only the subfolders are ignored; hand-written notes in re/ (candidates.md,
+# symbols.md, ...) stay tracked.
+/re/input/
+/re/dump/
+/re/ida/
+*.i64
+*.idb
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+
+# ---- downloaded tooling (Cpp2IL, Il2CppInspectorRedux, .NET runtime) ------
+/tools/
+
+# ---- user's personal game saves ------------------------------------------
+/save-backups/
+
+# ---- logs -----------------------------------------------------------------
+*.log
+/sr2mods.log
+sr2mods_injecttest.log
+
+# ---- editor / OS junk -----------------------------------------------------
+Thumbs.db
+desktop.ini
+*.swp
+
+# ---- never commit binaries / game data / Python envs ------------------------
+*.dll
+*.exe
+*.sav
+.venv/
+venv/

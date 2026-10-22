@@ -1,0 +1,29 @@
+{
+  // sr2mods configuration. Lives next to version.dll in the game folder.
+  // Comments and trailing commas are allowed - BUT changing a setting in-game
+  // rewrites this file as plain JSON (all keys kept, comments dropped).
+  // Module settings live under "modules": { "<module>": { "<key>": value } }.
+
+  "log_level": "info",            // trace | debug | info | warn | error | off
+  "debug_console": true,          // only has an effect in Debug builds
+
+  "startup_timeout_ms": 300000,   // max wait for GameAssembly.dll + IL2CPP init
+  "settle_delay_ms": 1500,        // extra wait after IL2CPP reports ready
+
+  "dump_assemblies": true,        // log every loaded image + class count at startup
+  "version_guard_invoke": true,   // call Application.unityVersion / .version via IL2CPP
+  "expected_game_version": "1.3.0",
+  "expected_unity_version": "6000.0.73f1",
+
+  "perf_log": true,               // timing of the mod's per-frame work, frame hitches + GC -> log ("perf:" lines)
+
+  // Settings profile last loaded/saved (profiles\<name>.json next to version.dll).
+  // Only remembered: startup never re-applies it, the values below are the live ones.
+  "active_profile": "",
+
+  "modules": {
+    "minimap":       { "enabled": true },
+    "spawn_scaling": { "enabled": true },
+    "hl2_movement":  { "enabled": false }
+  }
+}
