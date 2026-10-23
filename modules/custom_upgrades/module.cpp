@@ -1,7 +1,32 @@
 // custom_upgrades: framework for NEW land-plot upgrades bought in the game's own plot
-// purchase menu, with save-safe sidecar persistence (SR2 1.3.0). First upgrade: the silo
+// purchase menu, with save-safe sidecar persistence (SR2 1.3.0). Upgrades: the silo
 // "Sell-All Button" (sell every plort stored in that silo at the current Plort Market
-// price, market saturation applied by the game).
+// price, market saturation applied by the game) and the per-plot upgrade TIERS whose
+// effects plot_upgrades applies (api.h Multiplier):
+//
+//   tier                 plot         needs                 price   effect
+//   Plort Collector II   corral       Plort Collector       2500    collects 1.5x as often
+//   Plort Collector III  corral       Plort Collector II    5000    collects 2x as often
+//   Auto-Feeder II       corral       Auto-Feeder           2500    2x food per feeding cycle
+//   Music Box II         corral       Music Box             2000    2x calming bonus
+//   Faster Hens I        coop         -                     2000    hens lay 1.5x as often
+//   Faster Hens II       coop         Faster Hens I         4000    hens lay 2x as often
+//   Fast Growth I        garden       -                     2000    crops grow 1.5x as fast
+//   Fast Growth II       garden       Fast Growth I         4000    crops grow 2x as fast
+//   Ash Booster          incinerator  Ash Trough            1500    2x ash per incinerated food
+//
+//   Tiers are listed once the prerequisite is owned (custom `needs` or a vanilla
+//   upgrade via the original LandPlot.HasUpgrade); owned ones stay listed greyed. A
+//   tier reuses the icon of its vanilla upgrade (collector, feeder, music box, deluxe
+//   coop, sprinkler, ash trough). Selling (sell_upgrades) is refused while a higher tier
+//   - or, for a vanilla prerequisite, any tier built on it - is still owned. Only the
+//   highest owned tier of a family counts (they do not stack).
+//
+//   Multiplier(obj, family): a per-object cache (key = the LandPlot or the component
+//   the caller has; value = the multipliers of all families) invalidated by a version
+//   counter (buy, sell, load, new game, sidecar read, plot type change) and expired
+//   after ~900 frames (covers plot rebuilds / reused addresses). A miss resolves the
+//   plot once (GetComponentInParent(LandPlot) + LandPlotLocation id), no per-call work.
 //
 // Design + research notes: re/custom-upgrades.md. Summary (RVAs for reference only, all
 // lookups are by name):
@@ -117,14 +142,38 @@ constexpr int kSidecarFormat = 1;
 constexpr int kHideFlagsDontUnloadUnusedAsset = 32;
 
 // LandPlot.Id
+constexpr int32_t kPlotCorral = 2;
+constexpr int32_t kPlotCoop = 3;
+constexpr int32_t kPlotGarden = 4;
 constexpr int32_t kPlotSilo = 5;
-// LandPlot.Upgrade (vanilla) used as template preference
-constexpr int32_t kUpgStorageCapacity = 20;
+constexpr int32_t kPlotIncinerator = 7;
+// LandPlot.Upgrade (vanilla)
+constexpr int32_t kUpgMusicBox = 2;
+constexpr int32_t kUpgSprinkler = 7;
+constexpr int32_t kUpgFeeder = 9;
+constexpr int32_t kUpgPlortCollector = 12;
+constexpr int32_t kUpgAshTrough = 14;
+constexpr int32_t kUpgDeluxeCoop = 17;
+constexpr int32_t kUpgStorageCapacity = 20;  // template preference
+constexpr unsigned long long kTierCacheFrames = 900;
+
+using custom_upgrades::Family;
+constexpr int kFamilies = static_cast<int>(Family::kCount);
+constexpr int kNoFamily = -1;
 
 // ---- custom upgrade definitions -------------------------------------------------------
 enum CustomId : int32_t {
     SILO_SELL_ALL = custom_upgrades::kIdBase + 0x0001,      // owned upgrade
     SILO_SELL_ALL_NOW = custom_upgrades::kIdBase + 0x0002,  // action item (needs SILO_SELL_ALL)
+    CORRAL_COLLECTOR_2 = custom_upgrades::kIdBase + 0x0010,
+    CORRAL_COLLECTOR_3 = custom_upgrades::kIdBase + 0x0011,
+    CORRAL_FEEDER_2 = custom_upgrades::kIdBase + 0x0012,
+    CORRAL_MUSIC_2 = custom_upgrades::kIdBase + 0x0013,
+    COOP_HENS_1 = custom_upgrades::kIdBase + 0x0020,
+    COOP_HENS_2 = custom_upgrades::kIdBase + 0x0021,
+    GARDEN_GROWTH_1 = custom_upgrades::kIdBase + 0x0030,
+    GARDEN_GROWTH_2 = custom_upgrades::kIdBase + 0x0031,
+    INCIN_ASH_BOOST = custom_upgrades::kIdBase + 0x0040,
 };
 
 struct UpgradeDef {
@@ -132,19 +181,60 @@ struct UpgradeDef {
     const char* key;     // sidecar key (stable)
     int32_t plotType;    // LandPlot.Id
     bool action;         // never owned; buying runs the action
-    int32_t needs;    // shown only while this custom upgrade is owned (0 = always)
+    int32_t needs;       // listed only while this upgrade is owned: custom id, vanilla id or 0
+    int price;           // Newbucks (0 = setting / action)
+    int family;          // Family (kNoFamily = not a tier)
+    float mult;          // tier multiplier
+    int32_t iconFrom;    // vanilla upgrade whose menu icon is reused (0 = Market Link icon)
     const char* title;
     const char* description;
     const char* prompt;
 };
 
+constexpr int F(Family f) { return static_cast<int>(f); }
+
 const UpgradeDef kDefs[] = {
-    {SILO_SELL_ALL, "silo_sell_all", kPlotSilo, false, 0, "Sell-All Button",
+    {SILO_SELL_ALL, "silo_sell_all", kPlotSilo, false, 0, 0, kNoFamily, 1.0f, 0, "Sell-All Button",
      "Adds a sell-all action to this silo: sell every plort stored in it at today's Plort Market prices in "
      "one go (the market saturates like a normal sale). Food, slimes and other items stay in the silo.",
      "Buy the Sell-All Button for this silo?"},
-    {SILO_SELL_ALL_NOW, "silo_sell_all_now", kPlotSilo, true, SILO_SELL_ALL, "Sell All Plorts Now",
-     "Sell every plort stored in this silo at today's Plort Market prices.", "Sell all plorts in this silo?"},
+    {SILO_SELL_ALL_NOW, "silo_sell_all_now", kPlotSilo, true, SILO_SELL_ALL, 0, kNoFamily, 1.0f, 0,
+     "Sell All Plorts Now", "Sell every plort stored in this silo at today's Plort Market prices.",
+     "Sell all plorts in this silo?"},
+    // ---- tiers ----
+    {CORRAL_COLLECTOR_2, "corral_collector_2", kPlotCorral, false, kUpgPlortCollector, 2500, F(Family::kCollector),
+     1.5f, kUpgPlortCollector, "Plort Collector II",
+     "Tunes this corral's Plort Collector: it collects plorts 1.5x as often (every two thirds of the usual time).",
+     "Buy Plort Collector II for this corral?"},
+    {CORRAL_COLLECTOR_3, "corral_collector_3", kPlotCorral, false, CORRAL_COLLECTOR_2, 5000, F(Family::kCollector),
+     2.0f, kUpgPlortCollector, "Plort Collector III",
+     "Fully tunes this corral's Plort Collector: it collects plorts twice as often (replaces the Plort Collector II "
+     "bonus).",
+     "Buy Plort Collector III for this corral?"},
+    {CORRAL_FEEDER_2, "corral_feeder_2", kPlotCorral, false, kUpgFeeder, 2500, F(Family::kFeeder), 2.0f, kUpgFeeder,
+     "Auto-Feeder II",
+     "This corral's Auto-Feeder hands out twice as much food per feeding cycle, from the food stored in it.",
+     "Buy Auto-Feeder II for this corral?"},
+    {CORRAL_MUSIC_2, "corral_music_2", kPlotCorral, false, kUpgMusicBox, 2000, F(Family::kMusicBox), 2.0f,
+     kUpgMusicBox, "Music Box II", "Doubles the calming effect of this corral's Music Box on the slimes inside.",
+     "Buy Music Box II for this corral?"},
+    {COOP_HENS_1, "coop_hens_1", kPlotCoop, false, 0, 2000, F(Family::kCoop), 1.5f, kUpgDeluxeCoop, "Faster Hens I",
+     "Hens inside this coop lay eggs 1.5x as often.", "Buy Faster Hens I for this coop?"},
+    {COOP_HENS_2, "coop_hens_2", kPlotCoop, false, COOP_HENS_1, 4000, F(Family::kCoop), 2.0f, kUpgDeluxeCoop,
+     "Faster Hens II", "Hens inside this coop lay eggs twice as often (replaces the Faster Hens I bonus).",
+     "Buy Faster Hens II for this coop?"},
+    {GARDEN_GROWTH_1, "garden_growth_1", kPlotGarden, false, 0, 2000, F(Family::kGarden), 1.5f, kUpgSprinkler,
+     "Fast Growth I", "Crops on this garden grow 1.5x as fast (stacks with the Sprinkler).",
+     "Buy Fast Growth I for this garden?"},
+    {GARDEN_GROWTH_2, "garden_growth_2", kPlotGarden, false, GARDEN_GROWTH_1, 4000, F(Family::kGarden), 2.0f,
+     kUpgSprinkler, "Fast Growth II",
+     "Crops on this garden grow twice as fast (stacks with the Sprinkler, replaces the Fast Growth I bonus).",
+     "Buy Fast Growth II for this garden?"},
+    {INCIN_ASH_BOOST, "incinerator_ash_boost", kPlotIncinerator, false, kUpgAshTrough, 1500, F(Family::kAsh), 2.0f,
+     kUpgAshTrough, "Ash Booster",
+     "This incinerator puts twice as much ash into its Ash Trough per incinerated food (the trough's capacity is "
+     "unchanged).",
+     "Buy the Ash Booster for this incinerator?"},
 };
 
 const UpgradeDef* FindDef(int32_t id) {
@@ -229,6 +319,9 @@ struct SiloSummary {
     bool marketAvailable = false;
 };
 
+using HasUpgradeFn = bool (*)(Il2CppObject*, int32_t, const MethodInfo*);
+HasUpgradeFn g_origHas = nullptr;  // original LandPlot.HasUpgrade (vanilla ids only)
+
 class CustomUpgrades final : public sr2::core::Module {
 public:
     const char* Name() const override { return kModule; }
@@ -259,8 +352,23 @@ public:
     // api.h
     std::string CanSellCustom(Il2CppObject* plot, int32_t upg);
     bool RemoveCustom(Il2CppObject* plot, int32_t upg, std::string& notes);
+    std::string VanillaDependentOf(Il2CppObject* plot, int32_t vanillaUpg);
+    float TierMultiplier(Il2CppObject* obj, int family);
 
 private:
+    struct TierEntry {
+        unsigned long long version = 0;
+        unsigned long long tick = 0;
+        float mult[kFamilies] = {};
+    };
+    bool VanillaOwned(Il2CppObject* plot, int32_t upg) {
+        return g_origHas && unity::IsAlive(plot) && g_origHas(plot, upg, hasMi_);
+    }
+    void Bump() { ++version_; }
+
+    unsigned long long version_ = 1;  // tier cache version (buy / sell / load / reset)
+    std::unordered_map<Il2CppObject*, TierEntry> tierCache_;
+
     Il2CppObject* Invoke(const MethodInfo* m, void* obj, std::initializer_list<void*> args, const char* what,
                          bool* ok = nullptr);
     void SetRef(Il2CppObject* obj, size_t offset, Il2CppObject* value);
@@ -277,7 +385,7 @@ private:
 
     MenuInjection* InjectionFor(Il2CppObject* config);
     bool BuildInjection(MenuInjection& inj, int32_t plotType);
-    Il2CppObject* CloneItem(Il2CppObject* tpl, const UpgradeDef& d, Il2CppObject*& costEntry);
+    Il2CppObject* CloneItem(Il2CppObject* tpl, const UpgradeDef& d, Il2CppObject* iconSrc, Il2CppObject*& costEntry);
     bool ListCall(Il2CppObject* list, const char* method, Il2CppObject* item, bool* result = nullptr);
     Il2CppObject* MarketIcon();
     void SetTexts(const Injected& in, const std::string& title, const std::string& desc, const std::string& prompt);
@@ -337,12 +445,16 @@ public:
     Bound<Il2CppObject*(Il2CppObject*)> getParent_;
     Bound<Il2CppObject*(Il2CppObject*, Il2CppObject*)> getComponent_;
     Bound<Il2CppArray*(Il2CppObject*, Il2CppObject*, bool)> getComponentsInChildren_;
+    Bound<Il2CppObject*(Il2CppObject*, Il2CppObject*, bool)> getComponentInParent_;
+    const MethodInfo* hasMi_ = nullptr;  // LandPlot.HasUpgrade (hidden arg for g_origHas)
+    size_t offItemUnavailIcon_ = 0;      // MenuPurchaseItemModel._unavailableIcon
 
     using WBarrierFn = void (*)(Il2CppObject*, void**, void*);
     WBarrierFn wbarrier_ = nullptr;
 };
 
 CustomUpgrades* g_self = nullptr;
+sr2::core::DetourGuard g_tierGuard{kModule, "custom_upgrades.Multiplier"};
 
 sr2::core::DetourGuard g_hasGuard{kModule, "LandPlot.HasUpgrade"};
 sr2::core::DetourGuard g_addGuard{kModule, "LandPlot.AddUpgrade"};
@@ -350,13 +462,11 @@ sr2::core::DetourGuard g_menuGuard{kModule, "LandPlotUIRoot.UpdateMenuItemAvaila
 sr2::core::DetourGuard g_saveGuard{kModule, "AutoSaveDirector.SaveGameImpl"};
 sr2::core::DetourGuard g_loadGuard{kModule, "AutoSaveDirector.Load/StartNewGame"};
 
-using HasUpgradeFn = bool (*)(Il2CppObject*, int32_t, const MethodInfo*);
 using AddUpgradeFn = void (*)(Il2CppObject*, int32_t, const MethodInfo*);
 using MenuUpdateFn = void (*)(Il2CppObject*, const MethodInfo*);
 using SaveImplFn = Il2CppObject* (*)(Il2CppObject*, bool, Il2CppObject*, const MethodInfo*);
 using LoadFn = void (*)(Il2CppObject*, const void*, bool, Il2CppObject*, const MethodInfo*);  // struct by reference (x64)
 using NewGameFn = void (*)(Il2CppObject*, int32_t, Il2CppObject*, const MethodInfo*);
-HasUpgradeFn g_origHas = nullptr;
 AddUpgradeFn g_origAdd = nullptr;
 MenuUpdateFn g_origMenu = nullptr;
 SaveImplFn g_origSave = nullptr;
@@ -432,6 +542,7 @@ void CustomUpgrades::SetRef(Il2CppObject* obj, size_t offset, Il2CppObject* valu
 
 int CustomUpgrades::Price(const UpgradeDef& d) const {
     if (d.action) return 0;
+    if (d.price > 0) return d.price;
     int p = settings::GetInt(kModule, kKeyPrice);
     return std::clamp(p, 0, 10000000);
 }
@@ -464,12 +575,15 @@ void CustomUpgrades::ResetState(const char* why) {
     if (state_.loaded) SR2_INFO("[{}] {}: custom upgrade state of '{}' dropped (re-read from its sidecar)", kModule, why,
                                 state_.game);
     state_ = {};
+    Bump();
+    tierCache_.clear();
 }
 
 void CustomUpgrades::LoadSidecar(const std::string& game) {
     state_ = {};
     state_.loaded = true;
     state_.game = game;
+    Bump();
     const auto path = SidecarPath(game);
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) {
@@ -579,6 +693,7 @@ bool CustomUpgrades::OwnsKey(Il2CppObject* plot, const UpgradeDef& d, std::strin
         // The plot was demolished and rebuilt as another type: its custom upgrades are gone.
         SR2_INFO("[{}] plot '{}' is no longer type {} - dropping its custom upgrades", kModule, id, it->second.type);
         state_.plots.erase(it);
+        Bump();
         return false;
     }
     return it->second.owned.count(d.key) != 0;
@@ -592,11 +707,10 @@ bool CustomUpgrades::Owns(Il2CppObject* plot, int32_t upg) {
 
 bool CustomUpgrades::Visible(Il2CppObject* plot, const UpgradeDef& d) {
     if (PlotType(plot) != d.plotType) return false;
-    if (d.needs) {
-        const UpgradeDef* r = FindDef(d.needs);
-        return r && OwnsKey(plot, *r);
-    }
-    return true;
+    if (!d.needs) return true;
+    if (!custom_upgrades::IsCustomUpgrade(d.needs)) return VanillaOwned(plot, d.needs);  // vanilla prerequisite
+    const UpgradeDef* r = FindDef(d.needs);
+    return r && OwnsKey(plot, *r);
 }
 
 // ---------------------------------------------------------------- menu --
@@ -646,7 +760,8 @@ Il2CppObject* CustomUpgrades::MarketIcon() {
     return marketIcon_;
 }
 
-Il2CppObject* CustomUpgrades::CloneItem(Il2CppObject* tpl, const UpgradeDef& d, Il2CppObject*& costEntry) {
+Il2CppObject* CustomUpgrades::CloneItem(Il2CppObject* tpl, const UpgradeDef& d, Il2CppObject* iconSrc,
+                                        Il2CppObject*& costEntry) {
     costEntry = nullptr;
     Il2CppObject* clone = unity::Instantiate(tpl, nullptr);
     if (!unity::IsAlive(clone) || !IsA(clone, upgItemClass_)) return nullptr;
@@ -682,7 +797,16 @@ Il2CppObject* CustomUpgrades::CloneItem(Il2CppObject* tpl, const UpgradeDef& d, 
     if (!costEntry) return nullptr;
     unity::Field<int32_t>(clone, offItemUpgrade_) = d.id;
     unity::Field<int32_t>(costEntry, offCostAmount_) = Price(d);
-    if (Il2CppObject* icon = MarketIcon()) SetRef(clone, offItemIcon_, icon);
+    // Icon: the vanilla upgrade this tier builds on (its normal and greyed "owned" icon);
+    // otherwise the Market Link icon (sell-all), for both states.
+    Il2CppObject* icon = iconSrc ? unity::Field<Il2CppObject*>(iconSrc, offItemIcon_) : nullptr;
+    Il2CppObject* unavailable = iconSrc ? unity::Field<Il2CppObject*>(iconSrc, offItemUnavailIcon_) : nullptr;
+    if (!unity::IsAlive(icon)) {
+        icon = MarketIcon();
+        unavailable = icon;
+    }
+    if (unity::IsAlive(icon)) SetRef(clone, offItemIcon_, icon);
+    if (unity::IsAlive(unavailable) && offItemUnavailIcon_) SetRef(clone, offItemUnavailIcon_, unavailable);
     return clone;
 }
 
@@ -708,6 +832,7 @@ bool CustomUpgrades::BuildInjection(MenuInjection& inj, int32_t plotType) {
     Il2CppObject* bestList = nullptr;
     Il2CppObject* tpl = nullptr;
     int bestScore = -1;
+    std::map<int32_t, Il2CppObject*> vanilla;  // vanilla upgrade -> its menu item (icon source)
     for (size_t ci = 0, cn = unity::ListCount(cats); ci < cn && ci < 32; ++ci) {
         auto* cat = static_cast<Il2CppObject*>(unity::ListAt(cats, ci));
         if (!cat) continue;
@@ -730,6 +855,7 @@ bool CustomUpgrades::BuildInjection(MenuInjection& inj, int32_t plotType) {
             if (!IsA(item, upgItemClass_) || !unity::IsAlive(item)) continue;
             const int32_t u = unity::Field<int32_t>(item, offItemUpgrade_);
             if (custom_upgrades::IsCustomUpgrade(u)) continue;
+            vanilla.emplace(u, item);
             void* costs = unity::Field<void*>(item, offItemCosts_);
             const size_t nc = unity::ListCount(costs);
             int score = (nc == 1 ? 2 : nc > 1 ? 1 : 0) + (u == kUpgStorageCapacity ? 4 : 0);
@@ -749,7 +875,13 @@ bool CustomUpgrades::BuildInjection(MenuInjection& inj, int32_t plotType) {
         if (d.plotType != plotType) continue;
         Injected in;
         in.def = &d;
-        in.item = CloneItem(tpl, d, in.costEntry);
+        Il2CppObject* iconSrc = nullptr;
+        if (d.iconFrom) {
+            auto vit = vanilla.find(d.iconFrom);
+            if (vit != vanilla.end()) iconSrc = vit->second;
+            else SR2_INFO("[{}] {}: vanilla upgrade {} not in this menu - generic icon", kModule, d.title, d.iconFrom);
+        }
+        in.item = CloneItem(tpl, d, iconSrc, in.costEntry);
         if (!in.item) return false;
         inj.items.push_back(in);
     }
@@ -919,6 +1051,7 @@ void CustomUpgrades::OnAddUpgrade(Il2CppObject* plot, int32_t upg) {
     PlotState& ps = state_.plots[id];
     ps.type = d->plotType;
     ps.owned.insert(d->key);
+    Bump();
     SR2_INFO("[{}] bought {} on plot '{}' (saved with the next game save)", kModule, d->title, id);
 }
 
@@ -1019,9 +1152,53 @@ bool CustomUpgrades::RemoveCustom(Il2CppObject* plot, int32_t upg, std::string& 
     if (it == state_.plots.end()) return false;
     it->second.owned.erase(d->key);
     if (it->second.owned.empty()) state_.plots.erase(it);
+    Bump();
     notes += "custom upgrade removed (saved with the next game save)";
     SR2_INFO("[{}] {} removed from plot '{}'", kModule, d->title, id);
     return true;
+}
+
+std::string CustomUpgrades::VanillaDependentOf(Il2CppObject* plot, int32_t vanillaUpg) {
+    if (custom_upgrades::IsCustomUpgrade(vanillaUpg) || !vanillaUpg) return {};
+    for (const UpgradeDef& o : kDefs)
+        if (!o.action && o.needs == vanillaUpg && OwnsKey(plot, o)) return o.title;
+    return {};
+}
+
+// ---------------------------------------------------------------- tiers --
+
+float CustomUpgrades::TierMultiplier(Il2CppObject* obj, int family) {
+    if (family < 0 || family >= kFamilies || !obj || !main_thread::IsMainThread()) return 1.0f;
+    const unsigned long long tick = main_thread::TickCount();
+    auto it = tierCache_.find(obj);
+    if (it != tierCache_.end() && it->second.version == version_ && tick - it->second.tick < kTierCacheFrames)
+        return it->second.mult[family];
+
+    // Slow path (once per object per version / ~15 s): resolve the plot and its owned tiers.
+    TierEntry e;
+    e.version = version_;
+    e.tick = tick;
+    for (float& m : e.mult) m = 1.0f;
+    if (unity::IsAlive(obj)) {
+        Il2CppObject* plot = IsA(obj, plotClass_) ? obj : getComponentInParent_(obj, unity::TypeOf(plotClass_), true);
+        if (unity::IsAlive(plot) && IsA(plot, plotClass_)) {
+            const int32_t type = PlotType(plot);
+            bool any = false;
+            for (const UpgradeDef& d : kDefs) any |= (d.family != kNoFamily && d.plotType == type);
+            if (any && EnsureLoaded()) {
+                const std::string id = PlotId(plot);
+                auto ps = id.empty() ? state_.plots.end() : state_.plots.find(id);
+                if (ps != state_.plots.end() && ps->second.type == type) {
+                    for (const UpgradeDef& d : kDefs)
+                        if (d.family != kNoFamily && d.plotType == type && ps->second.owned.count(d.key))
+                            e.mult[d.family] = std::max(e.mult[d.family], d.mult);
+                }
+            }
+        }
+    }
+    if (tierCache_.size() > 4096) tierCache_.clear();  // bounded (stale keys of destroyed objects)
+    tierCache_[obj] = e;
+    return e.mult[family];
 }
 
 // ---------------------------------------------------------------- setup --
@@ -1105,6 +1282,7 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     off(upgItemClass_, "_description", offItemDesc_);
     off(upgItemClass_, "_promptMessage", offItemPrompt_);
     off(upgItemClass_, "_icon", offItemIcon_);
+    off(upgItemClass_, "_unavailableIcon", offItemUnavailIcon_);
     off(upgItemClass_, "_purchaseCost", offCostField);
     off(purchaseCost, "_currencyCosts", offCurrencyList);
     if (offCurrencyList >= 2 * sizeof(void*)) offCurrencyList -= 2 * sizeof(void*);  // value-type field
@@ -1120,6 +1298,7 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     if (!why.empty()) return ctx.Fail(why);
 
     const MethodInfo* hasMi = method(plotClass_, "HasUpgrade", 1);
+    hasMi_ = hasMi;
     const MethodInfo* addMi = method(plotClass_, "AddUpgrade", 1);
     const MethodInfo* menuMi = R.Method(rootClass_, "UpdateMenuItemAvailabilityAndHidden", 0);  // the override itself
     if (!menuMi && why.empty()) why = "LandPlotUIRoot.UpdateMenuItemAvailabilityAndHidden not found";
@@ -1142,6 +1321,7 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     bind(getParent_, method(transform, "get_parent", 0));
     bind(getComponent_, byParams(component, "GetComponent", {"System.Type"}));
     bind(getComponentsInChildren_, byParams(component, "GetComponentsInChildren", {"System.Type", "System.Boolean"}));
+    bind(getComponentInParent_, byParams(component, "GetComponentInParent", {"System.Type", "System.Boolean"}));
     if (!why.empty()) return ctx.Fail(why);
     {
         Il2CppClass* lookup = R.Class(kImage, "", "LookupDirector");
@@ -1225,6 +1405,20 @@ bool Remove(Il2CppObject* landPlot, int32_t upgrade, std::string& notes) {
     bool ok = false;
     g_addGuard.Run([&] { ok = g_self->RemoveCustom(landPlot, upgrade, notes); });
     return ok;
+}
+
+std::string VanillaDependent(Il2CppObject* landPlot, int32_t vanillaUpgrade) {
+    if (!Active() || !main_thread::IsMainThread()) return {};
+    std::string r;
+    g_hasGuard.Run([&] { r = g_self->VanillaDependentOf(landPlot, vanillaUpgrade); });
+    return r;
+}
+
+float Multiplier(Il2CppObject* plotOrComponent, Family family) {
+    if (!Active()) return 1.0f;
+    float m = 1.0f;
+    if (!g_tierGuard.Run([&] { m = g_self->TierMultiplier(plotOrComponent, static_cast<int>(family)); })) return 1.0f;
+    return std::isfinite(m) && m >= 1.0f && m <= 10.0f ? m : 1.0f;
 }
 
 }  // namespace custom_upgrades

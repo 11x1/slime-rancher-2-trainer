@@ -590,6 +590,9 @@ std::string SellUpgrades::CanSell(Il2CppObject* plot, int32_t upg) {
         default: break;
     }
     if (upg < WALLS || upg > STORAGE_CAPACITY_INCREASE) return "This upgrade can't be sold.";
+    // A custom tier built on this vanilla upgrade (e.g. Plort Collector II) must be sold first.
+    if (std::string dep = custom_upgrades::VanillaDependent(plot, upg); !dep.empty())
+        return std::format("Sell '{}' first - it needs this upgrade.", dep);
     if (upg == ASH_TROUGH && HasUpgrade(plot, PLORT_COLLECTOR_INCINERATOR))
         return "The incinerator's Plort Collector needs the Ash Trough. Sell the Plort Collector first.";
     if (upg == DELUXE_GARDEN && !replantOk_) return "This upgrade can't be sold (game functions not found).";
