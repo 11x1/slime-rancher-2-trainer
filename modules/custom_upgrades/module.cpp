@@ -435,6 +435,7 @@ public:
     void OnAddUpgrade(Il2CppObject* plot, int32_t upg);
     void BeforeMenuUpdate(Il2CppObject* root);
     void AfterMenuUpdate(Il2CppObject* root);
+    bool IsPlotMenu(Il2CppObject* root) const { return IsA(root, rootClass_); }
     void BeforeSave();
     void AfterSave(Il2CppObject* result);
     void OnStoreGameData(Il2CppObject* provider, Il2CppString* fileName);
@@ -698,6 +699,23 @@ void MenuUpdateDetour(Il2CppObject* root, const MethodInfo* mi) {
     if (run) g_menuGuard.Run([&] { g_self->BeforeMenuUpdate(root); });
     g_origMenu(root, mi);
     if (run && g_self->On()) g_menuGuard.Run([&] { g_self->AfterMenuUpdate(root); });
+}
+
+// ListUIRoot`4.RebuildUI (the shared generic body: every list menu comes through here). With the
+// menu already open it does NOT run CreateUI / UpdateMenuItemAvailabilityAndHidden: it only asks
+// the ListUI to RefreshAndAdvance, which re-reads the category item lists. Vanilla items only need
+// that (their availability is a live Func); ours are added / removed / swapped in those lists, so
+// the list is brought up to date first - after a purchase (Upgrade -> AddUpgrade -> RebuildUI) and
+// after a sale (sell_upgrades -> RebuildUI). Other menus: one class check.
+using RebuildFn = void (*)(Il2CppObject*, const MethodInfo*);
+RebuildFn g_origRebuild = nullptr;
+sr2::core::DetourGuard g_rebuildGuard{kModule, "ListUIRoot.RebuildUI"};
+
+void RebuildDetour(Il2CppObject* root, const MethodInfo* mi) {
+    const bool run = g_self && root && g_self->On() && g_self->IsPlotMenu(root);
+    if (run) g_rebuildGuard.Run([&] { g_self->BeforeMenuUpdate(root); });
+    g_origRebuild(root, mi);
+    if (run && g_self->On()) g_rebuildGuard.Run([&] { g_self->AfterMenuUpdate(root); });
 }
 
 Il2CppObject* SaveImplDetour(Il2CppObject* self, bool ignoreDebug, Il2CppObject* modify, const MethodInfo* mi) {
@@ -2255,6 +2273,19 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         if (!p) return ctx.Fail(std::format("{}: no native body ({})", h.name, err));
         if (!ctx.HookAddress(h.name, p, h.detour, h.orig)) return ctx.Fail(std::format("hook {} failed", h.name));
         report += std::format(" {}@0x{:X}", h.name, Resolver::Rva(p));
+    }
+    // Menu refresh after a purchase / sale with the menu open (optional: without it the menu shows
+    // the new tier only when it is opened again).
+    {
+        std::string err;
+        const MethodInfo* rebuildMi = method(rootClass_, "RebuildUI", 0, false);
+        void* p = rebuildMi ? R.MethodPointer(rebuildMi, &err) : nullptr;
+        if (p && ctx.HookAddress("ListUIRoot.RebuildUI", p, reinterpret_cast<void*>(&RebuildDetour),
+                                 reinterpret_cast<void**>(&g_origRebuild)))
+            report += std::format(" ListUIRoot.RebuildUI@0x{:X}", Resolver::Rva(p));
+        else
+            SR2_WARN("[{}] ListUIRoot.RebuildUI not hooked ({}) - the plot menu updates its custom items only when "
+                     "it is opened again", kModule, err.empty() ? "not found" : err);
     }
     if (detailsBindMi) {
         std::string err;
