@@ -154,6 +154,9 @@ struct Symbols {
     //      DroneStationMapMarker, whose icon is DroneTypeDisplayConfiguration.PickDroneTypeSprite(model._type).
     Il2CppClass* droneStationModel = nullptr;    // MonomiPark.SlimeRancher.DataModel.DroneStationGadgetModel
     size_t dsgmType = kNoOffset;                 // DroneStationGadgetModel._type (DroneType, int: 0 ranch, 1 explorer)
+    // ---- teleporters / warp depots: their own GadgetModel subclasses (both `: GadgetModel, LinkDestroyer`)
+    Il2CppClass* teleporterModel = nullptr;      // MonomiPark.SlimeRancher.DataModel.TeleporterGadgetModel
+    Il2CppClass* warpDepotModel = nullptr;       // MonomiPark.SlimeRancher.DataModel.WarpDepotModel
     Il2CppClass* droneStationMarker = nullptr;   // MonomiPark.SlimeRancher.UI.Map.DroneStationMapMarker
     size_t dsmDisplayConfig = kNoOffset;         // DroneStationMapMarker._displayConfiguration
     size_t mpmDronePrefab = kNoOffset;           // MapMarkerPrefabMapping._droneStationPrefab

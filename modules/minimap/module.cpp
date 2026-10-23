@@ -204,7 +204,7 @@ void RegisterSettings() {
         "below refine this one");
     def("icon_drone_ports", "Placed gadgets: drone ports", "Icons", Kind::Bool, 1, 0, 1, 1, {},
         "Quantum drone stations, with the full map's drone-type icon (ranch / explorer)");
-    def("icon_placed_teleporters", "Placed gadgets: teleporters and warp depots", "Icons", Kind::Bool, 1, 0, 1, 1);
+    def("icon_placed_teleporters", "Placed gadgets: teleporters, warp depots, market/refinery links", "Icons", Kind::Bool, 1, 0, 1, 1);
     def("icon_placed_decor", "Placed gadgets: decorations", "Icons", Kind::Bool, 0, 0, 1, 1, {},
         "Purely decorative gadgets (usually many on a ranch). Off by default to keep the minimap readable");
     def("respect_fog", "Respect fog of war", "Icons", Kind::Bool, 1, 0, 1, 1, {},
@@ -3132,7 +3132,9 @@ private:
     // SimpleChair, RockClump, ...; log of 1.3.0), and a variant gadget may leave Type at DEFAULT while its base
     // (VariantOf) carries it. So: Type of the gadget, else of its base; DRONE_STATION (10) -> drone port,
     // TELEPORTER (1) / WARP_DEPOT (2) -> teleporter; else names: "dronestation" -> drone port, "teleport" /
-    // "warpdepot" -> teleporter, "decor" in the asset, group or icon names (the decorations' icons are all
+    // "warpdepot" / "marketlink" / "refinerylink" -> teleporter (the market and refinery link terminals are
+    // DEFAULT gadgets, MarketLink / RefineryLink with iconGadgetMarketLink_small / iconGadgetRefineryLink_small,
+    // log of 1.3.0; they count as warp depots), "decor" in the asset, group or icon names (the decorations' icons are all
     // iconDecor*, e.g. iconDecorSingleChair_small; SpringPad is iconGadgetSpringPad_small) -> decoration;
     // anything else -> other. Each definition name is logged once per session with its group.
     const GadgetInfo& DescribeGadget(Il2CppObject* def, std::string& newDefs) {
@@ -3165,7 +3167,9 @@ private:
         std::string ln = Lower(name), lg = Lower(groupName), li = Lower(iconNames);
         auto named = [&](const char* k) { return Contains(ln, k) || Contains(li, k); };
         if (t == 10 || (t <= 0 && named("dronestation"))) info.group = kDronePort;
-        else if (t == 1 || t == 2 || (t <= 0 && (named("teleport") || named("warpdepot")))) info.group = kPlacedTele;
+        else if (t == 1 || t == 2 ||
+                 (t <= 0 && (named("teleport") || named("warpdepot") || named("marketlink") || named("refinerylink"))))
+            info.group = kPlacedTele;
         else if (t <= 0 && (named("decor") || Contains(lg, "decor"))) info.group = kPlacedDecor;
         else info.group = kPlaced;
         if (loggedDefs_.insert(name).second) {
@@ -3213,7 +3217,10 @@ private:
                 if (!ugui::IsA(def, sym_.identType)) continue;
                 const GadgetInfo& info = DescribeGadget(def, newDefs);
                 bool drone = info.group == kDronePort || (sym_.droneStationModel && ugui::IsA(model, sym_.droneStationModel));
-                int group = drone ? kDronePort : info.group;
+                // the model class settles teleporters / warp depots whatever the definition says
+                bool tele = (sym_.teleporterModel && ugui::IsA(model, sym_.teleporterModel)) ||
+                            (sym_.warpDepotModel && ugui::IsA(model, sym_.warpDepotModel));
+                int group = drone ? kDronePort : tele ? kPlacedTele : info.group;
                 bool pre = game::Has(sym_.gmdPrePlaced) && F<bool>(model, sym_.gmdPrePlaced);
                 int droneType = -1;
                 switch (group) {
