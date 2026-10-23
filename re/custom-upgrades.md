@@ -216,31 +216,41 @@ RVAs are only for reference (GameAssembly.dll 1.3.0). The code finds everything 
   `PlortCollectorActivator.Activate` for our clones → the same sale, plus a short popup or HUD
   text. Needs in-game placement tuning.
 
-### 2.3 Quantum drones: "sell only at or above a limit price" - FEASIBLE, low effort
+### 2.3 Quantum drones: "sell only at or above a limit price" - IMPLEMENTED (`modules/drone_price_limit/`)
 
-* "Automation bees" = the **ranch / quantum drones**: `MonomiPark.SlimeRancher.Drone.RanchDrone`
-  (QuantumDroneAnimator), placed at a `DroneStation` gadget (`DroneStationGadgetModel`) and
-  programmed with source and sink programs. The market sink is
-  `RanchDroneSinkProgramPlortMarket : RanchDroneSinkProgramBase<ScorePlort>`.
-* Online path: `GetSinks(id, overflow)` (iterator `<GetSinks>d__16.MoveNext`, 0xA356A0) filters
-  markets with **`ScorePlort.CanDroneDeposit(id, ignoreMarketShutdown)`** (0x991E40).
-  `OnAction_Deposit` then checks `IsMarketShutdown` and calls `ScorePlort.Deposit(...,
-  wasDepositedByDrone: true)`.
-* Fast-forward path (sleeping / away): `FastForward(id, overflow, endTime, max)` (0xA2C2C0) calls
-  `Deposit` directly on the first sink. **Verify** whether it runs only after `HasAvailableSpace`
-  / `GetSinks`, so that our filter also applies there and `Enumerable.First` never sees an empty
-  sequence.
-* Plan:
-  * Detour `CanDroneDeposit`: return false if the current value (`TryGetMarketValues`) is below
-    the limit. A global limit setting for v1. Per-plort-type and per-station limits later,
-    stored in the sidecar, keyed by the station's gadget id, with UI from the drone station menu
-    (`DroneStationActivator` → drone UI: `DroneProgramOptionButton`, `DroneListButton`), or as an
-    overlay/options entry.
-  * Also guard `FastForward`: skip (return the "nothing deposited" response) when the price is
-    below the limit.
-  * Behaviour when the price is too low: the drone keeps the plorts or leaves them at the source,
-    and sells them once the price recovers (prices update daily).
-  * Optional: "fall back to silo" if a silo sink program is also set.
+Built, not yet tested in game. Full findings are in the header comment of
+`modules/drone_price_limit/module.cpp`. Summary:
+
+* "Automation bees" = the **ranch / quantum drones**: `MonomiPark.SlimeRancher.Drone.RanchDrone`,
+  placed at a `DroneStation` gadget and programmed with source and sink programs. The market sink
+  is `RanchDroneSinkProgramPlortMarket : RanchDroneSinkProgramBase<ScorePlort>`.
+* `ScorePlort.CanDroneDeposit(id, ignoreMarketShutdown)` (0x991E40) is
+  `GetMarketValue(id).HasValue` (plus active / not charging). Its only callers are the `GetSinks`
+  iterators of the market and caretaker-shop sink programs (always `ignoreMarketShutdown = true`).
+  `HasAvailableSpace`, `GetAvailableSpace`, `Relevancy`, the per-tick `OnAction` re-check and the
+  source programs' gather checks all go through `GetSinks`.
+* Fast-forward (sleeping / away): `FastForward` (0xA2C2C0) does `Prioritize(GetSinks).First()`
+  and `Deposit`, but its only caller `DroneFastForwarder.FastForward_Deposit` first filters the sink
+  programs with `HasAvailableSpace(group.id)` and returns "nothing deposited" when none is left. So
+  the `CanDroneDeposit` filter covers it, `First()` never sees an empty sequence, and the source is
+  only decremented by what was really deposited.
+* Trap found: when a drone holds items and no sink program is relevant,
+  `DroneBehaviorPlexer.PickNextBehavior` picks `RanchDroneBehaviourDumpAmmo`, which **destroys**
+  the held items (`PopFromSelectedSlot` + FX). A drone that is carrying plorts when the price
+  drops below the limit (daily price update, limit raised, loaded save) would lose them.
+* Implemented:
+  * Detour `CanDroneDeposit`: after a yes from the original, for a real market (not
+    `_isCaretakerShop`, not the sprinkle type) return false while
+    `GetCurrValue(id) < max(min_price, ceil(fraction x base value))`. Base value =
+    `PlortEconomySettings.PlortsTable` `InitialValue` (= `CurrValueEntry.BaseValue`).
+  * Detour `RanchDroneBehaviourDumpAmmo.Relevancy`: false while the drone holds a plort held back
+    by the limit and has a Plort Market sink program. The drone then rests at its station with the
+    plorts, re-thinks on the Rest timer and deposits once the price is back.
+  * Settings: `min_price` (Newbucks, 0 = off) and `min_price_fraction_of_base` (0 = off); the
+    higher limit counts. One log line per change of state per plort type.
+* Later: per-plort-type / per-station limits (sidecar keyed by the station's gadget id, UI from the
+  drone station menu), "fall back to silo" when a silo sink program is also set (vanilla already
+  tries every relevant sink program in order, so a second silo program takes held-back plorts).
 
 ### 2.4 Coop roof - FEASIBLE (visual), the function needs a decision
 
