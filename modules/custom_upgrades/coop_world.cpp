@@ -46,7 +46,8 @@
 //   Collecting (our tick, ~1 Hz): adults = Physics.OverlapBox over the coop's active
 //   CoopRegion -> Identifiable.identType in {MeatGroup} - {ElderGroup} - UnstableMeat (chicks
 //   are in ChickGroup: never counted, never collected), not held by a vac. While more than
-//   kKeepAdults adults are in the coop and the collector's period (its CollectPeriod, 6 game
+//   the coop's keep-limit (CoopRequest.keepAdults: per coop from the sidecar, set with the plot
+//   menu slider, kHenKeepMin..kHenKeepMax, default 20) adults are in the coop and the collector's period (its CollectPeriod, 6 game
 //   hours, like the elder collector) is due, the excess is collected the vanilla way (slot
 //   chosen like AmmoSlotManager, MaybeAddResource, SpawnAndPlayFX(CollectFX) at the chicken,
 //   Destroyer.DestroyActor, cyclone animation), keeping at least kKeepRoosters roosters, until
@@ -93,8 +94,7 @@ constexpr std::string_view kAirNetKind = "CoopAirNet";
 constexpr std::string_view kHenKind = "HenCollector";
 constexpr float kFitTolerance = 0.02f;
 constexpr int kHideFlagsDontUnloadUnusedAsset = 32;
-constexpr int kKeepAdults = 20;    // breeding stock left in the coop (chicks not counted)
-constexpr int kKeepRoosters = 2;   // never collect the last roosters
+constexpr int kKeepRoosters = 2;   // never collect the last roosters (keep-limit: CoopRequest.keepAdults)
 constexpr int kWarmupTicks = 5;    // no collecting in the first seconds after a (re)build / load
 constexpr int32_t kQueryTriggerIgnore = 1;
 
@@ -306,7 +306,7 @@ struct CoopWorld::Impl {
                    Il2CppObject** storageOut = nullptr);
     void SnapshotInto(Il2CppObject* clone, CoopRequest& req);
     void ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopRequest& req);
-    int Collect(Il2CppObject* clone, Il2CppObject* pc, Il2CppObject* ammo, const CoopInfo& c, int* adultsOut);
+    int Collect(Il2CppObject* clone, Il2CppObject* pc, Il2CppObject* ammo, const CoopInfo& c, int keep, int* adultsOut);
     bool loggedNoHen = false;
     bool henBroken = false;  // a build failed structurally: not retried this session
     bool loggedLinked = false;
@@ -813,7 +813,7 @@ void CoopWorld::Impl::CreateHen(Il2CppObject* plot, CoopRequest& req, Il2CppObje
              henMax, stored);
 }
 
-int CoopWorld::Impl::Collect(Il2CppObject* clone, Il2CppObject* pc, Il2CppObject* ammo, const CoopInfo& c,
+int CoopWorld::Impl::Collect(Il2CppObject* clone, Il2CppObject* pc, Il2CppObject* ammo, const CoopInfo& c, int keep,
                              int* adultsOut) {
     (void)clone;
     *adultsOut = 0;
@@ -842,7 +842,7 @@ int CoopWorld::Impl::Collect(Il2CppObject* clone, Il2CppObject* pc, Il2CppObject
         birds.push_back({ident, type, unity::GetName(type).find("Rooster") != std::string::npos});
     }
     *adultsOut = static_cast<int>(birds.size());
-    int excess = static_cast<int>(birds.size()) - kKeepAdults;
+    int excess = static_cast<int>(birds.size()) - keep;
     if (excess <= 0) return 0;
     int roosters = static_cast<int>(std::count_if(birds.begin(), birds.end(), [](const Bird& b) { return b.rooster; }));
     const int32_t nSlots = static_cast<int32_t>(unity::ArrayLength(Call(ammoSlots, ammo, {}, "AmmoSlotManager.get_Slots", &ok)));
@@ -913,8 +913,9 @@ void CoopWorld::Impl::ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopReque
     bool ok = false;
     if (t.next > 0.0 && !Value<bool>(Call(hasReached, timeDir, {&t.next}, "TimeDirector.HasReached", &ok))) return;
     int adultsIn = 0;
-    const int n = Collect(clone, pc, ammo, c, &adultsIn);
-    if (adultsIn <= kKeepAdults) return;  // nothing over the limit: check again next tick
+    const int keep = std::clamp(req.keepAdults, std::max(kHenKeepMin, kKeepRoosters), kHenKeepMax);
+    const int n = Collect(clone, pc, ammo, c, keep, &adultsIn);
+    if (adultsIn <= keep) return;  // nothing over the limit: check again next tick
     float period = unity::Field<float>(pc, offPcPeriod);
     if (!std::isfinite(period) || period <= 0.0f) period = 6.0f;
     t.next = Value<double>(Call(hoursFromNow, timeDir, {&period}, "TimeDirector.HoursFromNow", &ok));
@@ -925,7 +926,7 @@ void CoopWorld::Impl::ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopReque
     }
     SR2_INFO("[{}] hen collector on plot '{}': {} adult(s) in the coop (limit {}), collected {}; next in {:.1f} game "
              "hours",
-             module, req.id, adultsIn, kKeepAdults, n, period);
+             module, req.id, adultsIn, keep, n, period);
 }
 
 // ---------------------------------------------------------------- api --

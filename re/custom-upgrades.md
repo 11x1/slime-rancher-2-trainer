@@ -201,8 +201,35 @@ As built:
 * Why 20: a collector that takes every adult (the elder collector's literal behaviour) empties the
   coop and stops breeding. 20 adults (~18 hens) produce ~2 chicks per game hour; with 14 h to grow
   that is ~30 chicks, ~50 birds in total, under the 58 density cap where breeding stalls.
-  `kKeepAdults` / `kKeepRoosters` in coop_world.cpp.
+  20 is now only the default: see the limit slider below. `kKeepRoosters` in coop_world.cpp.
 * Price 1000 (Deluxe Coop 1300, Plort Collector 750), icon = the Deluxe Coop item's.
+
+Limit slider (user request, follow-up): the keep-limit is per coop, **2..58** (58 =
+`MaxDensityInsideCoops`), default 20, set with a slider in the coop's purchase menu while the owned
+Hen Collector is selected.
+* Where: `PurchaseItemDetailsContentView.BindData(vm)` (0x6D9EA0, non-generic, unique body) binds
+  the details panel of every list menu: `_detailsText` (+0x58) <- `vm._description`,
+  `_craftCostView` (+0x60) active only when `vm._showCost` (= IsAvailable && NewbuckCost > 0, so
+  hidden for owned items). custom_upgrades detours it (post): the item is ours when
+  `vm._description` is our clone's `_description` LocalizedString instance, the plot comes from the
+  last `UpdateMenuItemAvailabilityAndHidden` root. The slider takes the hidden cost row's slot.
+* Slider prefab: none reachable. The plot UI has no slider, the options ranges are preset
+  steppers, the map zoom bar is `MapZoomSlider` (custom drag handler bound to the map view model).
+  The game styles uGUI sliders with `SliderStyler` (`_style : SliderStyle` asset; OnEnable 0x6CB430
+  -> ApplyStyle 0x6CAC90: `transform.Find("Background")` Image, `slider.fillRect` / `handleRect`
+  Images, `Selectable.colors`). So `modules/custom_upgrades/plot_menu_slider.cpp` builds the standard
+  uGUI slider hierarchy (Background, Fill Area/Fill, Handle Slide Area/Handle) at runtime, adds a
+  `SliderStyler` with the first loaded `SliderStyle` asset (one-time FindObjectsOfTypeAll; plain
+  colours if none), and a TMP label with the description text's font. Reusable: `SliderSpec`
+  {name, min, max, step, value, label(v), onChange(v)}, `Create(contentView, spec)` / `Destroy()` /
+  `Tick(dt)`.
+* Input: mouse through Unity's Slider; gamepad d-pad / left stick and keyboard arrows step it (with
+  repeat), checked to be interactable and without an active `PopupPrompt` (one
+  `FindAnyObjectByType` per new press). A mouse drag's EventSystem selection is handed back to the
+  previously selected object on release.
+* Save: sidecar per plot `"hen_collector_keep": n` (written while the Hen Collector is owned,
+  saved with the next game save like ownership), read live through `CoopRequest.keepAdults`. The
+  menu description shows the coop's current limit.
 
 Original plan:
 

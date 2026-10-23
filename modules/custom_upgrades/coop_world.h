@@ -21,6 +21,12 @@ class Resolver;
 
 namespace sr2::modules::custom_upgrades::world {
 
+// Hen Collector keep-limit (adults left in the coop), per coop; set with the plot menu slider.
+// 58 = Reproduce.MaxDensityInsideCoops, where breeding stalls anyway (re/custom-upgrades.md).
+inline constexpr int kHenKeepDefault = 20;
+inline constexpr int kHenKeepMin = 2;  // = the roosters that are never collected
+inline constexpr int kHenKeepMax = 58;
+
 // One storage slot of a Hen Collector (sidecar): IdentifiableType name ("" = empty) + count.
 struct HenSlot {
     std::string type;
@@ -36,6 +42,7 @@ struct CoopRequest {
     // Hen Collector contents in the sidecar state: restored into a newly built collector, and
     // overwritten with the live contents whenever they differ (only while henCollector).
     std::vector<HenSlot>* hens = nullptr;
+    int keepAdults = kHenKeepDefault;  // collect only the adults above this (clamped to the range above)
 };
 
 // query(plot, out) -> false for plots the framework does not know (no save game loaded,
