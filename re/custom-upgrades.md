@@ -235,6 +235,14 @@ As built:
   (+x,+z) corner) whose SiloStorage gets ONE session clone of the elder slot definition (same
   `_maxAmount` 100, group MeatGroup, block list ElderGroup + UnstableMeat) in both slots before
   activation. Its storage stays local (never linked; a tick check logs an error if it ever were),
+  but it needs an `AmmoModel` of its own: `SiloStorage.InitAmmo` only builds the AmmoSlotManager,
+  whose slots live in its AmmoModel (+0x18), set only via `SiloStorage.SetModel(LandPlotModel)` ->
+  `LandPlotModel.GetAmmoSet` (vanilla: `new AmmoModel(null)`) -> `AmmoSlotManager.SetModel` (Resets
+  it to the definitions). Without it every slot call NREs (first in-game test: `StorageSlotUI.Start`
+  / `Update` every frame, `AmmoSlotManager.get_Slots` in our tick). So CreateHen calls `InitAmmo`,
+  then `SetModel(new AmmoModel(null))` while the clone is still inactive. A one-shot log line
+  ("hen collector placement") gives the clone's world position, renderer count and visibility at
+  build and ~5 s later.
   contents persisted in the sidecar (`hen_collector`), output ports and slot displays work as
   vanilla. Selling is refused while it holds chickens.
 * Collecting: the clone's `PlortCollector` is disabled (it would NRE without a LandPlotModel and

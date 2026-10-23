@@ -40,7 +40,9 @@
 //   elder definition (same _maxAmount 100, _slotTypeGroup = MeatGroup, block list = ElderGroup
 //   members + UnstableMeat), PlortCollector disabled (it would NRE without a LandPlotModel and
 //   cannot keep a breeding stock), root turned -90 deg so it stands in the free (+x, +z) corner
-//   (vanilla: elder collector (+x,-z), vitamizer (-x,+z), plot menu (-x,-z)). Then activated:
+//   (vanilla: elder collector (+x,-z), vitamizer (-x,+z), plot menu (-x,-z)). The storage gets
+//   InitAmmo + a session AmmoModel of its own (AmmoSlotManager.SetModel; without a model every slot
+//   call NREs: slot displays, ports, our tick). Then activated:
 //   local storage only, never linked to the plot model, contents persisted in the sidecar,
 //   output ports / slot displays work as vanilla (vac the chickens out).
 //   Collecting (our tick, ~1 Hz): adults = Physics.OverlapBox over the coop's active
@@ -172,6 +174,19 @@ struct CoopWorld::Impl {
     const MethodInfo* hoursFromNow = nullptr;      // TimeDirector.HoursFromNow(float)
     const MethodInfo* hasReached = nullptr;        // TimeDirector.HasReached(double)
     const MethodInfo* animSetBool = nullptr;       // Animator.SetBool(int, bool)
+    const MethodInfo* initAmmo = nullptr;          // SiloStorage.InitAmmo() (local AmmoSlotManager)
+    const MethodInfo* ammoModelCtor = nullptr;     // AmmoModel..ctor(UnitPropertyTracker)
+    const MethodInfo* ammoSetModel = nullptr;      // AmmoSlotManager.SetModel(AmmoModel)
+    Il2CppClass* ammoModelClass = nullptr;
+    using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
+    ObjectNewFn objectNew = nullptr;
+    // diagnostics (one-shot per build)
+    Il2CppClass* rendererClass = nullptr;
+    const MethodInfo* compsInChildren = nullptr;   // Component.GetComponentsInChildren(Type, bool)
+    const MethodInfo* rendEnabled = nullptr;       // Renderer.get_enabled
+    const MethodInfo* rendVisible = nullptr;       // Renderer.get_isVisible
+    const MethodInfo* rendBounds = nullptr;        // Renderer.get_bounds
+    const MethodInfo* trSetLocalPosition = nullptr;
 
     // Session-wide Hen Collector assets (built once, pinned, never freed).
     bool henTried = false;
@@ -183,6 +198,7 @@ struct CoopWorld::Impl {
     struct PlotTimer {
         double next = 0.0;  // world time of the next collection (0 = due)
         int age = 0;        // ticks the current-generation collector has been served
+        bool diagLogged = false;  // in-world diagnostic written for this build
     };
     std::map<std::string, PlotTimer> timers;
 
@@ -301,6 +317,8 @@ struct CoopWorld::Impl {
         return std::find(adults.begin(), adults.end(), type) != adults.end();
     }
     void CreateHen(Il2CppObject* plot, CoopRequest& req, Il2CppObject* lookup, unsigned generation);
+    bool LinkLocalModel(Il2CppObject* storage, size_t nDefs);
+    void LogPlacement(Il2CppObject* plot, Il2CppObject* clone, const char* when);
     void Restore(Il2CppObject* storage, const std::vector<HenSlot>& slots);
     bool ReadSlots(Il2CppObject* clone, std::vector<HenSlot>& out, Il2CppObject** ammoOut = nullptr,
                    Il2CppObject** storageOut = nullptr);
@@ -442,6 +460,19 @@ bool CoopWorld::Setup(Resolver& R, const char* module, std::string& why) {
         std::string err;
         p->syncTransforms = R.Method(physics, "SyncTransforms", 0, &err);  // optional
         p->objSetHideFlags = R.Method(uobject, "set_hideFlags", 1, &err);  // optional
+        // Hen Collector storage model (without it the collector is not offered: see CreateHen).
+        p->objectNew = reinterpret_cast<Impl::ObjectNewFn>(ga ? GetProcAddress(ga, "il2cpp_object_new") : nullptr);
+        p->initAmmo = R.Method(p->siloStorageClass, "InitAmmo", 0, &err);
+        p->ammoModelClass = R.Class(kImage, "MonomiPark.SlimeRancher.DataModel", "AmmoModel", &err);
+        p->ammoModelCtor = p->ammoModelClass ? R.Method(p->ammoModelClass, ".ctor", 1, &err) : nullptr;
+        p->ammoSetModel = R.Method(ammoMgr, "SetModel", 1, &err);
+        // Diagnostics (optional).
+        p->rendererClass = R.Class(kCore, "UnityEngine", "Renderer", &err);
+        p->compsInChildren = R.MethodByParams(component, "GetComponentsInChildren", {"System.Type", "System.Boolean"}, &err);
+        p->rendEnabled = p->rendererClass ? R.Method(p->rendererClass, "get_enabled", 0, &err) : nullptr;
+        p->rendVisible = p->rendererClass ? R.Method(p->rendererClass, "get_isVisible", 0, &err) : nullptr;
+        p->rendBounds = p->rendererClass ? R.Method(p->rendererClass, "get_bounds", 0, &err) : nullptr;
+        p->trSetLocalPosition = R.Method(p->transformClass, "set_localPosition", 1, &err);
     }
     impl_ = p;
     ready_ = true;
@@ -728,6 +759,86 @@ void CoopWorld::Impl::SnapshotInto(Il2CppObject* clone, CoopRequest& req) {
     if (ReadSlots(clone, live) && live != *req.hens) *req.hens = std::move(live);
 }
 
+// SiloStorage.Awake -> InitAmmo only constructs an AmmoSlotManager from the slot definitions: its
+// AmmoModel (the slots array, AmmoSlotManager +0x18) is set only by SiloStorage.SetModel(LandPlotModel)
+// -> LandPlotModel.GetAmmoSet -> AmmoSlotManager.SetModel. Without it every slot call NREs
+// (StorageSlotUI.Start / Update of the slot displays, our ReadSlots / Collect, the output ports). The
+// vanilla model for a plot's ammo set is `new AmmoModel(null)` + SetModel (which Resets it to the
+// definitions); we do the same with a model of our own that is never part of the LandPlotModel (so
+// never saved by the game). Called while the clone is still inactive, so Awake's InitAmmo skips.
+bool CoopWorld::Impl::LinkLocalModel(Il2CppObject* storage, size_t nDefs) {
+    if (!initAmmo || !ammoModelClass || !ammoModelCtor || !ammoSetModel || !objectNew) {
+        SR2_WARN("[{}] hen collector: AmmoModel / SiloStorage.InitAmmo / AmmoSlotManager.SetModel not found", module);
+        return false;
+    }
+    bool ok = false;
+    Call(initAmmo, storage, {}, "SiloStorage.InitAmmo", &ok);
+    if (!ok) return false;
+    Il2CppObject* ammo = Call(localAmmo, storage, {}, "SiloStorage.get_LocalAmmo", &ok);
+    if (!ok || !ammo) {
+        SR2_WARN("[{}] hen collector: SiloStorage.InitAmmo built no AmmoSlotManager", module);
+        return false;
+    }
+    Il2CppObject* model = objectNew(ammoModelClass);
+    if (!model) return false;
+    Call(ammoModelCtor, model, {nullptr}, "AmmoModel..ctor", &ok);  // UnitPropertyTracker null, like vanilla
+    if (!ok) return false;
+    Call(ammoSetModel, ammo, {model}, "AmmoSlotManager.SetModel", &ok);
+    if (!ok) return false;
+    const size_t n = unity::ArrayLength(Call(ammoSlots, ammo, {}, "AmmoSlotManager.get_Slots", &ok));
+    if (!ok || n != nDefs) {
+        SR2_WARN("[{}] hen collector: local storage model has {} slot(s), expected {}", module, n, nDefs);
+        return false;
+    }
+    return true;
+}
+
+// One-shot diagnostic: where the clone ended up and whether it renders.
+void CoopWorld::Impl::LogPlacement(Il2CppObject* plot, Il2CppObject* clone, const char* when) {
+    Il2CppObject* root = unity::TransformOf(clone);
+    Il2CppObject* plotTr = unity::TransformOf(plot);
+    if (!unity::IsAlive(root) || !unity::IsAlive(plotTr)) return;
+    const Vec3 pp = GetVec(trGetPosition, plotTr, "Transform.get_position");
+    const Vec3 rp = GetVec(trGetPosition, root, "Transform.get_position");
+    const Vec3 rs = GetVec(trGetLocalScale, root, "Transform.get_localScale");
+    bool ok = false;
+    const int children = Value<int32_t>(Call(trChildCount, root, {}, "Transform.get_childCount", &ok));
+    int total = 0, enabled = 0, visible = 0;
+    Vec3 lo{1e9f, 1e9f, 1e9f}, hi{-1e9f, -1e9f, -1e9f};
+    if (rendererClass && compsInChildren) {
+        bool inactive = true;
+        Il2CppObject* arr = Call(compsInChildren, root, {unity::TypeOf(rendererClass), &inactive},
+                                 "GetComponentsInChildren(Renderer)", &ok);
+        for (size_t i = 0, n = ok ? unity::ArrayLength(arr) : 0; i < n && i < 256; ++i) {
+            auto* r = static_cast<Il2CppObject*>(unity::ArrayAt(arr, i));
+            if (!unity::IsAlive(r) || !IsA(r, rendererClass)) continue;
+            ++total;
+            if (!Value<bool>(Call(rendEnabled, r, {}, "Renderer.get_enabled", &ok)) || !ok) continue;
+            if (!unity::ActiveInHierarchy(unity::GameObjectOf(r))) continue;
+            ++enabled;
+            if (Value<bool>(Call(rendVisible, r, {}, "Renderer.get_isVisible", &ok)) && ok) ++visible;
+            Il2CppObject* b = Call(rendBounds, r, {}, "Renderer.get_bounds", &ok);
+            if (!ok || !b) continue;
+            const Bounds bb = Value<Bounds>(b);
+            lo = {std::min(lo.x, bb.center.x - bb.extents.x), std::min(lo.y, bb.center.y - bb.extents.y),
+                  std::min(lo.z, bb.center.z - bb.extents.z)};
+            hi = {std::max(hi.x, bb.center.x + bb.extents.x), std::max(hi.y, bb.center.y + bb.extents.y),
+                  std::max(hi.z, bb.center.z + bb.extents.z)};
+        }
+    }
+    const bool any = enabled > 0 && lo.x <= hi.x;
+    SR2_INFO("[{}] hen collector placement ({}): plot at ({:.2f}, {:.2f}, {:.2f}), clone root at ({:.2f}, {:.2f}, {:.2f}) "
+             "scale ({:.2f}, {:.2f}, {:.2f}), activeInHierarchy {}, {} child(ren), renderers {} (enabled+active {}, "
+             "visible to a camera {}), render bounds {}",
+             module, when, pp.x, pp.y, pp.z, rp.x, rp.y, rp.z, rs.x, rs.y, rs.z, unity::ActiveInHierarchy(clone),
+             children, total, enabled, visible,
+             any ? std::format("({:.2f}, {:.2f}, {:.2f})..({:.2f}, {:.2f}, {:.2f}) = plot-relative centre ({:.2f}, {:.2f}, "
+                               "{:.2f})",
+                               lo.x, lo.y, lo.z, hi.x, hi.y, hi.z, 0.5f * (lo.x + hi.x) - pp.x, 0.5f * (lo.y + hi.y) - pp.y,
+                               0.5f * (lo.z + hi.z) - pp.z)
+                 : std::string("none"));
+}
+
 void CoopWorld::Impl::CreateHen(Il2CppObject* plot, CoopRequest& req, Il2CppObject* lookup, unsigned generation) {
     if (henBroken || !EnsureHenAssets(lookup)) {
         if (!loggedNoHen) SR2_WARN("[{}] hen collector: not available (see above)", module);
@@ -796,14 +907,21 @@ void CoopWorld::Impl::CreateHen(Il2CppObject* plot, CoopRequest& req, Il2CppObje
         SetRef(static_cast<Il2CppObject*>(defs), reinterpret_cast<void**>(&data[i]), henSlotDef);
     bool off = false;
     Call(behSetEnabled, pc, {&off}, "Behaviour.set_enabled");  // our tick collects, not its FixedUpdate
-    Quat q{0.0f, -0.70710678f, 0.0f, 0.70710678f};             // -90 deg: (+x,-z) corner -> (+x,+z)
+    // Placement relative to the live plot: the Deluxe container's own local transform (identity in
+    // the prefab) is set explicitly, then turned -90 deg: (+x,-z) corner -> (+x,+z).
+    Vec3 zero{0.0f, 0.0f, 0.0f}, one{1.0f, 1.0f, 1.0f};
+    if (trSetLocalPosition) Call(trSetLocalPosition, root, {&zero}, "Transform.set_localPosition");
+    SetVec(trSetLocalScale, root, one, "Transform.set_localScale");
+    Quat q{0.0f, -0.70710678f, 0.0f, 0.70710678f};
     Call(trSetLocalRotation, root, {&q}, "Transform.set_localRotation");
-    if (sr2::core::ModuleFaulted(module)) {
+    if (sr2::core::ModuleFaulted(module) || !LinkLocalModel(storage, nDefs)) {
+        if (!sr2::core::ModuleFaulted(module)) SR2_WARN("[{}] hen collector: storage model not set up - not built", module);
         DestroyNow(clone);
         henBroken = true;
         return;
     }
-    unity::SetActive(clone, true);  // Awake: InitAmmo (local), collector refs, catchers, slot UIs
+    unity::SetActive(clone, true);  // Awake: collector refs, catchers, slot UIs (storage already has its model)
+    LogPlacement(plot, clone, "built");
     if (req.hens) Restore(storage, *req.hens);
     int stored = 0;
     if (req.hens)
@@ -908,6 +1026,10 @@ void CoopWorld::Impl::ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopReque
 
     PlotTimer& t = timers[req.id];
     if (++t.age < kWarmupTicks) return;
+    if (!t.diagLogged) {
+        t.diagLogged = true;
+        LogPlacement(c.plot, clone, "in the world");  // isVisible now reflects the cameras
+    }
     Il2CppObject* timeDir = unity::Field<Il2CppObject*>(pc, offPcTimeDir);
     if (!timeDir) return;
     bool ok = false;
