@@ -601,6 +601,8 @@ private:
     // Grid navigation (gamepad / keyboard left / right for the slider): NavigationEventData
     Il2CppClass* navEventClass_ = nullptr;
     const MethodInfo* navMoveDirMi_ = nullptr;  // NavigationEventData.get_MoveDirection
+    Il2CppObject* lastNavEvt_ = nullptr;        // last move the sliders took (identity only)
+    unsigned long long lastNavTick_ = ~0ull;
     const MethodInfo* navUseMi_ = nullptr;      // NavigationEventData.Use(bool didNavigate)
     Il2CppObject* menuRoot_ = nullptr;            // last updated LandPlotUIRoot (handle held)
     Il2CppGCHandle menuRootHandle_ = nullptr;
@@ -734,20 +736,26 @@ void DetailsBindDetour(Il2CppObject* view, Il2CppObject* vm, const MethodInfo* m
     if (g_self && view && g_self->On()) g_detailsGuard.Run([&] { g_self->AfterDetailsBind(view, vm); });
 }
 
-// UniformGridView.INavigationHandler.OnNavigate(NavigationEventData): the item grid of the plot menu
-// (GridArea / GenericGridItemViewHolder) moves its selection on left / right, so a pad / arrow press
-// for the slider also selected the neighbouring item (and the slider vanished with the rebind). While
-// the Hen Collector limit slider is shown those two directions step the slider instead (event used,
-// the grid keeps the item selected). Up / down and everything else pass through unchanged.
-using GridNavFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
-GridNavFn g_origGridNav = nullptr;
-sr2::core::DetourGuard g_gridNavGuard{kModule, "UniformGridView.OnNavigate"};
+// static INavigationHandler.TryHandleAsNavigation(IMoveHandler, NavigationEventData) (0x79C940): the
+// one place where FocusManager.NavigateInDirection (pad d-pad / stick, arrow keys) hands a move to the
+// handlers between the focused object and the spatial target: an INavigationHandler gets OnNavigate,
+// any other IMoveHandler (the focused card's Selectable) OnMove. Right after each call it checks the
+// event's `used` flag: used -> NotifySuccessfulNavigation and no SetFocus. A pad / arrow press for
+// the slider used to select the neighbouring card (the slider vanished with the rebind). The first
+// fix detoured UniformGridView.OnNavigate, but the focused card's own Selectable is asked first and
+// moved the selection, so that detour never ran (test of 506a4f60: no "taken from the menu's grid
+// navigation" line). While the Hen Collector sliders are shown, left / right step the slider instead
+// and the event is used; every other direction and every other menu pass through (one flag check).
+// FocusManager.NavigateInDirection itself is drone_price_limit's (one hook per address).
+using MenuNavFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+MenuNavFn g_origMenuNav = nullptr;
+sr2::core::DetourGuard g_menuNavGuard{kModule, "INavigationHandler.TryHandleAsNavigation"};
 
-void GridNavDetour(Il2CppObject* grid, Il2CppObject* evt, const MethodInfo* mi) {
+void MenuNavDetour(Il2CppObject* handler, Il2CppObject* evt, const MethodInfo* mi) {
     bool taken = false;
     if (g_self && evt && g_self->On() && g_self->SliderActive())
-        g_gridNavGuard.Run([&] { taken = g_self->OnGridNavigate(evt); });
-    if (!taken) g_origGridNav(grid, evt, mi);
+        g_menuNavGuard.Run([&] { taken = g_self->OnGridNavigate(evt); });
+    if (!taken) g_origMenuNav(handler, evt, mi);
 }
 
 bool HasUpgradeDetour(Il2CppObject* plot, int32_t upg, const MethodInfo* mi) {
@@ -2142,9 +2150,14 @@ bool CustomUpgrades::OnGridNavigate(Il2CppObject* evt) {
     if (!ok) return false;
     constexpr int32_t kMoveLeft = 0, kMoveRight = 2;  // UnityEngine.EventSystems.MoveDirection
     if (dir != kMoveLeft && dir != kMoveRight) return false;
+    // The same event again in this frame (another handler of the same move): swallowed, not stepped.
+    const unsigned long long tick = main_thread::TickCount();
+    if (evt == lastNavEvt_ && tick == lastNavTick_) return true;
     // Each slider takes only its own keys (Shift held: the roosters one).
     const int step = dir == kMoveRight ? 1 : -1;
     if (!sliderHens_.Step(step) && !sliderRoosters_.Step(step)) return false;
+    lastNavEvt_ = evt;  // identity only
+    lastNavTick_ = tick;
     bool didNavigate = true;  // nobody else (late navigation handlers) acts on it
     Invoke(navUseMi_, evt, {&didNavigate}, "NavigationEventData.Use", &ok);
     return true;
@@ -2673,23 +2686,21 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         // Pad / arrow left / right for the slider without moving the menu grid's selection (optional:
         // without it the slider polls the pad / keyboard itself).
         constexpr const char* kFocusNs = "MonomiPark.SlimeRancher.UI.Framework.Interaction.Focus";
-        Il2CppClass* grid = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Framework.CommonControls", "UniformGridView", &err);
+        Il2CppClass* navHandler = R.Class(kImage, kFocusNs, "INavigationHandler", &err);
         navEventClass_ = R.Class(kImage, kFocusNs, "NavigationEventData", &err);
         navMoveDirMi_ = navEventClass_ ? R.Method(navEventClass_, "get_MoveDirection", 0, &err) : nullptr;
         navUseMi_ = navEventClass_ ? R.Method(navEventClass_, "Use", 1, &err) : nullptr;
-        const MethodInfo* navMi =
-            grid ? R.Method(grid, "MonomiPark.SlimeRancher.UI.Framework.Interaction.Focus.INavigationHandler.OnNavigate", 1, &err)
-                 : nullptr;
+        const MethodInfo* navMi = navHandler ? R.Method(navHandler, "TryHandleAsNavigation", 2, &err) : nullptr;
         void* np = (navMi && navMoveDirMi_ && navUseMi_) ? R.MethodPointer(navMi, &err) : nullptr;
-        if (np && ctx.HookAddress("UniformGridView.OnNavigate", np, reinterpret_cast<void*>(&GridNavDetour),
-                                  reinterpret_cast<void**>(&g_origGridNav))) {
+        if (np && ctx.HookAddress("INavigationHandler.TryHandleAsNavigation", np, reinterpret_cast<void*>(&MenuNavDetour),
+                                  reinterpret_cast<void**>(&g_origMenuNav))) {
             sliderHens_.SetNavigationSteps(true);
             sliderRoosters_.SetNavigationSteps(true);
-            report += std::format(" UniformGridView.OnNavigate@0x{:X}", Resolver::Rva(np));
+            report += std::format(" INavigationHandler.TryHandleAsNavigation@0x{:X}", Resolver::Rva(np));
         } else {
             navEventClass_ = nullptr;
-            SR2_WARN("[{}] UniformGridView.OnNavigate not hooked ({}) - the slider polls pad / arrows itself (the menu "
-                     "grid may also move)", kModule, err.empty() ? "not found" : err);
+            SR2_WARN("[{}] INavigationHandler.TryHandleAsNavigation not hooked ({}) - the slider polls pad / arrows "
+                     "itself (the menu selection may also move)", kModule, err.empty() ? "not found" : err);
         }
     }
 

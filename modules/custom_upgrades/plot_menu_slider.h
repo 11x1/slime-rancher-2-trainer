@@ -17,9 +17,9 @@
 // Input: the details panel is a nested Canvas without a GraphicRaycaster, so the root (or the row) gets its own
 // Canvas (sorting order one above the panel's) + GraphicRaycaster; mouse click (jump) / drag then go
 // to Unity's Slider (navigation Mode.None: a click does not move the EventSystem selection). Gamepad
-// d-pad / left stick and keyboard arrows left / right: the menu's item grid (UniformGridView) would
-// move its selection on them, so the module detours its OnNavigate and hands left / right to Step()
-// while the slider is shown; the slider also polls pad / keys (fallback, de-duplicated per press).
+// d-pad / left stick and keyboard arrows left / right: the menu would move its selection on them, so
+// the module detours the menu's navigation dispatch (INavigationHandler.TryHandleAsNavigation) and
+// hands left / right to Step() while the slider is shown; the slider also polls pad / keys (fallback, de-duplicated per press).
 // Which pad / keys depends on spec.input (d-pad, left stick, arrows / right stick, Shift + arrows).
 // Steps only while the slider is interactable and no PopupPrompt is open. The value is read by
 // polling (no managed delegates).
@@ -116,7 +116,7 @@ public:
     int Value() const;
     // Main thread, every frame (one pointer check while no slider exists).
     void Tick(float unscaledDt);
-    // Main thread, from a detour of the menu's grid navigation (UniformGridView.OnNavigate): a left
+    // Main thread, from a detour of the menu's navigation (INavigationHandler.TryHandleAsNavigation): a left
     // (-1) / right (+1) navigation event while the slider is shown. true = the slider took it (the
     // caller then consumes the event so the grid does not move its selection); false also when the
     // event is for the other input (Shift held or not, SliderInput). A polled press that already
