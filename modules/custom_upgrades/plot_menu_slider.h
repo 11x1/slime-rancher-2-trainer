@@ -55,7 +55,7 @@ struct SliderSpec {
     int max = 100;
     int step = 1;   // values are min + k * step (clamped to max)
     int value = 0;  // initial value (snapped + clamped)
-    // Text above the bar for a value ("Collect above: 20 adults"); unset -> the number.
+    // Text above the bar for a value ("Keep hens: 18"); unset -> the number.
     std::function<std::string(int)> label;
     // Main thread: the user changed the value (snapped). Not called for the initial value.
     std::function<void(int)> onChange;
