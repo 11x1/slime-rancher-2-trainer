@@ -21,11 +21,15 @@ class Resolver;
 
 namespace sr2::modules::custom_upgrades::world {
 
-// Hen Collector keep-limit (adults left in the coop), per coop; set with the plot menu slider.
-// 58 = Reproduce.MaxDensityInsideCoops, where breeding stalls anyway (re/custom-upgrades.md).
-inline constexpr int kHenKeepDefault = 20;
-inline constexpr int kHenKeepMin = 2;  // = the roosters that are never collected
-inline constexpr int kHenKeepMax = 58;
+// Hen Collector keep-limits (adults left in the coop), per coop, hens and roosters separately; set
+// with the two plot menu sliders. Chicks never count. 58 = Reproduce.MaxDensityInsideCoops, where
+// breeding stalls anyway (re/custom-upgrades.md). The defaults add up to the old single limit (20).
+inline constexpr int kHenKeepHensDefault = 18;
+inline constexpr int kHenKeepHensMin = 0;
+inline constexpr int kHenKeepHensMax = 58;
+inline constexpr int kHenKeepRoostersDefault = 2;
+inline constexpr int kHenKeepRoostersMin = 0;
+inline constexpr int kHenKeepRoostersMax = 20;
 
 // One storage slot of a Hen Collector (sidecar): IdentifiableType name ("" = empty) + count.
 struct HenSlot {
@@ -42,7 +46,8 @@ struct CoopRequest {
     // Hen Collector contents in the sidecar state: restored into a newly built collector, and
     // overwritten with the live contents whenever they differ (only while henCollector).
     std::vector<HenSlot>* hens = nullptr;
-    int keepAdults = kHenKeepDefault;  // collect only the adults above this (clamped to the range above)
+    int keepHens = kHenKeepHensDefault;          // collect only the hens above this (clamped to the range above)
+    int keepRoosters = kHenKeepRoostersDefault;  // and the roosters above this
 };
 
 // query(plot, out) -> false for plots the framework does not know (no save game loaded,

@@ -39,21 +39,48 @@
 //   removed, the SiloStorage's two slot definitions replaced by ONE session clone of the
 //   elder definition (same _maxAmount 100, _slotTypeGroup = MeatGroup, block list = ElderGroup
 //   members + UnstableMeat), PlortCollector disabled (it would NRE without a LandPlotModel and
-//   cannot keep a breeding stock), root turned -90 deg so it stands in the free (+x, +z) corner
-//   (vanilla: elder collector (+x,-z), vitamizer (-x,+z), plot menu (-x,-z)). The storage gets
+//   cannot keep a breeding stock), placed in a free corner (below). The storage gets
 //   InitAmmo + a session AmmoModel of its own (AmmoSlotManager.SetModel; without a model every slot
 //   call NREs: slot displays, ports, our tick). Then activated:
 //   local storage only, never linked to the plot model, contents persisted in the sidecar,
 //   output ports / slot displays work as vanilla (vac the chickens out).
 //   Collecting (our tick, ~1 Hz): adults = Physics.OverlapBox over the coop's active
 //   CoopRegion -> Identifiable.identType in {MeatGroup} - {ElderGroup} - UnstableMeat (chicks
-//   are in ChickGroup: never counted, never collected), not held by a vac. While more than
-//   the coop's keep-limit (CoopRequest.keepAdults: per coop from the sidecar, set with the plot
-//   menu slider, kHenKeepMin..kHenKeepMax, default 20) adults are in the coop and the collector's period (its CollectPeriod, 6 game
-//   hours, like the elder collector) is due, the excess is collected the vanilla way (slot
-//   chosen like AmmoSlotManager, MaybeAddResource, SpawnAndPlayFX(CollectFX) at the chicken,
-//   Destroyer.DestroyActor, cyclone animation), keeping at least kKeepRoosters roosters, until
-//   the storage is full.
+//   are in ChickGroup: never counted, never collected), not held by a vac; a rooster is a type
+//   whose name has "Rooster". While more hens or roosters than the coop's keep-limits
+//   (CoopRequest.keepHens / keepRoosters: per coop from the sidecar, set with the two plot menu
+//   sliders, defaults 18 + 2) are in the coop and the collector's period (its CollectPeriod, 6
+//   game hours, like the elder collector) is due, the excess of each is vacuumed in until the
+//   storage (the elder collector's hardcoded 2 x 100) is full.
+//   Vacuum (user test of 4d16e38c: chickens just vanished): the vanilla elder collector's own
+//   suction. PlortCollector.DoCollection (0x98B670) gives every actor it takes a "CollectJoint"
+//   (kinematic Rigidbody under CollectPt, SpringJoint spring = CollectSpringiness, maxDistance =
+//   the distance, no auto anchor, connectedAnchor 0), SafeJointReference.AttachSafely(actor,
+//   joint, true), connectedBody.WakeUp, Vacuumable.Capture(joint), and a JointReference
+//   {AmmoMetadata +0x10 (Identifiable.get_AmmoMetadata), Vacuumable +0x30, Joint +0x38} in
+//   _joints; then _forceCollectUntil = HoursFromNow(1/12), _endCollectAt = HoursFromNow(1/6).
+//   PlortCollector.FixedUpdate (0x98BE90) does the rest: Region hibernated -> nothing; joints and
+//   _endCollectAt reached -> every JointReference.Destroy (joint destroyed, Vacuumable.Release);
+//   no joints -> DoCollection once HasReached(_model.collectorNextTime) (the only _model use: a
+//   null model NREs here); per joint: storage CouldAddToAnySlot else released, farther than 1 m ->
+//   maxDistance -= 5 * dt, else storage.MaybeAddToAnySlot + SpawnAndPlayFX(CollectFX) +
+//   Destroyer.DestroyActor; cyclone Animator bool = joints || !HasReached(_forceCollectUntil),
+//   vac audio on / off. So the clone's PlortCollector runs with a private LandPlotModel (never
+//   registered anywhere, collectorNextTime = 1e300: its own DoCollection never fires) and our tick
+//   builds the joints DoCollection would, for the chosen chickens only. Without those parts
+//   (names not found, no Region above the plot) the old direct store + puff is the fallback.
+//   Placement (asset data of "patchCoop", plot-local = coop prefab root): the "Deluxe" container
+//   is NOT identity in the prefab - its localRotation is (0, -0.707, 0, 0.707) = -90 deg about Y,
+//   so the vanilla elder collector (CollectionPoint at Deluxe-local (3.75, 0.5, -3.75)) stands in
+//   the plot's (+x, +z) corner. Plot menu terminal "techActivator" (-5.54, -5.54) = (-x, -z),
+//   vitamizer "Vitamizer/objCoopVitamizer" (-4.75, 4.75) = (-x, +z); (+x, -z) is free. Build
+//   4d16e38c turned the clone root -90 deg believing the container was identity: that is exactly
+//   the vanilla transform, so the Hen Collector stood INSIDE the vanilla elder collector of a
+//   deluxe coop (same meshes, same place: invisible) - its log line "render bounds ... plot-relative
+//   centre (-4.97, 1.89, -4.95)" (world axes, plot turned 180 deg) is that corner. Now PickCorner
+//   reads the occupied corners from the live plot's own children (by path, plot-local through
+//   InverseTransformPoint) and turns the clone by a multiple of 90 deg into the first free one,
+//   (+x, -z) preferred; logged once per build ("hen collector corner").
 //
 // Clones are named "sr2mods_<kind>#<generation>" and found again every tick under the plot
 // transform (no stored pointers). A clone of another generation (an older save game / before a
@@ -66,6 +93,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <format>
 #include <initializer_list>
 #include <map>
@@ -96,9 +124,11 @@ constexpr std::string_view kAirNetKind = "CoopAirNet";
 constexpr std::string_view kHenKind = "HenCollector";
 constexpr float kFitTolerance = 0.02f;
 constexpr int kHideFlagsDontUnloadUnusedAsset = 32;
-constexpr int kKeepRoosters = 2;   // never collect the last roosters (keep-limit: CoopRequest.keepAdults)
 constexpr int kWarmupTicks = 5;    // no collecting in the first seconds after a (re)build / load
 constexpr int32_t kQueryTriggerIgnore = 1;
+constexpr size_t kAmmoMetadataSize = 32;  // AmmoSlot.AmmoMetadata {IdentifiableType Id; float4 Emotions; bool Radiant}
+constexpr float kForceCollectHours = 1.0f / 12.0f;  // DoCollection: _forceCollectUntil (cyclone shown at least this long)
+constexpr float kEndCollectHours = 1.0f / 6.0f;     // DoCollection: _endCollectAt (unfinished joints released)
 
 struct Vec3 {
     float x, y, z;
@@ -109,6 +139,25 @@ struct Quat {
 struct Bounds {
     Vec3 center, extents;
 };
+
+// v rotated by the unit quaternion q (q * v * q^-1).
+Vec3 Rotate(const Quat& q, const Vec3& v) {
+    const float tx = 2.0f * (q.y * v.z - q.z * v.y), ty = 2.0f * (q.z * v.x - q.x * v.z),
+                tz = 2.0f * (q.x * v.y - q.y * v.x);
+    return {v.x + q.w * tx + (q.y * tz - q.z * ty), v.y + q.w * ty + (q.z * tx - q.x * tz),
+            v.z + q.w * tz + (q.x * ty - q.y * tx)};
+}
+Quat Yaw(float degrees) {
+    const float h = degrees * 3.14159265f / 360.0f;
+    return {0.0f, std::sin(h), 0.0f, std::cos(h)};
+}
+// Plot corner of a plot-local point: x / z signs, "(+x, -z)".
+struct Quadrant {
+    int x = 0, z = 0;
+    bool operator==(const Quadrant&) const = default;
+};
+Quadrant QuadrantOf(const Vec3& v) { return {v.x >= 0.0f ? 1 : -1, v.z >= 0.0f ? 1 : -1}; }
+std::string Name(Quadrant q) { return std::format("({}x, {}z)", q.x > 0 ? '+' : '-', q.z > 0 ? '+' : '-'); }
 
 }  // namespace
 
@@ -187,6 +236,37 @@ struct CoopWorld::Impl {
     const MethodInfo* rendVisible = nullptr;       // Renderer.get_isVisible
     const MethodInfo* rendBounds = nullptr;        // Renderer.get_bounds
     const MethodInfo* trSetLocalPosition = nullptr;
+    // placement (optional: without them the clone keeps the vanilla corner, logged)
+    const MethodInfo* trGetLocalRotation = nullptr;  // Transform.get_localRotation
+    const MethodInfo* trInverseTransformPoint = nullptr;  // Transform.InverseTransformPoint(Vector3)
+    const MethodInfo* trFind = nullptr;            // Transform.Find(string)
+    size_t offPcCollectPt = 0;                     // PlortCollector.CollectPt
+    // vacuum (optional: without it the chickens are stored directly, with a puff)
+    bool vacuum = false;
+    Il2CppClass* rigidbodyClass = nullptr;
+    Il2CppClass* springJointClass = nullptr;
+    Il2CppClass* landPlotModelClass = nullptr;
+    Il2CppClass* jointRefClass = nullptr;          // PlortCollector.JointReference (nested)
+    const MethodInfo* goCtor = nullptr;            // GameObject..ctor(string)
+    const MethodInfo* goAddComponent = nullptr;    // GameObject.AddComponent(Type)
+    const MethodInfo* trSetParent = nullptr;       // Transform.SetParent(Transform, bool)
+    const MethodInfo* rbSetKinematic = nullptr;    // Rigidbody.set_isKinematic
+    const MethodInfo* rbWakeUp = nullptr;          // Rigidbody.WakeUp
+    const MethodInfo* sjSetSpring = nullptr;       // SpringJoint.set_spring
+    const MethodInfo* sjSetMaxDistance = nullptr;  // SpringJoint.set_maxDistance
+    const MethodInfo* jSetAutoAnchor = nullptr;    // Joint.set_autoConfigureConnectedAnchor
+    const MethodInfo* jSetAnchor = nullptr;        // Joint.set_connectedAnchor
+    const MethodInfo* jGetBody = nullptr;          // Joint.get_connectedBody
+    const MethodInfo* attachSafely = nullptr;      // SafeJointReference.AttachSafely(GameObject, Joint, bool)
+    const MethodInfo* vacCapture = nullptr;        // Vacuumable.Capture(Joint)
+    const MethodInfo* identMeta = nullptr;         // Identifiable.get_AmmoMetadata
+    const MethodInfo* lpmCtor = nullptr;           // LandPlotModel..ctor()
+    const MethodInfo* jrDestroy = nullptr;         // JointReference.Destroy (joint + Vacuumable.Release)
+    size_t offPcModel = 0, offPcRegion = 0, offPcJoints = 0, offPcEnd = 0, offPcForce = 0, offPcSpring = 0;
+    size_t offPcStorage = 0, offPcAudio = 0;
+    size_t offLpmNext = 0;                         // LandPlotModel.collectorNextTime
+    size_t offJrMeta = 0, offJrVac = 0, offJrJoint = 0;
+    bool loggedNoVacuum = false;
 
     // Session-wide Hen Collector assets (built once, pinned, never freed).
     bool henTried = false;
@@ -319,12 +399,30 @@ struct CoopWorld::Impl {
     void CreateHen(Il2CppObject* plot, CoopRequest& req, Il2CppObject* lookup, unsigned generation);
     bool LinkLocalModel(Il2CppObject* storage, size_t nDefs);
     void LogPlacement(Il2CppObject* plot, Il2CppObject* clone, const char* when);
+    struct Corner {
+        bool ok = false;
+        Quat rot{0, 0, 0, 1};  // clone root localRotation
+        std::string log;
+    };
+    Corner PickCorner(Il2CppObject* plot, Il2CppObject* pc);
+    bool SetupVacuum(Resolver& R);
+    bool EnableVacuum(Il2CppObject* pc, const std::string& id);
+    bool Vacuuming(Il2CppObject* pc) const { return vacuum && unity::Field<Il2CppObject*>(pc, offPcModel) != nullptr; }
+    int PendingJoints(Il2CppObject* pc) const {
+        return Vacuuming(pc) ? static_cast<int>(unity::ListCount(unity::Field<void*>(pc, offPcJoints))) : 0;
+    }
+    bool Suck(Il2CppObject* pc, Il2CppObject* ident, Il2CppObject* vac);
+    void ReleaseJoints(Il2CppObject* clone);
+    bool PlotLocal(Il2CppObject* plotTr, Il2CppObject* tr, Vec3& out);
     void Restore(Il2CppObject* storage, const std::vector<HenSlot>& slots);
     bool ReadSlots(Il2CppObject* clone, std::vector<HenSlot>& out, Il2CppObject** ammoOut = nullptr,
                    Il2CppObject** storageOut = nullptr);
     void SnapshotInto(Il2CppObject* clone, CoopRequest& req);
     void ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopRequest& req);
-    int Collect(Il2CppObject* clone, Il2CppObject* pc, Il2CppObject* ammo, const CoopInfo& c, int keep, int* adultsOut);
+    struct Census {
+        int hens = 0, roosters = 0;  // adults in the coop (not held by a vac)
+    };
+    int Collect(Il2CppObject* pc, Il2CppObject* ammo, const CoopInfo& c, int keepHens, int keepRoosters, Census& in);
     bool loggedNoHen = false;
     bool henBroken = false;  // a build failed structurally: not retried this session
     bool loggedLinked = false;
@@ -473,6 +571,13 @@ bool CoopWorld::Setup(Resolver& R, const char* module, std::string& why) {
         p->rendVisible = p->rendererClass ? R.Method(p->rendererClass, "get_isVisible", 0, &err) : nullptr;
         p->rendBounds = p->rendererClass ? R.Method(p->rendererClass, "get_bounds", 0, &err) : nullptr;
         p->trSetLocalPosition = R.Method(p->transformClass, "set_localPosition", 1, &err);
+        // Corner choice (optional).
+        p->trGetLocalRotation = R.Method(p->transformClass, "get_localRotation", 0, &err);
+        p->trInverseTransformPoint = R.MethodByParams(p->transformClass, "InverseTransformPoint", {"UnityEngine.Vector3"}, &err);
+        p->trFind = R.MethodByParams(p->transformClass, "Find", {"System.String"}, &err);
+        if (auto o = R.FieldOffset(p->plortCollectorClass, "CollectPt", &err)) p->offPcCollectPt = *o;
+        // Vacuum: the vanilla collector's joints (all optional together).
+        p->vacuum = p->SetupVacuum(R);
     }
     impl_ = p;
     ready_ = true;
@@ -793,6 +898,72 @@ bool CoopWorld::Impl::LinkLocalModel(Il2CppObject* storage, size_t nDefs) {
     return true;
 }
 
+bool CoopWorld::Impl::PlotLocal(Il2CppObject* plotTr, Il2CppObject* tr, Vec3& out) {
+    if (!trInverseTransformPoint || !unity::IsAlive(plotTr) || !unity::IsAlive(tr)) return false;
+    Vec3 world = GetVec(trGetPosition, tr, "Transform.get_position");
+    bool ok = false;
+    Il2CppObject* b = Call(trInverseTransformPoint, plotTr, {&world}, "Transform.InverseTransformPoint", &ok);
+    if (!ok || !b) return false;
+    out = Value<Vec3>(b);
+    return std::isfinite(out.x) && std::isfinite(out.z);
+}
+
+// Turn the (inactive, root at identity) clone so that its collector stands in a plot corner no
+// vanilla part uses. The occupied corners come from the live plot's own children (names from the
+// coop prefab), each with the prefab layout as fallback: vanilla elder collector (+x, +z), plot
+// menu terminal (-x, -z), vitamizer (-x, +z).
+CoopWorld::Impl::Corner CoopWorld::Impl::PickCorner(Il2CppObject* plot, Il2CppObject* pc) {
+    Corner c;
+    Il2CppObject* plotTr = unity::TransformOf(plot);
+    Il2CppObject* collectPt = offPcCollectPt ? unity::Field<Il2CppObject*>(pc, offPcCollectPt) : nullptr;
+    Vec3 own{};
+    if (!trFind || !PlotLocal(plotTr, unity::IsAlive(collectPt) ? collectPt : unity::TransformOf(pc), own)) {
+        c.log = "placement methods / CollectPt missing - vanilla corner kept";
+        return c;
+    }
+    struct Part {
+        const char* what;
+        const char* path;
+        Quadrant fallback;
+    };
+    static const Part kParts[] = {
+        {"vanilla elder collector", "Deluxe/ElderCollector/Collector Unit/CollectionPoint", {1, 1}},
+        {"plot menu", "techActivator", {-1, -1}},
+        {"vitamizer", "Vitamizer/objCoopVitamizer", {-1, 1}},
+    };
+    std::vector<Quadrant> used;
+    std::string parts;
+    for (const Part& part : kParts) {
+        bool ok = false;
+        Il2CppObject* tr = Call(trFind, plotTr, {unity::NewString(part.path)}, "Transform.Find", &ok);
+        Vec3 v{};
+        const bool found = ok && unity::IsAlive(tr) && PlotLocal(plotTr, tr, v);
+        const Quadrant q = found ? QuadrantOf(v) : part.fallback;
+        used.push_back(q);
+        parts += std::format("{}{} {}{}", parts.empty() ? "" : ", ", part.what, Name(q),
+                             found ? "" : " (not found, prefab layout)");
+    }
+    static const Quadrant kOrder[] = {{1, -1}, {-1, 1}, {1, 1}, {-1, -1}};
+    Quadrant target = kOrder[0];
+    for (const Quadrant& q : kOrder)
+        if (std::find(used.begin(), used.end(), q) == used.end()) {
+            target = q;
+            break;
+        }
+    for (int k = 0; k < 4; ++k) {
+        const Quat r = Yaw(90.0f * k);
+        if (QuadrantOf(Rotate(r, own)) == target) {
+            c.ok = true;
+            c.rot = r;
+            c.log = std::format("collector turned {} deg into the {} corner (unturned {}); occupied: {}", 90 * k,
+                                Name(target), Name(QuadrantOf(own)), parts);
+            return c;
+        }
+    }
+    c.log = "no turn reaches the free corner - vanilla corner kept";
+    return c;
+}
+
 // One-shot diagnostic: where the clone ended up and whether it renders.
 void CoopWorld::Impl::LogPlacement(Il2CppObject* plot, Il2CppObject* clone, const char* when) {
     Il2CppObject* root = unity::TransformOf(clone);
@@ -827,16 +998,32 @@ void CoopWorld::Impl::LogPlacement(Il2CppObject* plot, Il2CppObject* clone, cons
         }
     }
     const bool any = enabled > 0 && lo.x <= hi.x;
+    // Plot-local centre (the corner as the plot sees it) and whether the vanilla deluxe parts are built.
+    std::string local = "?";
+    if (any && trInverseTransformPoint) {
+        Vec3 mid{0.5f * (lo.x + hi.x), 0.5f * (lo.y + hi.y), 0.5f * (lo.z + hi.z)};
+        Il2CppObject* b = Call(trInverseTransformPoint, plotTr, {&mid}, "Transform.InverseTransformPoint", &ok);
+        if (ok && b) {
+            const Vec3 v = Value<Vec3>(b);
+            local = std::format("({:.2f}, {:.2f}, {:.2f}) {}", v.x, v.y, v.z, Name(QuadrantOf(v)));
+        }
+    }
+    std::string deluxe = "?";
+    if (trFind) {
+        Il2CppObject* d = Call(trFind, plotTr, {unity::NewString("Deluxe")}, "Transform.Find", &ok);
+        if (ok && unity::IsAlive(d)) deluxe = unity::ActiveInHierarchy(unity::GameObjectOf(d)) ? "built" : "not built";
+    }
     SR2_INFO("[{}] hen collector placement ({}): plot at ({:.2f}, {:.2f}, {:.2f}), clone root at ({:.2f}, {:.2f}, {:.2f}) "
              "scale ({:.2f}, {:.2f}, {:.2f}), activeInHierarchy {}, {} child(ren), renderers {} (enabled+active {}, "
-             "visible to a camera {}), render bounds {}",
+             "visible to a camera {}), render bounds {}; plot-local centre {}, vanilla deluxe parts {}",
              module, when, pp.x, pp.y, pp.z, rp.x, rp.y, rp.z, rs.x, rs.y, rs.z, unity::ActiveInHierarchy(clone),
              children, total, enabled, visible,
              any ? std::format("({:.2f}, {:.2f}, {:.2f})..({:.2f}, {:.2f}, {:.2f}) = plot-relative centre ({:.2f}, {:.2f}, "
                                "{:.2f})",
                                lo.x, lo.y, lo.z, hi.x, hi.y, hi.z, 0.5f * (lo.x + hi.x) - pp.x, 0.5f * (lo.y + hi.y) - pp.y,
                                0.5f * (lo.z + hi.z) - pp.z)
-                 : std::string("none"));
+                 : std::string("none"),
+             local, deluxe);
 }
 
 void CoopWorld::Impl::CreateHen(Il2CppObject* plot, CoopRequest& req, Il2CppObject* lookup, unsigned generation) {
@@ -907,13 +1094,18 @@ void CoopWorld::Impl::CreateHen(Il2CppObject* plot, CoopRequest& req, Il2CppObje
         SetRef(static_cast<Il2CppObject*>(defs), reinterpret_cast<void**>(&data[i]), henSlotDef);
     bool off = false;
     Call(behSetEnabled, pc, {&off}, "Behaviour.set_enabled");  // our tick collects, not its FixedUpdate
-    // Placement relative to the live plot: the Deluxe container's own local transform (identity in
-    // the prefab) is set explicitly, then turned -90 deg: (+x,-z) corner -> (+x,+z).
+    // Placement relative to the live plot: root at the plot origin, unturned, then turned into a free
+    // corner (PickCorner). Fallback: the vanilla container's -90 deg (the vanilla elder collector's
+    // corner), only when no free corner can be worked out.
     Vec3 zero{0.0f, 0.0f, 0.0f}, one{1.0f, 1.0f, 1.0f};
     if (trSetLocalPosition) Call(trSetLocalPosition, root, {&zero}, "Transform.set_localPosition");
     SetVec(trSetLocalScale, root, one, "Transform.set_localScale");
-    Quat q{0.0f, -0.70710678f, 0.0f, 0.70710678f};
+    Quat q{0.0f, 0.0f, 0.0f, 1.0f};
     Call(trSetLocalRotation, root, {&q}, "Transform.set_localRotation");
+    const Corner corner = PickCorner(plot, pc);
+    q = corner.ok ? corner.rot : Quat{0.0f, -0.70710678f, 0.0f, 0.70710678f};
+    Call(trSetLocalRotation, root, {&q}, "Transform.set_localRotation");
+    SR2_INFO("[{}] hen collector corner on plot '{}': {}", module, req.id, corner.log);
     if (sr2::core::ModuleFaulted(module) || !LinkLocalModel(storage, nDefs)) {
         if (!sr2::core::ModuleFaulted(module)) SR2_WARN("[{}] hen collector: storage model not set up - not built", module);
         DestroyNow(clone);
@@ -921,20 +1113,224 @@ void CoopWorld::Impl::CreateHen(Il2CppObject* plot, CoopRequest& req, Il2CppObje
         return;
     }
     unity::SetActive(clone, true);  // Awake: collector refs, catchers, slot UIs (storage already has its model)
+    const bool vac = EnableVacuum(pc, req.id);
     LogPlacement(plot, clone, "built");
     if (req.hens) Restore(storage, *req.hens);
     int stored = 0;
     if (req.hens)
         for (const HenSlot& s : *req.hens) stored += std::max(s.count, 0);
     timers[req.id] = PlotTimer{};
-    SR2_INFO("[{}] hen collector built on plot '{}' ({} slot(s) x {}, {} chicken(s) restored)", module, req.id, nDefs,
-             henMax, stored);
+    SR2_INFO("[{}] hen collector built on plot '{}' ({} slot(s) x {}, {} chicken(s) restored, {})", module, req.id, nDefs,
+             henMax, stored, vac ? "vacuum: the elder collector's own suction" : "no vacuum: stored directly");
 }
 
-int CoopWorld::Impl::Collect(Il2CppObject* clone, Il2CppObject* pc, Il2CppObject* ammo, const CoopInfo& c, int keep,
-                             int* adultsOut) {
-    (void)clone;
-    *adultsOut = 0;
+bool CoopWorld::Impl::SetupVacuum(Resolver& R) {
+    std::string err, miss;
+    auto need = [&](bool ok, const char* what) {
+        if (!ok && miss.empty()) miss = what;
+    };
+    auto off = [&](Il2CppClass* k, const char* field, size_t& out) {
+        std::string e;
+        auto o = k ? R.FieldOffset(k, field, &e) : std::nullopt;
+        if (o) out = *o;
+        need(o.has_value(), field);
+    };
+    rigidbodyClass = R.Class(kPhysics, "UnityEngine", "Rigidbody", &err);
+    springJointClass = R.Class(kPhysics, "UnityEngine", "SpringJoint", &err);
+    Il2CppClass* joint = R.Class(kPhysics, "UnityEngine", "Joint", &err);
+    Il2CppClass* safe = R.Class(kImage, "", "SafeJointReference", &err);
+    landPlotModelClass = R.Class(kImage, "MonomiPark.SlimeRancher.DataModel", "LandPlotModel", &err);
+    need(rigidbodyClass && springJointClass && joint && safe && landPlotModelClass, "physics / LandPlotModel classes");
+    // PlortCollector.JointReference: a private nested class (no name lookup through the image).
+    using NestedFn = Il2CppClass* (*)(Il2CppClass*, void**);
+    auto nested = reinterpret_cast<NestedFn>(api().module ? GetProcAddress(api().module, "il2cpp_class_get_nested_types") : nullptr);
+    void* iter = nullptr;
+    for (Il2CppClass* k = nested ? nested(plortCollectorClass, &iter) : nullptr; k && api().il2cpp_class_get_name;
+         k = nested(plortCollectorClass, &iter)) {
+        const char* n = api().il2cpp_class_get_name(k);
+        if (n && std::string_view(n) == "JointReference") {
+            jointRefClass = k;
+            break;
+        }
+    }
+    need(jointRefClass != nullptr, "PlortCollector.JointReference");
+    if (!miss.empty()) {
+        SR2_WARN("[{}] hen collector vacuum unavailable ({}) - chickens are stored directly", module, miss);
+        return false;
+    }
+    goCtor = R.MethodByParams(gameObjectClass, ".ctor", {"System.String"}, &err);
+    goAddComponent = R.MethodByParams(gameObjectClass, "AddComponent", {"System.Type"}, &err);
+    trSetParent = R.MethodByParams(transformClass, "SetParent", {"UnityEngine.Transform", "System.Boolean"}, &err);
+    rbSetKinematic = R.Method(rigidbodyClass, "set_isKinematic", 1, &err);
+    rbWakeUp = R.Method(rigidbodyClass, "WakeUp", 0, &err);
+    sjSetSpring = R.Method(springJointClass, "set_spring", 1, &err);
+    sjSetMaxDistance = R.Method(springJointClass, "set_maxDistance", 1, &err);
+    jSetAutoAnchor = R.Method(joint, "set_autoConfigureConnectedAnchor", 1, &err);
+    jSetAnchor = R.Method(joint, "set_connectedAnchor", 1, &err);
+    jGetBody = R.Method(joint, "get_connectedBody", 0, &err);
+    attachSafely = R.MethodByParams(safe, "AttachSafely", {"UnityEngine.GameObject", "UnityEngine.Joint", "System.Boolean"}, &err);
+    vacCapture = R.MethodByParams(vacuumableClass, "Capture", {"UnityEngine.Joint"}, &err);
+    identMeta = R.Method(identifiableClass, "get_AmmoMetadata", 0, &err);
+    lpmCtor = R.Method(landPlotModelClass, ".ctor", 0, &err);
+    jrDestroy = R.Method(jointRefClass, "Destroy", 0, &err);
+    need(goCtor && goAddComponent && trSetParent && rbSetKinematic && rbWakeUp && sjSetSpring && sjSetMaxDistance &&
+             jSetAutoAnchor && jSetAnchor && jGetBody && attachSafely && vacCapture && identMeta && lpmCtor && jrDestroy &&
+             objectNew && trSetLocalPosition,
+         "joint / capture methods");
+    off(plortCollectorClass, "_model", offPcModel);
+    off(plortCollectorClass, "_region", offPcRegion);
+    off(plortCollectorClass, "_joints", offPcJoints);
+    off(plortCollectorClass, "_endCollectAt", offPcEnd);
+    off(plortCollectorClass, "_forceCollectUntil", offPcForce);
+    off(plortCollectorClass, "CollectSpringiness", offPcSpring);
+    off(plortCollectorClass, "_storage", offPcStorage);
+    off(plortCollectorClass, "_vacAudio", offPcAudio);
+    off(landPlotModelClass, "collectorNextTime", offLpmNext);
+    off(jointRefClass, "AmmoMetadata", offJrMeta);
+    off(jointRefClass, "Vacuumable", offJrVac);
+    off(jointRefClass, "Joint", offJrJoint);
+    need(offPcCollectPt != 0, "CollectPt");
+    if (!miss.empty()) {
+        SR2_WARN("[{}] hen collector vacuum unavailable ({}) - chickens are stored directly", module, miss);
+        return false;
+    }
+    return true;
+}
+
+// After activation (Awake has set _region / _storage / _timeDir / CollectAnim; the constructor
+// _joints): a private LandPlotModel whose collectorNextTime never comes, then the component on, so
+// the vanilla FixedUpdate reels in, stores, puffs and animates whatever joints we hand it.
+bool CoopWorld::Impl::EnableVacuum(Il2CppObject* pc, const std::string& id) {
+    if (!vacuum) return false;
+    Il2CppObject* collectPt = unity::Field<Il2CppObject*>(pc, offPcCollectPt);
+    // FixedUpdate dereferences all of these without a check (NRE every physics frame otherwise).
+    const bool parts = unity::Field<Il2CppObject*>(pc, offPcRegion) && unity::Field<Il2CppObject*>(pc, offPcTimeDir) &&
+                       unity::Field<void*>(pc, offPcJoints) && unity::Field<Il2CppObject*>(pc, offPcStorage) &&
+                       unity::Field<Il2CppObject*>(pc, offPcAudio) && unity::IsAlive(collectPt);
+    if (!parts) {
+        if (!loggedNoVacuum) SR2_WARN("[{}] hen collector on plot '{}': collector has no Region / TimeDirector / storage / audio / "
+                                      "CollectPt - "
+                                      "chickens are stored directly", module, id);
+        loggedNoVacuum = true;
+        return false;
+    }
+    Il2CppObject* model = objectNew(landPlotModelClass);
+    bool ok = false;
+    if (model) Call(lpmCtor, model, {}, "LandPlotModel..ctor", &ok);
+    if (!ok) return false;
+    unity::Field<double>(model, offLpmNext) = 1e300;  // FixedUpdate's own DoCollection never fires
+    SetRef(pc, reinterpret_cast<void**>(reinterpret_cast<char*>(pc) + offPcModel), model);
+    bool on = true;
+    Call(behSetEnabled, pc, {&on}, "Behaviour.set_enabled", &ok);
+    if (!ok) {
+        SetRef(pc, reinterpret_cast<void**>(reinterpret_cast<char*>(pc) + offPcModel), nullptr);
+        return false;
+    }
+    return true;
+}
+
+// One chicken onto the collector's spring, like DoCollection. false = nothing attached (the caller
+// stores it directly instead).
+bool CoopWorld::Impl::Suck(Il2CppObject* pc, Il2CppObject* ident, Il2CppObject* vac) {
+    Il2CppObject* collectPt = unity::Field<Il2CppObject*>(pc, offPcCollectPt);
+    void* joints = unity::Field<void*>(pc, offPcJoints);
+    Il2CppObject* birdGo = unity::GameObjectOf(ident);
+    if (!unity::IsAlive(collectPt) || !joints || !unity::IsAlive(vac) || !unity::IsAlive(birdGo)) return false;
+    std::string err;
+    const MethodInfo* listAdd =
+        Resolver::Get().Method(api().il2cpp_object_get_class(static_cast<Il2CppObject*>(joints)), "Add", 1, &err);
+    // get_AmmoMetadata is virtual (DoCollection calls it through the vtable); runtime_invoke does not
+    // dispatch, so take the override of the chicken's own class.
+    const MethodInfo* metaMi = nullptr;
+    for (Il2CppClass* k = api().il2cpp_object_get_class(ident); k && !metaMi && k != api().il2cpp_class_get_parent(identifiableClass);
+         k = api().il2cpp_class_get_parent ? api().il2cpp_class_get_parent(k) : nullptr)
+        metaMi = Resolver::Get().Method(k, "get_AmmoMetadata", 0, &err);
+    bool ok = false;
+    Il2CppObject* meta = Call(metaMi ? metaMi : identMeta, ident, {}, "Identifiable.get_AmmoMetadata", &ok);
+    if (!ok || !meta || !listAdd) return false;
+    Il2CppObject* go = objectNew(gameObjectClass);
+    if (!go) return false;
+    Call(goCtor, go, {unity::NewString("CollectJoint")}, "GameObject..ctor", &ok);
+    if (!ok || !unity::IsAlive(go)) return false;
+    auto add = [&](Il2CppClass* k, const char* what) -> Il2CppObject* {
+        bool good = false;
+        Il2CppObject* c = Call(goAddComponent, go, {unity::TypeOf(k)}, what, &good);
+        return good && unity::IsAlive(c) && IsA(c, k) ? c : nullptr;
+    };
+    Il2CppObject* rb = add(rigidbodyClass, "AddComponent(Rigidbody)");
+    bool kinematic = true, stays = false, autoAnchor = false, canDestroy = true;
+    Vec3 zero{0.0f, 0.0f, 0.0f};
+    if (rb) Call(rbSetKinematic, rb, {&kinematic}, "Rigidbody.set_isKinematic", &ok);
+    Il2CppObject* tr = unity::TransformOf(go);
+    if (rb && ok) Call(trSetParent, tr, {collectPt, &stays}, "Transform.SetParent", &ok);
+    if (rb && ok) Call(trSetLocalPosition, tr, {&zero}, "Transform.set_localPosition", &ok);
+    Il2CppObject* joint = rb && ok ? add(springJointClass, "AddComponent(SpringJoint)") : nullptr;
+    if (!joint) {
+        Destroy(go);
+        return false;
+    }
+    float spring = unity::Field<float>(pc, offPcSpring);
+    const Vec3 a = GetVec(trGetPosition, unity::TransformOf(ident), "Transform.get_position");
+    const Vec3 b = GetVec(trGetPosition, collectPt, "Transform.get_position");
+    float dist = std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z));
+    Call(sjSetSpring, joint, {&spring}, "SpringJoint.set_spring", &ok);
+    if (ok) Call(sjSetMaxDistance, joint, {&dist}, "SpringJoint.set_maxDistance", &ok);
+    if (ok) Call(jSetAutoAnchor, joint, {&autoAnchor}, "Joint.set_autoConfigureConnectedAnchor", &ok);
+    if (ok) Call(jSetAnchor, joint, {&zero}, "Joint.set_connectedAnchor", &ok);
+    if (ok) Call(attachSafely, nullptr, {birdGo, joint, &canDestroy}, "SafeJointReference.AttachSafely", &ok);
+    if (!ok || sr2::core::ModuleFaulted(module)) {
+        Destroy(go);
+        return false;
+    }
+    if (Il2CppObject* body = Call(jGetBody, joint, {}, "Joint.get_connectedBody", &ok); ok && unity::IsAlive(body))
+        Call(rbWakeUp, body, {}, "Rigidbody.WakeUp");
+    Call(vacCapture, vac, {joint}, "Vacuumable.Capture", &ok);
+    if (!ok) {
+        Destroy(go);
+        return false;
+    }
+    // The JointReference FixedUpdate works through (its constructor is empty).
+    Il2CppObject* ref = objectNew(jointRefClass);
+    if (ref) {
+        char* base = reinterpret_cast<char*>(ref);
+        std::memcpy(base + offJrMeta, reinterpret_cast<char*>(meta) + 2 * sizeof(void*), kAmmoMetadataSize);
+        // AmmoMetadata.Id (+0) is its only reference: through the write barrier.
+        SetRef(ref, reinterpret_cast<void**>(base + offJrMeta), *reinterpret_cast<Il2CppObject**>(base + offJrMeta));
+        SetRef(ref, reinterpret_cast<void**>(base + offJrVac), vac);
+        SetRef(ref, reinterpret_cast<void**>(base + offJrJoint), joint);
+        Call(listAdd, joints, {ref}, "List<JointReference>.Add", &ok);
+    }
+    if (!ref || !ok) {
+        if (ref) Call(jrDestroy, ref, {}, "JointReference.Destroy");  // joint gone, chicken released
+        else Destroy(go);
+        return false;
+    }
+    return true;
+}
+
+// Chickens on the clone's springs are let go (JointReference.Destroy: joint destroyed,
+// Vacuumable.Release) before the clone goes, so none stays captive on a destroyed joint.
+void CoopWorld::Impl::ReleaseJoints(Il2CppObject* clone) {
+    if (!vacuum || !unity::IsAlive(clone)) return;
+    Il2CppObject* pc = InChildren(unity::TransformOf(clone), plortCollectorClass, true);
+    if (!pc || !Vacuuming(pc)) return;
+    void* joints = unity::Field<void*>(pc, offPcJoints);
+    const size_t n = unity::ListCount(joints);
+    if (!n) return;
+    std::vector<Il2CppObject*> refs;
+    for (size_t i = 0; i < n && i < 512; ++i)
+        if (auto* r = static_cast<Il2CppObject*>(unity::ListAt(joints, i))) refs.push_back(r);
+    std::string err;
+    const MethodInfo* clear =
+        Resolver::Get().Method(api().il2cpp_object_get_class(static_cast<Il2CppObject*>(joints)), "Clear", 0, &err);
+    if (clear) Call(clear, joints, {}, "List<JointReference>.Clear");
+    for (Il2CppObject* r : refs) Call(jrDestroy, r, {}, "JointReference.Destroy");
+    SR2_INFO("[{}] hen collector: {} chicken(s) released from the vacuum", module, refs.size());
+}
+
+int CoopWorld::Impl::Collect(Il2CppObject* pc, Il2CppObject* ammo, const CoopInfo& c, int keepHens, int keepRoosters,
+                             Census& in) {
+    in = {};
     if (!c.hasRegion) return 0;
     Vec3 center = c.region.center, half = c.region.extents;
     Quat rot{0, 0, 0, 1};
@@ -959,33 +1355,54 @@ int CoopWorld::Impl::Collect(Il2CppObject* clone, Il2CppObject* pc, Il2CppObject
         if (vac && Value<bool>(Call(isCaptive, vac, {}, "Vacuumable.IsCaptive", &ok))) continue;  // held by a vac
         birds.push_back({ident, type, unity::GetName(type).find("Rooster") != std::string::npos});
     }
-    *adultsOut = static_cast<int>(birds.size());
-    int excess = static_cast<int>(birds.size()) - keep;
-    if (excess <= 0) return 0;
-    int roosters = static_cast<int>(std::count_if(birds.begin(), birds.end(), [](const Bird& b) { return b.rooster; }));
+    in.roosters = static_cast<int>(std::count_if(birds.begin(), birds.end(), [](const Bird& b) { return b.rooster; }));
+    in.hens = static_cast<int>(birds.size()) - in.roosters;
+    int excessHens = in.hens - keepHens, excessRoosters = in.roosters - keepRoosters;
+    if (excessHens <= 0 && excessRoosters <= 0) return 0;
     const int32_t nSlots = static_cast<int32_t>(unity::ArrayLength(Call(ammoSlots, ammo, {}, "AmmoSlotManager.get_Slots", &ok)));
     Il2CppObject* fx = unity::Field<Il2CppObject*>(pc, offPcFx);
+    // The slots as they will be once the chickens on their way are stored (vacuum: stored later by
+    // the collector's FixedUpdate, into the slot holding that type, else an empty one).
+    struct Slot {
+        Il2CppObject* type;
+        int32_t count, max;
+    };
+    std::vector<Slot> slots;
+    for (int32_t i = 0; i < nSlots && i < 8; ++i) {
+        const int32_t cnt = Value<int32_t>(Call(slotCount, ammo, {&i}, "AmmoSlotManager.GetSlotCount", &ok));
+        const int32_t max = Value<int32_t>(Call(slotMax, ammo, {&i}, "AmmoSlotManager.GetSlotMaxCount", &ok));
+        Il2CppObject* t = cnt > 0 ? Call(slotName, ammo, {&i}, "AmmoSlotManager.GetSlotName", &ok) : nullptr;
+        slots.push_back({cnt > 0 ? t : nullptr, cnt, max});
+    }
+    const bool vac = Vacuuming(pc);
     int collected = 0;
     for (const Bird& b : birds) {
-        if (excess <= 0 || sr2::core::ModuleFaulted(module)) break;
-        if (b.rooster && roosters <= kKeepRoosters) continue;
-        // Slot like AmmoSlotManager: the one holding this type, else an empty one.
+        if ((excessHens <= 0 && excessRoosters <= 0) || sr2::core::ModuleFaulted(module)) break;
+        int& excess = b.rooster ? excessRoosters : excessHens;
+        if (excess <= 0) continue;
         int32_t slot = -1;
-        for (int32_t i = 0; i < nSlots && i < 8; ++i) {
-            const int32_t cnt = Value<int32_t>(Call(slotCount, ammo, {&i}, "AmmoSlotManager.GetSlotCount", &ok));
-            const int32_t max = Value<int32_t>(Call(slotMax, ammo, {&i}, "AmmoSlotManager.GetSlotMaxCount", &ok));
-            Il2CppObject* t = cnt > 0 ? Call(slotName, ammo, {&i}, "AmmoSlotManager.GetSlotName", &ok) : nullptr;
-            if (cnt > 0 && t == b.type && cnt < max) {
+        for (int32_t i = 0; i < static_cast<int32_t>(slots.size()); ++i) {
+            if (slots[i].count > 0 && slots[i].type == b.type && slots[i].count < slots[i].max) {
                 slot = i;
                 break;
             }
-            if (cnt == 0 && slot < 0) slot = i;
+            if (slots[i].count == 0 && slot < 0) slot = i;
         }
         if (slot < 0) continue;  // storage full for this type
+        if (vac && Suck(pc, b.ident, unity::GetComponent(b.ident, vacuumableClass))) {
+            slots[slot].type = b.type;
+            ++slots[slot].count;
+            ++collected;
+            --excess;
+            continue;
+        }
+        if (sr2::core::ModuleFaulted(module)) break;
         int32_t one = 1;
         bool overflow = false;
         if (!Value<bool>(Call(addResource, ammo, {b.type, &slot, &one, &overflow}, "AmmoSlotManager.MaybeAddResource", &ok)))
             continue;
+        slots[slot].type = b.type;
+        ++slots[slot].count;
         Il2CppObject* tr = unity::TransformOf(b.ident);
         Il2CppObject* go = unity::GameObjectOf(b.ident);
         if (unity::IsAlive(fx) && unity::IsAlive(tr)) {
@@ -999,7 +1416,15 @@ int CoopWorld::Impl::Collect(Il2CppObject* clone, Il2CppObject* pc, Il2CppObject
              &ok);
         ++collected;
         --excess;
-        if (b.rooster) --roosters;
+    }
+    if (vac && PendingJoints(pc) > 0) {
+        // DoCollection's tail: how long the cyclone shows at least, when unfinished joints are dropped.
+        Il2CppObject* timeDir = unity::Field<Il2CppObject*>(pc, offPcTimeDir);
+        float force = kForceCollectHours, end = kEndCollectHours;
+        const double untilForce = Value<double>(Call(hoursFromNow, timeDir, {&force}, "TimeDirector.HoursFromNow", &ok));
+        if (ok) unity::Field<double>(pc, offPcForce) = untilForce;
+        const double untilEnd = Value<double>(Call(hoursFromNow, timeDir, {&end}, "TimeDirector.HoursFromNow", &ok));
+        if (ok) unity::Field<double>(pc, offPcEnd) = untilEnd;
     }
     return collected;
 }
@@ -1019,10 +1444,12 @@ void CoopWorld::Impl::ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopReque
     if (req.hens && live != *req.hens) *req.hens = live;
     Il2CppObject* pc = InChildren(unity::TransformOf(clone), plortCollectorClass, true);
     if (!pc) return;
+    // Vacuum: the collector's FixedUpdate animates the cyclone; direct storing: off between bursts.
+    const bool vac = Vacuuming(pc);
     Il2CppObject* anim = unity::Field<Il2CppObject*>(pc, offPcAnim);
     int32_t cyclone = unity::Field<int32_t>(pc, offPcCycloneId);
     bool flag = false;
-    if (unity::IsAlive(anim)) Call(animSetBool, anim, {&cyclone, &flag}, "Animator.SetBool");  // off between bursts
+    if (!vac && unity::IsAlive(anim)) Call(animSetBool, anim, {&cyclone, &flag}, "Animator.SetBool");
 
     PlotTimer& t = timers[req.id];
     if (++t.age < kWarmupTicks) return;
@@ -1031,24 +1458,25 @@ void CoopWorld::Impl::ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopReque
         LogPlacement(c.plot, clone, "in the world");  // isVisible now reflects the cameras
     }
     Il2CppObject* timeDir = unity::Field<Il2CppObject*>(pc, offPcTimeDir);
-    if (!timeDir) return;
+    if (!timeDir || PendingJoints(pc) > 0) return;  // chickens still on their way in
     bool ok = false;
     if (t.next > 0.0 && !Value<bool>(Call(hasReached, timeDir, {&t.next}, "TimeDirector.HasReached", &ok))) return;
-    int adultsIn = 0;
-    const int keep = std::clamp(req.keepAdults, std::max(kHenKeepMin, kKeepRoosters), kHenKeepMax);
-    const int n = Collect(clone, pc, ammo, c, keep, &adultsIn);
-    if (adultsIn <= keep) return;  // nothing over the limit: check again next tick
+    Census in;
+    const int keepHens = std::clamp(req.keepHens, kHenKeepHensMin, kHenKeepHensMax);
+    const int keepRoosters = std::clamp(req.keepRoosters, kHenKeepRoostersMin, kHenKeepRoostersMax);
+    const int n = Collect(pc, ammo, c, keepHens, keepRoosters, in);
+    if (in.hens <= keepHens && in.roosters <= keepRoosters) return;  // nothing over the limits: check again next tick
     float period = unity::Field<float>(pc, offPcPeriod);
     if (!std::isfinite(period) || period <= 0.0f) period = 6.0f;
     t.next = Value<double>(Call(hoursFromNow, timeDir, {&period}, "TimeDirector.HoursFromNow", &ok));
-    if (n > 0) {
+    if (n > 0 && !vac) {
         flag = true;
         if (unity::IsAlive(anim)) Call(animSetBool, anim, {&cyclone, &flag}, "Animator.SetBool");
         if (req.hens) ReadSlots(clone, *req.hens);
     }
-    SR2_INFO("[{}] hen collector on plot '{}': {} adult(s) in the coop (limit {}), collected {}; next in {:.1f} game "
-             "hours",
-             module, req.id, adultsIn, keep, n, period);
+    SR2_INFO("[{}] hen collector on plot '{}': {} hen(s) / {} rooster(s) in the coop (keeps {} / {}), {} {}; next in "
+             "{:.1f} game hours",
+             module, req.id, in.hens, in.roosters, keepHens, keepRoosters, vac ? "vacuuming" : "stored directly", n, period);
 }
 
 // ---------------------------------------------------------------- api --
@@ -1077,6 +1505,7 @@ void CoopWorld::Tick(const QueryFn& query, const LookupFn& lookup) {
         } else if (have.airNet) p.FitAirNet(have.airNet, c, false);
         if (req.henCollector && !have.hen) p.CreateHen(c.plot, req, getLookup(), generation_);
         else if (!req.henCollector && have.hen) {
+            p.ReleaseJoints(have.hen);
             p.Destroy(have.hen);
             SR2_INFO("[{}] hen collector removed from plot '{}' (not owned)", p.module, req.id);
         } else if (have.hen) p.ServeHen(have.hen, c, req);
@@ -1104,6 +1533,10 @@ void CoopWorld::RemoveAll(const QueryFn* query) {
                 if (have.hen) impl_->SnapshotInto(have.hen, req);
             }
         }
+        if (!sr2::core::ModuleFaulted(impl_->module)) {
+            Impl::Children have = impl_->Scan(c.plot, generation_, false);
+            if (have.hen) impl_->ReleaseJoints(have.hen);
+        }
         impl_->Scan(c.plot, generation_, true, true);
     }
 }
@@ -1126,6 +1559,7 @@ void CoopWorld::Remove(Il2CppObject* plot, bool airNet, bool henCollector) {
         SR2_INFO("[{}] coop air net removed (sold)", impl_->module);
     }
     if (henCollector && have.hen) {
+        impl_->ReleaseJoints(have.hen);
         impl_->Destroy(have.hen);
         SR2_INFO("[{}] hen collector removed (sold)", impl_->module);
     }

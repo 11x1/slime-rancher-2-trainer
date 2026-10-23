@@ -267,8 +267,9 @@ hardcoded limit, chicks don't count, no slider / custom UI. Findings (asset bund
 As built:
 * Save safety: storing hens in the vanilla elder storage is NOT valid (mod-free load: the slots
   are ElderGroup slots again, hens dropped by ValidateAndAdjustSlots). So the Hen Collector is a
-  clone of `Deluxe` under the coop plot (TV and button removed, turned -90 deg into the free
-  (+x,+z) corner) whose SiloStorage gets ONE session clone of the elder slot definition (same
+  clone of `Deluxe` under the coop plot (TV and button removed, placed in the free (+x,-z) corner;
+  the `Deluxe` container is itself turned -90 deg in the prefab, which puts the vanilla elder
+  collector in (+x,+z): see `modules/custom_upgrades/NOTES.md`) whose SiloStorage gets ONE session clone of the elder slot definition (same
   `_maxAmount` 100, group MeatGroup, block list ElderGroup + UnstableMeat) in both slots before
   activation. Its storage stays local (never linked; a tick check logs an error if it ever were),
   but it needs an `AmmoModel` of its own: `SiloStorage.InitAmmo` only builds the AmmoSlotManager,
@@ -281,23 +282,25 @@ As built:
   build and ~5 s later.
   contents persisted in the sidecar (`hen_collector`), output ports and slot displays work as
   vanilla. Selling is refused while it holds chickens.
-* Collecting: the clone's `PlortCollector` is disabled (it would NRE without a LandPlotModel and
-  takes everything). Our ~1 Hz tick counts adults (MeatGroup - ElderGroup - UnstableMeat) in the
-  active CoopRegion box (`Physics.OverlapBox`, Identifiable.identType, not held by a vac); chicks
-  are never counted or taken. While more than **20** adults are in the coop and the collector's
-  period (its CollectPeriod, 6 game hours) is due, the excess is collected the vanilla way
-  (`MaybeAddResource` into the slot holding that type or an empty one, `SpawnAndPlayFX(CollectFX)`
-  at the chicken, `Destroyer.DestroyActor`, cyclone animation), keeping at least 2 roosters, until
-  the slots are full.
+* Collecting: the clone's `PlortCollector` runs with a private LandPlotModel whose
+  collectorNextTime never comes (its own DoCollection would take everything). Our ~1 Hz tick counts
+  adult hens and roosters (MeatGroup - ElderGroup - UnstableMeat) in the active CoopRegion box
+  (`Physics.OverlapBox`, Identifiable.identType, not held by a vac); chicks are never counted or
+  taken. While more hens or roosters than the coop's two limits are in the coop and the
+  collector's period (its CollectPeriod, 6 game hours) is due, each excess chicken gets the joint
+  DoCollection would give it, and the collector's vanilla FixedUpdate vacuums it in (reel, store,
+  puff, cyclone, vac sound), until the slots are full. (Build 4d16e38c stored them directly and
+  they just vanished.)
 * Why 20: a collector that takes every adult (the elder collector's literal behaviour) empties the
   coop and stops breeding. 20 adults (~18 hens) produce ~2 chicks per game hour; with 14 h to grow
   that is ~30 chicks, ~50 birds in total, under the 58 density cap where breeding stalls.
-  20 is now only the default: see the limit slider below. `kKeepRoosters` in coop_world.cpp.
+  20 is now only the default (18 hens + 2 roosters): see the limit sliders below.
 * Price 1000 (Deluxe Coop 1300, Plort Collector 750), icon = the Deluxe Coop item's.
 
-Limit slider (user request, follow-up): the keep-limit is per coop, **2..58** (58 =
-`MaxDensityInsideCoops`), default 20, set with a slider in the coop's purchase menu while the owned
-Hen Collector is selected.
+Limit sliders (user request, follow-up): the keep-limits are per coop, hens **0..58** (58 =
+`MaxDensityInsideCoops`, default 18) and roosters **0..20** (default 2), set with two sliders side
+by side in the coop's purchase menu while the owned Hen Collector is selected (first a single
+2..58 adults slider; split after the test of 4d16e38c).
 * Where: `PurchaseItemDetailsContentView.BindData(vm)` (0x6D9EA0, non-generic, unique body) binds
   the details panel of every list menu: `_detailsText` (+0x58) <- `vm._description`,
   `_craftCostView` (+0x60) active only when `vm._showCost` (= IsAvailable && NewbuckCost > 0, so
@@ -331,9 +334,10 @@ Hen Collector is selected.
   the game's UI shapes are `SDFRoundedRectangle` (MonomiPark.SlimeRancher.UI.SDFUI; material from
   `Shader.Find("SDFUI/" + type)`), e.g. the scroll bars' pink handle (0.871, 0.310, 0.522). The slider
   uses them (track = panel text colour at 22 %, pink fill, white handle with a pink border).
-* Save: sidecar per plot `"hen_collector_keep": n` (written while the Hen Collector is owned,
-  saved with the next game save like ownership), read live through `CoopRequest.keepAdults`. The
-  menu description shows the coop's current limit.
+* Save: sidecar per plot `"hen_collector_keep_hens"` / `"hen_collector_keep_roosters"` (written
+  while the Hen Collector is owned, saved with the next game save like ownership; an old
+  `"hen_collector_keep": n` reads as min(2, n) roosters + the rest hens), read live through
+  `CoopRequest.keepHens` / `keepRoosters`. The menu description shows the coop's current limits.
 
 Original plan:
 
