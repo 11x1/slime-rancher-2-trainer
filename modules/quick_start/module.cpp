@@ -52,6 +52,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -67,6 +68,7 @@
 #include "core/module.h"
 #include "core/settings.h"
 #include "core/unity.h"
+#include "ui/quick_start_hint.h"
 
 namespace sr2::modules {
 namespace {
@@ -164,7 +166,10 @@ public:
     bool DefaultEnabled() const override { return true; }
     bool Setup(sr2::core::ModuleContext& ctx) override;
     void OnEnable() override { enabled_.store(true); }
-    void OnDisable() override { enabled_.store(false); }
+    void OnDisable() override {
+        enabled_.store(false);
+        sr2::ui::quick_start_hint::Clear();
+    }
 
     // ---- called from detours (main thread, inside a DetourGuard) ----
     void OnLogoStart(Il2CppObject* self) { PatchLogoScene(self, /*fromStart=*/true); }
@@ -186,6 +191,7 @@ private:
     Il2CppObject* FindContinueModel(Il2CppObject* landing, size_t listOffset);
     bool DirectContinue(std::string& err);
     void ContinueDone(std::string_view why, bool info);
+    void PublishHint();
 
     std::atomic<bool> enabled_{false};
     bool introOk_ = false;
@@ -242,6 +248,7 @@ private:
     bool menuReady_ = false;
     Clock::time_point menuReadyAt_{};
     double nextMenuPoll_ = 0;
+    bool hintDone_ = false;  // overlay note finished for this launch
 };
 
 QuickStart* g_self = nullptr;
@@ -758,6 +765,32 @@ void QuickStart::Frame() {
         CheckShift();
         if (menuSeen_) TryAutoContinue();
     }
+    if (continueOk_) PublishHint();
+}
+
+// The overlay's "Hold Shift to stay in the main menu" note (ui/quick_start_hint.h).
+void QuickStart::PublishHint() {
+    namespace hint = sr2::ui::quick_start_hint;
+    if (hintDone_) return;
+    const bool on = settings::GetBool(kModule, kAutoContinue);
+    if (shiftCanceled_ && on) {
+        hint::SetStaying();  // shown briefly by the overlay, then hidden
+        hintDone_ = true;
+        return;
+    }
+    if (continueDone_ || shiftCanceled_) {
+        hint::Clear();
+        hintDone_ = true;
+        return;
+    }
+    if (!on) {
+        hint::Clear();  // may still be turned on before the menu is ready
+        return;
+    }
+    double left = -1;  // unknown until the menu is interactive
+    if (menuReady_)
+        left = std::max(0.0, settings::GetFloat(kModule, kAutoContinueDelay) - SecondsSince(menuReadyAt_));
+    hint::SetPending(left);
 }
 
 }  // namespace
