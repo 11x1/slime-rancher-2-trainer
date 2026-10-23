@@ -39,8 +39,7 @@
 //   removed, the SiloStorage's two slot definitions replaced by ONE session clone of the
 //   elder definition (same _maxAmount 100, _slotTypeGroup = MeatGroup, block list = ElderGroup
 //   members + UnstableMeat), PlortCollector disabled (it would NRE without a LandPlotModel and
-//   cannot keep a breeding stock), root turned -90 deg so it stands in the free (+x, +z) corner
-//   (vanilla: elder collector (+x,-z), vitamizer (-x,+z), plot menu (-x,-z)). The storage gets
+//   cannot keep a breeding stock), placed in a free corner (below). The storage gets
 //   InitAmmo + a session AmmoModel of its own (AmmoSlotManager.SetModel; without a model every slot
 //   call NREs: slot displays, ports, our tick). Then activated:
 //   local storage only, never linked to the plot model, contents persisted in the sidecar,
@@ -54,6 +53,18 @@
 //   chosen like AmmoSlotManager, MaybeAddResource, SpawnAndPlayFX(CollectFX) at the chicken,
 //   Destroyer.DestroyActor, cyclone animation), keeping at least kKeepRoosters roosters, until
 //   the storage is full.
+//   Placement (asset data of "patchCoop", plot-local = coop prefab root): the "Deluxe" container
+//   is NOT identity in the prefab - its localRotation is (0, -0.707, 0, 0.707) = -90 deg about Y,
+//   so the vanilla elder collector (CollectionPoint at Deluxe-local (3.75, 0.5, -3.75)) stands in
+//   the plot's (+x, +z) corner. Plot menu terminal "techActivator" (-5.54, -5.54) = (-x, -z),
+//   vitamizer "Vitamizer/objCoopVitamizer" (-4.75, 4.75) = (-x, +z); (+x, -z) is free. Build
+//   4d16e38c turned the clone root -90 deg believing the container was identity: that is exactly
+//   the vanilla transform, so the Hen Collector stood INSIDE the vanilla elder collector of a
+//   deluxe coop (same meshes, same place: invisible) - its log line "render bounds ... plot-relative
+//   centre (-4.97, 1.89, -4.95)" (world axes, plot turned 180 deg) is that corner. Now PickCorner
+//   reads the occupied corners from the live plot's own children (by path, plot-local through
+//   InverseTransformPoint) and turns the clone by a multiple of 90 deg into the first free one,
+//   (+x, -z) preferred; logged once per build ("hen collector corner").
 //
 // Clones are named "sr2mods_<kind>#<generation>" and found again every tick under the plot
 // transform (no stored pointers). A clone of another generation (an older save game / before a
@@ -109,6 +120,25 @@ struct Quat {
 struct Bounds {
     Vec3 center, extents;
 };
+
+// v rotated by the unit quaternion q (q * v * q^-1).
+Vec3 Rotate(const Quat& q, const Vec3& v) {
+    const float tx = 2.0f * (q.y * v.z - q.z * v.y), ty = 2.0f * (q.z * v.x - q.x * v.z),
+                tz = 2.0f * (q.x * v.y - q.y * v.x);
+    return {v.x + q.w * tx + (q.y * tz - q.z * ty), v.y + q.w * ty + (q.z * tx - q.x * tz),
+            v.z + q.w * tz + (q.x * ty - q.y * tx)};
+}
+Quat Yaw(float degrees) {
+    const float h = degrees * 3.14159265f / 360.0f;
+    return {0.0f, std::sin(h), 0.0f, std::cos(h)};
+}
+// Plot corner of a plot-local point: x / z signs, "(+x, -z)".
+struct Quadrant {
+    int x = 0, z = 0;
+    bool operator==(const Quadrant&) const = default;
+};
+Quadrant QuadrantOf(const Vec3& v) { return {v.x >= 0.0f ? 1 : -1, v.z >= 0.0f ? 1 : -1}; }
+std::string Name(Quadrant q) { return std::format("({}x, {}z)", q.x > 0 ? '+' : '-', q.z > 0 ? '+' : '-'); }
 
 }  // namespace
 
@@ -187,6 +217,11 @@ struct CoopWorld::Impl {
     const MethodInfo* rendVisible = nullptr;       // Renderer.get_isVisible
     const MethodInfo* rendBounds = nullptr;        // Renderer.get_bounds
     const MethodInfo* trSetLocalPosition = nullptr;
+    // placement (optional: without them the clone keeps the vanilla corner, logged)
+    const MethodInfo* trGetLocalRotation = nullptr;  // Transform.get_localRotation
+    const MethodInfo* trInverseTransformPoint = nullptr;  // Transform.InverseTransformPoint(Vector3)
+    const MethodInfo* trFind = nullptr;            // Transform.Find(string)
+    size_t offPcCollectPt = 0;                     // PlortCollector.CollectPt
 
     // Session-wide Hen Collector assets (built once, pinned, never freed).
     bool henTried = false;
@@ -319,6 +354,13 @@ struct CoopWorld::Impl {
     void CreateHen(Il2CppObject* plot, CoopRequest& req, Il2CppObject* lookup, unsigned generation);
     bool LinkLocalModel(Il2CppObject* storage, size_t nDefs);
     void LogPlacement(Il2CppObject* plot, Il2CppObject* clone, const char* when);
+    struct Corner {
+        bool ok = false;
+        Quat rot{0, 0, 0, 1};  // clone root localRotation
+        std::string log;
+    };
+    Corner PickCorner(Il2CppObject* plot, Il2CppObject* pc);
+    bool PlotLocal(Il2CppObject* plotTr, Il2CppObject* tr, Vec3& out);
     void Restore(Il2CppObject* storage, const std::vector<HenSlot>& slots);
     bool ReadSlots(Il2CppObject* clone, std::vector<HenSlot>& out, Il2CppObject** ammoOut = nullptr,
                    Il2CppObject** storageOut = nullptr);
@@ -473,6 +515,11 @@ bool CoopWorld::Setup(Resolver& R, const char* module, std::string& why) {
         p->rendVisible = p->rendererClass ? R.Method(p->rendererClass, "get_isVisible", 0, &err) : nullptr;
         p->rendBounds = p->rendererClass ? R.Method(p->rendererClass, "get_bounds", 0, &err) : nullptr;
         p->trSetLocalPosition = R.Method(p->transformClass, "set_localPosition", 1, &err);
+        // Corner choice (optional).
+        p->trGetLocalRotation = R.Method(p->transformClass, "get_localRotation", 0, &err);
+        p->trInverseTransformPoint = R.MethodByParams(p->transformClass, "InverseTransformPoint", {"UnityEngine.Vector3"}, &err);
+        p->trFind = R.MethodByParams(p->transformClass, "Find", {"System.String"}, &err);
+        if (auto o = R.FieldOffset(p->plortCollectorClass, "CollectPt", &err)) p->offPcCollectPt = *o;
     }
     impl_ = p;
     ready_ = true;
@@ -793,6 +840,72 @@ bool CoopWorld::Impl::LinkLocalModel(Il2CppObject* storage, size_t nDefs) {
     return true;
 }
 
+bool CoopWorld::Impl::PlotLocal(Il2CppObject* plotTr, Il2CppObject* tr, Vec3& out) {
+    if (!trInverseTransformPoint || !unity::IsAlive(plotTr) || !unity::IsAlive(tr)) return false;
+    Vec3 world = GetVec(trGetPosition, tr, "Transform.get_position");
+    bool ok = false;
+    Il2CppObject* b = Call(trInverseTransformPoint, plotTr, {&world}, "Transform.InverseTransformPoint", &ok);
+    if (!ok || !b) return false;
+    out = Value<Vec3>(b);
+    return std::isfinite(out.x) && std::isfinite(out.z);
+}
+
+// Turn the (inactive, root at identity) clone so that its collector stands in a plot corner no
+// vanilla part uses. The occupied corners come from the live plot's own children (names from the
+// coop prefab), each with the prefab layout as fallback: vanilla elder collector (+x, +z), plot
+// menu terminal (-x, -z), vitamizer (-x, +z).
+CoopWorld::Impl::Corner CoopWorld::Impl::PickCorner(Il2CppObject* plot, Il2CppObject* pc) {
+    Corner c;
+    Il2CppObject* plotTr = unity::TransformOf(plot);
+    Il2CppObject* collectPt = offPcCollectPt ? unity::Field<Il2CppObject*>(pc, offPcCollectPt) : nullptr;
+    Vec3 own{};
+    if (!trFind || !PlotLocal(plotTr, unity::IsAlive(collectPt) ? collectPt : unity::TransformOf(pc), own)) {
+        c.log = "placement methods / CollectPt missing - vanilla corner kept";
+        return c;
+    }
+    struct Part {
+        const char* what;
+        const char* path;
+        Quadrant fallback;
+    };
+    static const Part kParts[] = {
+        {"vanilla elder collector", "Deluxe/ElderCollector/Collector Unit/CollectionPoint", {1, 1}},
+        {"plot menu", "techActivator", {-1, -1}},
+        {"vitamizer", "Vitamizer/objCoopVitamizer", {-1, 1}},
+    };
+    std::vector<Quadrant> used;
+    std::string parts;
+    for (const Part& part : kParts) {
+        bool ok = false;
+        Il2CppObject* tr = Call(trFind, plotTr, {unity::NewString(part.path)}, "Transform.Find", &ok);
+        Vec3 v{};
+        const bool found = ok && unity::IsAlive(tr) && PlotLocal(plotTr, tr, v);
+        const Quadrant q = found ? QuadrantOf(v) : part.fallback;
+        used.push_back(q);
+        parts += std::format("{}{} {}{}", parts.empty() ? "" : ", ", part.what, Name(q),
+                             found ? "" : " (not found, prefab layout)");
+    }
+    static const Quadrant kOrder[] = {{1, -1}, {-1, 1}, {1, 1}, {-1, -1}};
+    Quadrant target = kOrder[0];
+    for (const Quadrant& q : kOrder)
+        if (std::find(used.begin(), used.end(), q) == used.end()) {
+            target = q;
+            break;
+        }
+    for (int k = 0; k < 4; ++k) {
+        const Quat r = Yaw(90.0f * k);
+        if (QuadrantOf(Rotate(r, own)) == target) {
+            c.ok = true;
+            c.rot = r;
+            c.log = std::format("collector turned {} deg into the {} corner (unturned {}); occupied: {}", 90 * k,
+                                Name(target), Name(QuadrantOf(own)), parts);
+            return c;
+        }
+    }
+    c.log = "no turn reaches the free corner - vanilla corner kept";
+    return c;
+}
+
 // One-shot diagnostic: where the clone ended up and whether it renders.
 void CoopWorld::Impl::LogPlacement(Il2CppObject* plot, Il2CppObject* clone, const char* when) {
     Il2CppObject* root = unity::TransformOf(clone);
@@ -827,16 +940,32 @@ void CoopWorld::Impl::LogPlacement(Il2CppObject* plot, Il2CppObject* clone, cons
         }
     }
     const bool any = enabled > 0 && lo.x <= hi.x;
+    // Plot-local centre (the corner as the plot sees it) and whether the vanilla deluxe parts are built.
+    std::string local = "?";
+    if (any && trInverseTransformPoint) {
+        Vec3 mid{0.5f * (lo.x + hi.x), 0.5f * (lo.y + hi.y), 0.5f * (lo.z + hi.z)};
+        Il2CppObject* b = Call(trInverseTransformPoint, plotTr, {&mid}, "Transform.InverseTransformPoint", &ok);
+        if (ok && b) {
+            const Vec3 v = Value<Vec3>(b);
+            local = std::format("({:.2f}, {:.2f}, {:.2f}) {}", v.x, v.y, v.z, Name(QuadrantOf(v)));
+        }
+    }
+    std::string deluxe = "?";
+    if (trFind) {
+        Il2CppObject* d = Call(trFind, plotTr, {unity::NewString("Deluxe")}, "Transform.Find", &ok);
+        if (ok && unity::IsAlive(d)) deluxe = unity::ActiveInHierarchy(unity::GameObjectOf(d)) ? "built" : "not built";
+    }
     SR2_INFO("[{}] hen collector placement ({}): plot at ({:.2f}, {:.2f}, {:.2f}), clone root at ({:.2f}, {:.2f}, {:.2f}) "
              "scale ({:.2f}, {:.2f}, {:.2f}), activeInHierarchy {}, {} child(ren), renderers {} (enabled+active {}, "
-             "visible to a camera {}), render bounds {}",
+             "visible to a camera {}), render bounds {}; plot-local centre {}, vanilla deluxe parts {}",
              module, when, pp.x, pp.y, pp.z, rp.x, rp.y, rp.z, rs.x, rs.y, rs.z, unity::ActiveInHierarchy(clone),
              children, total, enabled, visible,
              any ? std::format("({:.2f}, {:.2f}, {:.2f})..({:.2f}, {:.2f}, {:.2f}) = plot-relative centre ({:.2f}, {:.2f}, "
                                "{:.2f})",
                                lo.x, lo.y, lo.z, hi.x, hi.y, hi.z, 0.5f * (lo.x + hi.x) - pp.x, 0.5f * (lo.y + hi.y) - pp.y,
                                0.5f * (lo.z + hi.z) - pp.z)
-                 : std::string("none"));
+                 : std::string("none"),
+             local, deluxe);
 }
 
 void CoopWorld::Impl::CreateHen(Il2CppObject* plot, CoopRequest& req, Il2CppObject* lookup, unsigned generation) {
@@ -907,13 +1036,18 @@ void CoopWorld::Impl::CreateHen(Il2CppObject* plot, CoopRequest& req, Il2CppObje
         SetRef(static_cast<Il2CppObject*>(defs), reinterpret_cast<void**>(&data[i]), henSlotDef);
     bool off = false;
     Call(behSetEnabled, pc, {&off}, "Behaviour.set_enabled");  // our tick collects, not its FixedUpdate
-    // Placement relative to the live plot: the Deluxe container's own local transform (identity in
-    // the prefab) is set explicitly, then turned -90 deg: (+x,-z) corner -> (+x,+z).
+    // Placement relative to the live plot: root at the plot origin, unturned, then turned into a free
+    // corner (PickCorner). Fallback: the vanilla container's -90 deg (the vanilla elder collector's
+    // corner), only when no free corner can be worked out.
     Vec3 zero{0.0f, 0.0f, 0.0f}, one{1.0f, 1.0f, 1.0f};
     if (trSetLocalPosition) Call(trSetLocalPosition, root, {&zero}, "Transform.set_localPosition");
     SetVec(trSetLocalScale, root, one, "Transform.set_localScale");
-    Quat q{0.0f, -0.70710678f, 0.0f, 0.70710678f};
+    Quat q{0.0f, 0.0f, 0.0f, 1.0f};
     Call(trSetLocalRotation, root, {&q}, "Transform.set_localRotation");
+    const Corner corner = PickCorner(plot, pc);
+    q = corner.ok ? corner.rot : Quat{0.0f, -0.70710678f, 0.0f, 0.70710678f};
+    Call(trSetLocalRotation, root, {&q}, "Transform.set_localRotation");
+    SR2_INFO("[{}] hen collector corner on plot '{}': {}", module, req.id, corner.log);
     if (sr2::core::ModuleFaulted(module) || !LinkLocalModel(storage, nDefs)) {
         if (!sr2::core::ModuleFaulted(module)) SR2_WARN("[{}] hen collector: storage model not set up - not built", module);
         DestroyNow(clone);
