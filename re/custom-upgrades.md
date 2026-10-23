@@ -389,7 +389,8 @@ Original plan:
   `IdentifiableType.IsPlort` types with a market value are sold. Order per slot: TrySell first,
   then Decrement, so you never lose plorts without being paid.
 * Implemented flow:
-  1. Buy "Sell-All Button" in the silo menu (setting `sell_all_price`, default 1000). It is
+  1. Buy "Sell-All Button" in the silo menu (fixed price 10,000 Newbucks in `kDefs`; the old
+     `sell_all_price` setting was removed, checklist si2). It is
      only offered when the world button below can be built.
   2. The button on the silo sells (HUD notices per plort type, log line with every type × count
      @ price). If the market is closed, it says so and nothing is sold. The former "Sell All
@@ -414,7 +415,24 @@ Original plan:
   `ItemAcquisitionNotificationList.HandleNotificationAvailable(provider)` (icon, PlortSoldFormat
   name, count). Only while `get_CanQueueAny` is true (the list discards notices while the HUD is
   suppressed by an open menu), so menu sales show after the menu closes. Without the HUD list the
-  button falls back to the text "Sold N plorts for V Newbucks". Silos come
+  button falls back to the text "Sold N plorts for V Newbucks".
+  * Same look as the drones' cloud-upload notice (checklist si2, decompiled 2026-10-23):
+    `DroneActivitySceneNotifications.DequeueResourceCollected` (0x75B430) and `DequeuePlortsSold`
+    (0x75B200) are the same code: a `NotificationEntry(provider, group null, type.icon,
+    Format.WithVariable("0", type.localizedName (+0x28)), count, config.DefaultStyle)`; only the
+    format differs (`QuantumCloudResourceCollectedFormat` vs `PlortSoldFormat`, falling back to the
+    bare localized name if the format is empty). The provider's `DequeueNext` serves low battery,
+    then resources collected, then plorts sold. So the sale keeps `AddPlortSold` (the text says
+    sold).
+  * Test n7 (20:04 build) showed no notices: the world button found no list with the drone
+    provider and used its text. Since then every loaded list is scanned (FindObjectsOfTypeAll, at
+    most 1 Hz, only on a press or while notices are queued); queued notices may go to a started
+    but inactive list, the world-button check needs an active one. The log says once which list
+    was used, or why none fits (the first list's provider classes): check it on the next test.
+  * Not used (unverified, risky): building a `NotificationEntry` ourselves and adding it to the
+    list's `_pendingNotifications` with another or no provider. The list calls the entry's provider
+    (`TryDequeueMergeNext`, paging), and the shop provider expects its own entry type.
+  Silos come
   from the sidecar ids -> `SceneContext.GameModel.GetLandPlotModel(id).gameObj` (the
   LandPlotLocation) -> `GetComponentInChildren<LandPlot>` at ~1 Hz; sold / disabled / faulted
   removes the button, load / plot rebuild rebuilds it. The menu action stays.
@@ -632,7 +650,7 @@ key) would show every loaded sprite name. It isn't done automatically.
 1. Log at startup: `[custom_upgrades] setup ok: ... hooks`. When the silo menu opens:
    `plot type 5: 2 custom item(s) cloned from '...'` and
    `using the Market Link icon '...'`.
-2. Silo menu: "Sell-All Button" with the Market Link icon and the price from the setting, and
+2. Silo menu: "Sell-All Button" with the Market Link icon and the price 10,000, and
    correct title, description and popup texts (not the storage upgrade's text). Buy it; Newbucks
    are deducted and the item turns greyed (owned).
 3. Press the button on the silo: plorts leave the silo, the sale notices pop up, and the log
@@ -650,7 +668,7 @@ key) would show every loaded sprite name. It isn't done automatically.
 ---------------------------------------------------------------------------------------------
 ## 5. Open questions for the user
 
-1. Prices: Sell-All Button (default 1000), Hen Wrangler, Coop Roof, drone price-limit feature
+1. Prices: Sell-All Button (10,000, fixed), Hen Wrangler, Coop Roof, drone price-limit feature
    (free setting, or an upgrade on the drone station?).
 2. Sell All: keep it as a menu action, or do you want the world button (cloned corral collector
    button) on the silo? Should the action need the market to be open (vanilla rule, current

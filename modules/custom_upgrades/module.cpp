@@ -212,7 +212,6 @@ constexpr const char* kModule = "custom_upgrades";
 constexpr const char* kImage = "Assembly-CSharp";
 constexpr const char* kCore = "UnityEngine.CoreModule";
 constexpr const char* kPlotUiNs = "MonomiPark.SlimeRancher.UI.Plot";
-constexpr const char* kKeyPrice = "sell_all_price";
 constexpr int kSidecarFormat = 2;  // 1 = one file per game (legacy), 2 = one file per .sav
 constexpr const char* kRotationSuffix = ".sav.json";  // sidecar of <save>.sav = sr2mods_saves/<save>.sav.json
 // Gate: per-save value "the module was on with this save loaded" (see the Gate section above).
@@ -269,7 +268,7 @@ struct UpgradeDef {
     const char* key;     // sidecar key (stable)
     int32_t plotType;    // LandPlot.Id
     int32_t needs;       // listed only while this upgrade is owned: custom id, vanilla id or 0
-    int price;           // Newbucks (0 = setting)
+    int price;           // Newbucks
     int family;          // Family (kNoFamily = not a tier)
     float mult;          // tier multiplier
     int32_t iconFrom;    // vanilla upgrade whose menu icon is reused (0 = Market Link icon)
@@ -282,7 +281,7 @@ struct UpgradeDef {
 constexpr int F(Family f) { return static_cast<int>(f); }
 
 const UpgradeDef kDefs[] = {
-    {SILO_SELL_ALL, "silo_sell_all", kPlotSilo, 0, 0, kNoFamily, 1.0f, 0, 0, "Sell-All Button",
+    {SILO_SELL_ALL, "silo_sell_all", kPlotSilo, 0, 10000, kNoFamily, 1.0f, 0, 0, "Sell-All Button",
      "A big red button for this silo that sells every plort inside at today's prices. Food and slimes stay put.",
      "Buy the Sell-All Button for this silo?"},
     // ---- tiers (one menu card per chain, see Shown) ----
@@ -836,11 +835,7 @@ void CustomUpgrades::SetRef(Il2CppObject* obj, size_t offset, Il2CppObject* valu
     else *slot = value;
 }
 
-int CustomUpgrades::Price(const UpgradeDef& d) const {
-    if (d.price > 0) return d.price;
-    int p = settings::GetInt(kModule, kKeyPrice);
-    return std::clamp(p, 0, 10000000);
-}
+int CustomUpgrades::Price(const UpgradeDef& d) const { return std::clamp(d.price, 0, 10000000); }
 
 std::string CustomUpgrades::PlotId(Il2CppObject* plot) {
     Il2CppObject* t = getTransform_(plot);
@@ -2712,23 +2707,6 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
             SR2_WARN("[{}] FileStorageProvider.StoreGameData not hooked ({}) - one sidecar per game instead of per save "
                      "file", kModule, serr);
     }
-
-    settings::Def d;
-    d.module = kModule;
-    d.key = kKeyPrice;
-    d.label = "Silo Sell-All Button price";
-    d.kind = settings::Kind::Int;
-    d.def = 1000;
-    d.min = 0;
-    d.max = 100000;
-    d.step = 50;
-    d.unit = " Newbucks";
-    d.zeroText = "free";
-    d.tooltip =
-        "Newbucks price of the silo 'Sell-All Button' custom upgrade (bought in the silo's own purchase menu). Once "
-        "bought, a button on the silo sells its plorts. Ownership is stored next to version.dll in "
-        "sr2mods_saves\\<save file>.sav.json (one per save file), never in the game's save.";
-    settings::Register(d);
 
     main_thread::AddFrameCallback(kModule, [](float dt) {
         if (g_self) g_self->FrameCheck(dt);
