@@ -25,6 +25,17 @@ struct Def {
     // setting except "enabled" is hidden while its module's "enabled" is off.
     std::string parent;
     int parentValue = -1;
+    // Optional "any of these on" parents (keys of the same module): the setting
+    // shows only while at least one of them is on (non-zero) and itself shown by
+    // its own parent rules. Combines with `parent` (both must allow). For a group
+    // of settings that matters only while any of several switches is on.
+    std::vector<std::string> anyOf;
+    // Optional display of Float/Int values (UI only; stored values are unchanged):
+    // shown = value * displayScale, followed by `unit` ("%", " m", " s", "x", " m/s");
+    // `zeroText` replaces the number while the value is 0 (e.g. "no limit", "auto").
+    std::string unit;
+    std::string zeroText;
+    double displayScale = 1;
 };
 
 void Register(const Def& d);  // idempotent per module+key; loads saved value if present
@@ -56,6 +67,14 @@ std::string LastSaveError();
 // registration helpers do not take one; a later Register without a parent
 // keeps it). No-op if module.key is not registered.
 void SetParent(std::string_view module, std::string_view key, std::string_view parent, int parentValue = -1);
+// Sets a registered def's "any of these on" parents (Def::anyOf); a later
+// Register without any keeps them. No-op if module.key is not registered.
+void SetAnyParent(std::string_view module, std::string_view key, const std::vector<std::string>& anyOf);
+// Sets a registered def's display unit, zero text and scale (see Def::unit) for
+// modules whose registration helpers do not take them; a later Register without
+// any of them keeps these. No-op if module.key is not registered.
+void SetDisplay(std::string_view module, std::string_view key, std::string_view unit, std::string_view zeroText = {},
+                double displayScale = 1);
 // True if `parentValue` (the parent's current value) lets `d` show. True when d has no parent.
 bool ParentAllows(const Def& d, double parentValue);
 // The full rule on the stored values: the parent chain allows it and, for any

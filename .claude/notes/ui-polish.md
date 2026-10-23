@@ -1,14 +1,16 @@
-# UI polish (branch feature/ui-polish)
+# UI polish (branch feature/ui-polish-2) - done, needs an in-game check
 
-- Collectible tracker (c1, n3, c4): always 3 columns, rows grow, left-aligned (no centering of partial rows), centered under the minimap; label must not cover the icon when alone.
-- n7 marked "still old": check which build it ran on.
-- Sidebar commit stamp: grayer text; tooltip shows only the copy hint.
-- Peel animation: last frame shows opaque corners; it stays where it started when the theme changes or the menu moves.
-- Minimap icons (resources etc.) scale with zoom like the player arrow; same size at base zoom.
-- Clicking a checkbox's title or row toggles it (F8 and in-game Options).
-- Settings page status panel: remove the "Overlay" row (also from the Options menu tab); "Game build" row reads "matches known build" in green, version in a hover tooltip (mismatch stays a visible warning).
-- (?) help marker (Speed Panel subtab and everywhere): centered, not thin/pixelated. Fix in the shared helper.
-- Sliders support suffixes (%, m, s, x, m/s) and special text (e.g. "no limit" at 0); add units to every slider that lacks one.
-- "Per resource (advanced)" shows when none of its per-resource toggles are on. Add an "any of these on" parent rule; audit other groups.
-- HL2 movement console command names shown as inline code (monospace chip). Embed a small monospace font in the overlay.
-- F8 subtab of a disabled feature: gray out its settings (read-only) instead of "this is turned off"; the feature's own switch stays active at the top. In-game Options tab keeps hide-when-off.
+The old `feature/ui-polish` branch name was taken (merged earlier), so this work is on `feature/ui-polish-2`. Details are in `ui/NOTES.md`, `modules/minimap/NOTES.md`, the collectibles header comment and `README.md`.
+
+- [x] Collectible tracker (c1, n3, c4): 3 columns as wide as the widest cell, block centred under the minimap, partial rows left-aligned; texts left-aligned so a label never spills over its icon.
+- [x] n7 "still old": the test ran on the 20:04 build (c3a71f0), which had the notices; the world-button sale logged no notice line, so the HUD list with the drone provider was not found. Now every loaded active list is checked and the reason is logged once. Unverified in game.
+- [x] Sidebar commit stamp: grayer text; tooltip only the copy hint.
+- [x] Peel animation: clipped to the rounded window (no square corners), follows the window when it moves.
+- [x] Minimap icons scale with the zoom like the player arrow (same size at 2.5x).
+- [x] Clicking a switch row's label or anywhere on the row toggles it (F8). Options tab: optional hook on `OptionsItemViewHolder.Activate`; unverified that a row click calls it.
+- [x] Settings status: no "Overlay" row; known game build reads "matches known build" in green with the details as tooltip. The "Options menu tab" row was kept (the note's "also from the Options menu tab" was read as "the Options tab has no such row").
+- [x] (?) marker: one `HelpMarker` helper, crisp and centred.
+- [x] Slider units and zero texts (`Def::unit`, `zeroText`, `displayScale`), added across modules (drone price sliders left alone: being removed on feature/drone-station-dialog).
+- [x] "Any of these on" parent rule (`Def::anyOf`); Per resource (advanced) needs a source in advanced mode; ore amount and its cap need a source applied.
+- [x] HL2 console names as inline code chips (JetBrains Mono, OFL, 9 KB).
+- [x] F8 disabled feature: settings grayed and read-only, switch usable; Options tab still hides.

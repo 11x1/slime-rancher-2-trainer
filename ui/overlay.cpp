@@ -561,6 +561,7 @@ menu::Host MakeHost() {
     h.hotkeyName = KeyName(HotkeyVk());
     h.versionMismatch = core::version_guard::Mismatch();
     h.versionStatus = core::version_guard::Status();
+    h.versionKnown = !h.versionMismatch && h.versionStatus.find("matches known build") != std::string::npos;
     h.startCapture = &StartCapture;
     h.isCapturing = &IsCapturing;
     h.openProfilesFolder = &OpenProfilesFolder;

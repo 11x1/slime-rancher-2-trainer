@@ -12,6 +12,7 @@ namespace sr2::ui::theme {
 namespace {
 
 #include "fonts/fredoka_semibold.inc"
+#include "fonts/jetbrains_mono_medium.inc"
 #include "fonts/nunito_bold.inc"
 
 constexpr ImU32 Rgb(unsigned rgb, float a = 1.0f) {
@@ -54,6 +55,7 @@ Mode g_mode = Mode::Dark;
 float g_scale = 0.0f;  // 0 = never applied
 ImFont* g_body = nullptr;
 ImFont* g_display = nullptr;
+ImFont* g_mono = nullptr;
 
 ImVec4 V(ImU32 c) { return ImGui::ColorConvertU32ToFloat4(c); }
 
@@ -170,11 +172,19 @@ void LoadFonts(ImGuiIO& io, const char* fallbackTtf) {
                                                          static_cast<int>(fredoka_semibold_compressed_size), kDisplaySize, &disp);
     if (g_display) merge();
     else g_display = g_body;
+    // Inline code (console names): JetBrains Mono, ASCII only, uncompressed (9 KB). The atlas
+    // only reads the data (FontDataOwnedByAtlas off), so the const array can be passed.
+    ImFontConfig mono;
+    strncpy_s(mono.Name, "JetBrains Mono Medium", _TRUNCATE);
+    mono.FontDataOwnedByAtlas = false;
+    g_mono = io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(jetbrains_mono_medium_data),
+                                            static_cast<int>(jetbrains_mono_medium_size), kSmallSize, &mono);
     io.FontDefault = g_body;
 }
 
 ImFont* Body() { return g_body; }
 ImFont* Display() { return g_display ? g_display : g_body; }
+ImFont* Mono() { return g_mono ? g_mono : g_body; }
 
 }  // namespace sr2::ui::theme
 

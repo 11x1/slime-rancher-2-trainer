@@ -90,9 +90,24 @@ const settings::Def* FindDef(const ModuleView& mv, std::string_view key) {
     return nullptr;
 }
 
-bool ParentChainAllows(const ModuleView& mv, const settings::Def& d) {
-    const settings::Def* cur = &d;
-    for (int depth = 0; depth < 8 && !cur->parent.empty(); ++depth) {  // depth cap: cycles
+namespace {
+// Same rules as settings::Visible (Def::parent chain and Def::anyOf) on the shown values.
+bool ChainAllows(const ModuleView& mv, const settings::Def* cur, int depth) {
+    for (; depth < 8 && cur; ++depth) {  // depth cap: cycles
+        if (!cur->anyOf.empty()) {
+            bool any = false, known = false;
+            for (const auto& k : cur->anyOf) {
+                const settings::Def* a = FindDef(mv, k);
+                if (!a) continue;
+                known = true;
+                if (std::fabs(Read(*a)) >= 0.5 && ChainAllows(mv, a, depth + 1)) {
+                    any = true;
+                    break;
+                }
+            }
+            if (known && !any) return false;
+        }
+        if (cur->parent.empty()) return true;
         const settings::Def* p = FindDef(mv, cur->parent);
         if (!p) return true;  // parent not registered: nothing to hide behind
         if (!settings::ParentAllows(*cur, Read(*p))) return false;
@@ -100,6 +115,9 @@ bool ParentChainAllows(const ModuleView& mv, const settings::Def& d) {
     }
     return true;
 }
+}  // namespace
+
+bool ParentChainAllows(const ModuleView& mv, const settings::Def& d) { return ChainAllows(mv, &d, 0); }
 
 bool Visible(const ModuleView& mv, const settings::Def& d) {
     if (d.key != kKeyEnabled && mv.hasEnabled && Read(mv.enabled) < 0.5) return false;
@@ -271,11 +289,24 @@ int StepDecimals(double step) {
     return 4;
 }
 
+int DisplayDecimals(const settings::Def& d) {
+    const double k = d.displayScale > 0 ? d.displayScale : 1.0;
+    const double step = d.kind == settings::Kind::Int ? std::max(1.0, std::round(d.step)) : d.step;
+    return StepDecimals(step * k);
+}
+
 std::string FormatValue(const settings::Def& d, double v) {
     switch (d.kind) {
         case settings::Kind::Bool: return v >= 0.5 ? "On" : "Off";
-        case settings::Kind::Int: return std::format("{}", static_cast<long long>(std::llround(v)));
-        case settings::Kind::Float: return std::format("{:.{}f}", v, StepDecimals(d.step));
+        case settings::Kind::Int:
+        case settings::Kind::Float: {
+            if (!d.zeroText.empty() && std::fabs(v) < 1e-9) return d.zeroText;
+            const double k = d.displayScale > 0 ? d.displayScale : 1.0;
+            const int dec = DisplayDecimals(d);
+            if (d.kind == settings::Kind::Int && dec == 0)
+                return std::format("{}{}", static_cast<long long>(std::llround(v * k)), d.unit);
+            return std::format("{:.{}f}{}", v * k, dec, d.unit);
+        }
         case settings::Kind::Enum: {
             long long i = std::llround(v);
             if (i >= 0 && static_cast<size_t>(i) < d.options.size()) return d.options[static_cast<size_t>(i)];

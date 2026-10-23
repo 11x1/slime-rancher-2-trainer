@@ -2,6 +2,8 @@
 
 #include "modules/custom_upgrades/sale_notify.h"
 
+#include <windows.h>
+
 #include <cmath>
 #include <format>
 #include <initializer_list>
@@ -46,6 +48,8 @@ struct SaleNotices::Impl {
     float retry = 0.0f;
     float waited = 0.0f;
     bool loggedFirst = false;
+    bool loggedMissing = false;
+    unsigned long long lastScan = 0;  // GetTickCount64 of the last all-instances scan
 
     bool IsA(Il2CppObject* obj, Il2CppClass* k) const {
         const auto& a = api();
@@ -67,10 +71,39 @@ struct SaleNotices::Impl {
         }
         return r;
     }
-    // The HUD list and its drone provider (nullptr if the HUD is not up).
+    // The HUD list that holds the drone provider (nullptr if the HUD is not up). The first active
+    // list is not always that one (test n7, 2026-10-23: a world-button sale fell back to the text
+    // message without any notice log), so when it lacks the provider every loaded list is checked
+    // (active scene instances only), at most once per second (a press, or the 0.25 s retry while
+    // something is queued). Why nothing was found is logged once.
     Il2CppObject* List() {
-        Il2CppObject* list = unity::FindObjectOfType(listClass);
-        return unity::IsAlive(list) && IsA(list, listClass) ? list : nullptr;
+        Il2CppObject* first = unity::FindObjectOfType(listClass);
+        if (unity::IsAlive(first) && IsA(first, listClass) && Provider(first)) return first;
+        const unsigned long long now = GetTickCount64();
+        if (now - lastScan < 1000) return nullptr;
+        lastScan = now;
+        size_t seen = 0, active = 0;
+        for (Il2CppObject* l : unity::FindObjectsOfTypeAll(listClass)) {
+            if (!unity::IsAlive(l) || !IsA(l, listClass)) continue;
+            ++seen;
+            if (!unity::ActiveInHierarchy(unity::GameObjectOf(l))) continue;
+            ++active;
+            if (Provider(l)) return l;
+        }
+        if (!loggedMissing) {
+            loggedMissing = true;
+            std::string providers;
+            if (unity::IsAlive(first)) {
+                void* arr = unity::Field<void*>(first, offProviders);
+                for (size_t i = 0, n = unity::ArrayLength(arr); i < n && i < 16; ++i)
+                    if (auto* p = static_cast<Il2CppObject*>(unity::ArrayAt(arr, i)))
+                        providers += (providers.empty() ? "" : ", ") + unity::ClassName(p);
+            }
+            SR2_INFO("[{}] sell-all notices: no HUD notification list with the drone provider (first active list {}, "
+                     "providers [{}]; {} list(s) loaded, {} active) - text feedback instead",
+                     module, unity::IsAlive(first) ? "found" : "none", providers, seen, active);
+        }
+        return nullptr;
     }
     Il2CppObject* Provider(Il2CppObject* list) {
         void* arr = unity::Field<void*>(list, offProviders);

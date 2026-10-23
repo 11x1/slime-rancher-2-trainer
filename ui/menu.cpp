@@ -132,6 +132,118 @@ void PopFloatingStyle() {
     ImGui::PopStyleColor();
 }
 
+// ---------------------------------------------------------- inline code ----
+// Console names (HL2 Movement's sv_gravity, hl2_walkspeed, ...) are shown as
+// inline code: monospace text on a small rounded chip.
+bool IsConsoleName(std::string_view s) {
+    const size_t us = s.find('_');
+    if (us == std::string_view::npos || us == 0 || us + 1 >= s.size()) return false;
+    const std::string_view prefix = s.substr(0, us);
+    if (prefix != "sv" && prefix != "hl2" && prefix != "cl" && prefix != "mp") return false;
+    return std::all_of(s.begin(), s.end(), [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; });
+}
+
+constexpr float kCodeSize = theme::kSmallSize + 0.5f;
+
+ImVec2 CodeChipSize(const char* text, float size) {
+    const ImVec2 ts = TextSize(theme::Mono(), size, text);
+    return ImVec2(ts.x + U(10), ts.y + U(4));
+}
+
+// Draws the chip with its top-left at `a`; returns its size.
+ImVec2 DrawCodeChip(ImDrawList* dl, ImVec2 a, const char* text, float size, ImU32 ink) {
+    const Palette& P = theme::Colors();
+    const ImVec2 cs = CodeChipSize(text, size);
+    a = ImVec2(std::round(a.x), std::round(a.y));
+    dl->AddRectFilled(a, ImVec2(a.x + cs.x, a.y + cs.y), ImGui::GetColorU32(P.frame), U(5));
+    dl->AddText(theme::Mono(), U(size), ImVec2(a.x + U(5), a.y + U(2)), ImGui::GetColorU32(ink), text);
+    return cs;
+}
+
+// A chip as a layout item, vertically centred on a frame-height line (like
+// AlignTextToFramePadding text).
+void CodeChipItem(const char* text, ImU32 ink) {
+    const ImVec2 cs = CodeChipSize(text, kCodeSize);
+    const ImVec2 cur = ImGui::GetCursorScreenPos();
+    const float fh = ImGui::GetFrameHeight();
+    ImGui::Dummy(ImVec2(cs.x, fh));
+    DrawCodeChip(ImGui::GetWindowDrawList(), ImVec2(cur.x, cur.y + (fh - cs.y) * 0.5f), text, kCodeSize, ink);
+}
+
+// Wrapped text whose console names are chips (word by word, wrapping at `wrap`
+// px from the line start). Plain text otherwise keeps ImGui's own wrapping.
+void RichText(const std::string& text, float wrap) {
+    ImFont* f = ImGui::GetFont();
+    const float fs = ImGui::GetFontSize();
+    const float space = f->CalcTextSizeA(fs, FLT_MAX, 0, " ").x;
+    const float lineH = std::max(fs, CodeChipSize("x", kCodeSize).y);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImU32 ink = ImGui::GetColorU32(ImGuiCol_Text);
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    float x = 0, y = 0, maxX = 0;
+    size_t i = 0;
+    while (i <= text.size()) {
+        const size_t nl = text.find('\n', i);
+        const std::string line = text.substr(i, nl == std::string::npos ? std::string::npos : nl - i);
+        size_t p = 0;
+        bool first = true;
+        while (p < line.size()) {
+            const size_t e = std::min(line.find(' ', p), line.size());
+            const std::string word = line.substr(p, e - p);
+            p = e + 1;
+            if (word.empty()) continue;
+            // "(sv_gravity)." -> "(", "sv_gravity", ")."
+            size_t a = 0, b = word.size();
+            while (a < b && std::strchr("(\"'", word[a])) ++a;
+            while (b > a && std::strchr(".,;:)\"'", word[b - 1])) --b;
+            const std::string pre = word.substr(0, a), core = word.substr(a, b - a), post = word.substr(b);
+            const bool code = IsConsoleName(core);
+            const float w = code ? f->CalcTextSizeA(fs, FLT_MAX, 0, pre.c_str()).x + CodeChipSize(core.c_str(), kCodeSize).x +
+                                       f->CalcTextSizeA(fs, FLT_MAX, 0, post.c_str()).x
+                                 : f->CalcTextSizeA(fs, FLT_MAX, 0, word.c_str()).x;
+            if (!first && x + space + w > wrap) {
+                x = 0;
+                y += lineH;
+            } else if (!first) {
+                x += space;
+            }
+            first = false;
+            const float ty = origin.y + y + (lineH - fs) * 0.5f;
+            if (code) {
+                dl->AddText(f, fs, ImVec2(origin.x + x, ty), ink, pre.c_str());
+                x += f->CalcTextSizeA(fs, FLT_MAX, 0, pre.c_str()).x;
+                const ImVec2 cs = CodeChipSize(core.c_str(), kCodeSize);
+                DrawCodeChip(dl, ImVec2(origin.x + x, origin.y + y + (lineH - cs.y) * 0.5f), core.c_str(), kCodeSize, ink);
+                x += cs.x;
+                dl->AddText(f, fs, ImVec2(origin.x + x, ty), ink, post.c_str());
+                x += f->CalcTextSizeA(fs, FLT_MAX, 0, post.c_str()).x;
+            } else {
+                dl->AddText(f, fs, ImVec2(origin.x + x, ty), ink, word.c_str());
+                x += w;
+            }
+            maxX = std::max(maxX, x);
+        }
+        y += lineH;
+        if (nl == std::string::npos) break;
+        i = nl + 1;
+    }
+    ImGui::Dummy(ImVec2(maxX, y));
+}
+
+bool HasConsoleName(const std::string& text) {
+    size_t p = 0;
+    while (p < text.size()) {
+        size_t e = text.find_first_of(" \n", p);
+        if (e == std::string::npos) e = text.size();
+        std::string_view w(text.data() + p, e - p);
+        while (!w.empty() && std::strchr("(\"'", w.front())) w.remove_prefix(1);
+        while (!w.empty() && std::strchr(".,;:)\"'", w.back())) w.remove_suffix(1);
+        if (IsConsoleName(w)) return true;
+        p = e + 1;
+    }
+    return false;
+}
+
 void Tooltip(const std::string& text) {
     if (text.empty()) return;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(12), U(9)));
@@ -140,9 +252,13 @@ void Tooltip(const std::string& text) {
         FloatingSurface(false);
         {
             FontScope f(theme::Body(), theme::kSmallSize + 0.5f);  // popped before EndTooltip
-            ImGui::PushTextWrapPos(U(300));
-            ImGui::TextUnformatted(text.c_str());
-            ImGui::PopTextWrapPos();
+            if (HasConsoleName(text)) {
+                RichText(text, U(300) - ImGui::GetStyle().WindowPadding.x);
+            } else {
+                ImGui::PushTextWrapPos(U(300));
+                ImGui::TextUnformatted(text.c_str());
+                ImGui::PopTextWrapPos();
+            }
         }
         ImGui::EndTooltip();
     }
@@ -302,6 +418,29 @@ void DrawSlimeFallback(ImDrawList* dl, ImVec2 min, ImVec2 max) {
 }
 
 // -------------------------------------------------------------- widgets ----
+// "(?)" with a tooltip, `size` square at the cursor. Crisp at any scale: the
+// centre is snapped to the pixel grid, the ring is a soft filled disc with a
+// 1.5 px outline (many segments), and the "?" is the bold display font at a
+// whole-pixel position with its ink (not its line box) centred.
+void HelpMarker(const char* id, float size, const std::string& tip) {
+    const Palette& P = theme::Colors();
+    ImGui::InvisibleButton(id, ImVec2(size, size));
+    const bool hov = ImGui::IsItemHovered() || ImGui::IsItemFocused();
+    const ImVec2 a = ImGui::GetItemRectMin();
+    const ImVec2 c(std::floor(a.x + size * 0.5f) + 0.5f, std::floor(a.y + size * 0.5f) + 0.5f);
+    const float r = std::floor(size * 0.5f) - 0.5f;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddCircleFilled(c, r, ImGui::GetColorU32(hov ? P.frameHover : P.frame), 48);
+    dl->AddCircle(c, r - U(0.75f), ImGui::GetColorU32(hov ? P.tabSel : P.line), 48, U(1.5f));
+    ImFont* qf = theme::Display();
+    const float qs = std::round(size * 0.62f);
+    const ImFontGlyph* g = qf->GetFontBaked(qs)->FindGlyph('?');
+    ImVec2 qp = g ? ImVec2(c.x - (g->X0 + g->X1) * 0.5f, c.y - (g->Y0 + g->Y1) * 0.5f) : c;
+    qp = ImVec2(std::round(qp.x), std::round(qp.y));
+    dl->AddText(qf, qs, qp, ImGui::GetColorU32(hov ? P.text : P.soft), "?");
+    if (hov) Tooltip(tip);
+}
+
 // On/off switch, vertically centred in a frame-height row. True when clicked.
 bool Switch(const char* id, bool on) {
     const Palette& P = theme::Colors();
@@ -323,21 +462,40 @@ bool Switch(const char* id, bool on) {
     return clicked;
 }
 
+// ImGui format text: '%' doubled so a unit or zero text is shown literally.
+std::string FormatLiteral(const std::string& s) {
+    std::string out;
+    for (char c : s) {
+        out.push_back(c);
+        if (c == '%') out.push_back('%');
+    }
+    return out;
+}
+
+// Slider on the displayed value (Def::displayScale) with Def::unit after the
+// number, or Def::zeroText instead of it at 0. Ctrl+click types the number.
 void SliderDef(const settings::Def& d, double cur, float w) {
     ImGui::SetNextItemWidth(w);
-    if (d.kind == settings::Kind::Float) {
-        float v = static_cast<float>(cur);
-        char fmt[16];
-        std::snprintf(fmt, sizeof(fmt), "%%.%df", StepDecimals(d.step));
-        if (ImGui::SliderFloat("##v", &v, static_cast<float>(d.min), static_cast<float>(d.max), fmt, ImGuiSliderFlags_AlwaysClamp)) {
+    const double k = d.displayScale > 0 ? d.displayScale : 1.0;
+    std::string fmt;
+    if (!d.zeroText.empty() && std::fabs(cur) < 1e-9 && !ImGui::GetIO().KeyCtrl)
+        fmt = FormatLiteral(d.zeroText);
+    else if (d.kind == settings::Kind::Int && k == 1.0)
+        fmt = "%d" + FormatLiteral(d.unit);
+    else
+        fmt = std::format("%.{}f", DisplayDecimals(d)) + FormatLiteral(d.unit);
+    if (d.kind == settings::Kind::Int && k == 1.0) {
+        int v = static_cast<int>(std::lround(cur));
+        if (ImGui::SliderInt("##v", &v, static_cast<int>(std::lround(d.min)), static_cast<int>(std::lround(d.max)),
+                             fmt.c_str(), ImGuiSliderFlags_AlwaysClamp)) {
             const double s = Snap(d, v);
             if (std::fabs(s - cur) > 1e-9) Write(d, s);
         }
     } else {
-        int v = static_cast<int>(std::lround(cur));
-        if (ImGui::SliderInt("##v", &v, static_cast<int>(std::lround(d.min)), static_cast<int>(std::lround(d.max)), "%d",
-                             ImGuiSliderFlags_AlwaysClamp)) {
-            const double s = Snap(d, v);
+        float v = static_cast<float>(cur * k);
+        if (ImGui::SliderFloat("##v", &v, static_cast<float>(d.min * k), static_cast<float>(d.max * k), fmt.c_str(),
+                               ImGuiSliderFlags_AlwaysClamp)) {
+            const double s = Snap(d, v / k);
             if (std::fabs(s - cur) > 1e-9) Write(d, s);
         }
     }
@@ -435,20 +593,41 @@ void DrawRow(const Host& h, const settings::Def& d, const std::string& label, bo
     const float ctlW = isBool ? U(kSwitchW) : std::min(U(kCtlW), std::floor(avail * 0.5f));
     const float x0 = ImGui::GetCursorPosX();
 
+    // A switch row is clickable as a whole (label and the gap included): an
+    // invisible button under it, sized like the row last frame. AllowOverlap
+    // lets the switch drawn on top keep its own hover and click.
+    bool rowClicked = false, rowHovered = false;
+    const ImVec2 rowStart = ImGui::GetCursorScreenPos();
+    ImGuiStorage* st = ImGui::GetStateStorage();
+    const ImGuiID rowHId = ImGui::GetID("##rowh");
+    if (isBool) {
+        const float rowH = std::max(ImGui::GetFrameHeight(), st->GetFloat(rowHId, 0.0f));
+        ImGui::SetNextItemAllowOverlap();
+        rowClicked = ImGui::InvisibleButton("##row", ImVec2(std::max(1.0f, avail), rowH));
+        rowHovered = ImGui::IsItemHovered();
+        ImGui::SetCursorScreenPos(rowStart);
+    }
+
     ImU32 col = nested ? P.soft : P.text;
-    if (isBool && cur < 0.5) col = P.dim;
-    ImGui::AlignTextToFramePadding();
-    ImGui::PushTextWrapPos(x0 + avail - ctlW - U(12));
-    ImGui::PushStyleColor(ImGuiCol_Text, col);
-    ImGui::TextUnformatted(label.c_str());
-    ImGui::PopStyleColor();
-    ImGui::PopTextWrapPos();
+    if (isBool && cur < 0.5) col = rowHovered ? P.soft : P.dim;
+    if (IsConsoleName(label)) {  // HL2 console names ("sv_gravity") as inline code
+        CodeChipItem(label.c_str(), col);
+    } else {
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushTextWrapPos(x0 + avail - ctlW - U(12));
+        ImGui::PushStyleColor(ImGuiCol_Text, col);
+        ImGui::TextUnformatted(label.c_str());
+        ImGui::PopStyleColor();
+        ImGui::PopTextWrapPos();
+    }
     HoverTip(d.tooltip);
+    const float labelBottom = ImGui::GetItemRectMax().y;
     ImGui::SameLine(x0 + avail - ctlW);
     switch (d.kind) {
         case settings::Kind::Bool:
-            if (Switch("##b", cur >= 0.5)) Write(d, cur >= 0.5 ? 0.0 : 1.0);
+            if (Switch("##b", cur >= 0.5) || rowClicked) Write(d, cur >= 0.5 ? 0.0 : 1.0);
             HoverTip(d.tooltip);
+            st->SetFloat(rowHId, std::max(labelBottom, ImGui::GetItemRectMax().y) - rowStart.y);
             break;
         case settings::Kind::Float:
         case settings::Kind::Int: SliderDef(d, cur, ctlW); break;
@@ -712,12 +891,10 @@ void DrawNested(const Host& h, const ModuleView& nmv) {
     }
     ImGui::Dummy(ImVec2(0, U(4)));
     FailedBanner(nmv);
-    if (!on) {  // child settings only while the module is on
-        OffNote("Turn on " + nmv.title + " to see its settings.");
-        return;
-    }
     Tab all;
+    ImGui::BeginDisabled(!on);  // grayed out and read-only while the module is off (its switch stays usable)
     DrawModuleCards(h, nmv, all, {}, {});
+    ImGui::EndDisabled();
 }
 
 // Misc > General: one card per module, the module's switch in the card header.
@@ -760,15 +937,15 @@ void DrawCardsPage(const Host& h, const Tab& tab, const std::vector<ModuleView>&
             std::vector<const GroupView*> groups;
             for (const auto& g : mv->groups) groups.push_back(&g);
             const Nesting n = BuildNesting(groups, {});
-            if (on) {  // the card shows only its header and switch while the module is off
-                for (const auto* g : groups) {
-                    const bool any = std::any_of(g->defs.begin(), g->defs.end(),
-                                                 [&](const settings::Def& d) { return RowShown(*mv, d, n, {}); });
-                    if (!any) continue;
-                    if (!g->name.empty() && groups.size() > 1) CardHeading(g->name.c_str(), P.head);
-                    DrawGroupRows(h, *mv, *g, n, {}, {});
-                }
+            ImGui::BeginDisabled(!on);  // grayed out and read-only while the module is off
+            for (const auto* g : groups) {
+                const bool any = std::any_of(g->defs.begin(), g->defs.end(),
+                                             [&](const settings::Def& d) { return RowShown(*mv, d, n, {}); });
+                if (!any) continue;
+                if (!g->name.empty() && groups.size() > 1) CardHeading(g->name.c_str(), P.head);
+                DrawGroupRows(h, *mv, *g, n, {}, {});
             }
+            ImGui::EndDisabled();
             EndCard();
             ImGui::Dummy(ImVec2(0, U(kGap) - ImGui::GetStyle().ItemSpacing.y));
             ImGui::PopID();
@@ -1349,7 +1526,7 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
 }
 
 // ------------------------------------------------------------- settings ----
-void KeyValue(const char* k, const std::string& v, ImU32 vcol) {
+void KeyValue(const char* k, const std::string& v, ImU32 vcol, const std::string& tip = {}) {
     const float avail = ImGui::GetContentRegionAvail().x, x0 = ImGui::GetCursorPosX();
     const float keyW = std::min(U(130), avail * 0.45f);
     ImGui::AlignTextToFramePadding();
@@ -1359,6 +1536,7 @@ void KeyValue(const char* k, const std::string& v, ImU32 vcol) {
     ImGui::AlignTextToFramePadding();
     ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(vcol), "%s", v.c_str());
     ImGui::PopTextWrapPos();
+    HoverTip(tip);
 }
 
 void DrawSettingsPage(const Host& h, const ModuleView* ui) {
@@ -1374,9 +1552,13 @@ void DrawSettingsPage(const Host& h, const ModuleView* ui) {
     ImGui::SameLine(0, U(kGap));
     BeginCard("status", w);
     CardHeading("Status", P.head);
-    KeyValue("Overlay", OverlayStatus(), P.dim);
     KeyValue("Options menu tab", OptionsTabStatus(), P.dim);
-    KeyValue("Game build", h.versionStatus, h.versionMismatch ? P.warn : P.dim);
+    // A known build is one green line (details on hover); anything else shows the full status,
+    // a mismatch as a warning.
+    if (h.versionKnown)
+        KeyValue("Game build", "matches known build", P.ok, h.versionStatus);
+    else
+        KeyValue("Game build", h.versionStatus, h.versionMismatch ? P.warn : P.dim);
     EndCard();
 }
 
@@ -1518,10 +1700,11 @@ void DrawSidebar(const Host& h, const std::vector<Category>& cats, const ModuleV
         }
     }
     const ImVec2 tp(x0, sp.y - inkMid(theme::kSmallSize));
-    Text(dl, bf, theme::kSmallSize, tp, P.dim, stamp);
+    const ImU32 stampCol = Mix(P.dim, P.side, 0.4f);  // grayer than other dim text: only a reference
+    Text(dl, bf, theme::kSmallSize, tp, stampCol, stamp);
     float lineW = ts.x;
     if (!tail.empty()) {
-        Text(dl, bf, tailSize, ImVec2(x0 + ts.x, sp.y - inkMid(tailSize)), P.dim, tail.c_str());
+        Text(dl, bf, tailSize, ImVec2(x0 + ts.x, sp.y - inkMid(tailSize)), stampCol, tail.c_str());
         lineW += TextSize(bf, tailSize, tail.c_str()).x;
     }
     if (lineW > 0) {
@@ -1542,12 +1725,7 @@ void DrawSidebar(const Host& h, const std::vector<Category>& cats, const ModuleV
             Tooltip("Copied " + copiedText);
         } else {
             copiedUntil = 0;
-            std::string tip = std::string("Built ") + ::sr2::core::build_info::TimeIso();
-            if (*::sr2::core::build_info::Commit())
-                tip += std::string("\nCommit ") + ::sr2::core::build_info::Commit() + "\nClick to copy the commit";
-            else
-                tip += "\nClick to copy the build time";
-            HoverTip(tip);
+            HoverTip(*::sr2::core::build_info::Commit() ? "Click to copy the commit" : "Click to copy the build time");
         }
     }
     ImGui::EndChild();
@@ -1657,16 +1835,7 @@ bool DrawTopBar(const Category& cat, int& ti, const std::vector<ModuleView>& vie
             const float hs = U(22);
             rx -= hs + U(10);
             ImGui::SetCursorScreenPos(ImVec2(rx, cy - hs * 0.5f));
-            ImGui::InvisibleButton("##help", ImVec2(hs, hs));
-            const bool hov = ImGui::IsItemHovered() || ImGui::IsItemFocused();
-            const ImVec2 c(rx + hs * 0.5f, cy);
-            dl->AddCircle(c, hs * 0.5f - U(1), hov ? P.tabSel : P.line, 0, U(2));
-            // Centre the glyph's ink, not its line box (which has room for descenders).
-            ImFont* qf = theme::Body();
-            const ImFontGlyph* g = qf->GetFontBaked(U(13))->FindGlyph('?');
-            const ImVec2 qp = g ? ImVec2(c.x - (g->X0 + g->X1) * 0.5f, c.y - (g->Y0 + g->Y1) * 0.5f) : c;
-            Text(dl, qf, 13, qp, hov ? P.text : P.soft, "?");
-            if (hov) Tooltip(tab.help);
+            HelpMarker("##help", hs, tab.help);
         }
         rx -= U(kSwitchW) + U(8);
         const float fh = ImGui::GetFrameHeight();
@@ -1721,7 +1890,31 @@ Poly ClipDiagonal(const Poly& in, ImVec2 o, ImVec2 s, float limit, bool below) {
     return out;
 }
 
-void FillPoly(ImDrawList* dl, const Poly& p, ImVec2 o, ImVec2 s, float lo, float hi, ImU32 clo, ImU32 chi, bool textured) {
+// The window's outline: a rectangle with rounded corners (convex, so the
+// diagonal clip and the fan fill below stay valid). The snapshot outside it is
+// the game behind the window, which must not show as square corners.
+Poly RoundedRect(ImVec2 a, ImVec2 b, float r) {
+    r = std::clamp(r, 0.0f, std::min(b.x - a.x, b.y - a.y) * 0.5f);
+    if (r < 0.5f) return {a, ImVec2(b.x, a.y), b, ImVec2(a.x, b.y)};
+    constexpr int kSeg = 8;
+    const ImVec2 centres[4] = {ImVec2(a.x + r, a.y + r), ImVec2(b.x - r, a.y + r), ImVec2(b.x - r, b.y - r),
+                               ImVec2(a.x + r, b.y - r)};
+    Poly p;
+    p.reserve(4 * (kSeg + 1));
+    for (int c = 0; c < 4; ++c) {
+        const float a0 = kPi * (1.0f + 0.5f * static_cast<float>(c));  // top-left corner starts at 180 degrees
+        for (int i = 0; i <= kSeg; ++i) {
+            const float an = a0 + 0.5f * kPi * static_cast<float>(i) / kSeg;
+            p.push_back(ImVec2(centres[c].x + std::cos(an) * r, centres[c].y + std::sin(an) * r));
+        }
+    }
+    return p;
+}
+
+// `uvOff`: where the window was when the snapshot was taken, relative to now
+// (the texture is sampled there, so the old look follows a moved window).
+void FillPoly(ImDrawList* dl, const Poly& p, ImVec2 o, ImVec2 s, float lo, float hi, ImU32 clo, ImU32 chi, bool textured,
+              ImVec2 uvOff = ImVec2(0, 0)) {
     if (p.size() < 3) return;
     const ImVec2 white = ImGui::GetFontTexUvWhitePixel();
     const ImVec2 disp = ImGui::GetIO().DisplaySize;
@@ -1736,7 +1929,8 @@ void FillPoly(ImDrawList* dl, const Poly& p, ImVec2 o, ImVec2 s, float lo, float
     for (const ImVec2& v : p) {
         const float k = (v.x - o.x) / s.x + (v.y - o.y) / s.y;
         const float t = hi > lo ? std::clamp((k - lo) / (hi - lo), 0.0f, 1.0f) : 0.0f;
-        dl->PrimWriteVtx(v, textured ? ImVec2(v.x / disp.x, v.y / disp.y) : white, textured ? IM_COL32_WHITE : Mix(clo, chi, t));
+        dl->PrimWriteVtx(v, textured ? ImVec2((v.x + uvOff.x) / disp.x, (v.y + uvOff.y) / disp.y) : white,
+                         textured ? IM_COL32_WHITE : Mix(clo, chi, t));
     }
 }
 
@@ -1750,12 +1944,15 @@ void DrawPeel() {
     // cubic-bezier-ish ease in-out; the edge runs from beyond the bottom-right corner to past the top-left one
     const float e = u < 0.5f ? 4 * u * u * u : 1 - std::pow(-2 * u + 2, 3.0f) / 2;
     const float p = 2.0f - 2.16f * e;
-    const ImVec2 o = g_peel.min, s(g_peel.max.x - g_peel.min.x, g_peel.max.y - g_peel.min.y);
-    const Poly rect = {o, ImVec2(o.x + s.x, o.y), g_peel.max, ImVec2(o.x, o.y + s.y)};
+    // Drawn where the window is now (it may have been dragged since the click),
+    // sampled where it was when the snapshot was taken.
+    const ImVec2 s(g_peel.max.x - g_peel.min.x, g_peel.max.y - g_peel.min.y);
+    const ImVec2 o = g_winMin, uvOff(g_peel.min.x - g_winMin.x, g_peel.min.y - g_winMin.y);
+    const Poly rect = RoundedRect(o, ImVec2(o.x + s.x, o.y + s.y), ImGui::GetStyle().WindowRounding);
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     // The old look, still on the top-left side of the edge.
     dl->PushTexture(ImTextureRef(g_peel.tex));
-    FillPoly(dl, ClipDiagonal(rect, o, s, p, true), o, s, 0, 0, 0, 0, true);
+    FillPoly(dl, ClipDiagonal(rect, o, s, p, true), o, s, 0, 0, 0, 0, true, uvOff);
     dl->PopTexture();
     // The lifted flap and its shadow, just past the edge.
     const Palette& P = theme::Colors();
@@ -1845,15 +2042,12 @@ bool Draw(const Host& h) {
                 FailedBanner(*mv);
                 const TabState st = StateOf(tab, views);
                 const std::string masterLabel = !tab.masterKey.empty() && st.sw ? st.sw->label : std::string();
-                if (!st.on) {  // child settings are hidden while the tab's switch (or its module) is off
-                    if (st.locked)
-                        OffNote(tab.title + " is part of " + mv->title + ". Turn on " + mv->title +
-                                " to use it.");
-                    else
-                        OffNote(tab.title + " is off. Turn it on with the Enabled switch above to see its settings.");
-                    break;
-                }
+                // While the tab's switch (or its module) is off, its settings stay visible but grayed
+                // out and read-only; the switch in the tab bar stays usable.
+                if (st.locked) OffNote(tab.title + " is part of " + mv->title + ". Turn on " + mv->title + " to use it.");
+                ImGui::BeginDisabled(!st.on);
                 DrawModuleCards(h, *mv, tab, tab.masterKey, masterLabel);
+                ImGui::EndDisabled();
                 for (const auto& n : tab.nested)
                     if (const ModuleView* nmv = FindView(views, n)) DrawNested(h, *nmv);
                 break;

@@ -60,7 +60,10 @@ double Snap(const settings::Def& d, double v);
 
 // Number of decimals that represent `step` exactly enough for display.
 int StepDecimals(double step);
-// Format a value of a def for display ("0.75", "On", enum label, key name).
+// Decimals of a Float/Int def's displayed value (step x Def::displayScale).
+int DisplayDecimals(const settings::Def& d);
+// Format a value of a def for display ("0.75", "40%", "no limit", "On", enum
+// label, key name); numbers use Def::displayScale, Def::unit and Def::zeroText.
 std::string FormatValue(const settings::Def& d, double v);
 
 // Writes a value. If the Unity main-thread dispatcher is running and the

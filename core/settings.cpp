@@ -267,10 +267,17 @@ void Register(const Def& d) {
     if (Entry* e = FindLocked(d.module, d.key)) {
         const std::string parent = e->def.parent;
         const int parentValue = e->def.parentValue;
+        const Def old = e->def;
         e->def = d;  // refresh metadata, keep the current value
         if (d.parent.empty()) {  // e.g. the module manager re-registering "enabled": keep a parent set earlier
             e->def.parent = parent;
             e->def.parentValue = parentValue;
+        }
+        if (d.anyOf.empty()) e->def.anyOf = old.anyOf;  // keep a SetAnyParent
+        if (d.unit.empty() && d.zeroText.empty() && d.displayScale == 1) {  // keep a display set with SetDisplay
+            e->def.unit = old.unit;
+            e->def.zeroText = old.zeroText;
+            e->def.displayScale = old.displayScale;
         }
         e->value = Clamp(e->def, e->value);
         return;
@@ -316,11 +323,58 @@ void SetParent(std::string_view module, std::string_view key, std::string_view p
     }
 }
 
+void SetAnyParent(std::string_view module, std::string_view key, const std::vector<std::string>& anyOf) {
+    std::lock_guard lock(g_mutex);
+    if (Entry* e = FindLocked(module, key)) {
+        e->def.anyOf.clear();
+        for (const auto& k : anyOf)
+            if (k != key) e->def.anyOf.push_back(k);
+    }
+}
+
+void SetDisplay(std::string_view module, std::string_view key, std::string_view unit, std::string_view zeroText,
+                double displayScale) {
+    std::lock_guard lock(g_mutex);
+    if (Entry* e = FindLocked(module, key)) {
+        e->def.unit = std::string(unit);
+        e->def.zeroText = std::string(zeroText);
+        e->def.displayScale = displayScale > 0 ? displayScale : 1;
+    }
+}
+
 bool ParentAllows(const Def& d, double parentValue) {
     if (d.parent.empty()) return true;
     if (d.parentValue < 0) return std::fabs(parentValue) >= 0.5;
     return std::lround(parentValue) == d.parentValue;
 }
+
+namespace {
+// Def::parent chain and Def::anyOf of `e` (and of everything they depend on).
+// `depth` caps cycles in a module's table.
+bool ChainAllowsLocked(std::string_view module, const Entry* e, int depth) {
+    for (; depth < 8 && e; ++depth) {
+        if (!e->def.anyOf.empty()) {
+            bool any = false, known = false;
+            for (const auto& k : e->def.anyOf) {
+                const Entry* a = FindLocked(module, k);
+                if (!a) continue;
+                known = true;
+                if (std::fabs(a->value) >= 0.5 && ChainAllowsLocked(module, a, depth + 1)) {
+                    any = true;
+                    break;
+                }
+            }
+            if (known && !any) return false;  // none registered (feature unavailable): nothing to hide behind
+        }
+        if (e->def.parent.empty()) return true;
+        const Entry* p = FindLocked(module, e->def.parent);
+        if (!p) return true;  // parent not registered (feature unavailable): nothing to hide behind
+        if (!ParentAllows(e->def, p->value)) return false;
+        e = p;
+    }
+    return true;
+}
+}  // namespace
 
 bool Visible(std::string_view module, std::string_view key) {
     std::lock_guard lock(g_mutex);
@@ -328,13 +382,7 @@ bool Visible(std::string_view module, std::string_view key) {
     if (!e) return true;
     if (key != "enabled")
         if (const Entry* en = FindLocked(module, "enabled"); en && en->value < 0.5) return false;
-    for (int depth = 0; depth < 8 && !e->def.parent.empty(); ++depth) {  // depth cap: cycles in a module's table
-        const Entry* p = FindLocked(module, e->def.parent);
-        if (!p) return true;  // parent not registered (feature unavailable): nothing to hide behind
-        if (!ParentAllows(e->def, p->value)) return false;
-        e = p;
-    }
-    return true;
+    return ChainAllowsLocked(module, e, 0);
 }
 
 void Set(std::string_view module, std::string_view key, double v) {

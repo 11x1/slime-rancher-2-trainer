@@ -18,7 +18,9 @@
 // Main thread only; every game call through Resolver::Invoke (managed exceptions caught, a native
 // fault marks the module faulted). No GC handles: queued IdentifiableTypes are persistent assets
 // and are class- and IsAlive-checked again before use. While something is queued, one
-// FindObjectOfType(ItemAcquisitionNotificationList) every 0.25 s; nothing otherwise.
+// FindObjectOfType(ItemAcquisitionNotificationList) every 0.25 s; nothing otherwise. If that first
+// active list lacks the drone provider, every loaded list is checked (FindObjectsOfTypeAll, active
+// ones only), at most once per second; why none fits is logged once.
 
 #include <string>
 #include <utility>

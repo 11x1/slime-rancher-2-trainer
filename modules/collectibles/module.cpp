@@ -46,9 +46,10 @@
 // the full map, loads). No per-frame work besides an "is the parent still
 // ours" check; counts are recomputed once per second while shown. There is no
 // background panel: compact mode is a fixed grid of 3 equal-width columns
-// spanning the minimap's width (column i starts at i/3 of it), "icon X/Y" cells
-// filled in order and left-aligned, the last row partially filled from the
-// left, rows as needed (usually 2), each cell optionally with a tiny label under
+// (each as wide as the widest cell), the block centred under the minimap,
+// "icon X/Y" cells filled in order and left-aligned (texts too, so they never
+// spill over their icon), the last row partially filled from the left, rows as
+// needed (usually 2), each cell optionally with a tiny label under
 // the count ("show_labels"); list mode is one text line per category. Every
 // icon and text has a dark copy offset down-right as a drop shadow, so it
 // stays readable on bright terrain.
@@ -184,7 +185,7 @@ void RegisterSettings() {
         settings::Register(x);
     };
     def("compact", "Compact grid (icons + numbers)", "Display", 1,
-        "A grid of 3 equal columns across the minimap's width: each category's icon and count, filled left to "
+        "A grid of 3 equal columns centred under the minimap: each category's icon and count, filled left to "
         "right (rows as needed, usually 2). Off: one text line per category");
     def("show_labels", "Show labels", "Display", 1,
         "A tiny name under each count (Pods, Gordos, Doors, Nodes, Drones, Ghosts, ...)");
@@ -197,7 +198,8 @@ void RegisterSettings() {
     settings::Def size;
     size.module = kModule;
     size.key = "size";
-    size.label = "Size (%)";
+    size.label = "Size";
+    size.unit = "%";
     size.group = "Display";
     size.kind = Kind::Float;
     size.def = 100;
@@ -1500,10 +1502,13 @@ private:
                 Il2CppObject* spr;
                 float textW, labelW, w;
             };
+            // TMP's preferred width can be stale for a text set this frame (inactive cell): never
+            // trust less than a rough per-character estimate.
             auto measure = [](Ref& tr, const std::string& txt, float size) {
+                const float est = static_cast<float>(txt.size()) * size * 0.56f;
                 float w = tr.Alive() ? ugui::TmpPreferredWidth(tr.get()) : -1.0f;
-                if (!std::isfinite(w) || w <= 0 || w > size * 40) w = static_cast<float>(txt.size()) * size * 0.56f;
-                return std::ceil(w) + 2;
+                if (!std::isfinite(w) || w <= 0 || w > size * 40) w = est;
+                return std::ceil(std::max(w, est * 0.8f)) + 2;
             };
             std::vector<Item> items;
             for (int i : shown) {
@@ -1533,16 +1538,14 @@ private:
                 SetVisible(false);
                 return;
             }
-            // Equal columns spanning the minimap: column j starts at j * S / 3. Cells fill the columns in
-            // order, left-aligned in their column; a partial last row stays left-aligned (no centring).
+            // Always 3 equal columns, each as wide as the widest cell plus a gap; the 3-column block is
+            // centred under the minimap (also with fewer than 3 cells). Cells fill the columns in order,
+            // left-aligned in their column; a partial last row stays left-aligned (no centring).
             const size_t nRows = (items.size() + kCols - 1) / kCols;
             float widest = 0;
             for (const Item& it : items) widest = std::max(widest, it.w);
-            float colStep = S / static_cast<float>(kCols), x0 = 0;
-            if (widest + minColGap > colStep) {  // a cell wider than a column: wider grid, centred overflow
-                colStep = widest + minColGap;
-                x0 = std::round((S - colStep * static_cast<float>(kCols) + minColGap) * 0.5f);
-            }
+            const float colStep = widest + minColGap;
+            const float x0 = std::round((S - (colStep * static_cast<float>(kCols) - minColGap)) * 0.5f);
             float colX[kCols] = {};
             for (size_t j = 0; j < kCols; ++j) colX[j] = x0 + colStep * static_cast<float>(j);
             std::vector<bool> used(kCatCount, false);
@@ -1582,6 +1585,9 @@ private:
                     ugui::SetPivot(tt, {0, top ? 1.0f : 0.0f});
                     ugui::SetSizeDelta(tt, {w, lineH});
                     ugui::SetAnchoredPosition(tt, pos);
+                    // Left-aligned: a text wider than its measured box grows to the right, never
+                    // back over the icon (centred text spilled over it, e.g. a lone "Gordos").
+                    ugui::TmpSetAlignment(tr.get(), 513 /* Left */);
                     ugui::TmpSetColor(tr.get(), col);
                 };
                 text(c.textShadow, {left + d, -d}, it.textW, h, true, shadowCol(complete ? 0.6f : 1.0f));

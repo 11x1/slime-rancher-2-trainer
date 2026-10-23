@@ -826,7 +826,7 @@ void BuildWishForTick(Tick& t) {
     t.forwardFlat = fwd;
 }
 
-// HL2 mode: the impulse that reaches the "Jump height (m)" setting at the HL2
+// HL2 mode: the impulse that reaches the "Jump height" setting at the HL2
 // gravity in effect (sqrt(2 g h), corrected for KCC's per-tick integration so
 // the apex equals the setting). Vanilla mode: SR2's jump speed.
 float JumpImpulseUnits(const Tick& t) {
@@ -1710,13 +1710,13 @@ void RegisterSettings() {
     add(kStopSpeed, "sv_stopspeed", "Physics", Kind::Float, mv::kSvStopSpeed, 0, 500, 5,
         "Below this speed friction acts as if moving at this speed (HL2: 100).");
     add(kGravityMode, "Gravity and jump", "Physics", Kind::Enum, 0, 0, 1, 1,
-        "HL2: sv_gravity (x multiplier) and a fixed jump to 'Jump height (m)', no variable jump height. Vanilla SR2: "
+        "HL2: sv_gravity (x multiplier) and a fixed jump to 'Jump height', no variable jump height. Vanilla SR2: "
         "the game's gravity and "
         "jump height (horizontal movement stays HL2). The jetpack always uses vanilla gravity.",
         {"HL2", "Vanilla SR2"});
     add(kGravity, "sv_gravity", "Physics", Kind::Float, mv::kSvGravity, 0, 2000, 10,
         "Gravity in HL2 mode, units/s^2 (HL2: 600). The jump impulse follows it so the jump height stays at the "
-        "'Jump height (m)' setting.");
+        "'Jump height' setting.");
     add(kGravityMult, "Gravity multiplier", "Physics", Kind::Float, 1.0, 0.25, 3.0, 0.05,
         "Multiplies sv_gravity in HL2 mode (1 = HL2). Lower = floatier, longer jumps at the same height; the jump "
         "height setting is kept.");
@@ -1743,7 +1743,7 @@ void RegisterSettings() {
         "Hold to move at walk speed (hl2_walkspeed). Unbound by default because Alt (HL2's walk key) is the "
         "autobhop hold key; if both are bound to the same key, autobhop wins.");
 
-    add(kJumpHeight, "Jump height (m)", "Jumping", Kind::Float, 2.0, 0.5, 6.0, 0.05,
+    add(kJumpHeight, "Jump height", "Jumping", Kind::Float, 2.0, 0.5, 6.0, 0.05,
         "Jump apex in metres in HL2 gravity mode; the impulse is sqrt(2 g h) at the HL2 gravity in effect (HL2's own "
         "jump is 1.1 m at the default scale). Air time grows with the height. Gravity mode Vanilla SR2 ignores it; "
         "its first jump logs the measured vanilla apex.");
@@ -1777,7 +1777,7 @@ void RegisterSettings() {
 
     add(kSpeedLimitOn, "Safety speed limit", "Safety", Kind::Bool, 0, 0, 1, 1,
         "Caps horizontal speed so you cannot outrun SR2's world streaming.");
-    add(kSpeedLimit, "Safety speed limit (u/s)", "Safety", Kind::Float, 2000, 100, 100000, 50,
+    add(kSpeedLimit, "Speed cap", "Safety", Kind::Float, 2000, 100, 100000, 50,
         "Horizontal speed cap in Source units/s when the safety limit is on.");
     add(kFallRecovery, "Fall-through recovery", "Safety", Kind::Bool, 1, 0, 1, 1,
         "If you fall far below your last grounded position for several seconds, teleport back to it.");
@@ -1786,7 +1786,7 @@ void RegisterSettings() {
         "Pick the unit scale so normal speed (190 u/s) equals SR2's vanilla max ground speed (10 m/s in 1.3.0 -> "
         "0.0526 m/u). Speeds, gravity and jump height all scale together, so the movement is HL2's at SR2 scale. "
         "While on, the manual unit scale below is ignored; moving that slider turns this off.");
-    add(kUnitScale, "Unit scale (m per unit)", "Advanced", Kind::Float, 0.0254, 0.005, 0.2, 0.0001,
+    add(kUnitScale, "Unit scale", "Advanced", Kind::Float, 0.0254, 0.005, 0.2, 0.0001,
         "Metres per Source unit (0.0254 = 1 inch, HL2's real size: 190 u/s = 4.8 m/s). Scales all speeds, gravity "
         "and jump height together. Changing it turns 'Match vanilla walk speed' off.");
     add(kMomentumHud, "Momentum HUD", "HUD", Kind::Bool, 1, 0, 1, 1,
@@ -1815,6 +1815,16 @@ void RegisterSettings() {
         "which limiter (friction, speed limit, sv_maxvelocity, boost clamp, ...) touched the velocity.");
     add(kDebugLog, "Debug speed log", "Advanced", Kind::Bool, 0, 0, 1, 1,
         "Log speed, input and tick counts once per second (needs log_level debug).");
+
+    // Units after the slider values (UI only; Source units are "u").
+    for (const char* k : {kStopSpeed, kMaxVelocity, kWalkSpeed, kNormSpeed, kSprintSpeed, kSpeedLimit})
+        settings::SetDisplay(kModule, k, " u/s");
+    settings::SetDisplay(kModule, kGravity, " u/s\xC2\xB2");
+    settings::SetDisplay(kModule, kGravityMult, "x");
+    settings::SetDisplay(kModule, kJumpHeight, " m");
+    settings::SetDisplay(kModule, kSprintDrain, "%/s");
+    settings::SetDisplay(kModule, kUnitScale, " m/u");
+    for (const char* k : {kMomentumX, kMomentumY, kMomentumSize}) settings::SetDisplay(kModule, k, "%");
 
     // Visibility parents (settings::Def::parent): both settings UIs hide these
     // while their parent is off (or, with a value, while it differs from it).

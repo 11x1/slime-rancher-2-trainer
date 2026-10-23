@@ -505,8 +505,9 @@ bool QuickStart::Setup(sr2::core::ModuleContext& ctx) {
         reg(kAutoContinue, "Auto-continue last save", Kind::Bool, 0.0, 0, 1, 1,
             "Once per launch, when the main menu is ready, do what the Continue button does (load the most recent "
             "save). Hold Shift while the game starts to cancel it for that launch.");
-        reg(kAutoContinueDelay, "Auto-continue delay (s)", Kind::Float, 0.5, 0.0, 5.0, 0.1,
+        reg(kAutoContinueDelay, "Auto-continue delay", Kind::Float, 0.5, 0.0, 5.0, 0.1,
             "How long the main menu stays interactive before auto-continue fires.");
+        settings::SetDisplay(kModule, kAutoContinueDelay, " s", "instant");
         settings::SetParent(kModule, kAutoContinueDelay, kAutoContinue);  // shown while auto-continue is on
     }
     if (newGameIntroOk_)

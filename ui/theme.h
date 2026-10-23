@@ -40,5 +40,6 @@ inline constexpr float kDisplaySize = 16.0f;
 void LoadFonts(ImGuiIO& io, const char* fallbackTtf);
 ImFont* Body();     // default font
 ImFont* Display();  // headings, sidebar, tabs (falls back to Body)
+ImFont* Mono();     // inline code such as console names (JetBrains Mono, ASCII; falls back to Body)
 
 }  // namespace sr2::ui::theme
