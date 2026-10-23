@@ -17,6 +17,7 @@
 #include "core/build_info.h"
 #include "core/profiles.h"
 #include "menu_layout.h"
+#include "item_grid.h"
 #include "sandbox_bridge.h"
 #include "slime_icons.h"
 #include "theme.h"
@@ -985,27 +986,18 @@ constexpr const char* kSbxPopup = "##sandbox_confirm";
 bool g_sbxConfirm = false;   // open the "Enable sandbox?" dialog (set by the button or the tab switch)
 int g_sbxSlot = 0;           // selected vacpack slot
 int g_sbxAmount = 0;         // amount slider
-int g_sbxAmountSlot = -1;    // slot the amount and picked item belong to
-uintptr_t g_sbxItem = 0;     // picked item (opaque id, never dereferenced here)
-char g_sbxSearch[64] = {};
+int g_sbxAmountSlot = -1;    // slot the amount slider belongs to
 long long g_sbxBucks = 1000;
+item_grid::State g_vacGrid, g_spawnGrid, g_craftGrid;  // search text per grid
+int g_spawnKind = -1;        // spawner filter (sbx::Kind as int, -1 = all)
+int g_spawnCount = 1;
+int g_craftCat = -1;         // crafter filter (index into recipeCategories, -1 = all)
+int g_craftCount = 1;
 
 std::string Thousands(long long v) {
     std::string s = std::to_string(v < 0 ? -v : v);
     for (int i = static_cast<int>(s.size()) - 3; i > 0; i -= 3) s.insert(static_cast<size_t>(i), ",");
     return v < 0 ? "-" + s : s;
-}
-
-bool ContainsNoCase(const std::string& hay, const char* needle) {
-    auto low = [](char c) { return static_cast<char>((c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c); };
-    const size_t n = std::strlen(needle);
-    if (n == 0) return true;
-    for (size_t i = 0; i + n <= hay.size(); ++i) {
-        size_t k = 0;
-        while (k < n && low(hay[i + k]) == low(needle[k])) ++k;
-        if (k == n) return true;
-    }
-    return false;
 }
 
 bool AccentButton(const char* label, ImVec2 size) {
@@ -1150,6 +1142,107 @@ void SandboxPlayer(const sbx::Snapshot& s, float w) {
     EndCard();
 }
 
+// Tile accent per item kind: a quiet "rarity" colour along the tile's bottom edge.
+ImU32 KindAccent(sbx::Kind k) {
+    switch (k) {
+        case sbx::Kind::Slime: return IM_COL32(0xEC, 0x5A, 0xA0, 0xFF);
+        case sbx::Kind::Largo: return IM_COL32(0xC8, 0x3C, 0xE6, 0xFF);
+        case sbx::Kind::Plort: return IM_COL32(0xF0, 0xC2, 0x4B, 0xFF);
+        case sbx::Kind::Food: return IM_COL32(0x7A, 0xCC, 0x5A, 0xFF);
+        case sbx::Kind::Animal: return IM_COL32(0xE8, 0x89, 0x4A, 0xFF);
+        case sbx::Kind::Toy: return IM_COL32(0x88, 0x47, 0xFF, 0xFF);
+        case sbx::Kind::Resource: return IM_COL32(0x4B, 0x8B, 0xFF, 0xFF);
+        case sbx::Kind::Liquid: return IM_COL32(0x5E, 0xC8, 0xF2, 0xFF);
+        case sbx::Kind::Gadget: return IM_COL32(0x4F, 0xD1, 0xB4, 0xFF);
+        case sbx::Kind::Other: break;
+    }
+    return IM_COL32(0xA8, 0xB4, 0xC8, 0xFF);
+}
+
+const char* KindLabel(sbx::Kind k) {
+    switch (k) {
+        case sbx::Kind::Slime: return "Slimes";
+        case sbx::Kind::Largo: return "Largos";
+        case sbx::Kind::Plort: return "Plorts";
+        case sbx::Kind::Food: return "Food";
+        case sbx::Kind::Animal: return "Animals";
+        case sbx::Kind::Toy: return "Toys";
+        case sbx::Kind::Resource: return "Resources";
+        case sbx::Kind::Liquid: return "Liquids";
+        case sbx::Kind::Gadget: return "Gadgets";
+        case sbx::Kind::Other: break;
+    }
+    return "Other";
+}
+
+// Small toggle pill for a filter row; true when clicked.
+bool Chip(const char* label, bool on) {
+    const Palette& P = theme::Colors();
+    FontScope f(theme::Body(), theme::kSmallSize);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(U(9), U(3)));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, U(10));
+    ImGui::PushStyleColor(ImGuiCol_Button, on ? P.sel : P.frame);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, on ? P.sel : P.frameHover);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, P.sel);
+    ImGui::PushStyleColor(ImGuiCol_Text, on ? P.text : P.soft);
+    const bool r = ImGui::Button(label);
+    ImGui::PopStyleColor(4);
+    ImGui::PopStyleVar(2);
+    return r;
+}
+
+// A wrapping row of chips: "All" (-1) and one per label. Returns the new selection.
+int ChipRow(const char* id, const std::vector<std::pair<int, std::string>>& chips, int sel) {
+    ImGui::PushID(id);
+    const float avail = ImGui::GetContentRegionAvail().x, sp = U(6);
+    float x = 0;
+    auto place = [&](const char* label) {
+        FontScope f(theme::Body(), theme::kSmallSize);
+        const float w = ImGui::CalcTextSize(label).x + U(18);
+        if (x > 0 && x + sp + w <= avail) ImGui::SameLine(0, sp), x += sp;
+        else x = 0;
+        x += w;
+    };
+    place("All");
+    if (Chip("All", sel == -1)) sel = -1;
+    for (const auto& [value, label] : chips) {
+        ImGui::PushID(value);
+        place(label.c_str());
+        if (Chip(label.c_str(), sel == value)) sel = value;
+        ImGui::PopID();
+    }
+    ImGui::PopID();
+    return sel;
+}
+
+void SmallHeading(const char* text) {
+    FontScope f(theme::Display(), theme::kSmallSize + 1);
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::Colors().soft);
+    ImGui::TextUnformatted(text);
+    ImGui::PopStyleColor();
+}
+
+// "How many" slider on one row with its label.
+void CountRow(const char* label, const char* id, int& value, int max, const char* tip) {
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float x0 = SbxRowStart(label);
+    const float sw = std::floor(avail * 0.58f);
+    ImGui::SameLine(x0 + avail - sw);
+    ImGui::SetNextItemWidth(sw);
+    ImGui::SliderInt(id, &value, 1, max, "%d", ImGuiSliderFlags_AlwaysClamp);
+    HoverTip(tip);
+}
+
+item_grid::Options GridOptions(float height) {
+    item_grid::Options o;
+    o.scale = g_scale;
+    o.height = height;
+    return o;
+}
+
+// Vacpack: the slots in a row across the top, the selected slot's amount
+// controls, then a grid of what that slot accepts. Clicking an item fills the
+// selected slot with it; dragging an item onto any slot fills that slot.
 void SandboxVacpack(const sbx::Snapshot& s, float w) {
     const Palette& P = theme::Colors();
     BeginCard("sbx_vac", w);
@@ -1161,113 +1254,241 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     }
     const int n = static_cast<int>(s.slots.size());
     g_sbxSlot = std::clamp(g_sbxSlot, 0, n - 1);
+    if (!s.slots[static_cast<size_t>(g_sbxSlot)].unlocked)  // move off a locked slot
+        for (int i = 0; i < n; ++i)
+            if (s.slots[static_cast<size_t>(i)].unlocked) {
+                g_sbxSlot = i;
+                break;
+            }
+
+    // ---- slot row ----
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImFont* body = theme::Body();
+    const float gap = U(8), avail = ImGui::GetContentRegionAvail().x;
+    const float e = std::max(U(24), std::floor(std::min(U(92), (avail - gap * static_cast<float>(n - 1)) / static_cast<float>(n))));
     for (int i = 0; i < n; ++i) {
         const sbx::Slot& sl = s.slots[static_cast<size_t>(i)];
         ImGui::PushID(i);
-        const ImVec2 size(ImGui::GetContentRegionAvail().x, U(30));
-        if (ImGui::InvisibleButton("##slot", size) && sl.unlocked) g_sbxSlot = i;
-        const bool hovered = ImGui::IsItemHovered() && sl.unlocked, sel = i == g_sbxSlot;
+        if (i > 0) ImGui::SameLine(0, gap);
+        if (ImGui::InvisibleButton("##slot", ImVec2(e, e)) && sl.unlocked) g_sbxSlot = i;
+        const bool hot = ImGui::IsItemHovered() && sl.unlocked;
         const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
-        if (sel || hovered) dl->AddRectFilled(a, b, sel ? P.sel : P.hover, U(8));
-        const float ty = (a.y + b.y) * 0.5f - ImGui::GetFontSize() * 0.5f;
-        Text(dl, body, theme::kBodySize, ImVec2(a.x + U(10), ty), P.dim, std::to_string(i + 1).c_str());
-        const char* name = !sl.unlocked ? "Locked" : sl.item ? sl.name.c_str() : "Empty";
-        Text(dl, body, theme::kBodySize, ImVec2(a.x + U(30), ty), sl.unlocked && sl.item ? P.text : P.dim, name);
-        if (sl.unlocked) {
-            const std::string c = std::format("{} / {}", sl.count, sl.max);
-            const ImVec2 cs = TextSize(body, theme::kBodySize, c.c_str());
-            Text(dl, body, theme::kBodySize, ImVec2(b.x - U(10) - cs.x, ty), P.soft, c.c_str());
+        if (sl.unlocked && ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(item_grid::kDragType);
+                p && p->DataSize == sizeof(uintptr_t)) {
+                g_sbxSlot = i;
+                SbxRequest(sbx::Op::PutItem, sl.max > 0 ? sl.max : 1, i, *static_cast<const uintptr_t*>(p->Data));
+            }
+            ImGui::EndDragDropTarget();
         }
+        item_grid::Tile t;
+        t.id = sl.item;
+        t.name = sl.item ? &sl.name : nullptr;
+        t.icon = sl.item ? sl.icon : 0;
+        t.accent = sl.item ? KindAccent(sl.kind) : 0;
+        t.dimmed = !sl.unlocked;
+        item_grid::DrawTile(dl, a, b, t, hot, sl.unlocked && i == g_sbxSlot, g_scale);
+        const float fs = theme::kSmallSize;
+        Text(dl, body, fs, ImVec2(a.x + U(6), a.y + U(4)), P.dim, std::to_string(i + 1).c_str());
+        const char* mid = !sl.unlocked ? "Locked" : !sl.item ? "Empty" : nullptr;
+        if (mid) {
+            const ImVec2 ts = TextSize(body, fs, mid);
+            Text(dl, body, fs, ImVec2((a.x + b.x - ts.x) * 0.5f, (a.y + b.y - ts.y) * 0.5f), P.dim, mid);
+        }
+        if (sl.unlocked && sl.item) {
+            const std::string c = std::format("{}/{}", sl.count, sl.max);
+            const ImVec2 cs = TextSize(body, fs, c.c_str());
+            const ImVec2 cp(b.x - U(6) - cs.x, b.y - U(6) - cs.y);
+            Text(dl, body, fs, ImVec2(cp.x + 1, cp.y + 1), IM_COL32(0, 0, 0, 150), c.c_str());
+            Text(dl, body, fs, cp, P.text, c.c_str());
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+            Tooltip(!sl.unlocked ? std::format("Slot {} is locked. Vacpack upgrades unlock it.", i + 1)
+                    : sl.item    ? std::format("Slot {}: {} ({} / {})", i + 1, sl.name, sl.count, sl.max)
+                                 : std::format("Slot {} is empty. Click an item below to fill it.", i + 1));
         ImGui::PopID();
     }
-    ImGui::Dummy(ImVec2(0, U(2)));
-    const ImVec2 la = ImGui::GetCursorScreenPos();
-    dl->AddLine(la, ImVec2(la.x + ImGui::GetContentRegionAvail().x, la.y), P.line, U(2));
-    ImGui::Dummy(ImVec2(0, U(4)));
 
     const sbx::Slot& sl = s.slots[static_cast<size_t>(g_sbxSlot)];
     if (!sl.unlocked) {
-        DimText("This slot is locked. Vacpack upgrades unlock it.");
+        DimText("Every slot is locked. Vacpack upgrades unlock them.");
         EndCard();
         return;
     }
+
+    // ---- selected slot: amount ----
+    ImGui::Dummy(ImVec2(0, U(2)));
     if (g_sbxAmountSlot != g_sbxSlot) {
         g_sbxAmountSlot = g_sbxSlot;
         g_sbxAmount = sl.item ? sl.count : sl.max;
-        g_sbxItem = 0;
     }
     const int max = std::max(0, sl.max);
     g_sbxAmount = std::clamp(g_sbxAmount, 0, max);
-    const float avail = ImGui::GetContentRegionAvail().x, sp = ImGui::GetStyle().ItemSpacing.x;
-    const float x0 = SbxRowStart("Amount");
-    const float sw = std::floor(avail * 0.62f);
-    ImGui::SameLine(x0 + avail - sw);
-    ImGui::SetNextItemWidth(sw);
-    ImGui::SliderInt("##amount", &g_sbxAmount, 0, max, "%d", ImGuiSliderFlags_AlwaysClamp);
-    HoverTip("Ctrl+click to type. Used by Set amount and Put.");
-
-    const ImVec2 bs(std::floor((avail - 2 * sp) / 3), U(30));
-    ImGui::BeginDisabled(!sl.item);
-    if (ImGui::Button("Set amount", bs)) SbxRequest(sbx::Op::SetSlotCount, g_sbxAmount, g_sbxSlot);
-    HoverTip("Change how many of the current item the slot holds (0 empties it).");
-    ImGui::SameLine();
-    ImGui::BeginDisabled(sl.count >= max);
-    if (ImGui::Button("Fill", bs)) SbxRequest(sbx::Op::SetSlotCount, max, g_sbxSlot);
-    ImGui::EndDisabled();
-    HoverTip("Fill the slot to its maximum.");
-    ImGui::SameLine();
-    if (ImGui::Button("Empty", bs)) SbxRequest(sbx::Op::SetSlotCount, 0, g_sbxSlot);
-    HoverTip("Remove everything from this slot.");
-    ImGui::EndDisabled();
-
-    ImGui::Dummy(ImVec2(0, U(2)));
     {
-        FontScope f(theme::Display(), theme::kSmallSize + 1);
-        ImGui::PushStyleColor(ImGuiCol_Text, P.soft);
-        ImGui::TextUnformatted("Put an item in this slot");
-        ImGui::PopStyleColor();
+        const float row = ImGui::GetContentRegionAvail().x, sp = ImGui::GetStyle().ItemSpacing.x;
+        const float bw = std::floor(std::min(U(104), (row * 0.5f - 2 * sp) / 3));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(std::format("Slot {}", g_sbxSlot + 1).c_str());
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(sl.item ? P.soft : P.dim), "%s", sl.item ? sl.name.c_str() : "Empty");
+        ImGui::SameLine(0, U(14));
+        const float sw = std::max(U(80), ImGui::GetContentRegionAvail().x - 3 * bw - 3 * sp);
+        ImGui::SetNextItemWidth(sw);
+        ImGui::SliderInt("##amount", &g_sbxAmount, 0, max, "%d", ImGuiSliderFlags_AlwaysClamp);
+        HoverTip("Ctrl+click to type. Used by Set.");
+        ImGui::BeginDisabled(!sl.item);
+        ImGui::SameLine();
+        if (ImGui::Button("Set", ImVec2(bw, 0))) SbxRequest(sbx::Op::SetSlotCount, g_sbxAmount, g_sbxSlot);
+        HoverTip("Change how many of the current item the slot holds (0 empties it).");
+        ImGui::SameLine();
+        ImGui::BeginDisabled(sl.count >= max);
+        if (ImGui::Button("Fill", ImVec2(bw, 0))) SbxRequest(sbx::Op::SetSlotCount, max, g_sbxSlot);
+        ImGui::EndDisabled();
+        HoverTip("Fill the slot to its maximum.");
+        ImGui::SameLine();
+        if (ImGui::Button("Empty", ImVec2(bw, 0))) SbxRequest(sbx::Op::SetSlotCount, 0, g_sbxSlot);
+        HoverTip("Remove everything from this slot.");
+        ImGui::EndDisabled();
     }
-    ImGui::SetNextItemWidth(-FLT_MIN);
-    ImGui::InputTextWithHint("##search", "Search items...", g_sbxSearch, sizeof(g_sbxSearch));
+
+    // ---- items the selected slot accepts ----
+    ImGui::Dummy(ImVec2(0, U(2)));
+    SmallHeading("Click an item to fill the selected slot, or drag it onto any slot");
     const uint32_t bit = g_sbxSlot < 32 ? (1u << g_sbxSlot) : 0u;
-    std::string pickedName;
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, P.frame);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(6), U(6)));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, U(2)));
-    ImGui::BeginChild("##items", ImVec2(0, U(160)), ImGuiChildFlags_AlwaysUseWindowPadding);
-    int shown = 0;
+    std::vector<item_grid::Tile> tiles;
     if (s.catalog) {
+        tiles.reserve(s.catalog->size());
         for (const sbx::Item& it : *s.catalog) {
             if (!(it.slotMask & bit)) continue;
-            if (!ContainsNoCase(it.name, g_sbxSearch)) continue;
-            ++shown;
-            ImGui::PushID(reinterpret_cast<const void*>(it.id));
-            if (ImGui::Selectable(it.name.c_str(), it.id == g_sbxItem)) g_sbxItem = it.id;
-            ImGui::PopID();
+            item_grid::Tile t;
+            t.id = it.id;
+            t.name = &it.name;
+            t.icon = it.icon;
+            t.accent = KindAccent(it.kind);
+            tiles.push_back(t);
         }
     }
-    if (shown == 0) ImGui::TextDisabled(s.catalog ? "No matching items." : "Reading the item list...");
-    ImGui::EndChild();
-    ImGui::PopStyleVar(2);
-    ImGui::PopStyleColor();
-    // Looked up after the list, so an item clicked this frame counts too (checking inside the
-    // loop, before the click, dropped every new pick again in the same frame).
-    if (s.catalog && g_sbxItem)
-        for (const sbx::Item& it : *s.catalog)
-            if (it.id == g_sbxItem && (it.slotMask & bit)) pickedName = it.name;
-    if (pickedName.empty()) g_sbxItem = 0;  // not accepted by this slot (or gone)
+    item_grid::Options o = GridOptions(212);
+    o.selected = sl.item;
+    o.drag = true;
+    o.empty = s.catalog ? "No matching items." : "Reading the item list...";
+    const item_grid::Result r = item_grid::Draw("vac", tiles, g_vacGrid, o);
+    if (r.hovered >= 0 && !ImGui::GetDragDropPayload())
+        Tooltip(std::format("{}\nClick: fill slot {} ({} max). Drag onto a slot to fill that one.",
+                            *tiles[static_cast<size_t>(r.hovered)].name, g_sbxSlot + 1, max));
+    if (r.clicked >= 0) SbxRequest(sbx::Op::PutItem, max > 0 ? max : 1, g_sbxSlot, tiles[static_cast<size_t>(r.clicked)].id);
+    EndCard();
+}
 
-    const bool canPut = g_sbxItem != 0 && g_sbxAmount > 0;
-    const std::string label = !g_sbxItem ? std::string("Pick an item above")
-                              : g_sbxAmount <= 0 ? std::string("Set an amount above 0")
-                                                 : std::format("Put {} x {}", g_sbxAmount, pickedName);
-    ImGui::BeginDisabled(!canPut);
-    if (AccentButton((label + "###put").c_str(), ImVec2(-FLT_MIN, U(32))))
-        SbxRequest(sbx::Op::PutItem, g_sbxAmount, g_sbxSlot, g_sbxItem);
-    ImGui::EndDisabled();
-    HoverTip("Replaces what the slot holds. The game checks that the slot accepts the item and its maximum.");
+// Spawner: places any actor the game can spawn (toys, slimes, food, ...) in front of you.
+void SandboxSpawner(const sbx::Snapshot& s, float w) {
+    const Palette& P = theme::Colors();
+    BeginCard("sbx_spawn", w);
+    CardHeading("Spawner", P.head);
+    if (!s.spawnWhy.empty()) {
+        DimText("Unavailable: " + s.spawnWhy);
+        EndCard();
+        return;
+    }
+    if (!s.spawnables) {
+        DimText("Reading the spawn list...");
+        EndCard();
+        return;
+    }
+    // Filter chips: the kinds present in the list, in enum order.
+    std::vector<std::pair<int, std::string>> chips;
+    {
+        bool have[16] = {};
+        for (const sbx::Item& it : *s.spawnables) have[static_cast<int>(it.kind) & 15] = true;
+        for (int k = 1; k < 16; ++k)
+            if (have[k]) chips.emplace_back(k, KindLabel(static_cast<sbx::Kind>(k)));
+        if (have[0]) chips.emplace_back(0, KindLabel(sbx::Kind::Other));
+    }
+    g_spawnKind = ChipRow("kinds", chips, g_spawnKind);
+    CountRow("How many", "##spawncount", g_spawnCount, 20, "How many to spawn per click.");
+    std::vector<item_grid::Tile> tiles;
+    tiles.reserve(s.spawnables->size());
+    std::vector<const sbx::Item*> src;
+    for (const sbx::Item& it : *s.spawnables) {
+        if (g_spawnKind >= 0 && static_cast<int>(it.kind) != g_spawnKind) continue;
+        item_grid::Tile t;
+        t.id = it.id;
+        t.name = &it.name;
+        t.icon = it.icon;
+        t.accent = KindAccent(it.kind);
+        tiles.push_back(t);
+        src.push_back(&it);
+    }
+    const item_grid::Result r = item_grid::Draw("spawn", tiles, g_spawnGrid, GridOptions(250));
+    if (r.hovered >= 0) {
+        const sbx::Item& it = *src[static_cast<size_t>(r.hovered)];
+        Tooltip(std::format("{}\n{}. Click to spawn {} in front of you.", it.name, KindLabel(it.kind), g_spawnCount));
+    }
+    if (r.clicked >= 0) SbxRequest(sbx::Op::Spawn, g_spawnCount, -1, tiles[static_cast<size_t>(r.clicked)].id);
+    EndCard();
+}
+
+// Crafter: the fabricator's gadget recipes, added to your gadget inventory at no cost.
+void SandboxCrafter(const sbx::Snapshot& s, float w) {
+    const Palette& P = theme::Colors();
+    BeginCard("sbx_craft", w);
+    CardHeading("Crafter", P.head);
+    if (!s.craftWhy.empty()) {
+        DimText("Unavailable: " + s.craftWhy);
+        EndCard();
+        return;
+    }
+    if (!s.recipes) {
+        DimText("Reading the fabricator recipes...");
+        EndCard();
+        return;
+    }
+    std::vector<std::pair<int, std::string>> chips;
+    if (s.recipeCategories) {
+        std::vector<bool> used(s.recipeCategories->size(), false);
+        for (const sbx::Recipe& r : *s.recipes)
+            if (r.category >= 0 && static_cast<size_t>(r.category) < used.size()) used[static_cast<size_t>(r.category)] = true;
+        for (size_t i = 0; i < used.size(); ++i)
+            if (used[i]) chips.emplace_back(static_cast<int>(i), (*s.recipeCategories)[i]);
+    }
+    if (!chips.empty()) g_craftCat = ChipRow("cats", chips, g_craftCat);
+    else g_craftCat = -1;
+    CountRow("How many", "##craftcount", g_craftCount, 20, "How many to craft per click.");
+    std::vector<item_grid::Tile> tiles;
+    std::vector<const sbx::Recipe*> src;
+    tiles.reserve(s.recipes->size());
+    for (const sbx::Recipe& rc : *s.recipes) {
+        if (g_craftCat >= 0 && rc.category != g_craftCat) continue;
+        item_grid::Tile t;
+        t.id = rc.id;
+        t.name = &rc.name;
+        t.icon = rc.icon;
+        t.accent = KindAccent(sbx::Kind::Gadget);
+        t.dimmed = !rc.unlocked;
+        t.badge = rc.owned;
+        tiles.push_back(t);
+        src.push_back(&rc);
+    }
+    item_grid::Options o = GridOptions(250);
+    o.hint = "Search gadgets...";
+    const item_grid::Result r = item_grid::Draw("craft", tiles, g_craftGrid, o);
+    if (r.hovered >= 0) {
+        const sbx::Recipe& rc = *src[static_cast<size_t>(r.hovered)];
+        std::string tip = rc.name;
+        if (!rc.cost.empty()) tip += "\nFabricator cost: " + rc.cost;
+        tip += std::format("\nIn your inventory: {}", rc.owned);
+        if (!rc.unlocked) tip += "\nBlueprint not unlocked yet.";
+        else
+            tip += std::format("\nClick to craft {} for free{}.", g_craftCount * rc.perCraft,
+                               rc.perCraft > 1 ? " (made in pairs)" : "");
+        Tooltip(tip);
+    }
+    if (r.clicked >= 0) {
+        const sbx::Recipe& rc = *src[static_cast<size_t>(r.clicked)];
+        if (rc.unlocked) SbxRequest(sbx::Op::Craft, g_craftCount, -1, rc.id);
+        else sbx::SetStatus(rc.name + " not crafted: its blueprint is not unlocked", true);
+    }
     EndCard();
 }
 
@@ -1290,8 +1511,9 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
         BeginCard("sbx_off", ImGui::GetContentRegionAvail().x);
         CardHeading("Sandbox", P.head);
         ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextUnformatted("Edit your character's resources: set your Newbucks, refill health and energy, and "
-                               "choose what each vacpack slot holds and how much.");
+        ImGui::TextUnformatted("Edit your character's resources: set your Newbucks, refill health and energy, "
+                               "choose what each vacpack slot holds, spawn items in front of you and craft "
+                               "fabricator gadgets for free.");
         ImGui::PopTextWrapPos();
         DimText("Edits use the game's own functions, so the save stays valid, but they change your save directly and "
                 "can't be undone. Sandbox stays off until you enable it and confirm.");
@@ -1311,16 +1533,18 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
         SandboxStatus(h);
         return;
     }
-    const float w = ColumnWidth();
-    ImGui::BeginGroup();
+    // Newbucks | Player, the vacpack across both columns, then Spawner | Crafter.
+    const float full = ImGui::GetContentRegionAvail().x, w = ColumnWidth();
+    const float gapY = U(kGap) - ImGui::GetStyle().ItemSpacing.y;
     SandboxNewbucks(*snap, w);
-    ImGui::Dummy(ImVec2(0, U(kGap) - ImGui::GetStyle().ItemSpacing.y));
-    SandboxPlayer(*snap, w);
-    ImGui::EndGroup();
     ImGui::SameLine(0, U(kGap));
-    ImGui::BeginGroup();
-    SandboxVacpack(*snap, w);
-    ImGui::EndGroup();
+    SandboxPlayer(*snap, w);
+    ImGui::Dummy(ImVec2(0, gapY));
+    SandboxVacpack(*snap, full);
+    ImGui::Dummy(ImVec2(0, gapY));
+    SandboxSpawner(*snap, w);
+    ImGui::SameLine(0, U(kGap));
+    SandboxCrafter(*snap, w);
     SandboxStatus(h);
 }
 
