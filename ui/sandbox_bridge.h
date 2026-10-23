@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace sr2::ui::sandbox {
@@ -24,38 +25,56 @@ namespace sr2::ui::sandbox {
 inline constexpr const char* kModule = "sandbox";
 
 // What kind of thing an item is (from its IdentifiableType class and flags);
-// the tab uses it for the tile accent and the spawner's filter.
+// the tab uses it for the tile accent, the group tabs and the tooltip tag.
 enum class Kind : uint8_t { Other, Slime, Largo, Plort, Food, Animal, Toy, Resource, Liquid, Gadget };
+
+// The icon-only group tabs of the vacpack and spawner grids (index into Snapshot::groupIcons).
+enum Group : int { kGroupAll = 0, kGroupPlorts, kGroupSlimes, kGroupFood, kGroupResources, kGroupCount };
 
 struct Item {
     uintptr_t id = 0;       // opaque (see above)
     std::string name;       // localized display name
     uint32_t slotMask = 0;  // bit i: vacpack slot i accepts it (AmmoSlotDefinition.IsAllowed); 0 in the spawn list
     uint32_t icon = 0;      // ui/item_icons.h id (0 = none)
+    uint32_t icon2 = 0;     // second half of a composed icon (a largo without its own: its two base slimes); 0 = none
     Kind kind = Kind::Other;
     bool tarr = false;      // spawn list: in GameModel.tarrTypeGroup (grayed out while Tarrs are off)
 };
+
+// How items relate through slime diets (SlimeDefinition.Diet), by item id. Ids
+// may name types that are in neither list; the tab skips those.
+struct Relation {
+    std::vector<uintptr_t> favourites;   // slime: its favourite foods (SlimeDiet.FavoriteIdents)
+    std::vector<uintptr_t> plorts;       // slime: what it produces (SlimeDiet.ProduceIdents)
+    std::vector<uintptr_t> favouriteOf;  // food: slimes that have it as a favourite (base slimes first)
+    std::vector<uintptr_t> plortOf;      // plort: slimes that produce it (base slimes first)
+};
+using Relations = std::unordered_map<uintptr_t, Relation>;
 
 struct Slot {
     bool unlocked = false;
     uintptr_t item = 0;     // 0 = empty
     std::string name;       // item name ("" when empty)
     uint32_t icon = 0;      // the item's icon (0 = none)
+    uint32_t icon2 = 0;     // see Item::icon2
     Kind kind = Kind::Other;
     int count = 0;
     int max = 0;            // AmmoSlotManager.GetSlotMaxCount
+    bool unlockable = false;  // locked, and a vacpack upgrade unlocks it (Op::UnlockSlot)
 };
 
-// A fabricator gadget recipe (a GadgetDefinition with a crafting cost).
+// A fabricator gadget recipe (a GadgetDefinition with a crafting cost), or a
+// crafting material the refinery stores (Snapshot::materials).
 struct Recipe {
     uintptr_t id = 0;       // opaque, like Item::id
     std::string name;
     uint32_t icon = 0;
     int category = -1;      // index into Snapshot::recipeCategories (-1: none)
     std::string cost;       // what the fabricator would charge, e.g. "20 x Pink Plort, 150 Newbucks"
-    bool unlocked = false;  // GadgetDirector.HasBlueprint
-    int owned = 0;          // GadgetDirector.GetItemCount (in the gadget inventory)
+    bool unlocked = false;  // GadgetDirector.HasBlueprint (materials: always true)
+    int owned = 0;          // GadgetDirector.GetItemCount (gadget inventory; the refinery for materials)
     int perCraft = 1;       // 2 for gadgets the fabricator makes in pairs (GadgetDefinition.BuyInPairs)
+    Kind kind = Kind::Gadget;  // materials: their item kind
 };
 
 struct Snapshot {
@@ -75,7 +94,11 @@ struct Snapshot {
     bool tarrsOff = false;                                // the save's game settings have Tarrs disabled
     std::shared_ptr<const std::vector<Recipe>> recipes;   // fabricator gadget recipes, sorted by name
     std::shared_ptr<const std::vector<std::string>> recipeCategories;  // the fabricator's category titles
+    std::shared_ptr<const std::vector<uint32_t>> recipeCategoryIcons;  // their icons (FabricateCategory._icon), same order
+    std::shared_ptr<const std::vector<Recipe>> materials; // crafting materials the refinery stores, sorted by name
     std::string craftWhy;                                 // crafter unavailable: why ("" = available)
+    std::shared_ptr<const Relations> relations;           // slime diets (favourites, plorts); nullptr until built
+    uint32_t groupIcons[kGroupCount] = {};                // the game's icons for the group tabs (0 = none; All has none)
 };
 
 enum class Op {
@@ -89,6 +112,9 @@ enum class Op {
     PutItem,         // slot, item, value = count (replaces what the slot holds)
     Spawn,           // item (from spawnables), value = how many; placed in front of the player
     Craft,           // item (a recipe id), value = how many crafts; added to the gadget inventory at no cost
+    MoveSlot,        // slot = from, value = to: moves the contents (merges into the same item, else swaps)
+    UnlockSlot,      // slot: applies the vacpack upgrade levels that unlock it
+    AddMaterial,     // item (from materials), value = how many; added to the refinery
 };
 
 struct Action {
