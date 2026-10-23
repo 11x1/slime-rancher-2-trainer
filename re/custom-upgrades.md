@@ -345,8 +345,15 @@ Original plan:
   a Collector; for ours it plays the button animation (`_buttonAnimator.SetTrigger`) and
   `PressButtonCue` (0.4 s rate limit like vanilla), checks ownership and runs the same sale as the
   menu action. Feedback: the game's currency HUD notification (TrySell showUi) plus a short
-  world-space text above the button through `ui::hud` (new `Frame.textOnly`): "Sold N plorts for
-  V Newbucks", "The Plort Market is closed - nothing sold", "No plorts in this silo". Silos come
+  world-space text above the button through `ui::hud` (new `Frame.textOnly`): "The Plort Market
+  is closed - nothing sold", "No plorts in this silo". A successful sale (button or menu) instead
+  raises one HUD notification per plort type, the quantum drones' "plorts sold" ones
+  (`modules/custom_upgrades/sale_notify.cpp`): `DroneActivitySceneNotifications.AddPlortSold(type,
+  count)` on the HUD drone provider's `_activeNotifications`, then
+  `ItemAcquisitionNotificationList.HandleNotificationAvailable(provider)` (icon, PlortSoldFormat
+  name, count). Only while `get_CanQueueAny` is true (the list discards notices while the HUD is
+  suppressed by an open menu), so menu sales show after the menu closes. Without the HUD list the
+  button falls back to the text "Sold N plorts for V Newbucks". Silos come
   from the sidecar ids -> `SceneContext.GameModel.GetLandPlotModel(id).gameObj` (the
   LandPlotLocation) -> `GetComponentInChildren<LandPlot>` at ~1 Hz; sold / disabled / faulted
   removes the button, load / plot rebuild rebuilds it. The menu action stays.
@@ -437,7 +444,8 @@ Original research:
   `mainActionButtonContainer` for unavailable items; the alt (Info) button comes from
   `category.altDetailsButton` and only exists with a Pedia entry. sell_upgrades now clones the
   category's own `detailsButton` prefab (the game's Purchase button) next to it, labelled
-  "Sell +N" / "Can't sell", from a `DetailsMoreButtonView.BindData` detour (non-generic; the
+  "Sell +N", or, for an upgrade that can't be sold, non-interactable (`Selectable.set_interactable(false)`,
+  dimmed label) as "Can't sell: <short reason>" with no popup (user feedback), from a `DetailsMoreButtonView.BindData` detour (non-generic; the
   ListUI methods are shared generic code without a name-resolvable pointer). Click:
   `UnityEngine.UI.Button.Press` detour (pointer compare) -> sell popup; gamepad A on the
   selected item -> OnAction -> same popup. Details in the sell_upgrades header.
@@ -538,7 +546,7 @@ The user wants upgrades they buy, not global switches. Built on this framework:
 | Popup | `ListUIRoot.OpenPopupPrompt`, `PopupPrompt` | plot menu (sell_upgrades) | confirmations |
 | Slider | `UnityEngine.UI.Slider`, `MapZoomSlider`, `SliderStyler` | runtime uGUI / map UI prefab | Hen Wrangler limit panel |
 
-**Own icons (current):** every custom item shows its own sprite from `assets/icons/` (`ui/mod_icons.h`, `ModIconName` in module.cpp), set in `CloneItem` for `_icon`, and for `_unavailableIcon` a greyed copy when the vanilla item uses a separate unavailable sprite (else the same sprite). The borrowed sprites below are the fallback when the sprite cannot be created and the size reference (pixelsPerUnit is scaled to their native size).
+**Own icons (current):** every custom item shows its own sprite from `assets/icons/` (`ui/mod_icons.h`, `ModIconName` in module.cpp), set in `CloneItem` for `_icon`. `_unavailableIcon` is not an item icon: every vanilla plot upgrade item points it at the shared `checkmark` sprite, which `GenericViewHolder.BindData` (0x83C900) enables as an overlay image (`unavailableIcon`, +0x68) over the list icon (tinted with `unavailableColor`) while the item is unavailable (= owned). The clones keep the template's checkmark, so owned custom items show the same tick as vanilla ones. The borrowed sprites below are the fallback when the sprite cannot be created and the size reference (pixelsPerUnit is scaled to their native size).
 
 **Icons (sprites reachable without scanning):**
 * `IdentifiableType.icon` on any identifiable: hens, roosters, chicks, plorts, food, gadgets.

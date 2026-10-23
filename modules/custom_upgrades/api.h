@@ -31,7 +31,9 @@ bool Active();
 std::string Name(int32_t upgrade);
 
 // Main thread. "" = the owned custom upgrade can be sold back; else the reason.
-std::string CanSell(Il2CppObject* landPlot, int32_t upgrade);
+// `brief` (optional) gets a few-word form of the reason for a button label
+// ("holds chickens", "sell Plort Collector III first"); cleared when sellable.
+std::string CanSell(Il2CppObject* landPlot, int32_t upgrade, std::string* brief = nullptr);
 
 // Main thread. Removes the custom upgrade from the plot (sidecar state,
 // world objects). Returns false if nothing was removed. `notes` gets details.

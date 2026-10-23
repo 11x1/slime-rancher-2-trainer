@@ -177,6 +177,7 @@
 #include "modules/custom_upgrades/api.h"
 #include "modules/custom_upgrades/coop_world.h"
 #include "modules/custom_upgrades/plot_menu_slider.h"
+#include "modules/custom_upgrades/sale_notify.h"
 #include "modules/custom_upgrades/silo_world.h"
 #include "ui/mod_icons.h"
 
@@ -420,6 +421,8 @@ struct SiloSummary {
     int types = 0;
     bool marketClosed = false;
     bool marketAvailable = false;
+    std::vector<std::pair<Il2CppObject*, int>> sold;  // sale only: IdentifiableType -> count sold
+    bool noticed = false;  // per-type HUD notices queued (SaleNotices) - no text feedback needed
 };
 
 using HasUpgradeFn = bool (*)(Il2CppObject*, int32_t, const MethodInfo*);
@@ -461,14 +464,14 @@ public:
     void FrameCheck(float dt);
     void WorldTick();
     bool OnSiloButton(Il2CppObject* activator);
-    SiloSummary SellAllNow(Il2CppObject* plot, const std::string& id, const char* via);
+    SiloSummary SellAllNow(Il2CppObject* plot, const std::string& id, const char* via, bool fromMenu);
     bool WorldQuery(Il2CppObject* plot, custom_upgrades::world::CoopRequest& req);
     void AfterDetailsBind(Il2CppObject* view, Il2CppObject* vm);
     void SliderTick(float dt);
     bool SliderActive() const { return slider_.Active(); }
 
     // api.h
-    std::string CanSellCustom(Il2CppObject* plot, int32_t upg);
+    std::string CanSellCustom(Il2CppObject* plot, int32_t upg, std::string* brief);
     bool RemoveCustom(Il2CppObject* plot, int32_t upg, std::string& notes);
     std::string VanillaDependentOf(Il2CppObject* plot, int32_t vanillaUpg);
     float TierMultiplier(Il2CppObject* obj, int family);
@@ -538,6 +541,7 @@ private:
     custom_upgrades::world::CoopWorld world_;
     custom_upgrades::world::SiloButtons silo_;  // Sell-All Button world button
     custom_upgrades::ui::PlotMenuSlider slider_;  // Hen Collector limit (one at a time)
+    custom_upgrades::ui::SaleNotices notices_;    // Sell-All: per-plort HUD notifications
     Il2CppObject* menuRoot_ = nullptr;            // last updated LandPlotUIRoot (handle held)
     Il2CppGCHandle menuRootHandle_ = nullptr;
     void TrackMenuRoot(Il2CppObject* root);
@@ -826,6 +830,7 @@ void CustomUpgrades::ResetState(const char* why) {
     tierCache_.clear();
     world_.Reset();  // clones of the previous game are destroyed (never read) at the next tick
     silo_.Reset();
+    notices_.Clear();
     slider_.Destroy();  // its value callback belongs to the old state
 }
 
@@ -1381,27 +1386,23 @@ Il2CppObject* CustomUpgrades::CloneItem(Il2CppObject* tpl, const UpgradeDef& d, 
     if (!costEntry) return nullptr;
     unity::Field<int32_t>(clone, offItemUpgrade_) = d.id;
     unity::Field<int32_t>(costEntry, offCostAmount_) = Price(d);
-    // Icon: the vanilla upgrade this tier builds on (its normal and greyed "owned" icon);
-    // otherwise the Market Link icon (sell-all), for both states.
+    // Icon: the vanilla upgrade this tier builds on, otherwise the Market Link icon (sell-all).
+    // _unavailableIcon is NOT an item icon: every vanilla plot upgrade item points it at the shared
+    // "checkmark" sprite, which GenericViewHolder.BindData shows as an overlay image on top of the
+    // (tinted) list icon when the item is unavailable (= owned). So owned custom items keep that
+    // checkmark: the template's (= iconSrc's, same shared sprite) reference, copied by Instantiate.
     Il2CppObject* icon = iconSrc ? unity::Field<Il2CppObject*>(iconSrc, offItemIcon_) : nullptr;
-    Il2CppObject* unavailable = iconSrc ? unity::Field<Il2CppObject*>(iconSrc, offItemUnavailIcon_) : nullptr;
-    if (!unity::IsAlive(icon)) {
-        icon = MarketIcon();
-        unavailable = icon;
-    }    // Our own icon replaces the borrowed one (a greyed copy where the game uses a separate
-    // "unavailable" sprite); the borrowed sprite stays the fallback and sets the native size.
+    Il2CppObject* check = iconSrc ? unity::Field<Il2CppObject*>(iconSrc, offItemUnavailIcon_) : nullptr;
+    if (!unity::IsAlive(check)) check = unity::Field<Il2CppObject*>(tpl, offItemUnavailIcon_);
+    if (!unity::IsAlive(icon)) icon = MarketIcon();
+    // Our own icon replaces the borrowed one; the borrowed sprite stays the fallback and sets the
+    // native size.
     if (const char* own = ModIconName(d.id)) {
         Il2CppObject* sizeRef = unity::IsAlive(icon) ? icon : unity::Field<Il2CppObject*>(tpl, offItemIcon_);
-        if (Il2CppObject* mine = sr2::ui::mod_icons::Get(own, sizeRef)) {
-            Il2CppObject* mineUnavail = (unity::IsAlive(unavailable) && unavailable != icon)
-                                            ? sr2::ui::mod_icons::Get(own, sizeRef, true)
-                                            : nullptr;
-            unavailable = mineUnavail ? mineUnavail : mine;
-            icon = mine;
-        }
+        if (Il2CppObject* mine = sr2::ui::mod_icons::Get(own, sizeRef)) icon = mine;
     }
     if (unity::IsAlive(icon)) SetRef(clone, offItemIcon_, icon);
-    if (unity::IsAlive(unavailable) && offItemUnavailIcon_) SetRef(clone, offItemUnavailIcon_, unavailable);
+    if (offItemUnavailIcon_) SetRef(clone, offItemUnavailIcon_, unity::IsAlive(check) ? check : nullptr);
     return clone;
 }
 
@@ -1616,6 +1617,7 @@ void CustomUpgrades::Cleanup(const char* why) {
     if (cleaned_) return;
     cleaned_ = true;
     slider_.Destroy();  // main thread only (no-op otherwise / without game calls after a fault)
+    notices_.Clear();
     if (world_.Ready() && main_thread::IsMainThread()) {
         // Hen Collector contents go into the sidecar state first (written with the next save
         // while the module is on again), then the clones are removed.
@@ -1652,6 +1654,7 @@ void CustomUpgrades::FrameCheck(float dt) {
     }
     if (On() && slider_.Active()) g_sliderGuard.Run([&] { SliderTick(dt); });
     if (On() && silo_.Ready()) g_siloGuard.Run([&] { silo_.Frame(); });  // button message (cheap when none)
+    if (On() && notices_.Ready()) g_siloGuard.Run([&] { notices_.Frame(dt); });  // queued sale notices
     if (!On() || (!world_.Ready() && !silo_.Ready())) return;
     if (std::isfinite(dt) && dt > 0.0f) worldAccum_ += std::min(dt, 1.0f);
     if (worldAccum_ < kWorldTickSeconds) return;
@@ -1699,13 +1702,21 @@ void CustomUpgrades::WorldTick() {
 
 // ---------------------------------------------------------------- silo button --
 
-SiloSummary CustomUpgrades::SellAllNow(Il2CppObject* plot, const std::string& id, const char* via) {
+SiloSummary CustomUpgrades::SellAllNow(Il2CppObject* plot, const std::string& id, const char* via, bool fromMenu) {
     std::string log;
-    const SiloSummary s = Summarize(plot, true, &log);
+    SiloSummary s = Summarize(plot, true, &log);
     if (!s.marketAvailable) SR2_INFO("[{}] sell all ({}, plot '{}'): Plort Market not available", kModule, via, id);
     else if (s.marketClosed) SR2_INFO("[{}] sell all ({}, plot '{}'): Plort Market closed, nothing sold", kModule, via, id);
     else SR2_INFO("[{}] sell all ({}, plot '{}'): sold {} plort(s) for {} Newbucks{}{}", kModule, via, id, s.plorts, s.value,
                   log.empty() ? "" : ": ", log);
+    // One HUD notice per plort type (icon, name, count) like the drones' "plorts sold" ones; from
+    // the plot menu they show once the menu is closed (the HUD drops notices while it is open, and
+    // may not be active then: queued anyway, the menu has no text feedback). The world button
+    // queues only if the HUD is there now, else it shows its text instead.
+    if (!s.sold.empty() && notices_.Ready() && (fromMenu || notices_.Available())) {
+        notices_.Queue(s.sold);
+        s.noticed = true;
+    }
     return s;
 }
 
@@ -1721,11 +1732,11 @@ bool CustomUpgrades::OnSiloButton(Il2CppObject* activator) {
         worldAccum_ = kWorldTickSeconds;  // remove the stale button
         return true;
     }
-    const SiloSummary s = SellAllNow(plot, id, "world button");
+    const SiloSummary s = SellAllNow(plot, id, "world button", false);
     if (!s.marketAvailable) silo_.Message(activator, "The Plort Market can't be reached right now", false);
     else if (s.marketClosed) silo_.Message(activator, "The Plort Market is closed - nothing sold", false);
     else if (s.plorts == 0) silo_.Message(activator, "No plorts in this silo", false);
-    else  // the game shows its own currency notification (TrySell showUi)
+    else if (!s.noticed)  // fallback: no HUD notices (the currency popup comes from TrySell showUi)
         silo_.Message(activator, std::format("Sold {} plort{} for {} Newbucks", s.plorts, s.plorts == 1 ? "" : "s", s.value),
                       true);
     return true;
@@ -1815,7 +1826,7 @@ void CustomUpgrades::OnAddUpgrade(Il2CppObject* plot, int32_t upg) {
                 SR2_WARN("[{}] sell-all on plot '{}' without the Sell-All Button - ignored", kModule, id);
                 return;
             }
-            SellAllNow(plot, id, "menu");
+            SellAllNow(plot, id, "menu", true);
         }
         return;
     }
@@ -1887,6 +1898,11 @@ SiloSummary CustomUpgrades::Summarize(Il2CppObject* plot, bool sell, std::string
             s.plorts += count;
             s.value += static_cast<long long>(cur) * count;
             types.insert(id);
+            {
+                auto it = std::find_if(s.sold.begin(), s.sold.end(), [id](const auto& e) { return e.first == id; });
+                if (it != s.sold.end()) it->second += count;
+                else s.sold.emplace_back(id, count);
+            }
             if (log) *log += std::format("{}{} x {} @ {}", log->empty() ? "" : ", ", count, unity::GetName(id), cur);
         }
     }
@@ -1939,11 +1955,15 @@ void CustomUpgrades::AfterSave(Il2CppObject* result) {
 
 // ---------------------------------------------------------------- api --
 
-std::string CustomUpgrades::CanSellCustom(Il2CppObject* plot, int32_t upg) {
+std::string CustomUpgrades::CanSellCustom(Il2CppObject* plot, int32_t upg, std::string* brief) {
+    auto no = [brief](std::string why, std::string shortWhy) {
+        if (brief) *brief = std::move(shortWhy);
+        return why;
+    };
     const UpgradeDef* d = FindDef(upg);
-    if (!d || d->action) return "This can't be sold.";
+    if (!d || d->action) return no("This can't be sold.", "not sellable");
     std::string id;
-    if (!OwnsKey(plot, *d, &id)) return "This upgrade is not owned.";
+    if (!OwnsKey(plot, *d, &id)) return no("This upgrade is not owned.", "not owned");
     if (d->id == COOP_HEN_COLLECTOR) {
         // Stored chickens are never thrown away: the player vacs them out first.
         int stored = world_.Ready() ? world_.StoredHens(plot) : -1;
@@ -1952,13 +1972,15 @@ std::string CustomUpgrades::CanSellCustom(Il2CppObject* plot, int32_t upg) {
             stored = it != state_.plots.end() ? HenCount(it->second) : 0;
         }
         if (stored > 0)
-            return std::format("Empty the Hen Collector first: {} chicken{} stored. Vac them out of its ports.", stored,
-                               stored == 1 ? " is" : "s are");
+            return no(std::format("Empty the Hen Collector first: {} chicken{} stored. Vac them out of its ports.",
+                                  stored, stored == 1 ? " is" : "s are"),
+                      "holds chickens");
     }
     // Tiers: an owned upgrade that needs this one must be sold first.
     for (const UpgradeDef& o : kDefs)
         if (!o.action && o.needs == d->id && OwnsKey(plot, o))
-            return std::format("Sell '{}' first - it needs this upgrade.", o.title);
+            return no(std::format("Sell '{}' first - it needs this upgrade.", o.title),
+                      std::format("sell {} first", o.title));
     return {};
 }
 
@@ -2261,6 +2283,13 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         else SR2_WARN("[{}] hook PurchaseItemDetailsContentView.BindData failed ({}) - no limit slider", kModule, err);
     }
 
+    // Sell-All HUD notices (optional; missing -> the world button's text says what was sold).
+    {
+        std::string nerr;
+        if (!notices_.Setup(R, kModule, nerr))
+            SR2_WARN("[{}] sell-all HUD notices unavailable ({}) - text feedback only", kModule, nerr);
+    }
+
     // Silo Sell-All world button (optional; missing -> only the "Sell All Plorts Now" menu action).
     {
         std::string serr;
@@ -2359,10 +2388,17 @@ std::string Name(int32_t upgrade) {
     return d ? d->title : "custom upgrade";
 }
 
-std::string CanSell(Il2CppObject* landPlot, int32_t upgrade) {
-    if (!Active() || !main_thread::IsMainThread()) return "Custom upgrades are not available right now.";
+std::string CanSell(Il2CppObject* landPlot, int32_t upgrade, std::string* brief) {
+    if (brief) brief->clear();
+    if (!Active() || !main_thread::IsMainThread()) {
+        if (brief) *brief = "unavailable";
+        return "Custom upgrades are not available right now.";
+    }
     std::string r;
-    if (!g_hasGuard.Run([&] { r = g_self->CanSellCustom(landPlot, upgrade); })) return "Custom upgrades failed.";
+    if (!g_hasGuard.Run([&] { r = g_self->CanSellCustom(landPlot, upgrade, brief); })) {
+        if (brief) *brief = "unavailable";
+        return "Custom upgrades failed.";
+    }
     return r;
 }
 
