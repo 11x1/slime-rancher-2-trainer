@@ -10,7 +10,6 @@
 | `buy-menu-cards.md` | Purchase/Sell overlap, wrong labels, hen arrows, hen Activate |
 | `silo-receipt.md` | Sell-All receipt dialog, silo space tiers |
 | `plot-props-2.md` | second speaker, random hay/nests, sprinkler fixes |
-| `hud-edit-bar.md` | edit bar with cancel/save, drag minimap to edit |
 | `sandbox-ux.md` | shift+scroll amounts, icon tabs, right-click menu, crafter |
 | `slime-dj.md` | custom songs from the music box |
 | `small-polish-2.md` | pill padding, copied!, scroll memory, [modded] label |

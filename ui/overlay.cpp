@@ -634,14 +634,16 @@ void RenderFrame() {
             // NewFrame computed it from the windows drawn last frame: only valid
             // once the menu has been drawn at least once since opening.
             if (g_openFrames < 2) ++g_openFrames;
-            g_imguiWantsMouse = g_openFrames < 2 || io.WantCaptureMouse;
+            // A HUD element under the mouse (hud_edit::Hover) keeps the press and drag from the game too.
+            g_imguiWantsMouse = g_openFrames < 2 || io.WantCaptureMouse || hud_edit::WantsMouse();
         }
         if (hudMarkers) hud::Draw();  // foreground draw list (the module hides them while the settings window is open)
         if (momentum) momentum_hud::Draw();
         if (editing) hud_edit::Draw(g_appliedScale);  // outline, handles, guide line (mouse and keys are ours)
         if (open) {
+            if (!editing) hud_edit::Hover(g_appliedScale, g_captureState.load() == 0);  // drag a HUD element: edit mode
             if (!menu::Draw(MakeHost())) overlay::SetOpen(false);
-            if (hud_edit::Active()) overlay::SetOpen(false);  // "Move" clicked: the window gives way to edit mode
+            if (hud_edit::Active()) overlay::SetOpen(false);  // "Move" clicked or element dragged: edit mode
         } else if (hint && !editing) {
             menu::Host h = MakeHost();
             h.menuHint = menuHint;

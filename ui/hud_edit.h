@@ -1,15 +1,17 @@
 #pragma once
 // HUD edit mode: move and resize HUD elements (minimap, Speed Panel) with the
-// mouse. The "Move" button on an element's overlay page starts it; the
-// overlay's settings window closes, the element gets a dashed outline and the
-// overlay keeps mouse and keyboard (game camera and actions stay locked, like
-// while the settings window is open).
+// mouse. The "Move" button on an element's overlay page starts it, and so does
+// dragging the element itself while the overlay's settings window is open
+// (Hover). The settings window closes, the element gets a dashed outline, a
+// help bar with cancel / save buttons sits at the top centre, and the overlay
+// keeps mouse and keyboard (game camera and actions stay locked, like while
+// the settings window is open).
 //
 //   drag inside       move; snaps to the horizontal screen centre (dashed guide)
 //   drag a corner     resize, the opposite corner stays put; Alt: from the centre
 //   Shift (moving)    the gap on the axis you drag along becomes equal to the
 //                     other gap of the nearest corner (equal distance to both edges)
-//   Enter / click outside   keep;  Esc   cancel (restore)
+//   Enter / click outside / check button   keep;  Esc / X button   cancel (restore)
 //
 // Placement: x, y in percent of the free space (0 = left / top edge, 100 =
 // right / bottom edge: screen size minus element size), size in percent of
@@ -60,6 +62,14 @@ const char* Name(Element e);  // "minimap", "Speed Panel"
 void Begin(Element e);   // enter edit mode (the overlay closes its window)
 void Cancel();           // restore and leave
 void Draw(float uiScale);  // between NewFrame and Render, after the HUD content
+// While the settings window is open (not in edit mode), before the window is
+// drawn: an element under the mouse (outside every overlay window) gets a
+// hover outline, and dragging it starts edit mode with that drag. `allowed`:
+// the overlay can give the mouse to it (no key capture running).
+void Hover(float uiScale, bool allowed);
+// Any thread. The last Hover had an element under the mouse or a press on one:
+// the overlay keeps the mouse from the game (press, drag, release).
+bool WantsMouse();
 // True once after edit mode ended (keep or cancel): the overlay reopens its window.
 bool TakeFinished();
 
