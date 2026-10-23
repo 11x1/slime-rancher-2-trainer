@@ -13,12 +13,17 @@
 //   Fast Growth II       garden       Fast Growth I         4000    crops grow 2x as fast
 //   Ash Booster          incinerator  Ash Trough            1500    2x ash per incinerated food
 //
-//   Tiers are listed once the prerequisite is owned (custom `needs` or a vanilla
-//   upgrade via the original LandPlot.HasUpgrade); owned ones stay listed greyed. A
-//   tier reuses the icon of its vanilla upgrade (collector, feeder, music box, deluxe
-//   coop, sprinkler, ash trough). Selling (sell_upgrades) is refused while a higher tier
-//   - or, for a vanilla prerequisite, any tier built on it - is still owned. Only the
-//   highest owned tier of a family counts (they do not stack).
+//   Each chain has ONE menu card (Shown): the first tier not owned yet, or the last one once
+//   all are owned (greyed, checkmark). Faster Hens I -> II and Fast Growth I -> II share a
+//   card; a tier on a vanilla upgrade (Music Box II, Ash Booster) takes over that upgrade's
+//   card once it is owned (the vanilla item leaves the list while the tier card stands at its
+//   index, and comes back for every other plot / when the module stops). Fast Growth is listed
+//   right after the Sprinkler (`after`). A card that shows a tier not owned yet gets Buy (the
+//   vanilla Purchase button) and, next to it, sell_upgrades' Sell button for the tier below
+//   (api.h ChainSellTarget). Prerequisites: custom `needs` or a vanilla upgrade via the
+//   original LandPlot.HasUpgrade. Selling is refused while a higher tier - or, for a vanilla
+//   prerequisite, any tier built on it - is still owned. Only the highest owned tier of a
+//   family counts (they do not stack).
 //
 //   Multiplier(obj, family): a per-object cache (key = the LandPlot or the component
 //   the caller has; value = the multipliers of all families) invalidated by a version
@@ -387,12 +392,20 @@ struct Injected {
     const UpgradeDef* def = nullptr;
     Il2CppObject* item = nullptr;      // our PlotUpgradePurchaseItemModel clone (GC handle held)
     Il2CppObject* costEntry = nullptr; // its first CurrencyCostEntry (price)
+    Il2CppObject* base = nullptr;      // tier on a vanilla upgrade: that upgrade's item, whose card it takes over
+    Il2CppObject* anchor = nullptr;    // vanilla item of def->after (listed right after it)
     bool inList = false;
+};
+// A vanilla item taken out of the list while a tier card stands in its place.
+struct HiddenVanilla {
+    Il2CppObject* item = nullptr;  // GC handle held (Injected::base)
+    int32_t index = 0;             // its index in the vanilla list
 };
 struct MenuInjection {
     Il2CppObject* config = nullptr;    // MenuConfiguration (GC handle held)
     Il2CppObject* list = nullptr;      // the category's items list (GC handle held)
     std::vector<Injected> items;
+    std::vector<HiddenVanilla> hidden;
     bool failed = false;               // clone/verification failed: never retried for this config
 };
 
@@ -457,6 +470,7 @@ public:
     std::string CanSellCustom(Il2CppObject* plot, int32_t upg, std::string* brief);
     bool RemoveCustom(Il2CppObject* plot, int32_t upg, std::string& notes);
     std::string VanillaDependentOf(Il2CppObject* plot, int32_t vanillaUpg);
+    bool ChainSellTargetOf(Il2CppObject* plot, Il2CppObject* item, int32_t& upgrade, Il2CppObject*& priceItem);
     float TierMultiplier(Il2CppObject* obj, int family);
     std::string PlotValueOf(Il2CppObject* plot, const std::string& key);
     bool SetPlotValueOf(Il2CppObject* plot, const std::string& key, const std::string& value);
@@ -506,6 +520,11 @@ private:
     bool BuildInjection(MenuInjection& inj, int32_t plotType);
     Il2CppObject* CloneItem(Il2CppObject* tpl, const UpgradeDef& d, Il2CppObject* iconSrc, Il2CppObject*& costEntry);
     bool ListCall(Il2CppObject* list, const char* method, Il2CppObject* item, bool* result = nullptr);
+    bool ListMethods(Il2CppObject* list);
+    bool ListInsert(Il2CppObject* list, int32_t index, Il2CppObject* item);
+    int32_t ListIndexOf(Il2CppObject* list, Il2CppObject* item);
+    void RestoreVanilla(MenuInjection& inj);
+    bool Shown(Il2CppObject* plot, const UpgradeDef& d);
     Il2CppObject* MarketIcon();
     void SetTexts(const Injected& in, const std::string& title, const std::string& desc, const std::string& prompt);
     void Cleanup(const char* why);
@@ -551,6 +570,8 @@ private:
     const MethodInfo* listAdd_ = nullptr;
     const MethodInfo* listRemove_ = nullptr;
     const MethodInfo* listContains_ = nullptr;
+    const MethodInfo* listInsert_ = nullptr;
+    const MethodInfo* listIndexOf_ = nullptr;
     std::unordered_map<Il2CppClass*, size_t> offCategories_, offItems_;
 
 public:
@@ -1306,25 +1327,62 @@ bool CustomUpgrades::Visible(Il2CppObject* plot, const UpgradeDef& d) {
     return r && OwnsKey(plot, *r);
 }
 
+// A tier chain has ONE menu card (vanilla lists each silo storage tier as its own card, the next
+// one appearing once the previous is owned; ours chain on the same card instead): the first tier not owned yet, or the last one once all are owned. An
+// owned tier with a next tier gives its place to that one (which is listed now: its `needs` is
+// owned); the card then offers Buy (next tier) and Sell (the owned one, sell_upgrades via
+// ChainSellTarget). A chain that starts on a vanilla upgrade (Music Box -> Music Box II) takes over
+// the vanilla card once that upgrade is owned (BeforeMenuUpdate).
+bool CustomUpgrades::Shown(Il2CppObject* plot, const UpgradeDef& d) {
+    if (!Visible(plot, d)) return false;
+    if (d.family == kNoFamily) return true;
+    for (const UpgradeDef& o : kDefs)
+        if (o.needs == d.id && o.family == d.family) return !OwnsKey(plot, d);
+    return true;
+}
+
 // ---------------------------------------------------------------- menu --
 
-bool CustomUpgrades::ListCall(Il2CppObject* list, const char* method, Il2CppObject* item, bool* result) {
-    Il2CppClass* k = api().il2cpp_object_get_class(list);
+bool CustomUpgrades::ListMethods(Il2CppObject* list) {
+    Il2CppClass* k = list ? api().il2cpp_object_get_class(list) : nullptr;
     if (!k) return false;
-    if (k != listClass_) {
-        std::string err;
-        const MethodInfo* add = Resolver::Get().Method(k, "Add", 1, &err);
-        const MethodInfo* rem = Resolver::Get().Method(k, "Remove", 1, &err);
-        const MethodInfo* has = Resolver::Get().Method(k, "Contains", 1, &err);
-        if (!add || !rem || !has) {
-            SR2_WARN("[{}] List methods not found: {}", kModule, err);
-            return false;
-        }
-        listClass_ = k;
-        listAdd_ = add;
-        listRemove_ = rem;
-        listContains_ = has;
+    if (k == listClass_) return true;
+    std::string err;
+    const MethodInfo* add = Resolver::Get().Method(k, "Add", 1, &err);
+    const MethodInfo* rem = Resolver::Get().Method(k, "Remove", 1, &err);
+    const MethodInfo* has = Resolver::Get().Method(k, "Contains", 1, &err);
+    const MethodInfo* ins = Resolver::Get().Method(k, "Insert", 2, &err);
+    const MethodInfo* idx = Resolver::Get().Method(k, "IndexOf", 1, &err);
+    if (!add || !rem || !has || !ins || !idx) {
+        SR2_WARN("[{}] List methods not found: {}", kModule, err);
+        return false;
     }
+    listClass_ = k;
+    listAdd_ = add;
+    listRemove_ = rem;
+    listContains_ = has;
+    listInsert_ = ins;
+    listIndexOf_ = idx;
+    return true;
+}
+
+bool CustomUpgrades::ListInsert(Il2CppObject* list, int32_t index, Il2CppObject* item) {
+    if (!ListMethods(list)) return false;
+    index = std::clamp<int32_t>(index, 0, static_cast<int32_t>(unity::ListCount(list)));
+    bool ok = false;
+    Invoke(listInsert_, list, {&index, item}, "List.Insert", &ok);
+    return ok;
+}
+
+int32_t CustomUpgrades::ListIndexOf(Il2CppObject* list, Il2CppObject* item) {
+    if (!item || !ListMethods(list)) return -1;
+    bool ok = false;
+    Il2CppObject* boxed = Invoke(listIndexOf_, list, {item}, "List.IndexOf", &ok);
+    return ok ? Unbox<int32_t>(boxed, -1) : -1;
+}
+
+bool CustomUpgrades::ListCall(Il2CppObject* list, const char* method, Il2CppObject* item, bool* result) {
+    if (!ListMethods(list)) return false;
     const MethodInfo* m = std::string_view(method) == "Add" ? listAdd_
                           : std::string_view(method) == "Remove" ? listRemove_
                                                                  : listContains_;
@@ -1500,6 +1558,17 @@ bool CustomUpgrades::BuildInjection(MenuInjection& inj, int32_t plotType) {
         }
         in.item = CloneItem(tpl, d, iconSrc, in.costEntry);
         if (!in.item) return false;
+        // Menu position: a tier on a vanilla upgrade takes over that upgrade's card; `after` lists
+        // the item right behind a vanilla one. The vanilla item may be out of the list for a while,
+        // so it is pinned (a few per session, never freed).
+        if (d.family != kNoFamily && d.needs && !custom_upgrades::IsCustomUpgrade(d.needs)) {
+            auto vit = vanilla.find(d.needs);
+            if (vit != vanilla.end() && unity::NewGCHandle(vit->second)) in.base = vit->second;
+        }
+        if (d.after) {
+            auto vit = vanilla.find(d.after);
+            if (vit != vanilla.end()) in.anchor = vit->second;
+        }
         inj.items.push_back(in);
     }
     inj.list = bestList;
@@ -1572,18 +1641,52 @@ void CustomUpgrades::BeforeMenuUpdate(Il2CppObject* root) {
     }
     if (inj->failed) return;
     cleaned_ = false;
-    for (Injected& in : inj->items) {
-        const bool want = sink && Visible(plot, *in.def);
-        bool has = false;
-        if (!ListCall(inj->list, "Contains", in.item, &has)) continue;
-        if (want && !has) ListCall(inj->list, "Add", in.item);
-        else if (!want && has) {
-            bool removed = false;
-            ListCall(inj->list, "Remove", in.item, &removed);
+    // The list is shared by every plot of this type: start from the vanilla list each time, then
+    // place this plot's cards. Cards that take over a vanilla card first (same list length, so the
+    // recorded indices are vanilla ones), then the rest (right after their anchor, else at the end).
+    RestoreVanilla(*inj);
+    for (int pass = 0; pass < 2; ++pass) {
+        for (Injected& in : inj->items) {
+            if ((pass == 0) != (in.base != nullptr)) continue;
+            if (in.costEntry) unity::Field<int32_t>(in.costEntry, offCostAmount_) = Price(*in.def);
+            if (!sink || !Shown(plot, *in.def)) continue;
+            if (in.base) {
+                const int32_t at = ListIndexOf(inj->list, in.base);
+                bool removed = false;
+                if (at >= 0 && ListCall(inj->list, "Remove", in.base, &removed) && removed) {
+                    if (ListInsert(inj->list, at, in.item)) {
+                        inj->hidden.push_back({in.base, at});
+                        in.inList = true;
+                    } else {
+                        ListInsert(inj->list, at, in.base);  // the vanilla card stays
+                    }
+                    continue;
+                }
+                // The vanilla item is not in this list: listed like any other card below.
+            }
+            const int32_t anchorAt = in.anchor ? ListIndexOf(inj->list, in.anchor) : -1;
+            in.inList = anchorAt >= 0 ? ListInsert(inj->list, anchorAt + 1, in.item)
+                                      : ListCall(inj->list, "Add", in.item);
         }
-        in.inList = want;
-        if (in.costEntry) unity::Field<int32_t>(in.costEntry, offCostAmount_) = Price(*in.def);
     }
+}
+
+void CustomUpgrades::RestoreVanilla(MenuInjection& inj) {
+    // Our cards out, the vanilla cards they stood in for back at their own index (ascending, so
+    // each index is valid when it is used).
+    if (!inj.list) return;
+    for (Injected& in : inj.items) {
+        bool has = false, removed = false;
+        if (ListCall(inj.list, "Contains", in.item, &has) && has) ListCall(inj.list, "Remove", in.item, &removed);
+        in.inList = false;
+    }
+    std::sort(inj.hidden.begin(), inj.hidden.end(),
+              [](const HiddenVanilla& a, const HiddenVanilla& b) { return a.index < b.index; });
+    for (const HiddenVanilla& h : inj.hidden) {
+        bool has = false;
+        if (ListCall(inj.list, "Contains", h.item, &has) && !has) ListInsert(inj.list, h.index, h.item);
+    }
+    inj.hidden.clear();
 }
 
 void CustomUpgrades::AfterMenuUpdate(Il2CppObject* root) {
@@ -1629,20 +1732,20 @@ void CustomUpgrades::Cleanup(const char* why) {
         silo_.RemoveAll();
         SR2_INFO("[{}] {}: silo sell buttons removed", kModule, why);
     }
-    int removed = 0;
+    int removed = 0, restored = 0;
     for (auto& inj : injections_) {
         for (Injected& in : inj->items) {
             // Lock the price first: an already open menu must not be able to buy the item
             // through vanilla AddUpgrade (our detour may be gone).
             if (in.costEntry) unity::Field<int32_t>(in.costEntry, offCostAmount_) = INT_MAX;
-            if (inj->list) {
-                bool r = false;
-                if (ListCall(inj->list, "Remove", in.item, &r) && r) ++removed;
-            }
-            in.inList = false;
+            removed += in.inList ? 1 : 0;
         }
+        restored += static_cast<int>(inj->hidden.size());
+        RestoreVanilla(*inj);  // our items out, vanilla cards back
     }
-    if (removed) SR2_INFO("[{}] {}: {} custom menu item(s) removed", kModule, why, removed);
+    if (removed || restored)
+        SR2_INFO("[{}] {}: {} custom menu item(s) removed, {} vanilla item(s) put back", kModule, why, removed,
+                 restored);
 }
 
 void CustomUpgrades::FrameCheck(float dt) {
@@ -2010,6 +2113,40 @@ std::string CustomUpgrades::VanillaDependentOf(Il2CppObject* plot, int32_t vanil
     for (const UpgradeDef& o : kDefs)
         if (o.needs == vanillaUpg && OwnsKey(plot, o)) return o.title;
     return {};
+}
+
+bool CustomUpgrades::ChainSellTargetOf(Il2CppObject* plot, Il2CppObject* item, int32_t& upgrade,
+                                       Il2CppObject*& priceItem) {
+    if (!main_thread::IsMainThread() || !item || !unity::IsAlive(plot) || !IsA(plot, plotClass_)) return false;
+    for (auto& inj : injections_) {
+        if (inj->failed) continue;
+        for (const Injected& in : inj->items) {
+            if (in.item != item) continue;
+            const UpgradeDef& d = *in.def;
+            // Only the card of a chain showing a tier that is not owned yet; an owned card sells itself.
+            if (!in.inList || d.family == kNoFamily || !d.needs || PlotType(plot) != d.plotType || OwnsKey(plot, d))
+                return false;
+            if (custom_upgrades::IsCustomUpgrade(d.needs)) {
+                const UpgradeDef* r = FindDef(d.needs);
+                if (!r || r->family != d.family || !OwnsKey(plot, *r)) return false;
+                for (const Injected& o : inj->items)
+                    if (o.def == r && unity::IsAlive(o.item)) {
+                        upgrade = r->id;
+                        priceItem = o.item;
+                        return true;
+                    }
+                return false;
+            }
+            // Chain on a vanilla upgrade: only while this card stands in for the vanilla one.
+            const bool standsIn = std::any_of(inj->hidden.begin(), inj->hidden.end(),
+                                              [&](const HiddenVanilla& h) { return h.item == in.base; });
+            if (!in.base || !standsIn || !unity::IsAlive(in.base) || !VanillaOwned(plot, d.needs)) return false;
+            upgrade = d.needs;
+            priceItem = in.base;
+            return true;
+        }
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------- per-save values --
@@ -2446,6 +2583,15 @@ std::string VanillaDependent(Il2CppObject* landPlot, int32_t vanillaUpgrade) {
     std::string r;
     g_hasGuard.Run([&] { r = g_self->VanillaDependentOf(landPlot, vanillaUpgrade); });
     return r;
+}
+
+bool ChainSellTarget(Il2CppObject* landPlot, Il2CppObject* item, int32_t& upgrade, Il2CppObject*& priceItem) {
+    upgrade = 0;
+    priceItem = nullptr;
+    if (!Active() || !main_thread::IsMainThread()) return false;
+    bool ok = false;
+    g_hasGuard.Run([&] { ok = g_self->ChainSellTargetOf(landPlot, item, upgrade, priceItem); });
+    return ok;
 }
 
 float Multiplier(Il2CppObject* plotOrComponent, Family family) {

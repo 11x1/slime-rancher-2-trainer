@@ -43,6 +43,13 @@ bool Remove(Il2CppObject* landPlot, int32_t upgrade, std::string& notes);
 // this plot that needs it (it must be sold first), or "" if none.
 std::string VanillaDependent(Il2CppObject* landPlot, int32_t vanillaUpgrade);
 
+// Main thread. A tier chain has one menu card (Faster Hens I -> II, Music Box -> Music Box II):
+// once a tier is owned the card shows the next one. For such a card `item` (a plot menu item)
+// that shows a tier NOT owned yet: the owned tier below it, which the card's Sell button sells
+// (a custom id, or the vanilla upgrade the chain starts on), and the menu item whose price the
+// refund is based on. False for every other item (an owned item sells itself).
+bool ChainSellTarget(Il2CppObject* landPlot, Il2CppObject* item, int32_t& upgrade, Il2CppObject*& priceItem);
+
 // Purchasable per-plot tiers (plot_upgrades applies the effects).
 enum class Family : int {
     kMusicBox = 0,   // corral Music Box II: calming bonus x multiplier
