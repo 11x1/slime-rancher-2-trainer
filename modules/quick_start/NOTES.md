@@ -7,6 +7,7 @@ This module shortens the time from launch to playing. It is native only and reso
 | `skip_intro` | on | Makes the Monomi Park logo, the warning screen and the game logo end after one frame each. Answers the "press any key" prompt automatically. Scene loading is never skipped. |
 | `auto_continue` | off | Once per launch, when the main menu is ready, does what the **Continue** button does (loads the most recent save). Holding **Shift** while the game window is in front, at any point before it fires, cancels it for that launch. The cancel is logged. |
 | `auto_continue_delay` | 0.5 s (0-5) | How long the main menu stays interactive before auto-continue fires. |
+| `skip_new_game_intro` | on | When a new save starts, ends the story intro (the text frames shown before the player gets control) right away through the game's own end-of-intro path. The main quest, tutorials and camera are set up exactly as after a watched intro. |
 
 ## Boot flow (game 1.3.0, from the dump and a disassembly of `re/input/GameAssembly.dll`)
 
@@ -89,8 +90,23 @@ Caveat: anything the game does in the background during the logos (for example p
 - **Once per process**: it only fires at the first main menu of the launch. If `auto_continue` is off then, it stays off until the next launch. It cancels if Shift is held while the game window is in front, or if a scene load starts from the menu before it fires (the player acted). It gives up if the menu never becomes ready within 120 s.
 - **Overlay note**: while it is pending, the overlay shows "Hold Shift to stay in the main menu" top left (with "Continuing in N s" once the menu is ready), and "Staying in the main menu" for 2.5 s after a Shift cancel. The frame callback publishes the state through `ui/quick_start_hint.h` (atomics only; the render thread makes no game calls).
 
+**skip_new_game_intro**
+
+New-game flow (disassembly, 1.3.0):
+- `AutoSaveDirector.StartNewGame` adds a load step `<>c.<StartNewGame>b__29_2` (0x5E4150), which calls `CutsceneDirector.Instance.SpawnIntroSequence()` (0xAC4290). That is the only caller. `SpawnIntroSequence` activates the registered `IntroSequenceUIRoot` (it registers itself in `Awake`) and pushes it on `UIDirector`.
+- `IntroSequenceUIRoot.Start`: black screen on (alpha 1), `PauseNonUiSfx(true)`, `_cameraEnabled.Value = false`, starts `StartUpCoroutine`: queue `_introSequenceMusic`, wait `_fadeInWaitTime`, fade the black screen out over `_fadeInTime`, then `StartFrame(_frameIndex)`.
+- `StartFrame` tweens the cutscene camera to the frame's target; on completion the frame text is shown and `_isInputEnabled` set. The `_next` input calls `TryToIterateFrame`, which after the last frame does exactly what `EndSequence()` does: `_isInputEnabled = false`, `MusicController.Dequeue(_currentMusic)`, `StartCoroutine(EndCoroutine)`.
+- `EndCoroutine`: fade to black over `_fadeOutTime`, wait `_fadeOutWaitTime`, then the virtual close (the UI is popped and destroyed).
+- `IntroSequenceUIRoot.OnDestroy` applies the intro's state: `PauseNonUiSfx(false)`, destroy the cutscene camera, `_cameraEnabled.Value = true`, `MetaGameDirector.StartMainQuest(true)`, `FadeIntoGameplay()` (`TutorialDirector.SuppressTutorials(HudUI)`, `LockOnDeath.Freeze()`, `DeathObscurer.StartObscuring(false, _fadeOutTime, cb)` with cb = `LockOnDeath.Unfreeze()` + `UnsuppressTutorials`), then `CutsceneDirector.ClearIntroSequenceUIRoot()`.
+- `EndSequence` has no direct caller in the binary (probably the debug skip); its body is the same as the end branch of `TryToIterateFrame`.
+
+What the module does:
+- **Pre-hook `IntroSequenceUIRoot.Start` (0 args)**: class check + `IsAlive`, logs the vanilla fade values, then `_fadeInWaitTime = 0`, `_fadeInTime = 0.1 s`, `_fadeOutTime` at most 0.5 s, `_fadeOutWaitTime = 0`. The fades keep a short non-zero length because they also drive tweens, particles and the `DeathObscurer`.
+- **Replace hook `IntroSequenceUIRoot.StartFrame` (1 arg)**: on the first call per instance it calls `EndSequence()` through `runtime_invoke` instead of the original. At that point the intro music has been queued (so `EndSequence` dequeues it), no frame tween exists and input is still off, so the next-frame input does nothing. The game's own end path then runs unchanged, including everything `OnDestroy` sets. If `EndSequence` throws, the original `StartFrame` runs and the intro plays as usual; a native fault marks the module faulted (detours become pass-through).
+- What the player sees: black, about 0.1 s of the intro camera view while the black screen fades, a fade to black (at most 0.5 s), then the game's own fade from black into gameplay.
+
 **Safety**
-- All logic in the four detours and the frame callback runs inside `DetourGuard`s. A native fault marks the module faulted for the session: hooks are disabled and the detours become pure pass-through. A native fault reported by `runtime_invoke` does the same (`MarkModuleFaulted`).
+- All logic in the detours and the frame callback runs inside `DetourGuard`s. A native fault marks the module faulted for the session: hooks are disabled and the detours become pure pass-through. A native fault reported by `runtime_invoke` does the same (`MarkModuleFaulted`).
 - Objects are re-found with `FindObjectOfType` when needed and checked with `IsA` + `IsAlive` (+ `activeInHierarchy`). No GC handles. A cached object pointer is only compared, never dereferenced later.
 
 ## Names resolved (Assembly-CSharp)
@@ -111,11 +127,14 @@ Caveat: anything the game does in the background during the logos (for example p
   - field: `<GameDataSummary>k__BackingField`
   - method: `InvokeBehavior()`
 - `MonomiPark.SlimeRancher.UI.ButtonBehavior.ButtonBehaviorConditionUtility`: `HasContinueGame()`
+- `MonomiPark.SlimeRancher.UI.IntroSequence.IntroSequenceUIRoot`
+  - methods: `Start()`, `StartFrame` (1 arg), `EndSequence()`
+  - fields: `_fadeInWaitTime`, `_fadeInTime`, `_fadeOutTime`, `_fadeOutWaitTime`
 - fallback (optional):
   - `MonomiPark.SlimeRancher.AutoSaveDirector`: `GetSaveToContinue()`, `BeginLoad` (2 args)
   - `MonomiPark.SlimeRancher.Persist.Summary`: `get_SaveIdentifier()`
 
-If the skip_intro set or the auto_continue set fails to resolve, only that feature is switched off (logged). If both fail, the module fails.
+If the skip_intro, auto_continue or skip_new_game_intro set fails to resolve, only that feature is switched off (logged). If all three fail, the module fails.
 
 ## Risks / limits
 
@@ -125,4 +144,5 @@ If the skip_intro set or the auto_continue set fails to resolve, only that featu
 - **`OnInteract` with a zeroed `CallbackContext`**: safe in 1.3.0 because the context is not read. If a future version reads it, it would throw a managed exception: caught, logged, and the player presses a key as usual.
 - **Fragile names**: `<IsSceneLoadInProgress>k__BackingField` and `<GameDataSummary>k__BackingField` are compiler-generated names. They are stable unless the property is rewritten. Failure only disables the feature.
 - **ABI assumption**: the boxed `bool` / `GameSaveIdentifier` returned by `runtime_invoke` is read at `2 * sizeof(void*)` (the Il2CppObject header). This is the same footing as the array-data constant in `core/unity.h`, and the class name of the box is checked first.
+- **skip_new_game_intro is not yet tested in game.** Check on a new save: `sr2mods.log` shows "new-game intro starting" with the vanilla fades and "intro ended before frame 0"; the player must get control, the main quest / first tutorial popups must appear as after a watched intro, and the HUD and camera must be normal.
 - **Auto-continue loads a save without a click**. Turn it off, or hold Shift at launch, to reach the menu.
