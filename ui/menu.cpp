@@ -1938,19 +1938,17 @@ void DrawSidebar(const Host& h, const std::vector<Category>& cats, const ModuleV
     if (lineW > 0) {
         // Click copies the full commit ("abc1234" or "abc1234-dirty", never the
         // shortened "*" form) to the Windows clipboard (ImGui's Win32 default
-        // handler); without a commit, the ISO build time. "Copied" shows ~1.5 s.
+        // handler); without a commit, the ISO build time. "copied!" shows ~1.5 s.
         static unsigned long long copiedUntil = 0;
-        static std::string copiedText;
         ImGui::SetCursorScreenPos(ImVec2(x0, sp.y - U(8)));
         if (ImGui::InvisibleButton("##buildstamp", ImVec2(lineW, U(16)))) {
             const char* full = ::sr2::core::build_info::Commit();
-            copiedText = *full ? full : ::sr2::core::build_info::TimeIso();
-            ImGui::SetClipboardText(copiedText.c_str());
+            ImGui::SetClipboardText(*full ? full : ::sr2::core::build_info::TimeIso());
             copiedUntil = h.nowMs + 1500;
         }
         if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         if (copiedUntil != 0 && h.nowMs < copiedUntil) {
-            Tooltip("Copied " + copiedText);
+            Tooltip("copied!");
         } else {
             copiedUntil = 0;
             HoverTip(*::sr2::core::build_info::Commit() ? "Click to copy the commit" : "Click to copy the build time");
