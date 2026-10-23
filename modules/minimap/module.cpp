@@ -180,9 +180,14 @@ void RegisterSettings() {
     def("orientation", "Orientation", "View", Kind::Enum, 0, 0, 1, 1, {"North up", "Rotate with player"});
     def("arrow_style", "Player arrow", "View", Kind::Enum, 1, 0, 1, 1, {"Game marker", "Classic arrow"},
         "The arrow and the map icons grow and shrink with the zoom (base size at 2.5x)");
-    def("arrow_rotation_offset", "Player arrow rotation offset (degrees)", "View", Kind::Float, 180, -180, 180, 5, {},
+    def("arrow_rotation_offset", "Player arrow rotation offset", "View", Kind::Float, 180, -180, 180, 5, {},
         "Added to the arrow's heading. 180 is correct for both arrow styles; change it only if the arrow points the "
         "wrong way");
+    // Units after the slider values (UI only).
+    for (const char* k : {"pos_x", "pos_y", "size"}) settings::SetDisplay(kModule, k, "%");
+    settings::SetDisplay(kModule, "opacity", "%", {}, 100);
+    settings::SetDisplay(kModule, "zoom", "x");
+    settings::SetDisplay(kModule, "arrow_rotation_offset", "\xC2\xB0");  // degree sign
     def("show_altitude", "Show altitude label (Grey Labyrinth)", "View", Kind::Bool, 0, 0, 1, 1, {},
         "Shows the player's height (\"Alt N m\") at the bottom of the minimap in the Grey Labyrinth");
     def("icon_teleporters", "Teleporters (map markers)", "Icons", Kind::Bool, 1, 0, 1, 1, {},

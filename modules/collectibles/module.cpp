@@ -198,7 +198,8 @@ void RegisterSettings() {
     settings::Def size;
     size.module = kModule;
     size.key = "size";
-    size.label = "Size (%)";
+    size.label = "Size";
+    size.unit = "%";
     size.group = "Display";
     size.kind = Kind::Float;
     size.def = 100;

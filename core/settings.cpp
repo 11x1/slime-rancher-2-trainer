@@ -267,10 +267,16 @@ void Register(const Def& d) {
     if (Entry* e = FindLocked(d.module, d.key)) {
         const std::string parent = e->def.parent;
         const int parentValue = e->def.parentValue;
+        const Def old = e->def;
         e->def = d;  // refresh metadata, keep the current value
         if (d.parent.empty()) {  // e.g. the module manager re-registering "enabled": keep a parent set earlier
             e->def.parent = parent;
             e->def.parentValue = parentValue;
+        }
+        if (d.unit.empty() && d.zeroText.empty() && d.displayScale == 1) {  // keep a display set with SetDisplay
+            e->def.unit = old.unit;
+            e->def.zeroText = old.zeroText;
+            e->def.displayScale = old.displayScale;
         }
         e->value = Clamp(e->def, e->value);
         return;
@@ -313,6 +319,16 @@ void SetParent(std::string_view module, std::string_view key, std::string_view p
     if (Entry* e = FindLocked(module, key)) {
         e->def.parent = std::string(parent);
         e->def.parentValue = parentValue;
+    }
+}
+
+void SetDisplay(std::string_view module, std::string_view key, std::string_view unit, std::string_view zeroText,
+                double displayScale) {
+    std::lock_guard lock(g_mutex);
+    if (Entry* e = FindLocked(module, key)) {
+        e->def.unit = std::string(unit);
+        e->def.zeroText = std::string(zeroText);
+        e->def.displayScale = displayScale > 0 ? displayScale : 1;
     }
 }
 

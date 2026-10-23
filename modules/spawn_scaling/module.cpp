@@ -1281,6 +1281,9 @@ bool SpawnScaling::Setup(sr2::core::ModuleContext& ctx) {
         settings::SetParent(kModule, AdvancedKey(s), ApplyKey(s));
     }
     if (paceOk_) settings::SetParent(kModule, kKeepHarvestTime, ApplyKey(kSrcNodes));
+    // Units after the slider values (UI only).
+    for (const char* k : {kSpawnRate, kMaxNodes, kRespawn, kOreAmount}) settings::SetDisplay(kModule, k, "x");
+    settings::SetDisplay(kModule, kHardCap, "", "auto");
 
     settings::OnChange(kModule, [this](const std::string&) { dirty_.store(true); });
 
@@ -1828,6 +1831,7 @@ void SpawnScaling::FlushPendingResources() {
         d.min = 0.1;
         d.max = 10.0;
         d.step = 0.1;
+        d.unit = "x";
         d.tooltip = std::format(
             "Amount multiplier for {}, used INSTEAD of the global ore amount multiplier by every source set to "
             "'advanced (per resource)'.{}{}",

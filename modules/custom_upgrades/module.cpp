@@ -2554,6 +2554,8 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     d.min = 0;
     d.max = 100000;
     d.step = 50;
+    d.unit = " Newbucks";
+    d.zeroText = "free";
     d.tooltip =
         "Newbucks price of the silo 'Sell-All Button' custom upgrade (bought in the silo's own purchase menu). Once "
         "bought, the silo menu shows 'Sell All Plorts Now'. Ownership is stored next to version.dll in "

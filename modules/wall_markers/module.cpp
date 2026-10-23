@@ -147,10 +147,12 @@ private:
             x.tooltip = tip;
             settings::Register(x);
         };
-        def("range", "Marker range (m)", Kind::Float, 60, 10, 250, 5,
+        def("range", "Marker range", Kind::Float, 60, 10, 250, 5,
             "Intact Nullifier walls closer than this get a marker (no line-of-sight check)");
         def("show_distance", "Show distance", Kind::Bool, 1, 0, 1, 1, "Distance label under each marker");
         def("size", "Marker size", Kind::Float, 1, 0.5, 3, 0.1, "");
+        settings::SetDisplay(kModule, "range", " m");
+        settings::SetDisplay(kModule, "size", "x");
     }
 
     static Cfg LoadCfg() {

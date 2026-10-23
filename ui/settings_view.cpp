@@ -271,11 +271,24 @@ int StepDecimals(double step) {
     return 4;
 }
 
+int DisplayDecimals(const settings::Def& d) {
+    const double k = d.displayScale > 0 ? d.displayScale : 1.0;
+    const double step = d.kind == settings::Kind::Int ? std::max(1.0, std::round(d.step)) : d.step;
+    return StepDecimals(step * k);
+}
+
 std::string FormatValue(const settings::Def& d, double v) {
     switch (d.kind) {
         case settings::Kind::Bool: return v >= 0.5 ? "On" : "Off";
-        case settings::Kind::Int: return std::format("{}", static_cast<long long>(std::llround(v)));
-        case settings::Kind::Float: return std::format("{:.{}f}", v, StepDecimals(d.step));
+        case settings::Kind::Int:
+        case settings::Kind::Float: {
+            if (!d.zeroText.empty() && std::fabs(v) < 1e-9) return d.zeroText;
+            const double k = d.displayScale > 0 ? d.displayScale : 1.0;
+            const int dec = DisplayDecimals(d);
+            if (d.kind == settings::Kind::Int && dec == 0)
+                return std::format("{}{}", static_cast<long long>(std::llround(v * k)), d.unit);
+            return std::format("{:.{}f}{}", v * k, dec, d.unit);
+        }
         case settings::Kind::Enum: {
             long long i = std::llround(v);
             if (i >= 0 && static_cast<size_t>(i) < d.options.size()) return d.options[static_cast<size_t>(i)];

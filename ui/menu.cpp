@@ -346,21 +346,40 @@ bool Switch(const char* id, bool on) {
     return clicked;
 }
 
+// ImGui format text: '%' doubled so a unit or zero text is shown literally.
+std::string FormatLiteral(const std::string& s) {
+    std::string out;
+    for (char c : s) {
+        out.push_back(c);
+        if (c == '%') out.push_back('%');
+    }
+    return out;
+}
+
+// Slider on the displayed value (Def::displayScale) with Def::unit after the
+// number, or Def::zeroText instead of it at 0. Ctrl+click types the number.
 void SliderDef(const settings::Def& d, double cur, float w) {
     ImGui::SetNextItemWidth(w);
-    if (d.kind == settings::Kind::Float) {
-        float v = static_cast<float>(cur);
-        char fmt[16];
-        std::snprintf(fmt, sizeof(fmt), "%%.%df", StepDecimals(d.step));
-        if (ImGui::SliderFloat("##v", &v, static_cast<float>(d.min), static_cast<float>(d.max), fmt, ImGuiSliderFlags_AlwaysClamp)) {
+    const double k = d.displayScale > 0 ? d.displayScale : 1.0;
+    std::string fmt;
+    if (!d.zeroText.empty() && std::fabs(cur) < 1e-9 && !ImGui::GetIO().KeyCtrl)
+        fmt = FormatLiteral(d.zeroText);
+    else if (d.kind == settings::Kind::Int && k == 1.0)
+        fmt = "%d" + FormatLiteral(d.unit);
+    else
+        fmt = std::format("%.{}f", DisplayDecimals(d)) + FormatLiteral(d.unit);
+    if (d.kind == settings::Kind::Int && k == 1.0) {
+        int v = static_cast<int>(std::lround(cur));
+        if (ImGui::SliderInt("##v", &v, static_cast<int>(std::lround(d.min)), static_cast<int>(std::lround(d.max)),
+                             fmt.c_str(), ImGuiSliderFlags_AlwaysClamp)) {
             const double s = Snap(d, v);
             if (std::fabs(s - cur) > 1e-9) Write(d, s);
         }
     } else {
-        int v = static_cast<int>(std::lround(cur));
-        if (ImGui::SliderInt("##v", &v, static_cast<int>(std::lround(d.min)), static_cast<int>(std::lround(d.max)), "%d",
-                             ImGuiSliderFlags_AlwaysClamp)) {
-            const double s = Snap(d, v);
+        float v = static_cast<float>(cur * k);
+        if (ImGui::SliderFloat("##v", &v, static_cast<float>(d.min * k), static_cast<float>(d.max * k), fmt.c_str(),
+                               ImGuiSliderFlags_AlwaysClamp)) {
+            const double s = Snap(d, v / k);
             if (std::fabs(s - cur) > 1e-9) Write(d, s);
         }
     }
