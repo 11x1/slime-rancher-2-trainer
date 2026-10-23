@@ -104,6 +104,27 @@ RVAs are only for reference (GameAssembly.dll 1.3.0). The code finds everything 
   * A deleted game leaves its sidecar behind (harmless). A later hook on
     `AutoSaveDirector.DeleteGame(string)` could delete it.
 
+### 1.2b Gate: off by default, locked on per save
+
+* `custom_upgrades.enabled` defaults to **off**: no custom item in any purchase menu (and no tier
+  effect, world object or per-save value) until the switch is on. Overlay: Ranch > General.
+* Turning it on with a save loaded marks that save: per-save value `custom_upgrades.on` = "1" in
+  its sidecar (written with the next game save, like a purchase). While a marked save, or one whose
+  sidecar has any owned custom upgrade, is loaded, the switch is pinned on with `settings::Lock`
+  (the overlay shows it locked, tooltip "Locked on: this save uses custom upgrades. ..."). On the
+  title screen nothing is locked.
+* With the switch off the module is still set up (`Module::SetupWhileDisabled`, hooks disabled), so
+  its frame callback (`GateTick`, 2 Hz) can watch the loaded save: in game = `SceneContext.GameModel`
+  set (the metadata keeps the last game on the title screen) and a game name; save =
+  `_currentGameMetadata` (GameName, SaveNumber), checked once per new save with a read-only sidecar
+  lookup in `LoadSidecar`'s order (exact per-save sidecar -> per-game sidecar -> newest older one).
+  Such a save turns the module on (posted `settings::Set`, the normal enable path re-reads the
+  loaded save); leaving it again (title screen, or a save without custom upgrades) turns it back
+  off, so the global switch stays what the player chose.
+* A session that is never saved leaves no mark: quit without saving and the save is not locked.
+* sell_upgrades keeps the ash of a sold Ash Trough in the sidecar only while custom upgrades are on;
+  otherwise only in memory (lost on reload).
+
 ### 1.3 Menu injection (`LandPlotUIRoot`, the plot purchase menu)
 
 * `LandPlotUIRoot : ListUIRoot<PlotPurchaseItemModel, PlotPurchaseCategory, ...>` has
