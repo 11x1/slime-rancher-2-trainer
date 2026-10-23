@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 
@@ -24,6 +25,7 @@ namespace {
 // The settings each element is placed with (registered by its module).
 struct Desc {
     const char* name;
+    const char* title;  // help bar heading
     const char* module;
     const char* keyX;
     const char* keyY;
@@ -32,8 +34,8 @@ struct Desc {
 };
 
 constexpr Desc kDesc[] = {
-    {"minimap", "minimap", "pos_x", "pos_y", "size", 10.0f, 50.0f},
-    {"Speed Panel", "hl2_movement", "momentum_hud_x", "momentum_hud_y", "momentum_hud_size", 0.8f, 8.0f},
+    {"minimap", "Minimap", "minimap", "pos_x", "pos_y", "size", 10.0f, 50.0f},
+    {"Speed Panel", "Speed Panel", "hl2_movement", "momentum_hud_x", "momentum_hud_y", "momentum_hud_size", 0.8f, 8.0f},
 };
 constexpr int kCount = static_cast<int>(sizeof(kDesc) / sizeof(kDesc[0]));
 
@@ -54,6 +56,7 @@ unsigned long long g_pendingUntil = 0;
 std::atomic<bool> g_active{false};
 std::atomic<int> g_activeElem{0};
 std::atomic<bool> g_finished{false};
+std::atomic<bool> g_hoverWants{false};  // Hover: element under the mouse or pressed (render thread writes)
 
 bool Near(double a, double b) { return std::fabs(a - b) < 0.02; }
 
@@ -118,6 +121,8 @@ bool Hidden(const char* module, const char* key) {
 const char* Name(Element e) { return D(e).name; }
 
 bool TakeFinished() { return g_finished.exchange(false); }
+
+bool WantsMouse() { return g_hoverWants.load(std::memory_order_relaxed); }
 
 #if defined(SR2_HAVE_IMGUI)
 
@@ -201,26 +206,177 @@ ImVec2 CornerOf(ImVec2 mn, ImVec2 mx, int c) { return ImVec2((c & 1) ? mx.x : mn
 
 bool KeyDown(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
 
-// Key help, top centre; at the bottom while the element is up there (`elemTop` = outline top).
-void HintBar(ImDrawList* dl, float W, float H, float u, float elemTop) {
-    const char* text =
-        "Drag to move   \xC2\xB7   Corners resize (Alt: from the centre)   \xC2\xB7   Shift: equal gaps to the corner   "
-        "\xC2\xB7   Enter or click outside: keep   \xC2\xB7   Esc: cancel";
-    ImFont* font = ImGui::GetFont();
-    const float fs = ImGui::GetFontSize();
-    const ImVec2 ts = font->CalcTextSizeA(fs, 1e9f, 0.0f, text);
-    const float px = 14 * u, py = 7 * u, margin = 18 * u;
-    const bool bottom = elemTop < margin + ts.y + py * 2 + margin;
-    const ImVec2 at(std::round((W - ts.x) * 0.5f), std::round(bottom ? H - margin - ts.y : margin));
-    dl->AddRectFilled(ImVec2(at.x - px, at.y - py), ImVec2(at.x + ts.x + px, at.y + ts.y + py), IM_COL32(20, 12, 34, 210),
-                      ts.y);
-    dl->AddText(font, fs, at, IM_COL32(255, 248, 236, 245), text);
+ImU32 Fade(ImU32 c, float a) {
+    const float al = static_cast<float>((c >> IM_COL32_A_SHIFT) & 0xFFu) * a;
+    return (c & ~IM_COL32_A_MASK) | (static_cast<ImU32>(al + 0.5f) << IM_COL32_A_SHIFT);
 }
 
-}  // namespace
+ImU32 Darker(ImU32 c, float k) {
+    ImVec4 v = ImGui::ColorConvertU32ToFloat4(c);
+    v.x *= k;
+    v.y *= k;
+    v.z *= k;
+    return ImGui::ColorConvertFloat4ToU32(v);
+}
 
-void Begin(Element e) {
-    if (Active()) return;
+ImVec2 TextSz(ImFont* f, float fs, const char* t) { return f->CalcTextSizeA(fs, 1e9f, 0.0f, t); }
+
+// Soft drop shadow below a rounded rect (as the overlay window's floating surfaces, menu.cpp).
+void SoftShadow(ImDrawList* dl, ImVec2 a, ImVec2 b, float rounding, float dy, float spread, ImU32 col) {
+    constexpr int kLayers = 10;
+    const ImU32 layer = Fade(col, 0.18f);
+    const float top = a.y + rounding + spread;  // hidden behind the rect
+    for (int i = 0; i < kLayers; ++i) {
+        const float e = spread * (1.0f - static_cast<float>(i) / kLayers);
+        const float ex = e - spread;  // never wider than the rect: the shadow only shows below it
+        dl->AddRectFilled(ImVec2(a.x - ex, top), ImVec2(b.x + ex, b.y + dy + e), layer, std::max(0.0f, rounding + ex));
+    }
+}
+
+// ---- help bar: a pill at the top centre in the overlay's theme; key hints as
+// keycap chips, then the cancel (X) and keep (check) buttons ----
+
+struct Hint {
+    const char* key;
+    const char* text;
+    int prio;  // the lowest go first when the bar is wider than the screen
+};
+constexpr Hint kHints[] = {
+    {"Drag", "move", 3},        {"Corner", "resize", 3}, {"Alt", "from the centre", 1},
+    {"Shift", "equal gaps", 1}, {"Enter", "keep", 2},    {"Esc", "cancel", 2},
+};
+
+// Bar metrics in px for the overlay scale `s` (1 = 1080p).
+struct Metrics {
+    float u, h, padL, gap, hintGap, keyGap, chipX, chipY, btnD, btnGap, edge, top;
+    float fsTitle, fsText, fsKey;
+    explicit Metrics(float s)
+        : u(s), h(44 * s), padL(20 * s), gap(14 * s), hintGap(16 * s), keyGap(6 * s), chipX(7 * s), chipY(3 * s),
+          btnD(32 * s), btnGap(6 * s), edge(6 * s), top(16 * s), fsTitle(theme::kDisplaySize * s),
+          fsText(theme::kBodySize * s), fsKey((theme::kSmallSize + 0.5f) * s) {}
+    float Sep() const { return std::max(1.0f, std::round(2 * u)); }
+};
+
+struct Bar {
+    ImVec2 mn, mx;        // the pill
+    ImVec2 cancel, keep;  // button centres
+    float btnR = 0;
+    int minPrio = 0;      // hints with prio >= minPrio are shown
+};
+
+enum class BarHit { None, Body, Cancel, Keep };
+
+float HintW(const Metrics& bm, const Hint& h) {
+    return TextSz(theme::Mono(), bm.fsKey, h.key).x + bm.chipX * 2 + bm.keyGap +
+           TextSz(theme::Body(), bm.fsText, h.text).x;
+}
+
+Bar LayoutBar(Element e, float W, const Metrics& bm) {
+    const float titleW = TextSz(theme::Display(), bm.fsTitle, D(e).title).x;
+    const float fixed = bm.padL + titleW + bm.gap + bm.Sep() + bm.gap + bm.gap + bm.btnD * 2 + bm.btnGap + bm.edge;
+    const float maxW = W - bm.top * 2;
+    Bar b;
+    float w = fixed;
+    for (b.minPrio = 0; b.minPrio <= 4; ++b.minPrio) {  // 4: no hints at all
+        float hw = 0;
+        int n = 0;
+        for (const Hint& h : kHints)
+            if (h.prio >= b.minPrio) {
+                hw += HintW(bm, h);
+                ++n;
+            }
+        if (n > 1) hw += bm.hintGap * static_cast<float>(n - 1);
+        w = fixed + hw;
+        if (w <= maxW) break;
+    }
+    b.minPrio = std::min(b.minPrio, 4);
+    b.mn = ImVec2(std::round((W - w) * 0.5f), std::round(bm.top));
+    b.mx = ImVec2(b.mn.x + std::round(w), b.mn.y + std::round(bm.h));
+    b.btnR = bm.btnD * 0.5f;
+    const float cy = (b.mn.y + b.mx.y) * 0.5f;
+    b.keep = ImVec2(b.mx.x - bm.edge - b.btnR, cy);
+    b.cancel = ImVec2(b.keep.x - bm.btnD - bm.btnGap, cy);
+    return b;
+}
+
+BarHit HitBar(const Bar& b, ImVec2 p) {
+    auto in = [&](ImVec2 c) {
+        const float dx = p.x - c.x, dy = p.y - c.y;
+        return dx * dx + dy * dy <= b.btnR * b.btnR;
+    };
+    if (in(b.cancel)) return BarHit::Cancel;
+    if (in(b.keep)) return BarHit::Keep;
+    if (p.x >= b.mn.x && p.x <= b.mx.x && p.y >= b.mn.y && p.y <= b.mx.y) return BarHit::Body;
+    return BarHit::None;
+}
+
+// A key as a keycap: monospace text on a rounded chip in the frame colour (like the
+// overlay's console-name chips) with a darker edge below. `at` = left end, vertical centre.
+float KeyChip(ImDrawList* dl, ImVec2 at, const char* key, const Metrics& bm, float alpha) {
+    const theme::Palette& P = theme::Colors();
+    const ImVec2 ts = TextSz(theme::Mono(), bm.fsKey, key);
+    const ImVec2 sz(std::round(ts.x + bm.chipX * 2), std::round(ts.y + bm.chipY * 2));
+    const ImVec2 a(std::round(at.x), std::round(at.y - sz.y * 0.5f - bm.u)), b(a.x + sz.x, a.y + sz.y);
+    const float r = 6 * bm.u, edge = std::max(1.0f, std::round(2 * bm.u));
+    dl->AddRectFilled(ImVec2(a.x, a.y + edge), ImVec2(b.x, b.y + edge), Fade(P.line, alpha), r);
+    dl->AddRectFilled(a, b, Fade(P.frame, alpha), r);
+    dl->AddText(theme::Mono(), bm.fsKey, ImVec2(a.x + bm.chipX, a.y + bm.chipY), Fade(P.text, alpha), key);
+    return sz.x;
+}
+
+// Round button with a drawn glyph (no font dependency): X = cancel, check = keep.
+void RoundButton(ImDrawList* dl, ImVec2 c, float r, bool keep, bool hot, const Metrics& bm, float alpha) {
+    const theme::Palette& P = theme::Colors();
+    const ImU32 fill = keep ? (hot ? Darker(P.accent, 0.88f) : P.accent) : (hot ? P.btnHover : P.btn);
+    const ImU32 ink = keep ? P.accentInk : P.text;
+    if (hot) dl->AddCircle(c, r + 2 * bm.u, Fade(P.tabSel, alpha), 0, std::max(1.0f, 2 * bm.u));
+    dl->AddCircleFilled(c, r, Fade(fill, alpha));
+    const float t = std::max(1.5f, 2.4f * bm.u);
+    if (keep) {
+        const ImVec2 pts[3] = {ImVec2(c.x - r * 0.40f, c.y + r * 0.02f), ImVec2(c.x - r * 0.12f, c.y + r * 0.30f),
+                               ImVec2(c.x + r * 0.42f, c.y - r * 0.28f)};
+        dl->AddPolyline(pts, 3, Fade(ink, alpha), ImDrawFlags_None, t);
+    } else {
+        const float k = r * 0.32f;
+        dl->AddLine(ImVec2(c.x - k, c.y - k), ImVec2(c.x + k, c.y + k), Fade(ink, alpha), t);
+        dl->AddLine(ImVec2(c.x - k, c.y + k), ImVec2(c.x + k, c.y - k), Fade(ink, alpha), t);
+    }
+}
+
+void DrawBar(ImDrawList* dl, Element e, const Bar& b, const Metrics& bm, float alpha, BarHit hot) {
+    const theme::Palette& P = theme::Colors();
+    const float r = (b.mx.y - b.mn.y) * 0.5f;
+    SoftShadow(dl, b.mn, b.mx, r, 2 * bm.u, 6 * bm.u, Fade(P.shadow, alpha));
+    dl->AddRectFilled(b.mn, b.mx, Fade(P.win, alpha), r);
+    dl->AddRect(b.mn, b.mx, Fade(P.line, alpha), r, 0, bm.Sep());
+    const float cy = (b.mn.y + b.mx.y) * 0.5f;
+    float x = b.mn.x + bm.padL;
+    const char* title = D(e).title;
+    const ImVec2 ts = TextSz(theme::Display(), bm.fsTitle, title);
+    dl->AddText(theme::Display(), bm.fsTitle, ImVec2(x, std::round(cy - ts.y * 0.5f)), Fade(P.head, alpha), title);
+    x += ts.x + bm.gap;
+    const float sep = bm.Sep(), half = std::round(bm.h * 0.25f);
+    dl->AddRectFilled(ImVec2(std::round(x), cy - half), ImVec2(std::round(x) + sep, cy + half), Fade(P.line, alpha),
+                      sep * 0.5f);
+    x += sep + bm.gap;
+    bool first = true;
+    for (const Hint& h : kHints) {
+        if (h.prio < b.minPrio) continue;
+        if (!first) x += bm.hintGap;
+        first = false;
+        x += KeyChip(dl, ImVec2(x, cy), h.key, bm, alpha) + bm.keyGap;
+        const ImVec2 hs = TextSz(theme::Body(), bm.fsText, h.text);
+        dl->AddText(theme::Body(), bm.fsText, ImVec2(std::round(x), std::round(cy - hs.y * 0.5f)), Fade(P.soft, alpha),
+                    h.text);
+        x += hs.x;
+    }
+    RoundButton(dl, b.cancel, b.btnR, false, hot == BarHit::Cancel, bm, alpha);
+    RoundButton(dl, b.keep, b.btnR, true, hot == BarHit::Keep, bm, alpha);
+}
+
+// Enters edit mode for `e` with the stored placement. False if its settings are missing.
+bool Start(Element e) {
+    if (Active()) return false;
     const Desc& d = D(e);
     const auto all = settings::All();
     const settings::Def* dx = FindDef(all, d.module, d.keyX);
@@ -228,7 +384,7 @@ void Begin(Element e) {
     const settings::Def* ds = FindDef(all, d.module, d.keySize);
     if (!dx || !dy || !ds) {
         SR2_WARN("ui: edit mode: {} has no position settings registered", d.name);
-        return;
+        return false;
     }
     g_st = State{};
     g_st.elem = e;
@@ -238,7 +394,28 @@ void Begin(Element e) {
     g_activeElem.store(static_cast<int>(e), std::memory_order_relaxed);
     g_active.store(true, std::memory_order_release);
     SR2_INFO("ui: edit mode for the {}", d.name);
+    return true;
 }
+
+// Hover (render thread): the element pressed and not yet dragged far enough.
+struct HoverState {
+    int elem = -1;
+    bool armed = false;
+    ImVec2 press{};
+} g_hv;
+
+// The placement on screen now: the stored one, or a commit that has not landed yet.
+Placement Shown(Element e) {
+    const Desc& d = D(e);
+    Placement p{static_cast<float>(settings::Get(d.module, d.keyX)), static_cast<float>(settings::Get(d.module, d.keyY)),
+                static_cast<float>(settings::Get(d.module, d.keySize))};
+    Preview(e, p);
+    return p;
+}
+
+}  // namespace
+
+void Begin(Element e) { Start(e); }
 
 void Cancel() {
     if (!Active()) return;
@@ -282,8 +459,21 @@ void Draw(float uiScale) {
         return -1;
     };
     const bool mouseOk = ImGui::IsMousePosValid(&m);
+    const Metrics bm(u);
+    const Bar bar = LayoutBar(g_st.elem, W, bm);
+    const BarHit barHit = mouseOk && g_st.drag == Drag::None ? HitBar(bar, m) : BarHit::None;
 
     if (g_st.drag == Drag::None && mouseOk && ImGui::IsMouseClicked(ImGuiMouseButton_Left, false)) {
+        // The bar's buttons first, then the element's corners and inside, then the
+        // bar itself (does nothing), then outside (keep).
+        if (barHit == BarHit::Cancel) {
+            Cancel();
+            return;
+        }
+        if (barHit == BarHit::Keep) {
+            Finish(true);
+            return;
+        }
         const int c = cornerAt(m);
         if (c >= 0) {
             g_st.drag = Drag::Resize;
@@ -292,7 +482,7 @@ void Draw(float uiScale) {
                                m.y - CornerOf(tl, ImVec2(tl.x + box.x, tl.y + box.y), c).y);
         } else if (m.x >= omn.x && m.x <= omx.x && m.y >= omn.y && m.y <= omx.y) {
             g_st.drag = Drag::Move;
-        } else {
+        } else if (barHit == BarHit::None) {
             Finish(true);  // click outside: keep
             return;
         }
@@ -368,18 +558,105 @@ void Draw(float uiScale) {
     }
     DashedRect(dl, ImVec2(omn.x + 1, omn.y + 1), ImVec2(omx.x + 1, omx.y + 1), ink, thick + 1, dash, gap);
     DashedRect(dl, omn, omx, line, thick, dash, gap);
-    const int hot = g_st.drag == Drag::Resize ? g_st.corner : (mouseOk ? cornerAt(m) : -1);
+    const bool onButton = barHit == BarHit::Cancel || barHit == BarHit::Keep;
+    const int hot = g_st.drag == Drag::Resize ? g_st.corner : (mouseOk && !onButton ? cornerAt(m) : -1);
     for (int c = 0; c < 4; ++c) {
         const ImVec2 k = CornerOf(omn, omx, c);
         const float h = handle * 0.5f;
         dl->AddRectFilled(ImVec2(k.x - h - 1, k.y - h - 1), ImVec2(k.x + h + 1, k.y + h + 1), ink);
         dl->AddRectFilled(ImVec2(k.x - h, k.y - h), ImVec2(k.x + h, k.y + h), c == hot ? accent : line);
     }
-    HintBar(dl, W, H, u, omn.y);
+    // The bar stays at the top; while the element is dragged under it, it fades so the element shows through.
+    const bool under = omx.x > bar.mn.x && omn.x < bar.mx.x && omx.y > bar.mn.y && omn.y < bar.mx.y;
+    DrawBar(dl, g_st.elem, bar, bm, g_st.drag != Drag::None && under ? 0.35f : 1.0f, barHit);
 
-    if (hot >= 0) ImGui::SetMouseCursor((hot == 0 || hot == 3) ? ImGuiMouseCursor_ResizeNWSE : ImGuiMouseCursor_ResizeNESW);
+    if (onButton) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    else if (hot >= 0) ImGui::SetMouseCursor((hot == 0 || hot == 3) ? ImGuiMouseCursor_ResizeNWSE : ImGuiMouseCursor_ResizeNESW);
     else if (g_st.drag == Drag::Move || (mouseOk && m.x >= omn.x && m.x <= omx.x && m.y >= omn.y && m.y <= omx.y))
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+}
+
+void Hover(float uiScale, bool allowed) {
+    const ImGuiIO& io = ImGui::GetIO();
+    const float W = io.DisplaySize.x, H = io.DisplaySize.y;
+    const ImVec2 m = io.MousePos;
+    if (g_hv.armed && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) g_hv = HoverState{};  // released without a drag
+    // Only outside the overlay's windows, with no popup open (a press that started on an element keeps it).
+    const bool free = allowed && !Active() && W > 0 && H > 0 && ImGui::IsMousePosValid(&m) &&
+                      (g_hv.armed || (!io.WantCaptureMouse && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)));
+    if (!free) {
+        g_hv = HoverState{};
+        g_hoverWants.store(false, std::memory_order_relaxed);
+        return;
+    }
+    const float u = uiScale > 0 ? uiScale : 1.0f;
+    const float pad = 6 * u;  // as the edit outline
+
+    // The element under the mouse (the Speed Panel first: it is the smaller one), or the one pressed.
+    // Hidden ones count too: the minimap hides while a menu (this window) frees the cursor.
+    int hit = -1;
+    ImVec2 mn, mx;
+    for (int i = kCount - 1; i >= 0 && hit < 0; --i) {
+        if (g_hv.armed && i != g_hv.elem) continue;
+        const Desc& dd = kDesc[i];
+        if (!settings::Visible(dd.module, dd.keyX)) continue;  // module off (or the Speed Panel turned off)
+        const Element e = static_cast<Element>(i);
+        const Placement p = Shown(e);
+        const ImVec2 box = Box(e, p.size, H);
+        const ImVec2 tl(ToPx(p.x, W, box.x), ToPx(p.y, H, box.y));
+        mn = ImVec2(tl.x - pad, tl.y - pad);
+        mx = ImVec2(tl.x + box.x + pad, tl.y + box.y + pad);
+        if (g_hv.armed || (m.x >= mn.x && m.x <= mx.x && m.y >= mn.y && m.y <= mx.y)) hit = i;
+    }
+    if (g_hv.armed && hit < 0) g_hv = HoverState{};  // its module was turned off meanwhile
+
+    if (!g_hv.armed && hit >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left, false)) {
+        g_hv.armed = true;
+        g_hv.elem = hit;
+        g_hv.press = m;
+    }
+    if (g_hv.armed) {
+        const float dx = m.x - g_hv.press.x, dy = m.y - g_hv.press.y;
+        const float thr = std::max(io.MouseDragThreshold, 4 * u);
+        if (dx * dx + dy * dy >= thr * thr) {
+            // Dragged: edit mode, continuing this drag as a move from the press.
+            const Element e = static_cast<Element>(g_hv.elem);
+            const ImVec2 press = g_hv.press;
+            g_hv = HoverState{};
+            g_hoverWants.store(false, std::memory_order_relaxed);
+            if (Start(e)) {
+                g_st.drag = Drag::Move;
+                g_st.startMouse = press;
+                g_st.startBox = Box(e, g_st.cur.size, H);
+                g_st.startTl = ImVec2(ToPx(g_st.cur.x, W, g_st.startBox.x), ToPx(g_st.cur.y, H, g_st.startBox.y));
+            }
+            return;
+        }
+    }
+    g_hoverWants.store(hit >= 0, std::memory_order_relaxed);
+    if (hit < 0) return;
+
+    // Hover outline behind the overlay's windows, and a label pill below it (above near the bottom).
+    const theme::Palette& P = theme::Colors();
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const float dash = 14 * u, gap = 8 * u, thick = std::max(1.0f, std::round(2 * u));
+    DashedRect(dl, ImVec2(mn.x + 1, mn.y + 1), ImVec2(mx.x + 1, mx.y + 1), IM_COL32(15, 10, 30, 110), thick + 1, dash, gap);
+    DashedRect(dl, mn, mx, IM_COL32(255, 255, 255, 190), thick, dash, gap);
+    char label[64];
+    std::snprintf(label, sizeof label, "Drag to move the %s", D(static_cast<Element>(hit)).name);
+    const float fs = theme::kSmallSize * u, px = 10 * u, py = 4 * u, off = 6 * u;
+    const ImVec2 ts = TextSz(theme::Body(), fs, label);
+    const ImVec2 sz(std::round(ts.x + px * 2), std::round(ts.y + py * 2));
+    const bool below = mx.y + off + sz.y <= H;
+    ImVec2 a(std::round((mn.x + mx.x - sz.x) * 0.5f), std::round(below ? mx.y + off : mn.y - off - sz.y));
+    a.x = std::clamp(a.x, 0.0f, std::max(0.0f, W - sz.x));
+    a.y = std::clamp(a.y, 0.0f, std::max(0.0f, H - sz.y));
+    const ImVec2 b(a.x + sz.x, a.y + sz.y);
+    SoftShadow(dl, a, b, sz.y * 0.5f, u, 3 * u, P.shadow);
+    dl->AddRectFilled(a, b, P.win, sz.y * 0.5f);
+    dl->AddRect(a, b, P.line, sz.y * 0.5f, 0, std::max(1.0f, std::round(u)));
+    dl->AddText(theme::Body(), fs, ImVec2(a.x + px, a.y + py), P.text, label);
+    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
 }
 
 #else
@@ -387,6 +664,7 @@ void Draw(float uiScale) {
 void Begin(Element) {}
 void Cancel() {}
 void Draw(float) {}
+void Hover(float, bool) {}
 
 #endif
 
