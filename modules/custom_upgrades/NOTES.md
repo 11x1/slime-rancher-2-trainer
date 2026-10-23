@@ -67,7 +67,7 @@ Not checked in game yet: that the plot categories have an `altDetailsButton`, th
 label is set (log `alt-action sell: prefab ... label via ...`), and the keyboard key of the
 altSubmit event (the prompt shows it).
 
-## Tier props (checklist u5, u6, u9, u11)
+## Tier props (checklist u5, u6, u9, u11, uv1-uv4)
 
 `plot_props.cpp` puts a visible prop on a plot while a tier is owned; it goes when the tier is
 sold or the module is turned off. No assets of ours: every piece is a child of a vanilla prefab,
@@ -77,15 +77,37 @@ coop_world's scan would destroy), stripped of colliders, joints, rigidbodies and
 
 | tier | prop | source |
 |---|---|---|
-| Faster Hens I or II (u5) | two small hay bales (scale 0.5) along the +z side | decoration `decorHayBales`: `hayBale_2`, `hayBale_0 (1)` |
-| Faster Hens II (u6) | nests in the middle of the -x / +x sides, a stuffed chicken in the +x nest, a flower pillow in the middle of the -z side | coop prefab `Deco/nestPlain01` (the vanilla nest), toy `toyStuffedChicken`: `model_stuffedChicken`, decoration `decorFlowerPillowSmall`: `mesh` |
+| Faster Hens I or II (u5) | two small hay bales (scale 0.5) and three grass tufts, scattered | decoration `decorHayBales`: `hayBale_2`, `hayBale_0 (1)`; coop prefab `Deco/decoFieldsGrass01 _Green`, `Deco/decoFieldsGrass02_Green` |
+| Faster Hens II (u6) | two nests (a stuffed chicken in the second), a flower pillow and two more grass tufts, scattered | coop prefab `Deco/nestPlain01` (the vanilla nest), toy `toyStuffedChicken`: `model_stuffedChicken`, decoration `decorFlowerPillowSmall`: `mesh`, coop grass as above |
 | Fast Growth I or II (u9) | a third sprinkler head in the middle of the +x side, spraying inwards | garden prefab `Sprinkler/SprinklerBase` (vanilla heads are on the -z / +z sides) |
+| Fast Growth II | a fourth head in the middle of the -x side, turned 180 degrees | same |
+| Music Box II | a second speaker on the (-x, -z) corner post (above the plot menu terminal), leaning inwards | corral prefab `Music Box/techCorralMusicBox/MusicBox/Music` (the vanilla speaker sits on the (-x, +z) post) |
 | Ash Booster (u11) | glow + embers in the fire, embers rising out of the opening | incinerator prefab `.../meshIncinerator/FireTest/Glow` and `/Embers` (inactive in vanilla, switched on), decoration `decorFireFlower`: `FX Fireflower` |
 
 Gadget / toy prefabs are found by prefab name in `LookupDirector._gadgetDefinitions` /
 `_toyDefinitions` (member types, then sub-groups). A missing model is logged once
 (`plot props: model '...' not found`) and that piece is left out.
 
-Not checked in game yet: sizes and heights (hay bales, nests, pillow), whether the incinerator's
+Coop scatter: one layout of 10 slots per coop (`CoopLayout`), seeded by FNV-1a of the plot id
+(splitmix64), so it is stable across loads and the Hens II slots do not move when Hens I changes.
+Slots stay within +-3.7 m, out of the corner squares (|x| and |z| both > 2.5), about 1.2 m off the
+vanilla nest and clear of each other (radius per slot); 64 draws, then a fixed fallback spot (a
+simulation over 2000 ids never needed it).
+
+Corral corners: plot menu terminal (-x, -z) outside the post at ground height, vanilla speaker
+(-x, +z), plort collector (+x, +z), auto-feeder distributor (+x, -z) at 2.5 m. The second speaker
+shares the terminal's corner, 2.5 m up.
+
+Test 2 "sprinkler left behind after selling Fast Growth" was not a props bug: the log shows every
+sale of Fast Growth I (and of Music Box / Ash Trough) from its tier card followed 2-12 ms later by
+`bought Fast Growth II` (Music Box II, Ash Booster), so the plot still owned a tier and the prop
+stayed correctly. `LandPlotUIRoot.Upgrade` has one caller, `<PromptForUpgrade>b__0`, and
+`PromptForUpgrade` always opens the popup, so a purchase popup was confirmed in the click of the
+sale. sell_upgrades now refuses that confirm in the sale's frame and the next (log `purchase of
+... right after a sale refused`). Removal itself (CoopNests, IncineratorGlow) logged fine.
+
+Not checked in game yet: the Music Box II speaker (its Animator runs without the game's music box
+script; it may stand still or play its idle), the scattered coop layout, the -x sprinkler head,
+and whether the phantom purchase is gone. Also not checked yet: sizes and heights (hay bales, nests, pillow), whether the incinerator's
 `Glow` / `Embers` play on their own once active (they may be sub-emitters of `FireTest`) and look
 right, and that nothing of the stripped clones still logs errors.
