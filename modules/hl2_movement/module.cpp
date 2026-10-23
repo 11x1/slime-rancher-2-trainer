@@ -156,8 +156,11 @@ constexpr const char* kJumpHeight = "jump_height";
 constexpr const char* kGravityMult = "gravity_multiplier";
 constexpr const char* kMomentumHud = "momentum_hud";
 constexpr const char* kMomentumDetails = "momentum_hud_details";
-constexpr const char* kMomentumY = "momentum_hud_y_offset";
-constexpr const char* kMomentumScale = "momentum_hud_scale";
+constexpr const char* kMomentumX = "momentum_hud_x";        // placed with the HUD edit mode (ui/hud_edit.h)
+constexpr const char* kMomentumY = "momentum_hud_y";
+constexpr const char* kMomentumSize = "momentum_hud_size";
+constexpr const char* kOldMomentumY = "momentum_hud_y_offset";  // before the edit mode (migrated once)
+constexpr const char* kOldMomentumScale = "momentum_hud_scale";
 constexpr const char* kMomentumFade = "momentum_hud_fade";
 constexpr const char* kMomentumBar = "momentum_hud_bar";
 
@@ -297,7 +300,7 @@ struct Cfg {
     float gravityMult = 1.0f;  // applied to sv_gravity in HL2 gravity mode
     // Momentum HUD (ui/momentum_hud.h).
     bool mhOn = true, mhDetails = false, mhFade = true, mhBar = false;
-    float mhY = 0.06f, mhScale = 1.0f;
+    float mhX = 50, mhY = 57.1f, mhSize = 1.6f;
 };
 Cfg g_cfg;  // main thread (and the constructor before hooks exist)
 std::atomic<bool> g_cfgDirty{true};
@@ -353,8 +356,9 @@ void LoadCfg() {
     c.mhDetails = b(kMomentumDetails);
     c.mhFade = b(kMomentumFade);
     c.mhBar = b(kMomentumBar);
-    c.mhY = std::clamp(f(kMomentumY), -0.45f, 0.45f);
-    c.mhScale = std::clamp(f(kMomentumScale), 0.5f, 3.0f);
+    c.mhX = std::clamp(f(kMomentumX), 0.0f, 100.0f);
+    c.mhY = std::clamp(f(kMomentumY), 0.0f, 100.0f);
+    c.mhSize = std::clamp(f(kMomentumSize), 0.5f, 10.0f);
     g_cfg = c;
 }
 
@@ -1570,8 +1574,9 @@ void UpdateMomentumHud(float unscaledDt) {
     st.details = g_cfg.mhDetails;
     st.bar = g_cfg.mhBar;
     st.fade = g_cfg.mhFade;
-    st.yOffset = g_cfg.mhY;
-    st.scale = g_cfg.mhScale;
+    st.x = g_cfg.mhX;
+    st.y = g_cfg.mhY;
+    st.size = g_cfg.mhSize;
     st.barFull = std::max(1.0f, 2.0f * g_cfg.sprint);
     sr2::ui::momentum_hud::Publish(st);
     if (!m.published) {
@@ -1645,6 +1650,27 @@ void Frame(float unscaledDt) {
 }
 
 // --------------------------------------------------------------- settings --
+
+// One-time migration of the old Speed Panel placement (vertical offset from the
+// screen centre as a fraction of the height, size multiplier of the overlay's
+// 15 px body font x 1.15 at 1080p) to the edit mode's percent placement, so
+// the panel stays where it was: horizontally centred, same top edge and size.
+void MigrateMomentumPlacement() {
+    const float oldY = std::clamp(settings::GetFloat(kModule, kOldMomentumY), -0.45f, 0.45f);
+    float oldScale = settings::GetFloat(kModule, kOldMomentumScale);
+    if (!settings::Saved(kModule, kOldMomentumScale)) oldScale = 1.0f;
+    oldScale = std::clamp(oldScale, 0.5f, 3.0f);
+    const float size = 15.0f * 1.15f / 1080.0f * 100.0f * oldScale;  // % of the screen height
+    const float boxH = size * sr2::ui::momentum_hud::BoxHeightUnits(settings::GetBool(kModule, kMomentumBar),
+                                                                    settings::GetBool(kModule, kMomentumDetails));
+    const float top = (0.5f + (settings::Saved(kModule, kOldMomentumY) ? oldY : 0.06f)) * 100.0f;
+    const float y = std::clamp(top / std::max(1.0f, 100.0f - boxH) * 100.0f, 0.0f, 100.0f);
+    settings::Set(kModule, kMomentumX, 50);
+    settings::Set(kModule, kMomentumY, y);
+    settings::Set(kModule, kMomentumSize, size);
+    SR2_INFO("hl2_movement: Speed Panel placement migrated (offset {:.3f}, scale {:.2f} -> y {:.1f}%, size {:.2f}%)", oldY,
+             oldScale, y, size);
+}
 
 void RegisterSettings() {
     using settings::Kind;
@@ -1773,9 +1799,16 @@ void RegisterSettings() {
         "Fade the readout out after standing still for a moment; it fades back in when you move.");
     add(kMomentumBar, "Momentum HUD: underline bar", "HUD", Kind::Bool, 0, 0, 1, 1,
         "Thin bar under the number, full at 2x sprint speed.");
-    add(kMomentumY, "Momentum HUD: vertical offset", "HUD", Kind::Float, 0.06, -0.45, 0.45, 0.005,
-        "Position below the screen centre as a fraction of the screen height (negative = above).");
-    add(kMomentumScale, "Momentum HUD: size", "HUD", Kind::Float, 1.0, 0.5, 3.0, 0.05, "Text size multiplier.");
+    // Placement (the overlay shows a "Move" button for these, ui/hud_edit.h).
+    const bool migrate = !settings::Saved(kModule, kMomentumY) &&
+                         (settings::Saved(kModule, kOldMomentumY) || settings::Saved(kModule, kOldMomentumScale));
+    add(kMomentumX, "Momentum HUD: horizontal position (% of free space)", "HUD", Kind::Float, 50, 0, 100, 0.01,
+        "0 = left edge, 100 = right edge. Set with Move.");
+    add(kMomentumY, "Momentum HUD: vertical position (% of free space)", "HUD", Kind::Float, 57.1, 0, 100, 0.01,
+        "0 = top edge, 100 = bottom edge. Set with Move.");
+    add(kMomentumSize, "Momentum HUD: size (% of screen height)", "HUD", Kind::Float, 1.6, 0.8, 8, 0.01,
+        "Height of the speed number. Set with Move (drag a corner).");
+    if (migrate) MigrateMomentumPlacement();
 
     add(kSpeedReadout, "Fast-movement log", "Advanced", Kind::Bool, 1, 0, 1, 1,
         "Once per second while faster than 2x normal speed, log (Info) the speed in u/s and m/s, grounded state and "
@@ -1794,7 +1827,7 @@ void RegisterSettings() {
     settings::SetParent(kModule, kSprintDrain, kHl2Sprint);
     settings::SetParent(kModule, kSpeedLimit, kSpeedLimitOn);
     settings::SetParent(kModule, kUnitScale, kMatchVanilla, 0);  // ignored while matching
-    for (const char* k : {kMomentumDetails, kMomentumFade, kMomentumBar, kMomentumY, kMomentumScale})
+    for (const char* k : {kMomentumDetails, kMomentumFade, kMomentumBar, kMomentumX, kMomentumY, kMomentumSize})
         settings::SetParent(kModule, k, kMomentumHud);
 }
 

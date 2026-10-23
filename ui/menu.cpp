@@ -16,6 +16,7 @@
 
 #include "core/build_info.h"
 #include "core/profiles.h"
+#include "hud_edit.h"
 #include "menu_layout.h"
 #include "sandbox_bridge.h"
 #include "slime_icons.h"
@@ -457,6 +458,28 @@ void DrawRow(const Host& h, const settings::Def& d, const std::string& label, bo
     ImGui::PopID();
 }
 
+// A HUD element's position and size settings as one row: a "Move" button that
+// starts the HUD edit mode (hud_edit.h; the overlay then closes the window).
+void DrawMoveRow(const settings::Def& d, hud_edit::Element e) {
+    ImGui::PushID(d.key.c_str());
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float ctlW = std::min(U(kCtlW), std::floor(avail * 0.5f));
+    const float x0 = ImGui::GetCursorPosX();
+    const std::string tip = std::string("Closes this window. Drag the ") + hud_edit::Name(e) +
+                            " to move it (it snaps to the screen centre), drag a corner to resize it (Alt: from the "
+                            "centre). Shift: the same gap to both edges of its corner. Enter or a click outside keeps "
+                            "it, Esc cancels.";
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::Colors().text);
+    ImGui::TextUnformatted("Position and size");
+    ImGui::PopStyleColor();
+    HoverTip(tip);
+    ImGui::SameLine(x0 + avail - ctlW);
+    if (ImGui::Button("Move", ImVec2(ctlW, 0))) hud_edit::Begin(e);
+    HoverTip(tip);
+    ImGui::PopID();
+}
+
 // Options that depend on `parent`: slide open below it, indented on a thread line.
 // Drawn in the card itself (no child window), so the block is measured in the
 // frame it is drawn: while animating, the rows are shifted up by the hidden part
@@ -541,13 +564,18 @@ Nesting BuildNesting(const std::vector<const GroupView*>& groups, std::string_vi
 
 // Rows the group shows right now (top-level rows whose parent chain allows them).
 bool RowShown(const ModuleView& mv, const settings::Def& d, const Nesting& n, std::string_view skipKey) {
-    return d.key != skipKey && !n.isKid.count(d.key) && ParentChainAllows(mv, d);
+    return d.key != skipKey && !n.isKid.count(d.key) && !hud_edit::Hidden(mv.module.c_str(), d.key.c_str()) &&
+           ParentChainAllows(mv, d);
 }
 
 void DrawGroupRows(const Host& h, const ModuleView& mv, const GroupView& g, const Nesting& n, std::string_view skipKey,
                    std::string_view masterLabel) {
     for (const auto& d : g.defs) {
         if (!RowShown(mv, d, n, skipKey)) continue;
+        if (hud_edit::Element e; hud_edit::MoveRow(mv.module.c_str(), d.key.c_str(), e)) {
+            DrawMoveRow(d, e);  // position + size: the HUD edit mode instead of sliders
+            continue;
+        }
         DrawRow(h, d, layout::ShortLabel(d, nullptr, g.name, masterLabel), false);
         auto it = n.kidsOf.find(d.key);
         if (it == n.kidsOf.end()) continue;

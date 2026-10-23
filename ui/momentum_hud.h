@@ -1,6 +1,7 @@
 #pragma once
-// Minimal momentum readout (horizontal speed) drawn by the ImGui overlay just
-// below the screen centre, also while the settings window is closed.
+// Minimal momentum readout (horizontal speed) drawn by the ImGui overlay, by
+// default just below the screen centre, also while the settings window is
+// closed. Placed with the HUD edit mode (hud_edit.h, Element::SpeedPanel).
 //
 // Threading: the owner (hl2_movement) publishes a State from the Unity main
 // thread (its frame callback); every field is a separate relaxed atomic, so a
@@ -22,10 +23,19 @@ struct State {
     bool details = false;  // draw the secondary line
     bool bar = false;      // draw the thin underline bar
     bool fade = true;      // fade out while standing still
-    float yOffset = 0.06f; // fraction of the screen height below the centre
-    float scale = 1.0f;    // user size multiplier
+    float x = 50, y = 57.1f;  // position: % of the free space (hud_edit::Placement)
+    float size = 1.6f;     // main number's font size, % of the screen height
     float barFull = 640;   // speed at which the bar is full (u/s)
 };
+
+// The panel's box in units of the main font size (fs = screen height * size / 100):
+// kBoxW wide, the number on a kLine high line, then the bar and the details line.
+// The content is centred horizontally in the box.
+inline constexpr float kBoxW = 3.2f, kLine = 1.2f, kBarH = 0.25f, kDetailsH = 0.9f;
+inline float BoxHeightUnits(bool bar, bool details) { return kLine + (bar ? kBarH : 0.0f) + (details ? kDetailsH : 0.0f); }
+// The box in px for `sizePct` on a screen `screenH` high, with the bar / details
+// settings as stored now (render thread; for the edit mode).
+void EditBox(float sizePct, float screenH, float& w, float& h);
 
 // Any thread (normally the Unity main thread).
 void Publish(const State& s);
