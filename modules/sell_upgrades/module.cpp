@@ -58,8 +58,9 @@
 //     item (A / submit / clicking the selected card) does nothing, as in vanilla - a double
 //     click must not sell. Not owned -> vanilla purchase flow. If the upgrade cannot be sold
 //     there is no popup either: a disabled button with a short reason, or no button.
-//   * Detour on LandPlotUIRoot.<PromptForUpgrade>b__0 (the vanilla purchase confirm): only
-//     for the Ash Trough re-purchase below.
+//   * Detour on LandPlotUIRoot.<PromptForUpgrade>b__0 (the vanilla purchase confirm): the Ash
+//     Trough re-purchase below, and no purchase in the frame of a sale or the next (a Sell
+//     click also bought the card's tier, see sellTick_).
 //   * Sale (main thread): re-validate, refund = floor(0.5 x each currency cost) via
 //     PlayerState.AddCurrency, model.upgrades.Remove(u), revert the upgrader exactly
 //     (table above, inverted), ApplyUpgrades(empty set, false) to refresh trackers +
@@ -296,6 +297,9 @@ public:
     };
     AshRebuy BeforeVanillaBuy(Il2CppObject* closure);
     void AfterVanillaBuy(const AshRebuy& r);
+    // A vanilla purchase confirm in the frame of a sale or the next: never the player's (see
+    // sellTick_), refused before Upgrade() spends anything.
+    bool RefuseBuyAfterSale(Il2CppObject* closure);
 
 private:
     struct Refund {
@@ -336,7 +340,11 @@ private:
     std::atomic<bool> enabled_{false};
     // TickCount of the last sale: a click on our button can also reach OnAction through the
     // prefab's own submit routing, for the item that is selected after the sale (which may then be
-    // buyable): swallowed in that frame and the next.
+    // buyable): swallowed in that frame and the next. A purchase popup that this routing opened
+    // and confirmed in the same frame is refused too (RefuseBuyAfterSale): test 2 logged a sale of
+    // Fast Growth I / Music Box / Ash Trough from a tier card followed 2-12 ms later by a buy of
+    // that card's tier (so the plot kept the tier and its prop). LandPlotUIRoot.Upgrade has one
+    // caller, <PromptForUpgrade>b__0 (IDA), and PromptForUpgrade always opens the popup.
     unsigned long long sellTick_ = ~0ull;
     bool loggedButton_ = false;
     bool loggedLayout_ = false;
@@ -549,6 +557,9 @@ void OnActionDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo* mi
 }
 
 void ConfirmDetour(Il2CppObject* closure, const MethodInfo* mi) {
+    bool refuse = false;
+    if (g_self && closure && g_self->On()) g_confirmGuard.Run([&] { refuse = g_self->RefuseBuyAfterSale(closure); });
+    if (refuse) return;
     SellUpgrades::AshRebuy rebuy;
     if (g_self && closure && g_self->On()) g_confirmGuard.Run([&] { rebuy = g_self->BeforeVanillaBuy(closure); });
     g_origConfirm(closure, mi);
@@ -1174,6 +1185,16 @@ float SavedAsh(Il2CppObject* plot) {
     char* end = nullptr;
     const float f = std::strtof(v.c_str(), &end);
     return (end != v.c_str() && std::isfinite(f) && f >= 0.0f) ? f : -1.0f;
+}
+
+bool SellUpgrades::RefuseBuyAfterSale(Il2CppObject* closure) {
+    if (!main_thread::IsMainThread() || sellTick_ == ~0ull) return false;
+    const unsigned long long tick = main_thread::TickCount();
+    if (tick < sellTick_ || tick - sellTick_ > 1) return false;
+    const int32_t upg =
+        offClosureUpgrade_ && IsA(closure, closureClass_) ? unity::Field<int32_t>(closure, offClosureUpgrade_) : 0;
+    SR2_INFO("[{}] purchase of {} right after a sale refused (same click)", kModule, upg ? UpgName(upg) : "?");
+    return true;
 }
 
 SellUpgrades::AshRebuy SellUpgrades::BeforeVanillaBuy(Il2CppObject* closure) {
