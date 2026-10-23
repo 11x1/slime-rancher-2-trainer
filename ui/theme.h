@@ -16,6 +16,7 @@ struct Palette {
     ImU32 tabSel, tabInk, head, offInk, offBg;
     ImU32 text, soft, dim, ok, warn, err;
     ImU32 scroll, shadow, scrim, pill, flap1, flap2;
+    ImU32 tipBg, tipText, tipBorder;  // tooltips: must stand out from cards and the window
 };
 
 const Palette& Colors();  // palette of the applied mode

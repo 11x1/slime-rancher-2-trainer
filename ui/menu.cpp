@@ -90,15 +90,23 @@ struct FontScope {
 
 void Tooltip(const std::string& text) {
     if (text.empty()) return;
+    const Palette& P = theme::Colors();
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(12), U(9)));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, std::max(1.0f, U(1)));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, P.tipBg);
+    ImGui::PushStyleColor(ImGuiCol_Border, P.tipBorder);
+    ImGui::PushStyleColor(ImGuiCol_Text, P.tipText);
     if (ImGui::BeginTooltip()) {
-        FontScope f(theme::Body(), theme::kSmallSize + 0.5f);
-        ImGui::PushTextWrapPos(U(300));
-        ImGui::TextUnformatted(text.c_str());
-        ImGui::PopTextWrapPos();
+        {
+            FontScope f(theme::Body(), theme::kSmallSize + 0.5f);  // popped before EndTooltip
+            ImGui::PushTextWrapPos(U(300));
+            ImGui::TextUnformatted(text.c_str());
+            ImGui::PopTextWrapPos();
+        }
         ImGui::EndTooltip();
     }
-    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(3);
+    ImGui::PopStyleVar(2);
 }
 
 void HoverTip(const std::string& text) {
@@ -295,8 +303,13 @@ void ComboDef(const settings::Def& d, double cur, float w) {
     ImGui::PopStyleVar();
     DrawChevron(dl, ImVec2(pos.x + w - U(17), pos.y + fh * 0.5f), ImGui::GetColorU32(P.grab));
     if (!open) return;
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, U(2)));
+    // No item spacing (a Selectable spreads over half of it on each side), so the options get real gaps below.
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0, 0));
+    // The chosen option keeps a soft fill (and a pink label); the hovered one gets the full fill.
+    ImGui::PushStyleColor(ImGuiCol_Header, WithAlpha(P.sel, 0.45f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, P.sel);
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, P.sel);
     for (int i = 0; i < static_cast<int>(texts.size()); ++i) {
         const auto& t = texts[static_cast<size_t>(i)];
         const float innerW = ImGui::GetContentRegionAvail().x;
@@ -304,6 +317,7 @@ void ComboDef(const settings::Def& d, double cur, float w) {
         const ImVec2 ds = t.desc.empty() ? ImVec2(0, 0) : TextSize(body, theme::kSmallSize, t.desc.c_str(), innerW - U(20));
         const float h = U(16) + lineH + (t.desc.empty() ? 0.0f : U(3) + ds.y);
         const bool sel = i == idx;
+        if (i > 0) ImGui::Dummy(ImVec2(0, U(3)));
         ImGui::PushID(i);
         if (ImGui::Selectable("##opt", sel, 0, ImVec2(0, h)) && !sel) Write(d, i);
         if (sel) ImGui::SetItemDefaultFocus();
@@ -316,6 +330,7 @@ void ComboDef(const settings::Def& d, double cur, float w) {
                  innerW - U(20));
         ImGui::PopID();
     }
+    ImGui::PopStyleColor(3);
     ImGui::PopStyleVar(2);
     ImGui::EndCombo();
 }

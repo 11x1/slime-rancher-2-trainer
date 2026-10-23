@@ -31,6 +31,7 @@ constexpr Palette kDark{
     .err = Rgb(0xFF7A6B),
     .scroll = Rgb(0x4F4585), .shadow = Rgb(0x100C22, 0.42f), .scrim = Rgb(0x100C22, 0.60f),
     .pill = Rgb(0x241F3D, 0.86f), .flap1 = Rgb(0xFFECF6, 0.95f), .flap2 = Rgb(0xD6C4EE, 0.95f),
+    .tipBg = Rgb(0x433A73), .tipText = Rgb(0xF4F1FF), .tipBorder = Rgb(0x6A5DAE),
 };
 
 // Daytime: cream panels, white cards, the same pink and sky blue.
@@ -46,6 +47,7 @@ constexpr Palette kLight{
     .err = Rgb(0xC0342F),
     .scroll = Rgb(0xDCCBEB), .shadow = Rgb(0x2B2350, 0.22f), .scrim = Rgb(0x2B2350, 0.35f),
     .pill = Rgb(0xFFF8EE, 0.94f), .flap1 = Rgb(0x3C326E, 0.95f), .flap2 = Rgb(0x241F3D, 0.95f),
+    .tipBg = Rgb(0x2B2350), .tipText = Rgb(0xFFF8EE), .tipBorder = Rgb(0x2B2350),
 };
 
 Mode g_mode = Mode::Dark;
@@ -121,6 +123,7 @@ void SetMetrics(ImGuiStyle& st) {
     st.GrabMinSize = 12;
     st.GrabRounding = 7;
     st.TabRounding = 10;
+    st.SelectableRounding = 8;  // dropdown options; no contiguous multi-selections in this UI
     st.SelectableTextAlign = ImVec2(0, 0.5f);
     st.WindowTitleAlign = ImVec2(0.5f, 0.5f);
     st.SeparatorTextBorderSize = 2;
