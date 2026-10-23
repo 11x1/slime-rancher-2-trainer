@@ -482,6 +482,7 @@ public:
     void OnAddUpgrade(Il2CppObject* plot, int32_t upg);
     void BeforeMenuUpdate(Il2CppObject* root);
     void AfterMenuUpdate(Il2CppObject* root);
+    void RegisterTexts(Il2CppObject* plot, const MenuInjection& inj);
     bool IsPlotMenu(Il2CppObject* root) const { return IsA(root, rootClass_); }
     void BeforeSave();
     void AfterSave(Il2CppObject* result);
@@ -1734,6 +1735,31 @@ void CustomUpgrades::BeforeMenuUpdate(Il2CppObject* root) {
                                       : ListCall(inj->list, "Add", in.item);
         }
     }
+    // Texts now, before the original runs: with the menu open, RebuildUI's original rebinds the
+    // cards (RefreshAndAdvance) and so runs LocalizeStringEvent.UpdateString for a card that was
+    // just placed (a tier taking over a vanilla card after its purchase). With the texts only
+    // registered in the post hook, a clone shown for the first time this session showed its
+    // template's text ("High Walls" on the Music Box card, test of 506a4f60) until the next bind.
+    if (sink) RegisterTexts(plot, *inj);
+}
+
+void CustomUpgrades::RegisterTexts(Il2CppObject* plot, const MenuInjection& inj) {
+    for (const Injected& in : inj.items) {
+        if (!in.inList) continue;
+        const UpgradeDef& d = *in.def;
+        if (d.id == COOP_HEN_COLLECTOR) {
+            // This coop's keep-limits (defaults until bought / set).
+            int hens = custom_upgrades::world::kHenKeepHensDefault, roosters = custom_upgrades::world::kHenKeepRoostersDefault;
+            const std::string id = PlotId(plot);
+            if (auto it = state_.plots.find(id); !id.empty() && it != state_.plots.end()) {
+                hens = ClampKeepHens(it->second.henKeepHens);
+                roosters = ClampKeepRoosters(it->second.henKeepRoosters);
+            }
+            SetTexts(in, d.title, HenDescription(hens, roosters), d.prompt);
+        } else {
+            SetTexts(in, d.title, d.description, d.prompt);
+        }
+    }
 }
 
 void CustomUpgrades::RestoreVanilla(MenuInjection& inj) {
@@ -1763,22 +1789,7 @@ void CustomUpgrades::AfterMenuUpdate(Il2CppObject* root) {
     for (auto& p : injections_)
         if (p->config == config) inj = p.get();
     if (!inj || inj->failed) return;
-    for (const Injected& in : inj->items) {
-        if (!in.inList) continue;
-        const UpgradeDef& d = *in.def;
-        if (d.id == COOP_HEN_COLLECTOR) {
-            // This coop's keep-limits (defaults until bought / set).
-            int hens = custom_upgrades::world::kHenKeepHensDefault, roosters = custom_upgrades::world::kHenKeepRoostersDefault;
-            const std::string id = PlotId(plot);
-            if (auto it = state_.plots.find(id); !id.empty() && it != state_.plots.end()) {
-                hens = ClampKeepHens(it->second.henKeepHens);
-                roosters = ClampKeepRoosters(it->second.henKeepRoosters);
-            }
-            SetTexts(in, d.title, HenDescription(hens, roosters), d.prompt);
-        } else {
-            SetTexts(in, d.title, d.description, d.prompt);
-        }
-    }
+    RegisterTexts(plot, *inj);  // again: the original may have changed what the pre hook read
 }
 
 void CustomUpgrades::Cleanup(const char* why) {
