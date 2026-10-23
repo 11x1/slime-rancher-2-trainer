@@ -115,7 +115,11 @@
 //     this game whose .sav is gone (CleanupAutosaves keeps 5) are deleted then. Without the
 //     StoreGameData hook: one per-game sidecar as before. Kept in the game folder, not in
 //     the Steam Cloud save folder (see re/custom-upgrades.md 1.2). AutoSaveDirector.Load /
-//     StartNewGame detours drop the in-memory state. The vanilla save never contains
+//     StartNewGame detours drop the in-memory state. Re-enabling the module (its Load hook was
+//     off meanwhile, so another save may be loaded now) drops it too and re-reads it for the
+//     loaded save, identified by _currentGameMetadata (GameName + SaveNumber -> the per-save
+//     sidecar with that number, then the same order as on load; no metadata -> empty state,
+//     logged). The vanilla save never contains
 //     anything of ours: without the mod it loads unchanged (only the custom upgrades are
 //     gone).
 //   * sell_upgrades integration (modules/custom_upgrades/api.h): owned custom upgrades
@@ -435,6 +439,9 @@ public:
     bool DefaultEnabled() const override { return true; }
     bool Setup(sr2::core::ModuleContext& ctx) override;
     void OnEnable() override {
+        // The Load / NewGame hooks were off while disabled: the loaded save may be another one
+        // than the in-memory state follows. Re-read on the next main-thread EnsureLoaded.
+        resync_.store(true);
         enabled_.store(true);
         cleaned_ = false;
     }
@@ -496,6 +503,8 @@ private:
                          bool* ok = nullptr);
     void SetRef(Il2CppObject* obj, size_t offset, Il2CppObject* value);
     bool EnsureLoaded();
+    void ResyncWithLoadedSave(const std::string& game);
+    bool FindExactRotation(const std::string& game, unsigned long long number, std::string& save);
     std::string CurrentGameName();
     std::filesystem::path SidecarDir() const { return sr2::paths::SelfDir() / "sr2mods_saves"; }
     std::filesystem::path LegacyPath(const std::string& game) const;
@@ -527,6 +536,7 @@ private:
     SiloSummary Summarize(Il2CppObject* plot, bool sell, std::string* log);
 
     std::atomic<bool> enabled_{false};
+    std::atomic<bool> resync_{false};  // (re-)enabled: state must be re-read for the loaded save
     bool cleaned_ = false;
     float worldAccum_ = 0.0f;
     Il2CppObject* LookupDirector();
@@ -828,6 +838,7 @@ void CustomUpgrades::ResetState(const char* why) {
 }
 
 void CustomUpgrades::OnLoad(Il2CppObject* asd, const void* identifier) {
+    resync_.store(false);  // this load names the file exactly
     ResetState("save game load");
     pendingLoadGame_.clear();
     pendingLoadSave_.clear();
@@ -855,6 +866,7 @@ void CustomUpgrades::AfterLoad(Il2CppObject* asd) {
 }
 
 void CustomUpgrades::OnNewGame() {
+    resync_.store(false);
     ResetState("new game");
     pendingLoadGame_.clear();
     pendingLoadSave_.clear();
@@ -1040,10 +1052,93 @@ bool CustomUpgrades::EnsureLoaded() {
         cachedGame_ = CurrentGameName();
         nameTick_ = tick;
     }
-    const std::string& game = cachedGame_;
+    const std::string game = cachedGame_;
     if (game.empty()) return false;
+    if (resync_.load()) {
+        if (!main_thread::IsMainThread()) return false;  // never answer from the stale state
+        resync_.store(false);
+        ResyncWithLoadedSave(game);
+    }
     if (!state_.loaded || state_.game != game) LoadSidecar(game);
     return true;
+}
+
+bool CustomUpgrades::FindExactRotation(const std::string& game, unsigned long long number, std::string& save) {
+    // This game's per-save sidecar written with exactly this save number whose .sav still exists
+    // (when the save folder is known). Two branches of a game can share a number (load an older
+    // save, save again into another file): then the most recently written .sav wins.
+    std::error_code ec;
+    const std::wstring prefix = Widen(SanitizeFileName(game) + "_");
+    const std::wstring suffix = Widen(kRotationSuffix);
+    const bool checkSav = !savePath_.empty() && std::filesystem::is_directory(savePath_, ec);
+    std::filesystem::file_time_type best{};
+    int matches = 0;
+    std::filesystem::directory_iterator it(SidecarDir(), ec), end;
+    for (int guard = 0; !ec && it != end && guard < 4096; it.increment(ec), ++guard) {
+        const std::wstring name = it->path().filename().wstring();
+        if (name.rfind(prefix, 0) != 0 || !EndsWith(name, suffix)) continue;
+        SaveState tmp;
+        SidecarMeta m;
+        std::string err;
+        if (!ReadSidecarFile(it->path(), tmp, m, err)) continue;
+        if (m.game != game || m.save.empty() || m.saveNumber != number) continue;
+        if (it->path().filename() != RotationPath(m.save).filename()) continue;  // copied / renamed file
+        std::filesystem::file_time_type t{};
+        if (checkSav) {
+            std::error_code ec2;
+            const auto sav = savePath_ / Utf8Path(m.save + ".sav");
+            if (!std::filesystem::exists(sav, ec2)) continue;  // its .sav is gone: not the loaded one
+            t = std::filesystem::last_write_time(sav, ec2);
+        }
+        if (matches++ == 0 || t > best) {
+            best = t;
+            save = m.save;
+        }
+    }
+    if (matches > 1)
+        SR2_WARN("[{}] {} sidecars of '{}' carry save #{} - using '{}' (newest .sav)", kModule, matches, game, number,
+                 save);
+    return matches > 0;
+}
+
+void CustomUpgrades::ResyncWithLoadedSave(const std::string& game) {
+    // Main thread. The module was (re-)enabled while a game is loaded: the in-memory state may
+    // belong to another save of this game (loaded while the Load hook was off). Drop it and read
+    // the sidecar of the save loaded now. Never writes a sidecar.
+    ResetState("module enabled");
+    pendingLoadGame_.clear();
+    pendingLoadSave_.clear();
+    pendingLoadNumber_ = 0;
+    Il2CppObject* asd = AutoSave();
+    if (asd && IsA(asd, autoSaveClass_) && offAsdProvider_) {
+        auto p = ProviderSavePath(unity::Field<Il2CppObject*>(asd, offAsdProvider_));
+        if (!p.empty()) savePath_ = p;
+    }
+    if (!saveIdOk_) {
+        // No save-number support: one per-game sidecar, exactly what the Load path reads too.
+        SR2_INFO("[{}] module enabled with game '{}' loaded: re-reading its per-game sidecar", kModule, game);
+        LoadSidecar(game);
+        return;
+    }
+    std::string metaGame;
+    unsigned long long number = 0;
+    if (!CurrentMetadata(asd, metaGame, number) || metaGame != game || number == 0) {
+        SR2_WARN("[{}] module enabled with game '{}' loaded, but the loaded save cannot be identified (metadata game "
+                 "'{}', save #{}) - no custom upgrades for it, its sidecars are not read",
+                 kModule, game, metaGame, number);
+        state_.loaded = true;
+        state_.game = game;
+        Bump();
+        return;
+    }
+    std::string save;
+    const bool exact = FindExactRotation(game, number, save);
+    pendingLoadGame_ = game;
+    pendingLoadSave_ = save;  // empty: LoadSidecar goes on with the per-game / newest older sidecar
+    pendingLoadNumber_ = number;
+    SR2_INFO("[{}] module enabled with game '{}' loaded: save #{} ({}) - re-reading its custom upgrades", kModule,
+             game, number, exact ? std::format("file '{}'", save) : std::string("no sidecar with that number"));
+    LoadSidecar(game);
 }
 
 bool CustomUpgrades::WriteSidecar(const std::string& save, unsigned long long saveNumber) {
