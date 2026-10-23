@@ -9,7 +9,6 @@
 | `hen-collector-fix2.md` | Hen Collector invisible, suction, hen/rooster sliders |
 | `upgrade-tiers.md` | tier chaining, removals, buy menu refresh and prefixes |
 | `upgrades-gate.md` | upgrades switch in General, locked per save |
-| `minimap-gadget-toggles.md` | teleporter / warp depot / decoration toggles broken |
 | `silo-sell.md` | 10k Sell-All price, bee-style sale notices |
 | `drone-station-dialog.md` | drone price limit as a game-UI dialog |
 | `ui-polish.md` | F8 and HUD polish list |

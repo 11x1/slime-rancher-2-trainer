@@ -174,6 +174,7 @@ struct Symbols {
     Il2CppClass* gadgetDef = nullptr;            // GadgetDefinition (global ns, : IdentifiableType)
     size_t gdType = kNoOffset;                   // GadgetDefinition.Type (Types enum, int: 1 TELEPORTER, 2 WARP_DEPOT, 10 DRONE_STATION)
     size_t gdMapIcon = kNoOffset;                // GadgetDefinition._optionalMapIcon (Sprite)
+    size_t gdVariantOf = kNoOffset;              // GadgetDefinition.VariantOf (GadgetDefinition; null on a base gadget)
     size_t itGroup = kNoOffset;                  // IdentifiableType.groupType (IdentifiableTypeGroup, decor heuristic)
 };
 
