@@ -7,7 +7,6 @@
 | note | about |
 |---|---|
 | `silo-receipt.md` | Sell-All receipt dialog, silo space tiers |
-| `sandbox-ux.md` | shift+scroll amounts, icon tabs, right-click menu, crafter |
 | `ideas.md` | unplanned ideas |
 
 ## Where the documentation lives
