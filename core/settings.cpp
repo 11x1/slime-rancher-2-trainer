@@ -63,6 +63,17 @@ void SetSaveError(std::string e) {
     g_saveError = std::move(e);
 }
 
+// A failed save keeps the changes pending: retry a few seconds later (and at Flush).
+constexpr auto kRetryDelay = std::chrono::seconds(4);  // on top of kSaveDelay
+void RetryLaterLocked() {
+    g_dirty = true;
+    g_lastChange = Clock::now() + kRetryDelay;
+}
+void RetryLater() {
+    std::lock_guard lock(g_mutex);
+    RetryLaterLocked();
+}
+
 Entry* FindLocked(std::string_view module, std::string_view key) {
     for (Entry& e : g_entries)
         if (e.def.module == module && e.def.key == key) return &e;
@@ -144,6 +155,7 @@ void SaveNow() {
         } else {
             std::lock_guard lock(g_mutex);
             g_saveError = "sr2mods.json is not valid JSON; not overwriting it";
+            RetryLaterLocked();
             if (!g_parseErrorLogged) {
                 SR2_ERROR("settings: {} is not valid JSON ({}); not overwriting it - fix or delete the file",
                           log::Narrow(file.wstring()), perr.empty() ? "unreadable" : perr);
@@ -165,6 +177,7 @@ void SaveNow() {
         if (!o || !o.write(out.data(), static_cast<std::streamsize>(out.size()))) {
             SR2_ERROR("settings: cannot write {}", log::Narrow(tmp.wstring()));
             SetSaveError("cannot write " + log::Narrow(tmp.filename().wstring()));
+            RetryLater();
             return;
         }
     }
@@ -173,6 +186,7 @@ void SaveNow() {
         SR2_ERROR("settings: cannot replace {} (error {})", log::Narrow(file.wstring()), gle);
         SetSaveError(std::format("cannot replace sr2mods.json (error {})", gle));
         DeleteFileW(tmp.c_str());
+        RetryLater();
         return;
     }
     {
@@ -208,6 +222,7 @@ DWORD WINAPI SaverThread(LPVOID) {
             if (!Try([] { SaveNow(); }, &err)) {
                 SR2_ERROR("settings: save failed: {}", err);
                 SetSaveError(err);
+                RetryLater();
             }
         }
     }
@@ -457,6 +472,7 @@ void Flush() {
     if (!Try([] { SaveNow(); }, &err)) {
         SR2_ERROR("settings: flush failed: {}", err);
         SetSaveError(err);
+        RetryLater();
     }
 }
 
