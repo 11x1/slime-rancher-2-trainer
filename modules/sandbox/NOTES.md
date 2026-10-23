@@ -1,6 +1,6 @@
 # sandbox
 
-Edits the character's resources from the overlay's **Misc > Sandbox** tab: Newbucks, health / energy / radiation, what each vacpack slot holds, spawning items in front of the player and crafting fabricator gadgets at no cost. Off by default. While it is on, achievements are paused (see "Achievements paused").
+Edits the character's resources from the overlay's **Misc > Sandbox** tab: Newbucks, health / energy / radiation, what each vacpack slot holds (and unlocking locked slots), spawning items in front of the player, crafting fabricator gadgets at no cost and adding crafting materials to the refinery. Off by default. While it is on, achievements are paused (see "Achievements paused").
 
 ## Turning it on
 
@@ -19,9 +19,12 @@ Every change goes through the game's own methods, the ones it uses for pickups, 
 | Clear radiation | `SetRad(0)` | |
 | Infinite energy | frame callback, every 0.1 s: `GetCurrEnergy` < `GetMaxEnergy` -> `SetEnergy(max)` | session only (not a setting); off on restart and when the module is turned off |
 | Slot amount (set / fill / empty) | up: `AmmoSlotManager.MaybeAddResource(id, slot, n, overflow: false)`; down: `AmmoSlotManager.Decrement(int slot, int n)` (clears the slot at 0) | `0..GetSlotMaxCount(slot)`; only unlocked slots (`AmmoSlot.IsUnlocked`), only a slot that holds something |
-| Put item | `Decrement` (empty the slot if it holds something else), then `MaybeAddResource` | the item must be in the catalog (below), saveable (below) and accepted by that slot; `1..max`. The tab always asks for the slot's maximum (click = fill) |
+| Put item | `Decrement` (empty the slot if it holds something else), then `MaybeAddResource` | the item must be in the catalog (below), saveable (below) and accepted by that slot; `1..max`. The tab asks for the item's chosen amount, else the slot's maximum |
+| Move slot | merge: `MaybeAddResource` on the target, then `Decrement` the source; onto an empty slot: as much as the target holds, the rest stays; swap: `Decrement` both, `MaybeAddResource` each into the other | both slots unlocked, both items saveable; a swap only when each side fits the other slot's maximum; if re-adding fails, both slots get their old contents back. Slime emotions in the slot are not carried over (the slot is re-filled by id) |
+| Unlock slot | `PlayerModel.GetUpgradeModel()`, `UpgradeModel.GetUpgradeLevel` / `IncrementUpgradeLevel(def)` (what `PlayerUpgradeFabricatableItem.FabricateAndSpendCost`, RVA 0x82AFA0, does after spending) | only up to the level that unlocks the slot (below); never past it |
 | Spawn | `InstantiationHelpers.InstantiateActor(prefab, RegionRegistry.CurrentSceneGroup, pos, identity, nonActorOk: false, NONE, NONE, metadata: null, false, setCollected: false)` | the item must be in the spawn list (below) and saveable (below); no Tarrs while they are disabled; 1..20 per click |
-| Craft | `GadgetDirector.HasBlueprint`, `CanAddGadget(def, n)`, then `GadgetDirector.AddItem(def, n)` | the gadget must be in the recipe list (below), its blueprint unlocked, and `n` within its limit; 1..20 crafts per click (x2 for `BuyInPairs`) |
+| Craft | `GadgetDirector.HasBlueprint` (for the message only), `CanAddGadget(def, n)`, then `GadgetDirector.AddItem(def, n)` | the gadget must be in the recipe list (below) and `n` within its limit; 1..99 crafts per request (x2 for `BuyInPairs`). A locked blueprint stays locked (see Crafter) |
+| Add material | `GadgetDirector.GetRefinerySpaceAvailable(t)`, then `GadgetDirector.AddItem(t, n)` | the type must be in the materials list (below), saveable; `1..space` (the refinery holds 999 per type) |
 
 ### Only saveable items
 
@@ -47,14 +50,28 @@ Items a vanilla vacpack can store: every loaded `IdentifiableType` (`Resources.F
 The catalog is built once (logged with its size and time) and rebuilt only when the slot definitions change. Entries are kept alive with GC handles; old handles are freed in a posted main-thread job. The UI gets item ids as opaque numbers (the type's address) and never dereferences them; a request is checked against the catalog (handle target, class, `IsAlive`) before use.
 
 Each item (and each slot's current item) also carries an **icon** and a **kind**, both cached per type:
-- Icon: `IdentifiableType.icon` registered once with `ui/item_icons` (texture kept alive, D3D11 resource and sprite rectangle cached); the tab only gets the small id.
-- Kind (tile accent and spawner filter only): `SlimeDefinition` (largo if `IsLargo`), `GadgetDefinition`, `ToyDefinition`, `LiquidDefinition`, `IsPlort`, `IsAnimal`, else the asset names of its `Categories` (`IdentifiableCategory` assets: "food" / "veggie" / "fruit" / "meat" -> Food, "craft" / "resource" -> Resource), else Other. The category names are a guess; a wrong guess only changes a colour.
+- Icon: registered once with `ui/item_icons` (texture kept alive, D3D11 resource and sprite rectangle cached); the tab only gets the small id. The first that exists:
+  1. `IdentifiableType.icon`.
+  2. The type's own `get_Icon`, resolved on its class (virtual). `SlimeDefinition.get_Icon` (0xBAF310) returns `GetAppearanceForSet(...)._icon`, the default appearance's icon, so a largo whose `icon` field is empty gets its appearance icon (1.3.0 disassembly; what largos' appearances carry is not verified).
+  3. A largo (`SlimeDefinition`) with neither: the icons of its first two `BaseSlimes`, sent as `icon` + `icon2`; the tab draws them overlapping (top left / bottom right, 70 % each).
+  4. The icon of a group it belongs to: its own `IdentifiableType.groupType`, else the first `IdentifiableTypeGroup` asset with an `_icon` whose `IsMember` is true (leaf groups, without `_memberGroups`, first). `TargetingUI` has `giantEggGroup` and `vineBulbGroup`, so giant eggs and vine bulbs are expected to land here. The groups with an icon are read once (one `FindObjectsOfTypeAll`, logged with their asset names) and only asked for types without any icon of their own.
+- Kind (tile accent, group tabs and tooltip tag): `SlimeDefinition` (largo if `IsLargo`), `GadgetDefinition`, `ToyDefinition`, `LiquidDefinition`, `IsPlort`, `IsAnimal`, else the asset names of its `Categories` (`IdentifiableCategory` assets: "food" / "veggie" / "fruit" / "meat" -> Food, "craft" / "resource" -> Resource), else Other. The category names are a guess; a wrong guess only changes a colour or the tab an item shows under.
+
+### Group tab icons
+
+The vacpack and spawner grids have icon-only tabs All / Plorts / Slimes / Food / Resources (Slimes include largos, Food includes `IsAnimal` meat). The icons are read once, after the spawn list:
+- From the drone station's target menu data: the `DroneTargetDefinitions` asset (`MonomiPark.SlimeRancher.UI.Drone.Data`, a `ListAsset` of `DroneUIProgramDefinition<DroneTaskTargetType>` with `_type` / `_icon`, fields read on the live objects). `PLORTS` (2) -> Plorts, `VEGGIES` (3) -> Food, `CRAFTING_MATS` (8) -> Resources. There is no "food" or "slimes" target type (enum: NONE, SINGLE, PLORTS, VEGGIES, FRUIT, MEATS, ELDERS, PLORTS_NO_SPECIALS, CRAFTING_MATS).
+- Anything still missing from the type groups with an icon, by asset name: "slime" (not largo / tarr / gordo / feral), "plort", "food", "craft". The chosen ids are logged (`[sandbox] group tab icons: ...`); a missing one is drawn as a coloured letter. **Which group gives the slime icon is a guess until the log line shows the group names.**
+
+### Slime diets (favourites)
+
+Read once after the spawn list, for every slime and largo in it: `SlimeDefinition.Diet` (`SlimeDiet`) -> `FavoriteIdents` (favourite foods) and `ProduceIdents` (plorts), with the reverse lookups (food -> slimes that love it, plort -> slimes that make it; base slimes before largos). Sent as `Snapshot::relations`, keyed by item id; the tab uses it for the tooltip rows, the related-tile highlight and the right-click "Give ..." entries (`ui/NOTES.md`). The `EatMap` and `MajorFoodIdentifiableTypeGroups` (everything a slime eats) are not used.
 
 Fixed (2026-10-23): picking an item in the old list did nothing. The list looked up the picked item's name inside its loop, before the click on that row was handled, then cleared the pick when the name was missing, so every new pick was undone in the same frame and **Put** never enabled (the log shows no `Put` attempt at all). The game side (`MaybeAddResource` arguments, `IsAllowed`) was fine.
 
 ## Spawner
 
-List: every loaded `IdentifiableType` whose `prefab` has an `IdentifiableActor` component (the game's loose actors: slimes, largos, plorts, food, toys, crafting resources, ...), except `IsPlayer`, `IsSceneObject` (gordos and other scene objects), `GadgetDefinition` (placed through gadget mode, `GadgetDirector.InstantiateGadget`), `LiquidDefinition` and types the save can't store (see "Only saveable items"; the vacpack list and the crafter are filtered the same way). Built once on a refresh in game (logged; tried again on the next enable if it came out empty), kept with GC handles, sorted by name. Each refresh builds at most one of the three lists (vacpack catalog, spawn list, recipes), so the one-time scans land in separate frames.
+List: every loaded `IdentifiableType` whose `prefab` has an `IdentifiableActor` component (the game's loose actors: slimes, largos, plorts, food, toys, crafting resources, ...), except `IsPlayer`, `IsSceneObject` (gordos and other scene objects), `GadgetDefinition` (placed through gadget mode, `GadgetDirector.InstantiateGadget`), `LiquidDefinition` and types the save can't store (see "Only saveable items"; the vacpack list and the crafter are filtered the same way). Built once on a refresh in game (logged; tried again on the next enable if it came out empty), kept with GC handles, sorted by name. Each refresh builds at most one of the lists and one-time extras (vacpack catalog, spawn list, recipes, crafting materials, slime diets, group tab icons), so the one-time scans land in separate frames.
 
 Spawning uses the vacpack's own path: `VacuumItem.Expel` calls `InstantiationHelpers.InstantiateActor` with `RegionRegistry.CurrentSceneGroup`, which creates the actor model (`GameModel.InstantiateActorModel`), instantiates the prefab, registers it with `DynamicObjectContainer` and initialises the model, so the spawned item is saved like any loose item. The `Nullable<AmmoMetadata>` argument is passed as a zeroed struct (`hasValue = false`; runtime_invoke takes nullable arguments as a pointer to the struct, and `InstantiateActor` only reads it for slimes after checking `hasValue`).
 
@@ -64,7 +81,17 @@ Placement: the main camera's position and its forward direction flattened onto t
 
 List: every `GadgetDefinition` asset whose `CraftingCosts` has ident or currency costs (what the fabricator charges for), read from the game data, not hardcoded. Grouped by the fabricator's own categories when its `FabricateMenuConfiguration` asset is loaded (`_categories`, `GadgetFabricateCategory.Contains(def)`, title from `FabricateCategory._title`); without it there are no category chips. The cost text in the tooltip comes from `PurchaseCost.IdentCosts` (`IdentCostEntry {Amount, IdentType}`, struct list read through `List._items`) and `_currencyCosts` (`CurrencyCostEntry`). Blueprint state (`HasBlueprint`) and the inventory count (`GetItemCount`) refresh every 2 s while the tab is open, and right after a craft.
 
-Crafting mirrors `GadgetFabricatableItem.FabricateAndSpendCost` (1.3.0, RVA 0x827E20) without `SpendableDirector.Spend`: `SceneContext.GadgetDirector.AddItem(definition, count * (BuyInPairs ? 2 : 1))`. Like the fabricator it needs the blueprint and respects the gadget's count limit (`CanAddGadget`), so it only makes states a vanilla game can reach (with enough resources). It does not send the fabricate analytics event or `MetaGameDirector.OnGadgetFabricated`.
+Crafting mirrors `GadgetFabricatableItem.FabricateAndSpendCost` (1.3.0, RVA 0x827E20) without `SpendableDirector.Spend`: `SceneContext.GadgetDirector.AddItem(definition, count * (BuyInPairs ? 2 : 1))`. It respects the gadget's count limit (`CanAddGadget`). It does not send the fabricate analytics event or `MetaGameDirector.OnGadgetFabricated`. The category icons are `FabricateCategory._icon`.
+
+**Without the blueprint** (2026-10-24): `GadgetDirector.AddItem(in AddItemOptions)` (RVA 0x867C20, disassembled) has no blueprint check. For a storable type it clamps to the refinery space; for a `GadgetDefinition` it unlocks the gadget's pedia entry if needed, raises the gadget-obtained event and does `GadgetsModel.SetCount(BaseGadget, GetCount + n)`. `CanAddGadget` only compares the count with the gadget's limit (`GadgetDefinition` +0xF8). So a gadget with a locked blueprint is crafted into the inventory and saved like any other; the blueprint itself stays locked (`AddBlueprint` is not called). **Not seen in game:** whether the gadget menu lists and places a gadget whose blueprint is locked.
+
+### Crafting materials
+
+The crafter's last section: every `IdentifiableType` that `GadgetDirector.IsStorable` accepts (the refinery's storable groups, minus its block list), except gadgets, the player and scene objects, saveable (see above). Built once in game (needs the gadget director), sorted by name, logged; the refinery count (`GetItemCount`) refreshes with the recipes every 2 s. Adding goes through `GadgetDirector.AddItem(type, n)`, the same call the refinery intake uses, clamped to `GetRefinerySpaceAvailable` (999 per type). This includes plorts if the refinery stores them.
+
+### Vacpack slot unlock
+
+`AmmoSlot.IsUnlocked` (0xA3BE20, disassembled): true if the slot definition's `_isUnlockedProperty` is null, else the slot's unlock property value >= `_isUnlockedThreshold`. The property is driven by upgrade effects: `UpgradeDefinition._levels[n].Effects` (`List<FloatModifier>`, `TargetProperty` / `Value` in the generic base `Modifier<float>`, read on the live objects). The module looks through the player's `UpgradeModel.upgradeDefinitions` (`UpgradeDefinitionList`) for the upgrade with a modifier on the slot's property and takes the first level whose `Value` reaches the threshold (else the first level that names the property). The model's level n applies `_levels[n]` (`UpgradeDefinition.GetUpgradeLevel(int)` indexes the list directly; the fabricator buys `GetUpgradeLevel(def) + 1`), so it calls `IncrementUpgradeLevel` until `GetUpgradeLevel` reaches that index, at most 16 times, and stops early once the slot reports unlocked. Earlier slots unlocked by the same levels open too, as when buying them. Locked slots for which an upgrade is found are flagged `unlockable` in the snapshot (field reads plus one `GetUpgradeModel` call per locked slot per refresh). **Not seen in game:** that the property updates within the same call (the bound above makes a late update harmless) and the upgrade asset that owns the slot properties.
 
 ## Achievements paused
 
@@ -103,8 +130,9 @@ Limits:
 
 ## Not done (possible later)
 
-- **Unlock all vacpack upgrades**: upgrades are `UpgradeModel` levels bought through `UpgradeDefinition` purchase flows (components, costs, prerequisites); setting levels directly risks states the shop can't produce. Would need its own investigation of `PlayerModel.GetUpgradeModel()` / the Fabricator purchase path.
-- Other `CurrencyDefinition`s (same `AddCurrency` / `SpendCurrency` path, with a currency picker), keys (`PlayerState.AddKey` exists, trivially doable), plort market prices, unlocking zones / map, time of day (`TimeDirector`), refinery contents (`custom_upgrades` already talks to the silo/refinery models).
+- **Unlock all vacpack upgrades**: only the slot upgrade is applied (above, one level at a time like the shop). Other upgrades (tank size, jetpack, ...) would go through the same `IncrementUpgradeLevel`; not offered yet.
+- **Rendered icons** for types that have no icon and no group icon (containers / treasure-pod-like items were reported without one; their type names are not known yet): rendering the prefab to a texture needs a camera, a render texture and a lit layer set up from native code, which is a lot of game-object work on the main thread for a cosmetic gain. Not done; the tile shows the name instead. Check the `group(s) with an icon` log line and the tiles that still show names to see what is left.
+- Other `CurrencyDefinition`s (same `AddCurrency` / `SpendCurrency` path, with a currency picker), keys (`PlayerState.AddKey` exists, trivially doable), plort market prices, unlocking zones / map, time of day (`TimeDirector`).
 
 ## Unverified in game
 
@@ -113,3 +141,5 @@ Everything above was built from the dump and disassembly only: the catalog size 
 Not yet seen in game (2026-10-23): the icons (sRGB handling as for the Slimepedia logo), the item kinds from category names, the spawn list's size and contents, `InstantiateActor` with the zeroed nullable, spawn placement and the wall check, spawned items persisting after a save and reload, the fabricator categories being loaded outside the fabricator UI, the cost text, and `AddItem` showing the gadget in the gadget menu.
 
 Not yet seen in game (2026-10-24): which types the save check leaves out (expected: Glitch Tarr and other test/unused types; see the log line), that `Dictionary<string, int>.ContainsKey` runs through runtime_invoke (if it doesn't, every list stays empty and the log shows the failed call), and the Tarr gray-out.
+
+Not yet seen in game (2026-10-24, UX round 2): the largo icons from `get_Icon` (or the composed fallback), the group-icon fallback for giant eggs / vine bulbs, which group icons the tabs pick (log line), the diet relations (log: `slime diets: N related item(s)`), the crafting materials list (log: `crafting materials the refinery stores`), crafting a gadget with a locked blueprint, slot unlock through the upgrade, and slot move / swap.

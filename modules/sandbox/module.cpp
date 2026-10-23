@@ -143,7 +143,13 @@ private:
     Il2CppObject* SlotAt(const Ctx& c, int idx);
     std::string Localized(Il2CppObject* ls);
     std::string ItemName(Il2CppObject* ident);
-    uint32_t ItemIcon(Il2CppObject* ident);
+    uint32_t ItemIcon(Il2CppObject* ident, uint32_t* second = nullptr);
+    uint32_t SpriteIcon(Il2CppObject* sprite);
+    Il2CppObject* VirtualIcon(Il2CppObject* obj);
+    uint32_t GroupIconFor(Il2CppObject* ident);
+    void EnsureIconGroups();
+    void EnsureGroupIcons();
+    void EnsureRelations();
     bridge::Kind ItemKind(Il2CppObject* ident);
     bool EnsureCatalog(const Ctx& c);
     Il2CppObject* CatalogItem(uintptr_t id, uint32_t* mask);
@@ -156,7 +162,9 @@ private:
     Il2CppObject* TarrGroup();
     bool EnsureSpawnables();
     bool EnsureRecipes();
+    bool EnsureMaterials();
     void RefreshRecipeState();
+    Il2CppObject* SlotUnlockUpgrade(const Ctx& c, Il2CppObject* slot, Il2CppObject** upgradeModel, int* level = nullptr);
     std::string RecipeCost(Il2CppObject* def);
     Il2CppObject* GadgetDirector();
     void Refresh();
@@ -168,6 +176,9 @@ private:
     void DoPutItem(const Ctx& c, int idx, uintptr_t item, int64_t value);
     void DoSpawn(const Ctx& c, uintptr_t item, int64_t count);
     void DoCraft(uintptr_t item, int64_t count);
+    void DoAddMaterial(uintptr_t item, int64_t count);
+    void DoMoveSlot(const Ctx& c, int from, int to);
+    void DoUnlockSlot(const Ctx& c, int idx);
     bool SpawnPose(const Ctx& c, Vec3& pos, Vec3& fwd);
     bool GetVec3(const MethodInfo* m, Il2CppObject* obj, Vec3& out);
     void SetupExtras(sr2::il2cpp::Resolver& R);
@@ -183,7 +194,14 @@ private:
     std::vector<Il2CppObject*> catalogDefs_;  // slot definitions it was built for (identity only)
     std::unordered_map<uintptr_t, std::string> nameCache_;  // identity -> name (never dereferenced)
     std::unordered_map<uintptr_t, uint32_t> iconCache_;     // identity -> item_icons id
+    std::unordered_map<uintptr_t, uint32_t> icon2Cache_;    // identity -> second icon of a composed one (largos)
     std::unordered_map<uintptr_t, bridge::Kind> kindCache_; // identity -> kind
+    std::unordered_map<Il2CppClass*, const MethodInfo*> iconGetter_;  // class -> its (overriding) get_Icon, or nullptr
+    std::vector<CatalogEntry> iconGroups_;  // IdentifiableTypeGroup assets with an icon (fallback icons), leaf groups first
+    bool iconGroupsBuilt_ = false;
+    uint32_t groupIcons_[bridge::kGroupCount] = {};  // icons of the group tabs
+    bool groupIconsBuilt_ = false;
+    std::shared_ptr<const bridge::Relations> relations_;  // slime diets, built once after the spawn list
 
     // spawner and crafter lists (main thread), built once per enable; entries kept alive by GC handles
     std::shared_ptr<const std::vector<bridge::Item>> spawnables_;
@@ -192,8 +210,12 @@ private:
     std::string spawnWhy_;  // "" = spawner available
     std::shared_ptr<const std::vector<bridge::Recipe>> recipes_;
     std::shared_ptr<const std::vector<std::string>> recipeCats_;
+    std::shared_ptr<const std::vector<uint32_t>> recipeCatIcons_;
     std::unordered_map<uintptr_t, CatalogEntry> recipeById_;
     bool recipesTried_ = false;
+    std::shared_ptr<const std::vector<bridge::Recipe>> materials_;  // refinery materials
+    std::unordered_map<uintptr_t, CatalogEntry> materialById_;
+    bool materialsTried_ = false;
     std::string craftWhy_;  // "" = crafter available
     unsigned long long lastRecipeState_ = 0;
 
@@ -296,7 +318,36 @@ private:
     Il2CppClass* fabMenuClass_ = nullptr;            // FabricateMenuConfiguration (optional, for categories)
     Il2CppClass* fabGadgetCatClass_ = nullptr;       // GadgetFabricateCategory
     size_t offFabCategories_ = 0, offFabCatTitle_ = 0;
+    size_t offFabCatIcon_ = 0;                       // FabricateCategory._icon (optional)
     const MethodInfo* fabCatContains_ = nullptr;     // GadgetFabricateCategory.Contains(GadgetDefinition)
+    const MethodInfo* isStorable_ = nullptr;         // GadgetDirector.IsStorable(IdentifiableType) (refinery materials)
+    const MethodInfo* refinerySpace_ = nullptr;      // GadgetDirector.GetRefinerySpaceAvailable(IdentifiableType)
+
+    // ---- icons, group tabs and diets (optional, cosmetic) ----
+    size_t offSlimeBases_ = 0;      // SlimeDefinition.BaseSlimes (SlimeDefinition[])
+    size_t offSlimeDiet_ = 0;       // SlimeDefinition.Diet (SlimeDiet)
+    size_t offDietFavs_ = 0;        // SlimeDiet.FavoriteIdents (IdentifiableType[])
+    size_t offDietProduce_ = 0;     // SlimeDiet.ProduceIdents (IdentifiableType[])
+    size_t offIdentGroupType_ = 0;  // IdentifiableType.groupType (IdentifiableTypeGroup)
+    size_t offGroupIcon_ = 0;       // IdentifiableTypeGroup._icon
+    size_t offGroupSubGroups_ = 0;  // IdentifiableTypeGroup._memberGroups
+    size_t offGroupIsFood_ = 0;     // IdentifiableTypeGroup._isFood
+    const MethodInfo* groupContains_ = nullptr;  // IdentifiableTypeGroup.IsMember (for the icon fallback)
+    size_t offModTarget_ = 0;       // FloatModifier.TargetProperty (from the live object's class)
+    Il2CppClass* modClass_ = nullptr;
+    Il2CppClass* droneTargetsClass_ = nullptr;  // DroneTargetDefinitions (ListAsset of DroneUIProgramDefinition<DroneTaskTargetType>)
+
+    // ---- vacpack slot unlock (optional): the upgrade levels the fabricator sells ----
+    const MethodInfo* getUpgradeModel_ = nullptr;    // PlayerModel.GetUpgradeModel()
+    const MethodInfo* incUpgrade_ = nullptr;         // UpgradeModel.IncrementUpgradeLevel(UpgradeDefinition)
+    const MethodInfo* getUpgradeLevel_ = nullptr;    // UpgradeModel.GetUpgradeLevel(UpgradeDefinition)
+    size_t offUmDefs_ = 0;                           // UpgradeModel.upgradeDefinitions (UpgradeDefinitionList)
+    size_t offUdLevels_ = 0;                         // UpgradeDefinition._levels (List<UpgradeLevelDefinition>)
+    size_t offUlEffects_ = 0;                        // UpgradeLevelDefinition.Effects (List<FloatModifier>)
+    size_t offSlotDefUnlockProp_ = 0;                // AmmoSlotDefinition._isUnlockedProperty
+    size_t offSlotDefThreshold_ = 0;                 // AmmoSlotDefinition._isUnlockedThreshold
+    size_t offModValue_ = 0;                         // FloatModifier.Value (from the live object's class)
+    Il2CppClass* upgradeDefClass_ = nullptr;
 };
 
 Sandbox* g_self = nullptr;
@@ -441,6 +492,56 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
     toyDefClass_ = cls(kImage, "", "ToyDefinition", optional);
     liquidDefClass_ = cls(kImage, "", "LiquidDefinition", optional);
     if (!optional.empty()) SR2_WARN("[{}] item icons / kinds partly unavailable: {}", kModule, optional);
+    {
+        // Fallback icons (largos from their base slimes, group icons for types without
+        // their own), the group tabs' icons and slime diets. All cosmetic / optional.
+        std::string iw;
+        groupClass_ = cls(kImage, "", "IdentifiableTypeGroup", iw);
+        off(groupClass_, "_icon", offGroupIcon_, iw);
+        off(groupClass_, "_memberGroups", offGroupSubGroups_, iw);
+        off(groupClass_, "_isFood", offGroupIsFood_, iw);
+        off(identClass_, "groupType", offIdentGroupType_, iw);
+        groupContains_ = method(groupClass_, "IsMember", 1, iw);
+        if (!iw.empty()) {
+            offGroupIcon_ = 0;
+            SR2_WARN("[{}] no group icons ({})", kModule, iw);
+        }
+        std::string bw;
+        off(slimeDefClass_, "BaseSlimes", offSlimeBases_, bw);
+        if (!bw.empty()) SR2_WARN("[{}] no composed largo icons ({})", kModule, bw);
+        std::string dw;
+        Il2CppClass* diet = cls(kImage, "", "SlimeDiet", dw);
+        off(slimeDefClass_, "Diet", offSlimeDiet_, dw);
+        off(diet, "FavoriteIdents", offDietFavs_, dw);
+        off(diet, "ProduceIdents", offDietProduce_, dw);
+        if (!dw.empty() || !slimeDefClass_) {
+            offSlimeDiet_ = 0;
+            SR2_WARN("[{}] no favourites / plorts in the tab ({})", kModule, dw);
+        }
+        std::string tw;
+        droneTargetsClass_ = cls(kImage, "MonomiPark.SlimeRancher.UI.Drone.Data", "DroneTargetDefinitions", tw);
+        if (!tw.empty()) SR2_WARN("[{}] group tabs: no drone target icons ({})", kModule, tw);
+    }
+    {
+        // Optional: unlocking a locked vacpack slot through the upgrade the fabricator sells
+        // (PlayerUpgradeFabricatableItem.FabricateAndSpendCost: UpgradeModel.IncrementUpgradeLevel).
+        std::string uw;
+        Il2CppClass* upModel = cls(kImage, "MonomiPark.SlimeRancher.DataModel", "UpgradeModel", uw);
+        upgradeDefClass_ = cls(kImage, "", "UpgradeDefinition", uw);
+        getUpgradeModel_ = method(playerModelClass_, "GetUpgradeModel", 0, uw);
+        incUpgrade_ = method(upModel, "IncrementUpgradeLevel", 1, uw);
+        getUpgradeLevel_ = method(upModel, "GetUpgradeLevel", 1, uw);
+        off(upModel, "upgradeDefinitions", offUmDefs_, uw);
+        off(upgradeDefClass_, "_levels", offUdLevels_, uw);
+        off(slotDefClass_, "_isUnlockedProperty", offSlotDefUnlockProp_, uw);
+        off(slotDefClass_, "_isUnlockedThreshold", offSlotDefThreshold_, uw);
+        // UpgradeLevelDefinition (nested) and FloatModifier (generic base): their fields are read
+        // on the live objects (offUlEffects_ and the modifier's TargetProperty, resolved once).
+        if (!uw.empty()) {
+            incUpgrade_ = nullptr;
+            SR2_WARN("[{}] vacpack: locked slots can't be unlocked ({})", kModule, uw);
+        }
+    }
 
     // Save check: the dictionary the save code looks identifiable types up in
     // (GameModelPullHelpers.BuildActorData -> SaveReferenceTranslation.GetPersistenceId).
@@ -558,6 +659,19 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
             fabMenuClass_ = nullptr;
             SR2_WARN("[{}] crafter: no fabricator categories ({})", kModule, fw);
         }
+        std::string iw;
+        off(fabCat, "_icon", offFabCatIcon_, iw);
+    }
+    {
+        // Optional: crafting materials straight into the refinery (GadgetDirector.AddItem
+        // stores any IsStorable type there, up to GetRefinerySpaceAvailable).
+        std::string mw;
+        isStorable_ = method(gadgetDir, "IsStorable", 1, mw);
+        refinerySpace_ = method(gadgetDir, "GetRefinerySpaceAvailable", 1, mw);
+        if (!mw.empty()) {
+            isStorable_ = refinerySpace_ = nullptr;
+            SR2_WARN("[{}] crafter: no crafting materials ({})", kModule, mw);
+        }
     }
 }
 
@@ -569,6 +683,7 @@ void Sandbox::OnEnable() {
     // A list that came out empty (built before the assets were loaded) is tried again.
     if (!spawnables_ || spawnables_->empty()) spawnTried_ = false;
     if (!recipes_ || recipes_->empty()) recipesTried_ = false;
+    if (!materials_ || materials_->empty()) materialsTried_ = false;
     SR2_INFO("[{}] enabled: edits from the overlay's Sandbox tab now change the loaded game", kModule);
 }
 
@@ -665,15 +780,194 @@ std::string Sandbox::ItemName(Il2CppObject* ident) {
     return n;
 }
 
-// The type's own icon (IdentifiableType.icon), registered once with ui/item_icons.
-uint32_t Sandbox::ItemIcon(Il2CppObject* ident) {
+uint32_t Sandbox::SpriteIcon(Il2CppObject* sprite) {
+    return sprite && unity::IsAlive(sprite) ? sr2::ui::item_icons::Register(sprite) : 0;
+}
+
+// The object's get_Icon, resolved on its own class (it is virtual: SlimeDefinition
+// returns its default appearance's icon, GadgetDefinition has its own), cached per class.
+Il2CppObject* Sandbox::VirtualIcon(Il2CppObject* obj) {
+    const auto& a = api();
+    Il2CppClass* k = a.il2cpp_object_get_class ? a.il2cpp_object_get_class(obj) : nullptr;
+    if (!k) return nullptr;
+    auto it = iconGetter_.find(k);
+    if (it == iconGetter_.end()) {
+        const MethodInfo* m = nullptr;
+        for (Il2CppClass* c = k; c && !m; c = a.il2cpp_class_get_parent ? a.il2cpp_class_get_parent(c) : nullptr)
+            m = Resolver::Get().Method(c, "get_Icon", 0);
+        it = iconGetter_.emplace(k, m).first;
+    }
+    if (!it->second) return nullptr;
+    bool ok = false;
+    Il2CppObject* spr = Call(it->second, obj, {}, "get_Icon", &ok);
+    return ok ? spr : nullptr;
+}
+
+// The type's icon, registered once with ui/item_icons: IdentifiableType.icon, else
+// its get_Icon (largos: their appearance's icon), else for a largo its two base
+// slimes' icons (`second` gets the other half), else the icon of a group it
+// belongs to (giant eggs, vine bulbs and the like have a group icon at most).
+uint32_t Sandbox::ItemIcon(Il2CppObject* ident, uint32_t* second) {
+    if (second) *second = 0;
     if (!ident || !offIdentIcon_) return 0;
     const auto key = reinterpret_cast<uintptr_t>(ident);
-    if (auto it = iconCache_.find(key); it != iconCache_.end()) return it->second;
+    if (auto it = iconCache_.find(key); it != iconCache_.end()) {
+        if (second) *second = icon2Cache_[key];
+        return it->second;
+    }
     if (!IsA(ident, identClass_) || !unity::IsAlive(ident)) return 0;
-    const uint32_t icon = sr2::ui::item_icons::Register(unity::Field<Il2CppObject*>(ident, offIdentIcon_));
+    uint32_t icon = SpriteIcon(unity::Field<Il2CppObject*>(ident, offIdentIcon_)), icon2 = 0;
+    if (!icon) icon = SpriteIcon(VirtualIcon(ident));
+    if (!icon && offSlimeBases_ && slimeDefClass_ && IsA(ident, slimeDefClass_)) {
+        void* bases = unity::Field<void*>(ident, offSlimeBases_);
+        uint32_t found[2] = {};
+        for (size_t i = 0, n = unity::ArrayLength(bases), k = 0; i < n && k < 2; ++i) {
+            auto* b = static_cast<Il2CppObject*>(unity::ArrayAt(bases, i));
+            if (b == ident || !IsA(b, slimeDefClass_) || !unity::IsAlive(b)) continue;
+            if (const uint32_t bi = ItemIcon(b)) found[k++] = bi;
+        }
+        icon = found[0], icon2 = found[1];
+    }
+    if (!icon) icon = GroupIconFor(ident);
     iconCache_[key] = icon;
+    icon2Cache_[key] = icon2;
+    if (second) *second = icon2;
     return icon;
+}
+
+// Every IdentifiableTypeGroup asset with an icon, read once (leaf groups first, so the
+// most specific group wins in GroupIconFor). The group assets stay loaded; handles keep them.
+void Sandbox::EnsureIconGroups() {
+    if (iconGroupsBuilt_ || !offGroupIcon_ || !groupContains_) return;
+    iconGroupsBuilt_ = true;
+    std::vector<CatalogEntry> leaf, parent;
+    std::string names;
+    for (Il2CppObject* g : unity::FindObjectsOfTypeAll(groupClass_)) {
+        if (!IsA(g, groupClass_) || !unity::IsAlive(g)) continue;
+        Il2CppObject* spr = unity::Field<Il2CppObject*>(g, offGroupIcon_);
+        if (!spr || !unity::IsAlive(spr)) continue;
+        Il2CppGCHandle h = unity::NewGCHandle(g);
+        if (!h) continue;
+        (unity::ListCount(unity::Field<void*>(g, offGroupSubGroups_)) ? parent : leaf).push_back(CatalogEntry{h, g});
+        names += (names.empty() ? "" : ", ") + unity::GetName(g);
+    }
+    iconGroups_ = std::move(leaf);
+    iconGroups_.insert(iconGroups_.end(), parent.begin(), parent.end());
+    SR2_INFO("[{}] {} identifiable type group(s) with an icon: {}", kModule, iconGroups_.size(), names);
+}
+
+// Icon of the type's own group (IdentifiableType.groupType), else of the first group with an icon
+// it belongs to. Only asked for types without any icon of their own (a few), once each.
+uint32_t Sandbox::GroupIconFor(Il2CppObject* ident) {
+    if (!offGroupIcon_) return 0;
+    Il2CppObject* own = offIdentGroupType_ ? unity::Field<Il2CppObject*>(ident, offIdentGroupType_) : nullptr;
+    if (IsA(own, groupClass_) && unity::IsAlive(own))
+        if (const uint32_t i = SpriteIcon(unity::Field<Il2CppObject*>(own, offGroupIcon_))) return i;
+    EnsureIconGroups();
+    for (const CatalogEntry& e : iconGroups_) {
+        Il2CppObject* g = unity::GCHandleTarget(e.handle);
+        if (g != e.obj || !unity::IsAlive(g)) continue;
+        bool in = false;
+        if (CallValue(groupContains_, g, {ident}, "IdentifiableTypeGroup.IsMember", in) && in)
+            if (const uint32_t i = SpriteIcon(unity::Field<Il2CppObject*>(g, offGroupIcon_))) return i;
+    }
+    return 0;
+}
+
+// The game's icons for the group tabs, read once: plorts and crafting materials from the drone
+// station's target menu (DroneTargetDefinitions: PLORTS, CRAFTING_MATS; food from VEGGIES), slimes
+// and anything still missing from the identifiable type groups by asset name (logged).
+void Sandbox::EnsureGroupIcons() {
+    if (groupIconsBuilt_) return;
+    groupIconsBuilt_ = true;
+    const auto& a = api();
+    if (droneTargetsClass_) {
+        for (Il2CppObject* defs : unity::FindObjectsOfTypeAll(droneTargetsClass_)) {
+            if (!IsA(defs, droneTargetsClass_) || !unity::IsAlive(defs)) continue;
+            auto itemsOff = Resolver::Get().FieldOffset(a.il2cpp_object_get_class(defs), "items");
+            void* list = itemsOff ? unity::Field<void*>(defs, *itemsOff) : nullptr;
+            for (size_t i = 0, n = unity::ListCount(list); i < n; ++i) {
+                auto* d = static_cast<Il2CppObject*>(unity::ListAt(list, i));
+                if (!d) continue;
+                Il2CppClass* dk = a.il2cpp_object_get_class(d);
+                auto typeOff = Resolver::Get().FieldOffset(dk, "_type");
+                auto iconOff = Resolver::Get().FieldOffset(dk, "_icon");
+                if (!typeOff || !iconOff) break;
+                const int type = unity::Field<int32_t>(d, *typeOff);  // DroneTaskTargetType
+                const int group = type == 2 ? bridge::kGroupPlorts : type == 3 ? bridge::kGroupFood
+                                  : type == 8                       ? bridge::kGroupResources
+                                                                    : -1;
+                if (group >= 0 && !groupIcons_[group]) groupIcons_[group] = SpriteIcon(unity::Field<Il2CppObject*>(d, *iconOff));
+            }
+            break;
+        }
+    }
+    EnsureIconGroups();
+    auto lower = [](std::string s) {
+        for (char& ch : s) ch = static_cast<char>((ch >= 'A' && ch <= 'Z') ? ch - 'A' + 'a' : ch);
+        return s;
+    };
+    struct Want {
+        int group;
+        const char* need;
+        const char* avoid[4];
+    };
+    const Want wants[] = {
+        {bridge::kGroupSlimes, "slime", {"largo", "tarr", "gordo", "feral"}},
+        {bridge::kGroupPlorts, "plort", {"unstable", "edible", nullptr, nullptr}},
+        {bridge::kGroupFood, "food", {nullptr, nullptr, nullptr, nullptr}},
+        {bridge::kGroupResources, "craft", {nullptr, nullptr, nullptr, nullptr}},
+    };
+    for (const Want& w : wants) {
+        if (groupIcons_[w.group]) continue;
+        for (const CatalogEntry& e : iconGroups_) {
+            Il2CppObject* g = unity::GCHandleTarget(e.handle);
+            if (g != e.obj || !unity::IsAlive(g)) continue;
+            const std::string n = lower(unity::GetName(g));
+            if (n.find(w.need) == std::string::npos) continue;
+            bool bad = false;
+            for (const char* av : w.avoid) bad = bad || (av && n.find(av) != std::string::npos);
+            if (bad) continue;
+            if ((groupIcons_[w.group] = SpriteIcon(unity::Field<Il2CppObject*>(g, offGroupIcon_)))) break;
+        }
+    }
+    SR2_INFO("[{}] group tab icons: plorts {}, slimes {}, food {}, resources {} (0 = drawn fallback)", kModule,
+             groupIcons_[bridge::kGroupPlorts], groupIcons_[bridge::kGroupSlimes], groupIcons_[bridge::kGroupFood],
+             groupIcons_[bridge::kGroupResources]);
+}
+
+// Favourite foods and plorts of every slime in the spawn list (SlimeDefinition.Diet, read once
+// after the list is built), with the reverse lookups. Base slimes come before largos.
+void Sandbox::EnsureRelations() {
+    if (relations_ || !spawnables_) return;
+    auto rel = std::make_shared<bridge::Relations>();
+    if (!offSlimeDiet_) {  // no diet symbols: an empty table, so this runs once
+        relations_ = std::move(rel);
+        return;
+    }
+    auto ids = [&](void* arr, std::vector<uintptr_t>& out) {
+        for (size_t i = 0, n = unity::ArrayLength(arr); i < n; ++i)
+            if (auto* t = static_cast<Il2CppObject*>(unity::ArrayAt(arr, i)); t && IsA(t, identClass_))
+                out.push_back(reinterpret_cast<uintptr_t>(t));
+    };
+    // Base slimes first, so the reverse lists start with them.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (const bridge::Item& it : *spawnables_) {
+            if ((it.kind == bridge::Kind::Largo) != (pass == 1) ||
+                (it.kind != bridge::Kind::Slime && it.kind != bridge::Kind::Largo))
+                continue;
+            Il2CppObject* s = Lookup(spawnById_, it.id, slimeDefClass_);
+            Il2CppObject* diet = s ? unity::Field<Il2CppObject*>(s, offSlimeDiet_) : nullptr;
+            if (!diet) continue;
+            bridge::Relation& r = (*rel)[it.id];
+            ids(unity::Field<void*>(diet, offDietFavs_), r.favourites);
+            ids(unity::Field<void*>(diet, offDietProduce_), r.plorts);
+            for (uintptr_t f : r.favourites) (*rel)[f].favouriteOf.push_back(it.id);
+            for (uintptr_t p : r.plorts) (*rel)[p].plortOf.push_back(it.id);
+        }
+    }
+    SR2_INFO("[{}] slime diets: {} related item(s)", kModule, rel->size());
+    relations_ = std::move(rel);
 }
 
 // Rough kind from the class and flags, then the names of its IdentifiableCategory assets
@@ -763,7 +1057,10 @@ bool Sandbox::EnsureCatalog(const Ctx& c) {
         if (!h) continue;
         const auto id = reinterpret_cast<uintptr_t>(o);
         catalogById_[id] = CatalogEntry{h, o};
-        items->push_back(bridge::Item{id, ItemName(o), mask, ItemIcon(o), ItemKind(o)});
+        bridge::Item item{id, ItemName(o), mask};
+        item.icon = ItemIcon(o, &item.icon2);
+        item.kind = ItemKind(o);
+        items->push_back(std::move(item));
     }
     // Same display name twice (variants): add the asset name.
     std::map<std::string, int> seen;
@@ -925,7 +1222,11 @@ bool Sandbox::EnsureSpawnables() {
         spawnById_[id] = CatalogEntry{h, o};
         bool tarr = false;
         if (tarrs) CallValue(groupIsMember_, tarrs, {o}, "IdentifiableTypeGroup.IsMember", tarr);
-        items->push_back(bridge::Item{id, ItemName(o), 0, ItemIcon(o), ItemKind(o), tarr});
+        bridge::Item item{id, ItemName(o)};
+        item.icon = ItemIcon(o, &item.icon2);
+        item.kind = ItemKind(o);
+        item.tarr = tarr;
+        items->push_back(std::move(item));
     }
     std::map<std::string, int> seen;
     for (const auto& it : *items) ++seen[it.name];
@@ -997,6 +1298,7 @@ bool Sandbox::EnsureRecipes() {
     };
     std::vector<Cat> cats;
     auto titles = std::make_shared<std::vector<std::string>>();
+    auto catIcons = std::make_shared<std::vector<uint32_t>>();
     if (fabMenuClass_) {
         for (Il2CppObject* menu : unity::FindObjectsOfTypeAll(fabMenuClass_)) {
             if (!IsA(menu, fabMenuClass_) || !unity::IsAlive(menu)) continue;
@@ -1008,6 +1310,7 @@ bool Sandbox::EnsureRecipes() {
                 if (t.empty()) t = unity::GetName(c);
                 cats.push_back({c, static_cast<int>(titles->size())});
                 titles->push_back(t);
+                catIcons->push_back(offFabCatIcon_ ? SpriteIcon(unity::Field<Il2CppObject*>(c, offFabCatIcon_)) : 0);
             }
             if (!cats.empty()) break;  // one menu is enough
         }
@@ -1045,6 +1348,7 @@ bool Sandbox::EnsureRecipes() {
     std::sort(list->begin(), list->end(), [](const bridge::Recipe& a, const bridge::Recipe& b) { return a.name < b.name; });
     recipes_ = std::move(list);
     recipeCats_ = std::move(titles);
+    recipeCatIcons_ = std::move(catIcons);
     lastRecipeState_ = 0;
     SR2_INFO("[{}] crafter: {} gadget recipes in {} fabricator categories ({} ms)", kModule, recipes_->size(),
              recipeCats_->size(), GetTickCount64() - t0);
@@ -1055,23 +1359,78 @@ bool Sandbox::EnsureRecipes() {
 // Blueprint unlocked and how many are in the gadget inventory, per recipe. Copies the
 // list only when something changed, so the tab's shared_ptr stays the same otherwise.
 void Sandbox::RefreshRecipeState() {
-    if (!recipes_ || recipes_->empty()) return;
     Il2CppObject* dir = GadgetDirector();
     if (!dir) return;
-    auto next = std::make_shared<std::vector<bridge::Recipe>>(*recipes_);
-    bool changed = false;
-    for (bridge::Recipe& r : *next) {
-        Il2CppObject* d = Lookup(recipeById_, r.id, gadgetDefClass_);
-        if (!d) continue;
-        bool unlocked = false;
-        int owned = 0;
-        CallValue(hasBlueprint_, dir, {d}, "GadgetDirector.HasBlueprint", unlocked);
-        CallValue(gadgetCount_, dir, {d}, "GadgetDirector.GetItemCount", owned);
-        if (unlocked != r.unlocked || owned != r.owned) changed = true;
-        r.unlocked = unlocked;
-        r.owned = owned;
+    if (recipes_ && !recipes_->empty()) {
+        auto next = std::make_shared<std::vector<bridge::Recipe>>(*recipes_);
+        bool changed = false;
+        for (bridge::Recipe& r : *next) {
+            Il2CppObject* d = Lookup(recipeById_, r.id, gadgetDefClass_);
+            if (!d) continue;
+            bool unlocked = false;
+            int owned = 0;
+            CallValue(hasBlueprint_, dir, {d}, "GadgetDirector.HasBlueprint", unlocked);
+            CallValue(gadgetCount_, dir, {d}, "GadgetDirector.GetItemCount", owned);
+            if (unlocked != r.unlocked || owned != r.owned) changed = true;
+            r.unlocked = unlocked;
+            r.owned = owned;
+        }
+        if (changed) recipes_ = std::move(next);
     }
-    if (changed) recipes_ = std::move(next);
+    if (materials_ && !materials_->empty()) {
+        auto next = std::make_shared<std::vector<bridge::Recipe>>(*materials_);
+        bool changed = false;
+        for (bridge::Recipe& r : *next) {
+            Il2CppObject* t = Lookup(materialById_, r.id, identClass_);
+            int owned = 0;
+            if (!t || !CallValue(gadgetCount_, dir, {t}, "GadgetDirector.GetItemCount", owned)) continue;
+            changed = changed || owned != r.owned;
+            r.owned = owned;
+        }
+        if (changed) materials_ = std::move(next);
+    }
+}
+
+// Crafting materials for the crafter's own section: every IdentifiableType the gadget
+// director stores in the refinery (GadgetDirector.IsStorable), except gadgets, that the
+// save can store. Built once, in game (needs the gadget director).
+bool Sandbox::EnsureMaterials() {
+    if (materialsTried_ || !craftWhy_.empty() || !isStorable_ || !refinerySpace_) return false;
+    Il2CppObject* index = SaveIndex();
+    Il2CppObject* dir = GadgetDirector();
+    if (!index || !dir) return false;  // try again on a later refresh
+    materialsTried_ = true;
+    const unsigned long long t0 = GetTickCount64();
+    auto list = std::make_shared<std::vector<bridge::Recipe>>();
+    std::vector<std::string> leftOut;
+    for (Il2CppObject* o : unity::FindObjectsOfTypeAll(identClass_)) {
+        if (sr2::core::ModuleFaulted(kModule)) break;
+        if (!IsA(o, identClass_) || !unity::IsAlive(o) || (gadgetDefClass_ && IsA(o, gadgetDefClass_))) continue;
+        if (unity::Field<bool>(o, offIdentIsPlayer_) || unity::Field<bool>(o, offIdentIsScene_)) continue;
+        bool storable = false;
+        if (!CallValue(isStorable_, dir, {o}, "GadgetDirector.IsStorable", storable) || !storable) continue;
+        if (!Saveable(index, o)) {
+            leftOut.push_back(unity::GetName(o));
+            continue;
+        }
+        Il2CppGCHandle h = unity::NewGCHandle(o);
+        if (!h) continue;
+        bridge::Recipe r;
+        r.id = reinterpret_cast<uintptr_t>(o);
+        r.name = ItemName(o);
+        r.icon = ItemIcon(o);
+        r.kind = ItemKind(o);
+        r.unlocked = true;
+        CallValue(gadgetCount_, dir, {o}, "GadgetDirector.GetItemCount", r.owned);
+        materialById_[r.id] = CatalogEntry{h, o};
+        list->push_back(std::move(r));
+    }
+    std::sort(list->begin(), list->end(), [](const bridge::Recipe& a, const bridge::Recipe& b) { return a.name < b.name; });
+    materials_ = std::move(list);
+    SR2_INFO("[{}] crafter: {} crafting materials the refinery stores ({} ms)", kModule, materials_->size(),
+             GetTickCount64() - t0);
+    LogLeftOut("crafting materials", leftOut);
+    return true;
 }
 
 // ---------------------------------------------------------------- refresh ----
@@ -1107,11 +1466,12 @@ void Sandbox::Refresh() {
                 if (id && slot.count > 0) {
                     slot.item = reinterpret_cast<uintptr_t>(id);
                     slot.name = ItemName(id);
-                    slot.icon = ItemIcon(id);
+                    slot.icon = ItemIcon(id, &slot.icon2);
                     slot.kind = ItemKind(id);
                 } else {
                     slot.count = 0;
                 }
+                if (!slot.unlocked) slot.unlockable = SlotUnlockUpgrade(c, a, nullptr) != nullptr;
             }
             s.slots.push_back(std::move(slot));
         }
@@ -1122,14 +1482,22 @@ void Sandbox::Refresh() {
         s.spawnables = spawnables_;
         s.spawnWhy = spawnWhy_;
         s.tarrsOff = spawnables_ && TarrsOff();
-        if (!built) EnsureRecipes();
-        if (recipes_ && s.tick - lastRecipeState_ >= kRecipeStateMs) {
+        if (!built) built = EnsureRecipes();
+        if (!built) built = EnsureMaterials();
+        // Cheap one-time extras, each in its own refresh after the lists.
+        if (!built && spawnables_ && !relations_) EnsureRelations(), built = true;
+        if (!built && spawnables_ && !groupIconsBuilt_) EnsureGroupIcons();
+        if ((recipes_ || materials_) && s.tick - lastRecipeState_ >= kRecipeStateMs) {
             lastRecipeState_ = s.tick;
             RefreshRecipeState();
         }
         s.recipes = recipes_;
         s.recipeCategories = recipeCats_;
+        s.recipeCategoryIcons = recipeCatIcons_;
+        s.materials = materials_;
         s.craftWhy = craftWhy_;
+        s.relations = relations_;
+        std::copy(std::begin(groupIcons_), std::end(groupIcons_), std::begin(s.groupIcons));
     }
     bridge::Publish(std::move(s));
 }
@@ -1226,6 +1594,12 @@ void Sandbox::Handle(const bridge::Action& a) {
             DoCraft(a.item, a.value);
             lastRecipeState_ = 0;  // show the new owned count at once
             break;
+        case bridge::Op::AddMaterial:
+            DoAddMaterial(a.item, a.value);
+            lastRecipeState_ = 0;
+            break;
+        case bridge::Op::MoveSlot: DoMoveSlot(c, a.slot, static_cast<int>(a.value)); break;
+        case bridge::Op::UnlockSlot: DoUnlockSlot(c, a.slot); break;
         case bridge::Op::InfiniteEnergy: break;  // handled above
     }
     Refresh();
@@ -1518,11 +1892,11 @@ void Sandbox::DoCraft(uintptr_t item, int64_t count) {
         Done(false, std::format("{} not crafted: no gadget director (load a save)", name));
         return;
     }
+    // A gadget without its blueprint goes into the inventory too: GadgetDirector.AddItem
+    // (1.3.0, RVA 0x867C20) has no blueprint check; it only adds the count to the
+    // gadgets model, which the save stores like any crafted gadget.
     bool unlocked = false;
-    if (!CallValue(hasBlueprint_, dir, {def}, "GadgetDirector.HasBlueprint", unlocked) || !unlocked) {
-        Done(false, std::format("{} not crafted: its blueprint is not unlocked", name));
-        return;
-    }
+    CallValue(hasBlueprint_, dir, {def}, "GadgetDirector.HasBlueprint", unlocked);
     const int crafts = static_cast<int>(std::clamp<int64_t>(count, 1, kMaxCraft));
     const int per = unity::Field<bool>(def, offBuyInPairs_) ? 2 : 1;
     int amount = crafts * per;
@@ -1537,8 +1911,239 @@ void Sandbox::DoCraft(uintptr_t item, int64_t count) {
     Call(gadgetAddItem_, dir, {def, &amount}, "GadgetDirector.AddItem", &ok);
     CallValue(gadgetCount_, dir, {def}, "GadgetDirector.GetItemCount", after);
     Done(ok && after > before, ok && after > before
-                                   ? std::format("Crafted {} x {} for free (inventory {} -> {})", after - before, name, before, after)
+                                   ? std::format("Crafted {} x {} for free (inventory {} -> {}){}", after - before, name, before,
+                                                 after, unlocked ? "" : "; its blueprint is still locked")
                                    : std::format("{} not crafted: the game refused it", name));
+}
+
+// Adds `count` of a crafting material to the refinery: GadgetDirector.AddItem, which
+// stores IsStorable types there and clamps to GetRefinerySpaceAvailable (999 per type).
+void Sandbox::DoAddMaterial(uintptr_t item, int64_t count) {
+    Il2CppObject* t = Lookup(materialById_, item, identClass_);
+    if (!t) {
+        Done(false, "Not added: the material is not in the list (anymore)");
+        return;
+    }
+    const std::string name = ItemName(t);
+    if (!Saveable(SaveIndex(), t)) {
+        Done(false, std::format("{} not added: the game can't save it", name));
+        return;
+    }
+    Il2CppObject* dir = GadgetDirector();
+    if (!dir) {
+        Done(false, std::format("{} not added: no gadget director (load a save)", name));
+        return;
+    }
+    int space = 0;
+    if (!CallValue(refinerySpace_, dir, {t}, "GadgetDirector.GetRefinerySpaceAvailable", space) || space <= 0) {
+        Done(false, std::format("{} not added: the refinery is full for it", name));
+        return;
+    }
+    int amount = static_cast<int>(std::clamp<int64_t>(count, 1, space));
+    int before = 0, after = 0;
+    CallValue(gadgetCount_, dir, {t}, "GadgetDirector.GetItemCount", before);
+    bool ok = false;
+    Call(gadgetAddItem_, dir, {t, &amount}, "GadgetDirector.AddItem", &ok);
+    CallValue(gadgetCount_, dir, {t}, "GadgetDirector.GetItemCount", after);
+    Done(ok && after > before, ok && after > before
+                                   ? std::format("Refinery: {} {} -> {}", name, before, after)
+                                   : std::format("{} not added: the game refused it", name));
+}
+
+// The upgrade the fabricator sells that unlocks `slot`: an UpgradeDefinition (from the player's
+// UpgradeModel.upgradeDefinitions) with a level whose effects target the slot definition's
+// _isUnlockedProperty (AmmoSlot.IsUnlocked: that property >= _isUnlockedThreshold). Field reads only.
+Il2CppObject* Sandbox::SlotUnlockUpgrade(const Ctx& c, Il2CppObject* slot, Il2CppObject** upgradeModel, int* level) {
+    if (!incUpgrade_ || !slot) return nullptr;
+    Il2CppObject* def = unity::Field<Il2CppObject*>(slot, offSlotDef_);
+    if (!IsA(def, slotDefClass_) || !unity::IsAlive(def)) return nullptr;
+    Il2CppObject* prop = unity::Field<Il2CppObject*>(def, offSlotDefUnlockProp_);
+    if (!prop) return nullptr;
+    const int threshold = unity::Field<int32_t>(def, offSlotDefThreshold_);
+    bool ok = false;
+    Il2CppObject* um = Call(getUpgradeModel_, c.model, {}, "PlayerModel.GetUpgradeModel", &ok);
+    if (!ok || !um) return nullptr;
+    if (upgradeModel) *upgradeModel = um;
+    Il2CppObject* defList = unity::Field<Il2CppObject*>(um, offUmDefs_);
+    if (!defList || !unity::IsAlive(defList)) return nullptr;
+    const auto& a = api();
+    auto itemsOff = Resolver::Get().FieldOffset(a.il2cpp_object_get_class(defList), "items");
+    void* defs = itemsOff ? unity::Field<void*>(defList, *itemsOff) : nullptr;
+    for (size_t i = 0, n = unity::ListCount(defs); i < n; ++i) {
+        auto* up = static_cast<Il2CppObject*>(unity::ListAt(defs, i));
+        if (!IsA(up, upgradeDefClass_) || !unity::IsAlive(up)) continue;
+        int firstAny = -1;
+        void* levels = unity::Field<void*>(up, offUdLevels_);
+        for (size_t l = 0, nl = unity::ListCount(levels); l < nl; ++l) {
+            auto* lvl = static_cast<Il2CppObject*>(unity::ListAt(levels, l));
+            if (!lvl) continue;
+            if (!offUlEffects_) {
+                auto o = Resolver::Get().FieldOffset(a.il2cpp_object_get_class(lvl), "Effects");
+                if (!o) return nullptr;
+                offUlEffects_ = *o;
+            }
+            void* effects = unity::Field<void*>(lvl, offUlEffects_);
+            for (size_t e = 0, ne = unity::ListCount(effects); e < ne; ++e) {
+                auto* mod = static_cast<Il2CppObject*>(unity::ListAt(effects, e));
+                if (!mod) continue;
+                Il2CppClass* mk = a.il2cpp_object_get_class(mod);
+                if (mk != modClass_) {
+                    auto o = Resolver::Get().FieldOffset(mk, "TargetProperty");
+                    auto v = Resolver::Get().FieldOffset(mk, "Value");
+                    if (!o || !v) continue;
+                    modClass_ = mk;
+                    offModTarget_ = *o;
+                    offModValue_ = *v;
+                }
+                if (unity::Field<Il2CppObject*>(mod, offModTarget_) != prop) continue;
+                // The level that unlocks it: the first whose modifier on the property reaches the
+                // threshold (a level may also list the property with a lower value).
+                if (firstAny < 0) firstAny = static_cast<int>(l);
+                if (unity::Field<float>(mod, offModValue_) >= static_cast<float>(threshold)) {
+                    if (level) *level = static_cast<int>(l);
+                    return up;
+                }
+            }
+        }
+        if (firstAny >= 0) {  // targets it, but no value reaches the threshold: assume the first level
+            if (level) *level = firstAny;
+            return up;
+        }
+    }
+    return nullptr;
+}
+
+// Unlocks a locked slot the way buying the vacpack upgrade does
+// (PlayerUpgradeFabricatableItem.FabricateAndSpendCost, 1.3.0 RVA 0x82AFA0, minus the
+// spending and analytics): UpgradeModel.IncrementUpgradeLevel, one level at a time, up to
+// the level that unlocks it (the model's level n applies UpgradeDefinition._levels[n]; the
+// fabricator buys GetUpgradeLevel + 1). Never past that level, even if the slot does not
+// report unlocked at once. Earlier slots the same levels unlock open too, as in the shop.
+void Sandbox::DoUnlockSlot(const Ctx& c, int idx) {
+    Il2CppObject* slot = SlotAt(c, idx);
+    if (!slot) {
+        Done(false, std::format("Slot {} not unlocked: no such slot", idx + 1));
+        return;
+    }
+    bool unlocked = false;
+    if (CallValue(slotUnlocked_, slot, {}, "AmmoSlot.IsUnlocked", unlocked) && unlocked) {
+        Done(true, std::format("Slot {} is already unlocked", idx + 1));
+        return;
+    }
+    Il2CppObject* um = nullptr;
+    int target = -1;
+    Il2CppObject* up = SlotUnlockUpgrade(c, slot, &um, &target);
+    if (!up || !um || target < 0) {
+        Done(false, std::format("Slot {} not unlocked: no vacpack upgrade unlocks it", idx + 1));
+        return;
+    }
+    const std::string upName = unity::GetName(up);
+    int levels = 0, cur = 0;
+    for (int guard = 0; guard < 16 && !unlocked; ++guard) {
+        if (!CallValue(getUpgradeLevel_, um, {up}, "UpgradeModel.GetUpgradeLevel", cur) || cur >= target) break;
+        bool inc = false;
+        if (!CallValue(incUpgrade_, um, {up}, "UpgradeModel.IncrementUpgradeLevel", inc) || !inc) break;
+        ++levels;
+        CallValue(slotUnlocked_, slot, {}, "AmmoSlot.IsUnlocked", unlocked);
+    }
+    Done(unlocked, unlocked ? std::format("Slot {} unlocked ({} level(s) of the {} upgrade)", idx + 1, levels, upName)
+                   : levels ? std::format("Slot {}: applied {} level(s) of {}, but it is still locked", idx + 1, levels, upName)
+                            : std::format("Slot {} not unlocked: the {} upgrade is at level {} already (needs {})", idx + 1,
+                                          upName, cur, target));
+}
+
+// Moves a slot's contents onto another slot: onto the same item it merges (up to the
+// target's maximum), onto an empty slot it moves, onto another item it swaps. Every step
+// goes through Decrement / MaybeAddResource, which check what each slot accepts; if
+// re-adding fails, the original contents are put back.
+void Sandbox::DoMoveSlot(const Ctx& c, int from, int to) {
+    Il2CppObject* a = SlotAt(c, from);
+    Il2CppObject* b = SlotAt(c, to);
+    if (!a || !b || from == to || !c.ammo) {
+        Done(false, "Not moved: no such slot");
+        return;
+    }
+    bool ua = false, ub = false;
+    CallValue(slotUnlocked_, a, {}, "AmmoSlot.IsUnlocked", ua);
+    CallValue(slotUnlocked_, b, {}, "AmmoSlot.IsUnlocked", ub);
+    if (!ua || !ub) {
+        Done(false, std::format("Not moved: slot {} is locked", !ua ? from + 1 : to + 1));
+        return;
+    }
+    Il2CppObject* ia = unity::Field<Il2CppObject*>(a, offSlotId_);
+    Il2CppObject* ib = unity::Field<Il2CppObject*>(b, offSlotId_);
+    const int ca = unity::Field<int32_t>(a, offSlotCount_), cb = unity::Field<int32_t>(b, offSlotCount_);
+    if (!ia || ca <= 0) {
+        Done(false, std::format("Not moved: slot {} is empty", from + 1));
+        return;
+    }
+    if (!Saveable(SaveIndex(), ia) || (ib && cb > 0 && !Saveable(SaveIndex(), ib))) {
+        Done(false, "Not moved: the game can't save one of the items");
+        return;
+    }
+    auto add = [&](Il2CppObject* id, int slotIdx, int n) {
+        bool overflow = false, added = false;
+        return n <= 0 || (CallValue(addResource_, c.ammo, {id, &slotIdx, &n, &overflow}, "AmmoSlotManager.MaybeAddResource",
+                                    added) &&
+                          added);
+    };
+    auto remove = [&](int slotIdx, int n) {
+        bool ok = false;
+        Call(decrement_, c.ammo, {&slotIdx, &n}, "AmmoSlotManager.Decrement", &ok);
+        return ok;
+    };
+    const std::string na = ItemName(ia);
+    int maxB = 0;
+    CallValue(slotMax_, c.ammo, {&to}, "AmmoSlotManager.GetSlotMaxCount", maxB);
+    if (ib == ia && cb > 0) {  // merge
+        const int n = std::min(ca, std::max(0, maxB - cb));
+        if (n <= 0) {
+            Done(false, std::format("Not moved: slot {} is full", to + 1));
+            return;
+        }
+        if (!add(ia, to, n)) {
+            Done(false, std::format("Not moved: slot {} refused {} x {}", to + 1, n, na));
+            return;
+        }
+        remove(from, n);
+        Done(true, std::format("Moved {} x {} from slot {} to slot {}", n, na, from + 1, to + 1));
+        return;
+    }
+    if (!(ib && cb > 0)) {  // onto an empty slot: as much as it holds; the rest stays
+        const int n = std::min(ca, maxB);
+        if (n <= 0 || !add(ia, to, n)) {
+            Done(false, std::format("Not moved: slot {} does not accept {}", to + 1, na));
+            return;
+        }
+        remove(from, n);
+        Done(true, std::format("Moved {} x {} from slot {} to slot {}", n, na, from + 1, to + 1));
+        return;
+    }
+    // Swap: only when each side fits into the other slot, so nothing is lost.
+    const std::string nb = ItemName(ib);
+    int maxA = 0;
+    CallValue(slotMax_, c.ammo, {&from}, "AmmoSlotManager.GetSlotMaxCount", maxA);
+    if (ca > maxB || cb > maxA) {
+        Done(false, std::format("Not swapped: {} x {} or {} x {} does not fit the other slot", ca, na, cb, nb));
+        return;
+    }
+    if (!remove(from, ca) || !remove(to, cb)) {
+        Done(false, "Not swapped: a slot could not be emptied");
+        add(ia, from, ca - unity::Field<int32_t>(a, offSlotCount_));
+        return;
+    }
+    const bool okA = add(ia, to, ca);
+    const bool okB = add(ib, from, cb);
+    if (okA && okB) {
+        Done(true, std::format("Swapped slot {} ({}) and slot {} ({})", from + 1, na, to + 1, nb));
+        return;
+    }
+    // Put everything back where it was.
+    if (okA) remove(to, unity::Field<int32_t>(b, offSlotCount_));
+    if (okB) remove(from, unity::Field<int32_t>(a, offSlotCount_));
+    add(ia, from, ca);
+    add(ib, to, cb);
+    Done(false, std::format("Not swapped: slot {} does not accept {}", okA ? from + 1 : to + 1, okA ? nb : na));
 }
 
 }  // namespace
