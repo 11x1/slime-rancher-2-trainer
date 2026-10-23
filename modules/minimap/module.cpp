@@ -41,6 +41,7 @@
 #include <format>
 #include <map>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -595,6 +596,7 @@ private:
         Ref icon;         // _optionalMapIcon, else IdentifiableType.icon
     };
     std::map<Il2CppObject*, GadgetInfo> gadgetCache_;
+    std::set<std::string> loggedDefs_;  // gadget definition names already logged (kept across world resets)
 
     void Step(const char* s) { step_ = s; }
 
@@ -3058,35 +3060,54 @@ private:
         return slot.get();
     }
 
-    // Gadget definition -> group + icon (cached). Groups: GadgetDefinition.Type DRONE_STATION (10) -> drone port,
-    // TELEPORTER (1) / WARP_DEPOT (2) -> teleporter, DEFAULT whose asset or group name says "deco" -> decoration
-    // (name heuristic, see the definition log line), anything else -> other.
+    // Gadget definition -> group + icon (cached). GadgetDefinition.Type alone does not separate the groups: the
+    // game's decorations are all DEFAULT (0) with no groupType and no "deco" in the asset name (ConservatoryLamp,
+    // SimpleChair, RockClump, ...; log of 1.3.0), and a variant gadget may leave Type at DEFAULT while its base
+    // (VariantOf) carries it. So: Type of the gadget, else of its base; DRONE_STATION (10) -> drone port,
+    // TELEPORTER (1) / WARP_DEPOT (2) -> teleporter; else names: "dronestation" -> drone port, "teleport" /
+    // "warpdepot" -> teleporter, "decor" in the asset, group or icon names (the decorations' icons are all
+    // iconDecor*, e.g. iconDecorSingleChair_small; SpringPad is iconGadgetSpringPad_small) -> decoration;
+    // anything else -> other. Each definition name is logged once per session with its group.
     const GadgetInfo& DescribeGadget(Il2CppObject* def, std::string& newDefs) {
         auto it = gadgetCache_.find(def);
         if (it != gadgetCache_.end()) return it->second;
         GadgetInfo info;
         info.pin.Reset(def);
-        int type = -1;
-        std::string name = unity::GetName(def), groupName;
+        int type = -1, baseType = -1;
+        std::string name = unity::GetName(def), groupName, iconNames;
         if (ugui::IsA(def, sym_.gadgetDef)) {
             if (game::Has(sym_.gdType)) type = F<int>(def, sym_.gdType);
+            if (game::Has(sym_.gdVariantOf) && game::Has(sym_.gdType)) {
+                Il2CppObject* base = F<Il2CppObject*>(def, sym_.gdVariantOf);
+                if (base != def && ugui::IsA(base, sym_.gadgetDef) && unity::IsAlive(base))
+                    baseType = F<int>(base, sym_.gdType);
+            }
             if (game::Has(sym_.itGroup)) {
                 Il2CppObject* g = F<Il2CppObject*>(def, sym_.itGroup);
                 if (ugui::PlausiblePointer(g) && unity::IsAlive(g)) groupName = unity::GetName(g);
             }
-            Il2CppObject* icon = game::Has(sym_.gdMapIcon) ? F<Il2CppObject*>(def, sym_.gdMapIcon) : nullptr;
-            if (!ugui::IsA(icon, ugui::SpriteClass()) && game::Has(sym_.identIcon)) icon = F<Il2CppObject*>(def, sym_.identIcon);
-            if (ugui::IsA(icon, ugui::SpriteClass())) info.icon.Reset(icon);
+            Il2CppObject* mapIcon = game::Has(sym_.gdMapIcon) ? F<Il2CppObject*>(def, sym_.gdMapIcon) : nullptr;
+            Il2CppObject* pediaIcon = game::Has(sym_.identIcon) ? F<Il2CppObject*>(def, sym_.identIcon) : nullptr;
+            if (!ugui::IsA(mapIcon, ugui::SpriteClass())) mapIcon = nullptr;
+            if (!ugui::IsA(pediaIcon, ugui::SpriteClass())) pediaIcon = nullptr;
+            if (Il2CppObject* icon = mapIcon ? mapIcon : pediaIcon) info.icon.Reset(icon);
+            if (mapIcon) iconNames += unity::GetName(mapIcon);
+            if (pediaIcon) iconNames += " " + unity::GetName(pediaIcon);
         }
-        std::string ln = Lower(name), lg = Lower(groupName);
-        if (type == 10 || Contains(ln, "dronestation")) info.group = kDronePort;
-        else if (type == 1 || type == 2) info.group = kPlacedTele;
-        else if (type == 0 && (Contains(ln, "deco") || Contains(lg, "deco"))) info.group = kPlacedDecor;
+        int t = type > 0 ? type : baseType;
+        std::string ln = Lower(name), lg = Lower(groupName), li = Lower(iconNames);
+        auto named = [&](const char* k) { return Contains(ln, k) || Contains(li, k); };
+        if (t == 10 || (t <= 0 && named("dronestation"))) info.group = kDronePort;
+        else if (t == 1 || t == 2 || (t <= 0 && (named("teleport") || named("warpdepot")))) info.group = kPlacedTele;
+        else if (t <= 0 && (named("decor") || Contains(lg, "decor"))) info.group = kPlacedDecor;
         else info.group = kPlaced;
-        if (newDefs.size() < 1500)
-            newDefs += std::format("{}{}[type {}, group '{}', {}, icon '{}']", newDefs.empty() ? "" : "; ", name, type,
-                                   groupName, kCatName[info.group],
+        if (loggedDefs_.insert(name).second) {
+            if (!newDefs.empty()) newDefs += "; ";
+            newDefs += std::format("{}[type {}{}, group '{}', {}, icon '{}']", name, type,
+                                   baseType >= 0 ? std::format(", base type {}", baseType) : std::string(), groupName,
+                                   kCatName[info.group],
                                    info.icon.Alive() ? unity::GetName(info.icon.get()) : std::string("-"));
+        }
         return gadgetCache_.emplace(def, std::move(info)).first->second;
     }
 
@@ -3176,7 +3197,16 @@ private:
                 items.push_back(it);
                 ++stats_.gShown;
             }
-        if (!newDefs.empty()) SR2_INFO("minimap: placed gadget kinds (new): {}", newDefs);
+        // each definition name once per session, in chunks: the full list is the classification's evidence
+        for (size_t at = 0; at < newDefs.size();) {
+            size_t end = newDefs.size();
+            if (end - at > 1500) {
+                end = newDefs.find("; ", at + 1500);
+                if (end == std::string::npos) end = newDefs.size();
+            }
+            SR2_INFO("minimap: placed gadget kinds (new): {}", newDefs.substr(at, end - at));
+            at = end < newDefs.size() ? end + 2 : end;
+        }
     }
 
     void ApplyIcons(const std::vector<IconItem>& items) {

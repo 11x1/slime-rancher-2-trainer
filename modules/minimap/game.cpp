@@ -206,6 +206,7 @@ bool Resolve(Symbols& s, std::string& err, std::vector<std::string>& optionalMis
     s.gadgetDef = c.Class("", "GadgetDefinition", false);
     s.gdType = c.Field(s.gadgetDef, "Type", false);
     s.gdMapIcon = c.Field(s.gadgetDef, "_optionalMapIcon", false);
+    s.gdVariantOf = c.Field(s.gadgetDef, "VariantOf", false);
     s.itGroup = c.Field(s.identType, "groupType", false);
 
     // ---- map UI preload (the game's own UI display loader)
