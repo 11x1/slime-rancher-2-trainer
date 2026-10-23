@@ -49,6 +49,7 @@ struct SaleNotices::Impl {
     float waited = 0.0f;
     bool loggedFirst = false;
     bool loggedMissing = false;
+    bool loggedScan = false;
     unsigned long long lastScan = 0;  // GetTickCount64 of the last all-instances scan
 
     bool IsA(Il2CppObject* obj, Il2CppClass* k) const {
@@ -74,22 +75,29 @@ struct SaleNotices::Impl {
     // The HUD list that holds the drone provider (nullptr if the HUD is not up). The first active
     // list is not always that one (test n7, 2026-10-23: a world-button sale fell back to the text
     // message without any notice log), so when it lacks the provider every loaded list is checked
-    // (active scene instances only), at most once per second (a press, or the 0.25 s retry while
-    // something is queued). Why nothing was found is logged once.
-    Il2CppObject* List() {
+    // (active ones first, then a started inactive one), at most once per second (a press, or the
+    // 0.25 s retry while something is queued). Why nothing was found is logged once.
+    Il2CppObject* List(bool allowInactive) {
         Il2CppObject* first = unity::FindObjectOfType(listClass);
         if (unity::IsAlive(first) && IsA(first, listClass) && Provider(first)) return first;
         const unsigned long long now = GetTickCount64();
         if (now - lastScan < 1000) return nullptr;
         lastScan = now;
         size_t seen = 0, active = 0;
+        Il2CppObject* inactive = nullptr;  // a list with the provider whose object is inactive right now
         for (Il2CppObject* l : unity::FindObjectsOfTypeAll(listClass)) {
             if (!unity::IsAlive(l) || !IsA(l, listClass)) continue;
             ++seen;
-            if (!unity::ActiveInHierarchy(unity::GameObjectOf(l))) continue;
-            ++active;
-            if (Provider(l)) return l;
+            const bool on = unity::ActiveInHierarchy(unity::GameObjectOf(l));
+            active += on ? 1 : 0;
+            if (!Provider(l)) continue;  // prefabs / lists whose Start never ran have no providers
+            if (on) return Found(l, true, seen);
+            if (!inactive) inactive = l;
         }
+        // Inactive but started (its HUD canvas hidden for now): the notices wait in its pending
+        // queue and show when it is active again. Not for Available(): the world button then shows
+        // its text, since such a list may stay hidden.
+        if (inactive && allowInactive) return Found(inactive, false, seen);
         if (!loggedMissing) {
             loggedMissing = true;
             std::string providers;
@@ -105,6 +113,14 @@ struct SaleNotices::Impl {
         }
         return nullptr;
     }
+    Il2CppObject* Found(Il2CppObject* list, bool active, size_t seen) {
+        if (!loggedScan) {
+            loggedScan = true;
+            SR2_INFO("[{}] sell-all notices: drone provider found on another HUD notification list ({}, list #{} of "
+                     "the loaded ones)", module, active ? "active" : "inactive", seen);
+        }
+        return list;
+    }
     Il2CppObject* Provider(Il2CppObject* list) {
         void* arr = unity::Field<void*>(list, offProviders);
         for (size_t i = 0, n = unity::ArrayLength(arr); i < n && i < 16; ++i) {
@@ -115,7 +131,7 @@ struct SaleNotices::Impl {
     }
     // true = done with the queue (shown or given up), false = try again later.
     bool TryFlush() {
-        Il2CppObject* list = List();
+        Il2CppObject* list = List(true);
         if (!list) return false;
         Il2CppObject* provider = Provider(list);
         Il2CppObject* scene = provider ? unity::Field<Il2CppObject*>(provider, offActive) : nullptr;
@@ -183,7 +199,7 @@ bool SaleNotices::Setup(Resolver& R, const char* module, std::string& why) {
 
 bool SaleNotices::Available() {
     if (!ready_) return false;
-    Il2CppObject* list = impl_->List();
+    Il2CppObject* list = impl_->List(false);
     return list && impl_->Provider(list);
 }
 

@@ -9,7 +9,10 @@
 // `_activeNotifications` (a DroneActivitySceneNotifications); its private AddPlortSold(
 // IdentifiableType, int) (0x75A9D0) adds / merges a per-type entry, and DequeuePlortsSold
 // (0x75B200) turns it into a NotificationEntry {icon = type.icon, name = PlortSoldFormat with the
-// type's localized name as {0}, count, DefaultStyle}. The list's private
+// type's localized name as {0}, count, DefaultStyle}. That is the drones' cloud-upload notice too:
+// DequeueResourceCollected (0x75B430, for AddResourceCollected) is the same code with
+// QuantumCloudResourceCollectedFormat as the text, same entry class and DefaultStyle (both
+// decompiled), so the sale notices look exactly like it and only say "sold". The list's private
 // HandleNotificationAvailable(provider) (0x76B7B0) dequeues every item into its pending queue and
 // shows them page by page, unless its HUD-suppression query is satisfied (menus open: get_
 // CanQueueAny false, 0x76D2B0) - then it drains and DISCARDS them. So we only hand items over
@@ -19,8 +22,9 @@
 // fault marks the module faulted). No GC handles: queued IdentifiableTypes are persistent assets
 // and are class- and IsAlive-checked again before use. While something is queued, one
 // FindObjectOfType(ItemAcquisitionNotificationList) every 0.25 s; nothing otherwise. If that first
-// active list lacks the drone provider, every loaded list is checked (FindObjectsOfTypeAll, active
-// ones only), at most once per second; why none fits is logged once.
+// active list lacks the drone provider, every loaded list is checked (FindObjectsOfTypeAll; active
+// ones first, else a started inactive one for queued notices, never for Available()), at most once
+// per second; why none fits is logged once.
 
 #include <string>
 #include <utility>
