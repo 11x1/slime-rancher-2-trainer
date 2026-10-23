@@ -24,6 +24,18 @@ namespace {
 
 constexpr const char* kActiveKey = "active_profile";
 constexpr const char* kSkipModule = "ui";  // never part of a profile
+// Also never part of a profile: a profile load must not turn on the sandbox,
+// which the overlay only enables after a confirmation dialog.
+constexpr const char* kSandboxModule = "sandbox";
+bool Skipped(std::string_view module) { return module == kSkipModule || module == kSandboxModule; }
+
+// A settings::Snapshot without the modules profiles skip.
+json::Value WithoutSkipped(const json::Value& mods) {
+    json::Value out = json::Value::Object();
+    for (size_t i = 0; i < mods.keys().size() && i < mods.items().size(); ++i)
+        if (!Skipped(mods.keys()[i])) out.set(mods.keys()[i], mods.items()[i]);
+    return out;
+}
 constexpr size_t kMaxNameChars = 40;
 constexpr size_t kMaxDescChars = 200;
 constexpr uintmax_t kMaxFileBytes = 1u << 20;
@@ -241,7 +253,7 @@ std::string ProfileText(const json::Value& mods, const std::string& desc) {
 json::Value BuildModules(const std::vector<settings::Def>& defs, double (*valueOf)(const settings::Def&)) {
     std::vector<settings::Def> sorted;
     for (const auto& d : defs)
-        if (d.module != kSkipModule) sorted.push_back(d);
+        if (!Skipped(d.module)) sorted.push_back(d);
     std::sort(sorted.begin(), sorted.end(), [](const settings::Def& a, const settings::Def& b) {
         return a.module != b.module ? a.module < b.module : a.key < b.key;
     });
@@ -354,7 +366,7 @@ void Apply(const std::string& name, const json::Value& mods) {
     for (size_t i = 0; i < mods.keys().size() && i < mods.items().size(); ++i) {
         const std::string& m = mods.keys()[i];
         const json::Value& sect = mods.items()[i];
-        if (m == kSkipModule || !known.contains(m) || !sect.isObject()) continue;
+        if (Skipped(m) || !known.contains(m) || !sect.isObject()) continue;
         for (size_t k = 0; k < sect.keys().size() && k < sect.items().size(); ++k)
             if (!settings::Has(m, sect.keys()[k])) settings::StashSaved(m, sect.keys()[k], sect.items()[k]);
     }
@@ -369,7 +381,7 @@ void Apply(const std::string& name, const json::Value& mods) {
     int changed = 0;
     for (int pass = 0; pass < 2; ++pass) {
         for (const auto& d : settings::All()) {  // re-read: enabling may register more
-            if (d.module == kSkipModule) continue;
+            if (Skipped(d.module)) continue;
             const bool isEnabled = d.key == "enabled" && d.kind == settings::Kind::Bool;
             if (isEnabled != (pass == 1)) continue;
             double before = settings::Get(d.module, d.key);
@@ -438,7 +450,7 @@ bool IsModified() {
     }
     bool modified = false;
     for (const auto& d : settings::All()) {
-        if (d.module == kSkipModule) continue;
+        if (Skipped(d.module)) continue;
         double want = d.def;
         if (const json::Value* x = mods[d.module].find(d.key)) {
             double v = 0;
@@ -517,7 +529,8 @@ Outcome SaveCurrentAs(std::string_view nameIn, std::string_view description, boo
 
     std::string text;
     std::string err;
-    bool ok = Try([&] { text = ProfileText(settings::Snapshot(kSkipModule), CleanDescription(description)); }, &err);
+    bool ok = Try(
+        [&] { text = ProfileText(WithoutSkipped(settings::Snapshot(kSkipModule)), CleanDescription(description)); }, &err);
     if (!ok) return Make(Result::Error, std::format("Saving '{}' failed: {}", name, err), name);
     if (!WriteAtomic(p, text, err)) return Make(Result::Error, std::format("Saving '{}' failed: {}", name, err), name);
     SetActive(name);

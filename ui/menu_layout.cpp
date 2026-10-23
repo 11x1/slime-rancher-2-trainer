@@ -67,6 +67,13 @@ std::vector<Category> Spec() {
     general.kind = TabKind::Cards;
     general.columns = {{"quick_start"}, {"instant_build", "quick_travel"}};
     misc.tabs.push_back(general);
+    Tab sandbox;
+    sandbox.title = "Sandbox";
+    sandbox.kind = TabKind::Sandbox;
+    sandbox.module = "sandbox";
+    sandbox.help = "Edit your Newbucks, health, energy and vacpack. Turning it on asks for confirmation first: "
+                   "the edits change your save.";
+    misc.tabs.push_back(sandbox);
     cats.push_back(misc);
 
     Category profiles = Cat("profiles", "Profiles", Icon::Profiles, true);
@@ -131,6 +138,9 @@ std::vector<Category> Build(const std::vector<ModuleView>& views) {
                 std::erase_if(t.nested, [&](const std::string& n) { return !find(n); });
                 placed.insert(t.module);
                 placed.insert(t.nested.begin(), t.nested.end());
+            } else if (t.kind == TabKind::Sandbox) {
+                if (!find(t.module)) continue;
+                placed.insert(t.module);
             } else if (t.kind == TabKind::Cards) {
                 for (auto& col : t.columns) {
                     std::erase_if(col, [&](const std::string& m) { return !find(m); });

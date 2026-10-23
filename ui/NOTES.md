@@ -30,6 +30,7 @@ The UI never draws an automatic `ui.enabled` toggle, because turning the UI off 
 | `mod_icons.cpp/.h` | the mod's own icons (`assets/icons/`, embedded as `mod_icons_data.inc`) as Unity sprites: stb_image decode, `Texture2D` + `Sprite.Create`, cached and pinned; used by the Mods tab and the custom plot upgrades, with the game's sprite as fallback |
 | `settings_view.cpp/.h` | shared helpers (see above) |
 | `quick_start_hint.cpp/.h` | "Hold Shift to stay in the main menu" note: `quick_start` publishes its pending auto-continue (and countdown) from the main thread through atomics; `menu::DrawHint` stacks it under the hotkey note. Shown whenever auto-continue is pending, independent of `overlay_hint`; after a Shift cancel it says "Staying in the main menu" for 2.5 s |
+| `sandbox_bridge.cpp/.h` | Misc > Sandbox: the `sandbox` module publishes a snapshot (Newbucks, health/energy/radiation, vacpack slots, item catalog) from the main thread; the tab reads only that copy and posts `Action`s, which `main_thread::Post` hands to the module's handler. Item ids are opaque to the UI |
 | `il2cpp_util.cpp/.h` | by-name IL2CPP helpers: invoke, unbox, object_new, GC handles |
 | `../third_party/stb/` | `stb_image.h` v2.30 (nothings/stb, MIT / public domain), PNG decoder only, compiled into `mod_icons.cpp` |
 | `../third_party/imgui/` | Dear ImGui **v1.93.0** (official ocornut/imgui release tag, 2026-10-14). Only the core files, the dx11 and win32 backends, and `LICENSE.txt` are vendored, unmodified. |
@@ -85,9 +86,10 @@ The UI never draws an automatic `ui.enabled` toggle, because turning the UI off 
 | World | Spawn Scaling, Wall Markers |
 | HUD | Minimap (Collectibles below it, with its own switch: the tracker is drawn under the minimap and reads its map), Speed Panel |
 | Ranch | Plot Upgrades, Sell Upgrades, Custom Upgrades |
-| Misc | General: Quick Start on the left; Instant Build and Quick Travel on the right, one card each with the module switch in the card header |
+| Misc | General: Quick Start on the left; Instant Build and Quick Travel on the right, one card each with the module switch in the card header. Sandbox: its own page (see below) |
 | Profiles, Settings | one tab each |
 
+- **Sandbox** (`TabKind::Sandbox`, module `sandbox`, default off) draws its own page instead of setting cards. Off: a card with an explanation and an **Enable sandbox** button. The button and the tab bar's Enabled switch (only when turning on) open a modal, "Enable sandbox?" / "Sandbox edits change your save directly. Enable?" with Cancel / Enable (Esc cancels; Cancel comes first, so keyboard focus never starts on Enable); only Enable writes `sandbox.enabled`. Turning it off is the plain switch. On: left column Newbucks (amount, input, Set / Add / Subtract) and Player (health, energy, radiation with Refill / Clear, an infinite-energy switch); right column Vacpack (slot list with item and count; for the selected slot an amount slider, Set amount / Fill / Empty, a searchable list of the items that slot accepts and a Put button); a status line with the last result. The page reads `sandbox_bridge::Get()` only and marks itself viewed each frame, which makes the module refresh the snapshot at 4 Hz. The Options "Mods" tab has no Sandbox row and profiles skip the module, so nothing else turns it on. Details: `modules/sandbox/NOTES.md`.
 - **Speed Panel** is `hl2_movement`'s HUD group. Its switch is `hl2_movement.momentum_hud`, it is locked while Hl2 Movement is off, and a (?) next to it says so.
 - A module the layout does not list gets a card on Misc > General, so new modules show up without touching the UI. A setting the layout does not list stays in its module's tab.
 

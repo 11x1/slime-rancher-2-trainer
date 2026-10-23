@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <format>
 #include <map>
 #include <set>
 #include <string>
@@ -16,6 +17,7 @@
 #include "core/build_info.h"
 #include "core/profiles.h"
 #include "menu_layout.h"
+#include "sandbox_bridge.h"
 #include "slime_icons.h"
 #include "theme.h"
 
@@ -970,6 +972,350 @@ void DrawProfilesPage(const Host& h) {
     EndCard();
 }
 
+// -------------------------------------------------------------- sandbox ----
+// Misc > Sandbox (module "sandbox"). Reads only the snapshot the module copies on
+// the main thread (sandbox_bridge.h); every change is a posted request.
+namespace sbx = ::sr2::ui::sandbox;
+
+constexpr const char* kSbxPopup = "##sandbox_confirm";
+bool g_sbxConfirm = false;   // open the "Enable sandbox?" dialog (set by the button or the tab switch)
+int g_sbxSlot = 0;           // selected vacpack slot
+int g_sbxAmount = 0;         // amount slider
+int g_sbxAmountSlot = -1;    // slot the amount and picked item belong to
+uintptr_t g_sbxItem = 0;     // picked item (opaque id, never dereferenced here)
+char g_sbxSearch[64] = {};
+long long g_sbxBucks = 1000;
+
+std::string Thousands(long long v) {
+    std::string s = std::to_string(v < 0 ? -v : v);
+    for (int i = static_cast<int>(s.size()) - 3; i > 0; i -= 3) s.insert(static_cast<size_t>(i), ",");
+    return v < 0 ? "-" + s : s;
+}
+
+bool ContainsNoCase(const std::string& hay, const char* needle) {
+    auto low = [](char c) { return static_cast<char>((c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c); };
+    const size_t n = std::strlen(needle);
+    if (n == 0) return true;
+    for (size_t i = 0; i + n <= hay.size(); ++i) {
+        size_t k = 0;
+        while (k < n && low(hay[i + k]) == low(needle[k])) ++k;
+        if (k == n) return true;
+    }
+    return false;
+}
+
+bool AccentButton(const char* label, ImVec2 size) {
+    const Palette& P = theme::Colors();
+    ImGui::PushStyleColor(ImGuiCol_Button, P.accent);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Mix(P.accent, IM_COL32_WHITE, 0.14f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, Mix(P.accent, IM_COL32_BLACK, 0.12f));
+    ImGui::PushStyleColor(ImGuiCol_Text, P.accentInk);
+    const bool r = ImGui::Button(label, size);
+    ImGui::PopStyleColor(4);
+    return r;
+}
+
+void SbxRequest(sbx::Op op, long long value = 0, int slot = -1, uintptr_t item = 0) {
+    sbx::Action a;
+    a.op = op;
+    a.value = value;
+    a.slot = slot;
+    a.item = item;
+    sbx::Request(a);
+}
+
+void DimText(const std::string& text, float size = theme::kSmallSize) {
+    FontScope f(theme::Body(), size);
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::Colors().dim);
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextUnformatted(text.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
+}
+
+// "Enable sandbox?": the only way the overlay turns the module on. Cancel (or Esc) does nothing.
+void SandboxConfirm(const ModuleView& mv) {
+    const Palette& P = theme::Colors();
+    if (g_sbxConfirm) {
+        ImGui::OpenPopup(kSbxPopup);
+        g_sbxConfirm = false;
+    }
+    const float w = U(430);
+    ImGui::SetNextWindowPos(ImVec2((g_winMin.x + g_winMax.x) * 0.5f, (g_winMin.y + g_winMax.y) * 0.5f), ImGuiCond_Appearing,
+                            ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(w, 0), ImVec2(w, FLT_MAX));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(22), U(18)));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(10), U(8)));
+    ImGui::PushStyleColor(ImGuiCol_Border, P.cardBorder);
+    const ImGuiWindowFlags f = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                               ImGuiWindowFlags_AlwaysAutoResize;
+    if (ImGui::BeginPopupModal(kSbxPopup, nullptr, f)) {
+        {
+            FontScope fs(theme::Display(), theme::kDisplaySize + 4);
+            ImGui::PushStyleColor(ImGuiCol_Text, theme::Current() == theme::Mode::Dark ? P.grab : P.accent);
+            ImGui::TextUnformatted("Enable sandbox?");
+            ImGui::PopStyleColor();
+        }
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted("Sandbox edits change your save directly. Enable?");
+        ImGui::PopTextWrapPos();
+        DimText("Every edit goes through the game's own functions and is kept when the game next saves. "
+                "There is no undo, so back up your save if you want to keep it as it is.");
+        ImGui::Dummy(ImVec2(0, U(4)));
+        const ImVec2 bs(U(112), U(34));
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - 2 * bs.x -
+                             ImGui::GetStyle().ItemSpacing.x);
+        if (ImGui::Button("Cancel", bs) || PopupCancelled()) ImGui::CloseCurrentPopup();
+        ImGui::SameLine();
+        if (AccentButton("Enable", bs)) {
+            if (mv.hasEnabled) Write(mv.enabled, 1.0);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+}
+
+void SandboxNewbucks(const sbx::Snapshot& s, float w) {
+    const Palette& P = theme::Colors();
+    BeginCard("sbx_bucks", w);
+    CardHeading("Newbucks", P.head);
+    if (!s.haveNewbucks) {
+        DimText("The Newbucks currency was not found.");
+        EndCard();
+        return;
+    }
+    {
+        FontScope f(theme::Display(), theme::kDisplaySize + 12);
+        ImGui::TextUnformatted(Thousands(s.newbucks).c_str());
+    }
+    DimText("Maximum " + Thousands(s.maxNewbucks));
+    const long long max = std::max(0, s.maxNewbucks);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputScalar("##bucks", ImGuiDataType_S64, &g_sbxBucks, nullptr, nullptr, "%lld");
+    HoverTip("Amount for the buttons below.");
+    g_sbxBucks = std::clamp(g_sbxBucks, 0LL, max);
+    const float sp = ImGui::GetStyle().ItemSpacing.x;
+    const ImVec2 bs(std::floor((ImGui::GetContentRegionAvail().x - 2 * sp) / 3), U(32));
+    if (ImGui::Button("Set", bs)) SbxRequest(sbx::Op::SetNewbucks, g_sbxBucks);
+    HoverTip("Set your Newbucks to this amount.");
+    ImGui::SameLine();
+    if (ImGui::Button("Add", bs)) SbxRequest(sbx::Op::AddNewbucks, g_sbxBucks);
+    HoverTip("Add this amount (up to the maximum).");
+    ImGui::SameLine();
+    if (ImGui::Button("Subtract", bs)) SbxRequest(sbx::Op::AddNewbucks, -g_sbxBucks);
+    HoverTip("Take this amount away (down to 0).");
+    EndCard();
+}
+
+// Label, value and a control at the right edge (button or switch), on one row.
+float SbxRowStart(const char* label) {
+    const float x0 = ImGui::GetCursorPosX();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(label);
+    return x0;
+}
+
+void SandboxPlayer(const sbx::Snapshot& s, float w) {
+    const Palette& P = theme::Colors();
+    BeginCard("sbx_player", w);
+    CardHeading("Player", P.head);
+    const float avail = ImGui::GetContentRegionAvail().x, bw = U(84);
+    auto row = [&](const char* label, const std::string& value, const char* button, sbx::Op op, const char* tip) {
+        ImGui::PushID(label);
+        const float x0 = SbxRowStart(label);
+        ImGui::SameLine(x0 + std::floor(avail * 0.40f));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.soft), "%s", value.c_str());
+        ImGui::SameLine(x0 + avail - bw);
+        if (ImGui::Button(button, ImVec2(bw, 0))) SbxRequest(op);
+        HoverTip(tip);
+        ImGui::PopID();
+    };
+    row("Health", std::format("{} / {}", s.health, s.maxHealth), "Refill", sbx::Op::RefillHealth,
+        "Set health to its maximum (PlayerState.SetHealth).");
+    row("Energy", std::format("{} / {}", s.energy, s.maxEnergy), "Refill", sbx::Op::RefillEnergy,
+        "Set energy to its maximum (PlayerState.SetEnergy).");
+    row("Radiation", std::to_string(s.rads), "Clear", sbx::Op::ClearRads, "Set radiation to 0 (PlayerState.SetRad).");
+    const float x0 = SbxRowStart("Infinite energy");
+    ImGui::SameLine(x0 + avail - U(kSwitchW));
+    if (Switch("##infenergy", s.infiniteEnergy)) SbxRequest(sbx::Op::InfiniteEnergy, s.infiniteEnergy ? 0 : 1);
+    HoverTip("Keeps energy at its maximum. For this session only: off again after a restart or when Sandbox is "
+             "turned off.");
+    EndCard();
+}
+
+void SandboxVacpack(const sbx::Snapshot& s, float w) {
+    const Palette& P = theme::Colors();
+    BeginCard("sbx_vac", w);
+    CardHeading("Vacpack", P.head);
+    if (s.slots.empty()) {
+        DimText("No vacpack slots found.");
+        EndCard();
+        return;
+    }
+    const int n = static_cast<int>(s.slots.size());
+    g_sbxSlot = std::clamp(g_sbxSlot, 0, n - 1);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImFont* body = theme::Body();
+    for (int i = 0; i < n; ++i) {
+        const sbx::Slot& sl = s.slots[static_cast<size_t>(i)];
+        ImGui::PushID(i);
+        const ImVec2 size(ImGui::GetContentRegionAvail().x, U(30));
+        if (ImGui::InvisibleButton("##slot", size) && sl.unlocked) g_sbxSlot = i;
+        const bool hovered = ImGui::IsItemHovered() && sl.unlocked, sel = i == g_sbxSlot;
+        const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+        if (sel || hovered) dl->AddRectFilled(a, b, sel ? P.sel : P.hover, U(8));
+        const float ty = (a.y + b.y) * 0.5f - ImGui::GetFontSize() * 0.5f;
+        Text(dl, body, theme::kBodySize, ImVec2(a.x + U(10), ty), P.dim, std::to_string(i + 1).c_str());
+        const char* name = !sl.unlocked ? "Locked" : sl.item ? sl.name.c_str() : "Empty";
+        Text(dl, body, theme::kBodySize, ImVec2(a.x + U(30), ty), sl.unlocked && sl.item ? P.text : P.dim, name);
+        if (sl.unlocked) {
+            const std::string c = std::format("{} / {}", sl.count, sl.max);
+            const ImVec2 cs = TextSize(body, theme::kBodySize, c.c_str());
+            Text(dl, body, theme::kBodySize, ImVec2(b.x - U(10) - cs.x, ty), P.soft, c.c_str());
+        }
+        ImGui::PopID();
+    }
+    ImGui::Dummy(ImVec2(0, U(2)));
+    const ImVec2 la = ImGui::GetCursorScreenPos();
+    dl->AddLine(la, ImVec2(la.x + ImGui::GetContentRegionAvail().x, la.y), P.line, U(2));
+    ImGui::Dummy(ImVec2(0, U(4)));
+
+    const sbx::Slot& sl = s.slots[static_cast<size_t>(g_sbxSlot)];
+    if (!sl.unlocked) {
+        DimText("This slot is locked. Vacpack upgrades unlock it.");
+        EndCard();
+        return;
+    }
+    if (g_sbxAmountSlot != g_sbxSlot) {
+        g_sbxAmountSlot = g_sbxSlot;
+        g_sbxAmount = sl.item ? sl.count : sl.max;
+        g_sbxItem = 0;
+    }
+    const int max = std::max(0, sl.max);
+    g_sbxAmount = std::clamp(g_sbxAmount, 0, max);
+    const float avail = ImGui::GetContentRegionAvail().x, sp = ImGui::GetStyle().ItemSpacing.x;
+    const float x0 = SbxRowStart("Amount");
+    const float sw = std::floor(avail * 0.62f);
+    ImGui::SameLine(x0 + avail - sw);
+    ImGui::SetNextItemWidth(sw);
+    ImGui::SliderInt("##amount", &g_sbxAmount, 0, max, "%d", ImGuiSliderFlags_AlwaysClamp);
+    HoverTip("Ctrl+click to type. Used by Set amount and Put.");
+
+    const ImVec2 bs(std::floor((avail - 2 * sp) / 3), U(30));
+    ImGui::BeginDisabled(!sl.item);
+    if (ImGui::Button("Set amount", bs)) SbxRequest(sbx::Op::SetSlotCount, g_sbxAmount, g_sbxSlot);
+    HoverTip("Change how many of the current item the slot holds (0 empties it).");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(sl.count >= max);
+    if (ImGui::Button("Fill", bs)) SbxRequest(sbx::Op::SetSlotCount, max, g_sbxSlot);
+    ImGui::EndDisabled();
+    HoverTip("Fill the slot to its maximum.");
+    ImGui::SameLine();
+    if (ImGui::Button("Empty", bs)) SbxRequest(sbx::Op::SetSlotCount, 0, g_sbxSlot);
+    HoverTip("Remove everything from this slot.");
+    ImGui::EndDisabled();
+
+    ImGui::Dummy(ImVec2(0, U(2)));
+    {
+        FontScope f(theme::Display(), theme::kSmallSize + 1);
+        ImGui::PushStyleColor(ImGuiCol_Text, P.soft);
+        ImGui::TextUnformatted("Put an item in this slot");
+        ImGui::PopStyleColor();
+    }
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputTextWithHint("##search", "Search items...", g_sbxSearch, sizeof(g_sbxSearch));
+    const uint32_t bit = g_sbxSlot < 32 ? (1u << g_sbxSlot) : 0u;
+    std::string pickedName;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, P.frame);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(6), U(6)));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, U(2)));
+    ImGui::BeginChild("##items", ImVec2(0, U(160)), ImGuiChildFlags_AlwaysUseWindowPadding);
+    int shown = 0;
+    if (s.catalog) {
+        for (const sbx::Item& it : *s.catalog) {
+            if (!(it.slotMask & bit)) continue;
+            if (it.id == g_sbxItem) pickedName = it.name;
+            if (!ContainsNoCase(it.name, g_sbxSearch)) continue;
+            ++shown;
+            ImGui::PushID(reinterpret_cast<const void*>(it.id));
+            if (ImGui::Selectable(it.name.c_str(), it.id == g_sbxItem)) g_sbxItem = it.id;
+            ImGui::PopID();
+        }
+    }
+    if (shown == 0) ImGui::TextDisabled(s.catalog ? "No matching items." : "Reading the item list...");
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
+    if (pickedName.empty()) g_sbxItem = 0;  // not accepted by this slot (or gone)
+
+    const bool canPut = g_sbxItem != 0 && g_sbxAmount > 0;
+    const std::string label = !g_sbxItem ? std::string("Pick an item above")
+                              : g_sbxAmount <= 0 ? std::string("Set an amount above 0")
+                                                 : std::format("Put {} x {}", g_sbxAmount, pickedName);
+    ImGui::BeginDisabled(!canPut);
+    if (AccentButton((label + "###put").c_str(), ImVec2(-FLT_MIN, U(32))))
+        SbxRequest(sbx::Op::PutItem, g_sbxAmount, g_sbxSlot, g_sbxItem);
+    ImGui::EndDisabled();
+    HoverTip("Replaces what the slot holds. The game checks that the slot accepts the item and its maximum.");
+    EndCard();
+}
+
+void SandboxStatus(const Host& h) {
+    const sbx::Status st = sbx::GetStatus();
+    if (st.text.empty()) return;
+    const Palette& P = theme::Colors();
+    const bool fresh = h.nowMs - st.tick < 6000;
+    ImGui::Dummy(ImVec2(0, U(2)));
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(st.error ? P.err : fresh ? P.head : P.dim), "%s", st.text.c_str());
+    ImGui::PopTextWrapPos();
+}
+
+void DrawSandboxPage(const Host& h, const ModuleView& mv) {
+    const Palette& P = theme::Colors();
+    FailedBanner(mv);
+    SandboxConfirm(mv);
+    if (!ModuleOn(mv)) {
+        BeginCard("sbx_off", ImGui::GetContentRegionAvail().x);
+        CardHeading("Sandbox", P.head);
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted("Edit your character's resources: set your Newbucks, refill health and energy, and "
+                               "choose what each vacpack slot holds and how much.");
+        ImGui::PopTextWrapPos();
+        DimText("Edits use the game's own functions, so the save stays valid, but they change your save directly and "
+                "can't be undone. Sandbox stays off until you enable it and confirm.");
+        ImGui::Dummy(ImVec2(0, U(4)));
+        if (AccentButton("Enable sandbox", ImVec2(U(170), U(34)))) g_sbxConfirm = true;
+        EndCard();
+        return;
+    }
+    sbx::MarkViewed();
+    const auto snap = sbx::Get();
+    if (!snap || h.nowMs - snap->tick > 3000) {
+        OffNote("Reading your character...");
+        return;
+    }
+    if (!snap->inGame) {
+        OffNote(snap->why.empty() ? std::string("Load a save to use the sandbox.") : snap->why);
+        SandboxStatus(h);
+        return;
+    }
+    const float w = ColumnWidth();
+    ImGui::BeginGroup();
+    SandboxNewbucks(*snap, w);
+    ImGui::Dummy(ImVec2(0, U(kGap) - ImGui::GetStyle().ItemSpacing.y));
+    SandboxPlayer(*snap, w);
+    ImGui::EndGroup();
+    ImGui::SameLine(0, U(kGap));
+    ImGui::BeginGroup();
+    SandboxVacpack(*snap, w);
+    ImGui::EndGroup();
+    SandboxStatus(h);
+}
+
 // ------------------------------------------------------------- settings ----
 void KeyValue(const char* k, const std::string& v, ImU32 vcol) {
     const float avail = ImGui::GetContentRegionAvail().x, x0 = ImGui::GetCursorPosX();
@@ -1174,7 +1520,7 @@ struct TabState {
 
 TabState StateOf(const Tab& t, const std::vector<ModuleView>& views) {
     TabState s;
-    if (t.kind != TabKind::Module) return s;
+    if (t.kind != TabKind::Module && t.kind != TabKind::Sandbox) return s;
     const ModuleView* mv = FindView(views, t.module);
     if (!mv) return s;
     const bool moduleOn = ModuleOn(*mv);
@@ -1273,7 +1619,11 @@ bool DrawTopBar(const Category& cat, int& ti, const std::vector<ModuleView>& vie
         ImGui::SetCursorScreenPos(ImVec2(rx, cy - fh * 0.5f));
         ImGui::BeginDisabled(st.locked);
         const bool on = IsOn(*st.sw);
-        if (Switch("##enable", on)) Write(*st.sw, on ? 0.0 : 1.0);
+        if (Switch("##enable", on)) {
+            // Sandbox: turning it on goes through the confirmation dialog (drawn by its page).
+            if (tab.kind == TabKind::Sandbox && !on) g_sbxConfirm = true;
+            else Write(*st.sw, on ? 0.0 : 1.0);
+        }
         ImGui::EndDisabled();
         HoverTip(st.locked ? tab.help : st.sw->tooltip);
         const ImVec2 ls = TextSize(f, 15, "Enabled");
@@ -1457,6 +1807,9 @@ bool Draw(const Host& h) {
             case TabKind::Cards: DrawCardsPage(h, tab, views); break;
             case TabKind::Profiles: DrawProfilesPage(h); break;
             case TabKind::Settings: DrawSettingsPage(h, ui); break;
+            case TabKind::Sandbox:
+                if (const ModuleView* mv = FindView(views, tab.module)) DrawSandboxPage(h, *mv);
+                break;
         }
         ImGui::Dummy(ImVec2(0, U(18)));
         ImGui::EndChild();

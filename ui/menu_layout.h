@@ -21,12 +21,13 @@ enum class TabKind {
     Cards,     // several small modules, one card each with its own switch
     Profiles,  // the profiles page
     Settings,  // the overlay's own settings (module "ui") and status
+    Sandbox,   // module "sandbox": its own page (resource editor), switch only after a confirmation dialog
 };
 
 struct Tab {
     std::string title;
     TabKind kind = TabKind::Module;
-    std::string module;                     // Module
+    std::string module;                     // Module, Sandbox
     std::vector<std::string> onlyGroups;    // Module: only these groups ("" = ungrouped); empty = all
     std::vector<std::string> skipGroups;    // Module: groups shown on another tab
     std::vector<std::string> nested;        // Module: modules drawn below as sections with their own switch

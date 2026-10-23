@@ -23,6 +23,7 @@
 #include "core/version_guard.h"
 #include "il2cpp_util.h"
 #include "mod_icons.h"
+#include "sandbox_bridge.h"
 #include "settings_view.h"
 
 namespace sr2::ui {
@@ -412,6 +413,8 @@ void RebuildRows() {
     g_rows.clear();
     g_rowByDef.clear();
     for (const auto& mv : BuildModuleViews()) {
+        // Sandbox is turned on only through the overlay's confirmation dialog.
+        if (mv.module == sandbox::kModule) continue;
         auto add = [&](const settings::Def& d, std::string label, bool indented) {
             if (d.kind == settings::Kind::Key) return;  // overlay-only
             const bool toggle = d.kind == settings::Kind::Bool;
