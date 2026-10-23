@@ -193,6 +193,8 @@ Il2CppObject* AddMask(Il2CppObject* go);
 Il2CppObject* AddCanvasGroup(Il2CppObject* go);
 void CanvasGroupSetAlpha(Il2CppObject* cg, float a);
 void CanvasGroupSetBlocksRaycasts(Il2CppObject* cg, bool v);
+void CanvasGroupSetIgnoreParentGroups(Il2CppObject* cg, bool v);  // no-op if unavailable
+bool HasIgnoreParentGroups();
 Il2CppObject* AddCanvas(Il2CppObject* go);  // nested canvas, isolates our rebuilds
 Il2CppObject* CanvasRoot(Il2CppObject* canvas);
 void CanvasSetOverlay(Il2CppObject* canvas, int sortingOrder);  // ScreenSpaceOverlay root canvas

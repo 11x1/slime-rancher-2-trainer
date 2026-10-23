@@ -57,7 +57,7 @@ struct State {
     // uGUI
     Fn imgSetSprite, imgGetSprite, imgSetType, imgSetPreserveAspect, imgSetPpuMul, gfxSetColor, gfxSetRaycast,
         maskShowGraphic;
-    Fn cgSetAlpha, cgSetBlocks, cgSetInteractable;
+    Fn cgSetAlpha, cgSetBlocks, cgSetInteractable, cgSetIgnoreParent;
     Fn canvasRoot, canvasSetRenderMode, canvasSetSorting, canvasSetOverrideSorting;
     Fn behEnabled, maskGetShow;
     Il2CppClass* material = nullptr;
@@ -271,6 +271,7 @@ bool Resolve(std::string& err) {
     s.cgSetAlpha = A(s.canvasGroup, "set_alpha", 1, &req);
     s.cgSetBlocks = A(s.canvasGroup, "set_blocksRaycasts", 1, &opt);
     s.cgSetInteractable = A(s.canvasGroup, "set_interactable", 1, &opt);
+    s.cgSetIgnoreParent = A(s.canvasGroup, "set_ignoreParentGroups", 1, &opt);
     s.canvasRoot = A(s.canvas, "get_rootCanvas", 0, &opt);
     s.canvasSetRenderMode = A(s.canvas, "set_renderMode", 1, &opt);
     s.canvasSetSorting = A(s.canvas, "set_sortingOrder", 1, &opt);
@@ -737,6 +738,10 @@ void CanvasGroupSetBlocksRaycasts(Il2CppObject* cg, bool v) {
     if (S.cgSetBlocks) Call<void>(S.cgSetBlocks, cg, v);
     if (S.cgSetInteractable) Call<void>(S.cgSetInteractable, cg, v);
 }
+void CanvasGroupSetIgnoreParentGroups(Il2CppObject* cg, bool v) {
+    if (Alive(cg) && S.cgSetIgnoreParent) Call<void>(S.cgSetIgnoreParent, cg, v);
+}
+bool HasIgnoreParentGroups() { return static_cast<bool>(S.cgSetIgnoreParent); }
 Il2CppObject* AddCanvas(Il2CppObject* go) { return AddComponent(go, S.canvas); }
 Il2CppObject* CanvasRoot(Il2CppObject* canvas) {
     return (Alive(canvas) && S.canvasRoot) ? Call<Il2CppObject*>(S.canvasRoot, canvas) : canvas;

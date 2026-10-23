@@ -488,6 +488,7 @@ private:
         };
         std::vector<Note> notes;
         std::string placeholders;
+        int fogOpaque = 0;           // fog-shader copies shielded from the root CanvasGroup's opacity
         int staticFog = 0;           // fog-shader images outside FogMapElements (always drawn)
         std::string staticFogNames;
     };
@@ -1772,6 +1773,7 @@ private:
 
         // material / texture source
         const Build::MatInfo& mi = MaterialInfo(g);
+        bool fogShader = mi.custom && Contains(Lower(mi.label), "fogofwar");  // Custom/PosterizedFogOfWar*
         Il2CppObject* useMat = nullptr;  // custom material to assign
         Il2CppObject* matTex = nullptr;  // null-sprite Image drawn as RawImage(material main texture)
         if (mi.custom) {
@@ -1836,6 +1838,16 @@ private:
             }
             if (useMat) ugui::GraphicSetMaterial(img, useMat);
             ugui::GraphicSetColor(img, color);
+            if (useMat && fogShader) {
+                // The fog shaders read the vertex alpha (Graphic colour x every CanvasGroup above) as their
+                // reveal threshold, not as opacity: under the root CanvasGroup a minimap opacity < 1 eats
+                // holes into the fog. This group stops the inheritance: fog keeps its full shape (opaque).
+                if (Il2CppObject* cg = ugui::HasIgnoreParentGroups() ? ugui::AddCanvasGroup(go) : nullptr) {
+                    ugui::CanvasGroupSetIgnoreParentGroups(cg, true);
+                    ugui::CanvasGroupSetBlocksRaycasts(cg, false);
+                    ++b.fogOpaque;
+                }
+            }
         } else {
             Il2CppObject* ri = ugui::AddComponent(go, ugui::RawImageClass());
             ugui::GraphicSetRaycastTarget(ri, false);
@@ -1856,7 +1868,7 @@ private:
                                                   color.g, color.b, color.a, mi.custom ? " mat " + mi.label : std::string(),
                                                   kind == kRootFog ? " [fog]" : (kind == kRootDyn ? " [dynamic]" : ""))});
 
-        if (kind != kRootFog && mi.custom && Contains(Lower(mi.label), "fogofwar")) {
+        if (kind != kRootFog && fogShader) {
             // fog-shader art outside every FogMapElement: always drawn (nothing in the game toggles it)
             ++b.staticFog;
             if (b.staticFogNames.size() < 400) {
@@ -1960,6 +1972,11 @@ private:
         fogLogged_ = false;
         iconsLogged_ = false;
         if (!b.placeholders.empty()) SR2_INFO("minimap: page placeholders skipped: {}", b.placeholders);
+        if (b.fogOpaque > 0)
+            SR2_INFO("minimap: fog: {} fog-shader images drawn at full alpha (CanvasGroup.ignoreParentGroups): "
+                     "the shader uses vertex alpha as its reveal threshold, so the minimap opacity does not apply "
+                     "to fog",
+                     b.fogOpaque);
         if (b.staticFog > 0)
             SR2_INFO("minimap: fog: {} fog-shader images outside every FogMapElement (always drawn, as in the "
                      "prefab): {}",
@@ -2378,8 +2395,9 @@ private:
         }
     }
 
-    // Fog images are SetActive per area: fully shown or fully hidden. The user opacity is the
-    // CanvasGroup on the minimap root, so it applies to every graphic of the minimap alike.
+    // Fog images are SetActive per area: fully shown or fully hidden. The user opacity (CanvasGroup on
+    // the minimap root) does not reach fog-shader copies: each has its own CanvasGroup with
+    // ignoreParentGroups, because those shaders treat vertex alpha as the reveal threshold.
     void ApplyFogVisibility() {
         for (Group& f : view_.fog) {
             int vis = (cfg_.respectFog && f.state != 1) ? 1 : 0;  // unknown counts as unrevealed

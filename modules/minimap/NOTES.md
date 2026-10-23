@@ -231,7 +231,7 @@ Fix:
 - Readiness: GameModel present, its record set, the director's `_model` == that record, stable for 1 s. Until then every area is unknown = fogged. If a director has a record that never matches GameModel's, it is used after 10 s with a warning. Polled at 10 Hz from the first tick after a world reset until settled, then checked with every fog evaluation; a changed record (save / session change) makes every area unknown again.
 - Cleared on every world reset (scene load, new player object), on a page rebuild, and on a zone change (all areas re-queried in the same tick, so no flash when ready).
 - Cadence: unrevealed + unknown every 2 s; every area after the build / readiness / zone change / full map close / setting change and every 30 s.
-- Drawing: `SetActive` per area (fully on or off). The user opacity stays the root CanvasGroup (uniform for the whole minimap).
+- Drawing: `SetActive` per area (fully on or off). The user opacity (root CanvasGroup) does not reach the fog: see "Fog shaders and minimap opacity".
 
 New log lines:
 
@@ -243,6 +243,17 @@ New log lines:
 - `minimap: fog: event record changed (save / session change) - all N areas unknown again`
 - `minimap: fog: N fog-shader images outside every FogMapElement (always drawn, as in the prefab): '<name>' in '<parent>', ...` (the "covering up static fog (n)" images: if fog over explored areas remains, these are the suspects)
 - WARN `minimap: fog: <field>'s event record is not GameModel.eventRecordModel after 10 s - querying it anyway`
+
+## Fog shaders and minimap opacity (verified 2026-10-23)
+
+Source: the three shaders in `shaders_assets__b2000203….bundle` (`Custom/PosterizedFogOfWarMask` = the FogMapElement art and the static covers, `…Clouds`, `…NegativeMask` = the outside fog), DXBC disassembled with `D3DDisassemble`, constant buffer names from the serialized shader.
+
+- Vertex shader: `COLOR = vertex colour * _Color`. The vertex colour is the Graphic colour times the alpha of every CanvasGroup above it (uGUI bakes it into the vertices).
+- Mask pixel shader (Clouds reads `COLOR.a` the same way): `a = round(COLOR.a * 255) / 255` sets a radial threshold: `radial = saturate(smoothstep(dist_from_centre / (1 - smoothstep((a + 0.5) * 2/3))) + a)` multiplies the SDF before the posterize / `_OpacityLevel` steps. At `a = 1` the shape is complete; below about 0.8 a hole opens from the centre of each fog image. This is the reveal animation (`FogMapElement.PlayReveal` tweens its CanvasGroup 1 -> 0). The output alpha only gets `1 - (1 - a)^4` (0.94 at a = 0.5), so alpha cannot fade the fog anyway.
+- `COLOR.rg` is a UV offset for the noise (that is why every fog image has its own odd colour).
+- `_Color.a` is multiplied into the vertex colour as well, so a material alpha would shrink the fog too.
+
+So "opacity < 1 shrinks the fog" was real: the root CanvasGroup alpha reached the fog's vertex alpha. Uniform fading of the fog would need the fog rendered to a texture first (an extra HDRP camera, too expensive for a HUD element). Chosen fix: every copy that keeps a fog shader gets its own CanvasGroup with `ignoreParentGroups = true` (and no raycasts). Fog keeps its exact shape and is drawn opaque; the opacity setting fades everything else. Visibility is still `SetActive`, which ignoreParentGroups does not affect (the minimap hides with `SetActive` on its root too). Log: "fog: N fog-shader images drawn at full alpha (CanvasGroup.ignoreParentGroups)".
 
 ## Mask / frame quality
 
@@ -399,7 +410,7 @@ Optional keys in `sr2mods.json` under `modules.minimap`:
 - Treasure pods: shown while LOCKED and (fog respected) not under fog; resource nodes: READY + live node object, behind their toggle; teleporter gadgets: `MapDirector.Marker.ShouldDisplay()`.
 - White map (user test 2026-10-22): the cause is not known for sure. Handled candidates: sprite-less placeholders, hidden mask graphics, disabled Images, custom materials (copied / main texture). Check the "page copied" (skip reasons), "page materials", "page placeholders skipped" and "page art (largest first)" lines; "sprites without a texture" > 0 means a late-bound sprite atlas that is only loaded when the full map opens.
 - Fog direction is verified: `FogMapElement.SetRevealState(bool)` sets its CanvasGroup alpha to `!isRevealed` (0x704B20), so fog images are overlays shown while NOT revealed. The game evaluates `ShouldBeRevealed(MapUIFogReveal._eventDirector)` (0x729650 / 0x729190); we pass the director whose `_model` is the loaded save's record (see "Fog of war state").
-- Assumed: the fog shader (`Custom/PosterizedFogOfWarMask`, SDF sprites) is drawn like any graphic under the root CanvasGroup. If it uses vertex alpha as a reveal threshold (the game tweens the CanvasGroup alpha 1 -> 0 in `PlayReveal`), a minimap opacity below 1 would shrink the fog shapes instead of dimming them. Check visually at opacity 0.5; a fix would be a render texture (uniform opacity) or a CanvasGroup with `ignoreParentGroups` on the fog copies (opaque fog).
+- Verified: the fog shaders use vertex alpha as the reveal threshold; fog copies ignore the root CanvasGroup (see "Fog shaders and minimap opacity").
 - Marker classification keywords: see the "page copied … markers (…)" histogram.
 - Zone names "conservatory"/"ranch", "labyrinth": see "zone -> '…'".
 - Teleporter gadget asset names contain "teleport".
