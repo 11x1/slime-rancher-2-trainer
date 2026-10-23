@@ -394,9 +394,10 @@ Original plan:
   1. Buy "Sell-All Button" in the silo menu (fixed price 10,000 Newbucks in `kDefs`; the old
      `sell_all_price` setting was removed, checklist si2). It is
      only offered when the world button below can be built.
-  2. The button on the silo sells (HUD notices per plort type, log line with every type × count
-     @ price). If the market is closed, it says so and nothing is sold. The former "Sell All
-     Plorts Now" menu action (an action item, id 0x53520002) was retired (checklist u12).
+  2. The button on the silo opens a receipt (below); Sell sells (HUD notices per plort type, log
+     line with every type × count @ price). If the market is closed, it says so and nothing is
+     sold. The former "Sell All Plorts Now" menu action (an action item, id 0x53520002) was
+     retired (checklist u12).
   3. The upgrade can be sold back with sell_upgrades.
 * World button (`modules/custom_upgrades/silo_world.cpp`, built, not yet tested in game): while
   the upgrade is owned, the corral Plort Collector's press button (`PlortCollectorUpgrader.Collector`
@@ -434,10 +435,45 @@ Original plan:
   * Not used (unverified, risky): building a `NotificationEntry` ourselves and adding it to the
     list's `_pendingNotifications` with another or no provider. The list calls the entry's provider
     (`TryDequeueMergeNext`, paging), and the shop provider expects its own entry type.
+  * **Receipt (`modules/custom_upgrades/silo_receipt.cpp`).** A press quotes the
+    silo (per plort type: count, `TryGetMarketValues` current price) and opens a runtime uGUI dialog
+    (own overlay Canvas + CanvasScaler 1920 x 1080 + GraphicRaycaster, SDFRoundedRectangle shapes,
+    the menu palette, a HUD text's TMP font). Findings (disassembly, 1.3.0) on how game menus lock
+    input: `UIInputLocker` (MonomiPark.SlimeRancher.UI) `OnEnable` (0x6B0F00) = `TimeDirector.Pause`
+    (0x550570: `_pauserCount`, timeScale 0, OnPausedChanged(true)) + `SECTR_AudioSystem.PauseNonUiSfx`;
+    `OnDisable` (0x6B0DD0) = `TimeDirector.Unpause` (0x5507F0, a coroutine). `InputDirector.OnPausedChanged`
+    = `UpdateInputMaps(uiMode)` (0x9DBB00: one map Disable, the other Enable: player map off, UI map
+    on). `CursorLockHandler.LateUpdate` (0x68AF70) enables the cursor when the pause state changes
+    (not on gamepad). `UIDirector.Push(IStackableUI, ...)` (0x6AF0C0) only hides / disables the
+    previous UI, hides popups and tutorials and raises AddedToStack; it does not lock input, and
+    `BaseUI.Awake` does not push itself. So the receipt adds a `UIInputLocker` to its root (and is not
+    on the UI stack). Sell re-quotes: identical -> sold with the quote as the plan (at most the shown
+    count per type), different -> the receipt is refreshed, nothing sold.
   Silos come
   from the sidecar ids -> `SceneContext.GameModel.GetLandPlotModel(id).gameObj` (the
   LandPlotLocation) -> `GetComponentInChildren<LandPlot>` at ~1 Hz; sold / disabled / faulted
   removes the button, load / plot rebuild rebuilds it. The menu action stays.
+
+### 2.2b Silo capacity tiers - IMPLEMENTED
+
+* Vanilla (prefab `patchSilo`, UnityPy; disassembly 1.3.0): `SiloStorage.AmmoSlotDefinitions` = 12 x
+  `SiloNonSlimes` (`_maxAmount` 100, block list = slimes). `StorageUpgrader` (on the plot root):
+  STORAGE2 / 3 / 4 toggle `StorageAdd2..4` / `StorageOnly1/2/3And4`; STORAGE_CAPACITY_INCREASE
+  (item "Storage Capacity Upgrade", 1800) = `StorageSilo.Ammo.UpdateMaxCount(StorageCapacityUpgradeAmount
+  = 200)` + `CapacityUpgrade1..4` active (`Apply` 0x996E30). `AmmoSlotManager.UpdateMaxCount`
+  (0xA3AB70) -> `AmmoModel.UpdateMaxCount` (0xA6EB00, every slot's `set_MaxCount` = the
+  `_maxCountValue` NullableFloatProperty default) or `_pendingMaxCountOverride` while no model;
+  `SetModel` (0xA3A860) = `Reset(defs)`, the pending override, `ValidateAndAdjustSlots`.
+* Not in the save: `AmmoDataV02` = ID, EmotionData, Count, Appearance, Radiant. `AmmoModel.Push`
+  (0xA6E530, load) copies Count with `set_Count` (0xA3C110, no clamp). `ValidateAndAdjustSlots`
+  (0xA3AC00) resizes the slot array to the definitions and clears slots whose type is not allowed,
+  never a count. So a max below the contents never deletes anything.
+* Built: Silo Capacity II / III / IV (`0x5352_0060..62`), 300 / 400 / 500 per slot, 3000 / 4500 /
+  6500, a chain on the vanilla Storage Capacity card (`ChainVanillaRoot`). The world tick applies
+  the owned tier per silo (`GameModel.GetLandPlotModel(id).gameObj` -> LandPlot -> StorageUpgrader ->
+  StorageSilo -> LocalAmmo, only while its `_ammoModel` exists), module off / fault puts the vanilla
+  value back. Unsellable (same reason as the vanilla silo storage upgrades). Details:
+  `modules/custom_upgrades/NOTES.md`.
 
 ### 2.3 Quantum drones: "sell only at or above a limit price" - IMPLEMENTED (`modules/drone_price_limit/`)
 
@@ -562,6 +598,8 @@ Original research:
     `alt-action sell: prefab ... label via ...`), which key the altSubmit event has on keyboard
     (the hint shows it; the event name is logged), and whether the plot categories have an
     `altDetailsButton` at all.
+* **Silo Capacity II-IV** (`0x5352_0060..62`) are a tier chain too (section 2.2b); every tier of a
+  chain that starts on a vanilla upgrade now shows on that upgrade's card (`ChainVanillaRoot`).
 * **2b.2 as built:** prices/multipliers as proposed below, ids `0x5352_0013..0040` (Plort
   Collector II / III and Auto-Feeder II, `0x5352_0010..0012`, were retired), one menu card per
   chain (section 1.3), effects in

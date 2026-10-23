@@ -6,7 +6,6 @@
 
 | note | about |
 |---|---|
-| `silo-receipt.md` | Sell-All receipt dialog, silo space tiers |
 | `ideas.md` | unplanned ideas |
 
 ## Where the documentation lives

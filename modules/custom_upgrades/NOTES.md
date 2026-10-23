@@ -104,6 +104,80 @@ Not checked in game yet: all of the above (layout and centring, the hidden icon,
 buys, the label, the slider keys on keyboard and pad, the Activate button's position, prompt and
 animation).
 
+## Sell-All receipt
+
+Pressing the silo's Sell-All button no longer sells at once: it opens a receipt (`silo_receipt.cpp`).
+One row per sellable plort type (icon, name, "x count", "@ unit price", line total + coin), the grand
+total, Cancel and Sell. Market closed / unreachable or no plorts: the old text above the button, no
+dialog.
+
+- **Input lock = the game's own.** The dialog root carries the game's `UIInputLocker` component, as
+  menu prefabs do: `OnEnable` -> `TimeDirector.Pause` (timeScale 0, ref-counted) ->
+  `InputDirector.OnPausedChanged` disables the player action map and enables the UI map (no movement,
+  no look, no interact), `CursorLockHandler` frees the cursor while paused, non-UI sound pauses.
+  Closing deactivates the root first (`OnDisable` -> `Unpause` at once), then destroys it. Every close
+  path (cancel, sell, load, module off, fault, scene change) goes through that, so the game cannot
+  stay paused because of the dialog.
+- **Keys** (polled from `Keyboard.current` / `Gamepad.current`, nothing hooked): Left / Right, A / D,
+  Tab, d-pad, left stick switch Cancel / Sell; Enter / Space / pad A press the focused one (Sell is
+  focused first); Esc / pad B cancel. Mouse: the two buttons, a click on the dimmed backdrop cancels.
+  Input is ignored for 0.3 s after opening or refreshing, so the press that opened it never confirms.
+- **What is sold.** Sell quotes the silo again. Only an identical quote (same types, counts and
+  prices, market still open) is sold, with the quote as the plan: at most the shown count per type
+  (`Summarize(..., plan)`). Anything else refreshes the receipt with an orange note ("Prices or
+  contents changed - this is the new receipt", "The Plort Market just closed") and sells nothing; Sell
+  is disabled while nothing can be sold. Time is paused while it is open, so a change is unlikely.
+- **After the sale** the dialog is already closed; the per-plort HUD notices are queued as before
+  (shown once the HUD takes them), the text fallback above the button stays for a missing HUD list.
+- Log: `silo receipt ready`, `sell all (plot '...'): receipt shown, N plort(s) in T type(s) for V`,
+  `receipt cancelled, nothing sold`, `receipt changed before the sale (...) - refreshed`, then the
+  usual `sell all (receipt, plot '...'): sold ...`. Without the dialog parts (setup failed) the button
+  sells at once as before (`sell-all receipt unavailable`).
+
+Not checked in game yet: the look (font taken from a HUD text, sizes at other resolutions), that the
+locker really freezes movement / camera and shows the cursor here, that Esc / Start do not open the
+pause menu as well (they should not: `PauseMenuDirector.TogglePause` (0xAEFF20) only calls `PauseGame`
+while `Time.timeScale > 0`, and the locker sets it to 0), mouse clicks (needs the scene's
+EventSystem), pad A / B and the d-pad / stick.
+
+## Silo capacity tiers
+
+Storage per silo slot: 100 -> 200 (vanilla) -> 300 -> 400 -> 500 (ours).
+
+- **Vanilla** (prefab `patchSilo` read with UnityPy, disassembly): one `SiloStorage` with 12 slot
+  definitions, all `SiloNonSlimes` (`_maxAmount` 100). STORAGE2 / 3 / 4 (500 / 575 / 650) only swap
+  slot GameObjects (`StorageUpgrader.StorageAdd*` / `StorageOnly*`); the single capacity upgrade
+  STORAGE_CAPACITY_INCREASE ("Storage Capacity Upgrade", 1800, in the
+  `scriptableobjectlookupdata_assets_all_*` bundle) runs `AmmoSlotManager.UpdateMaxCount(
+  StorageCapacityUpgradeAmount = 200)` (`StorageUpgrader.Apply` 0x996E30) and shows the four
+  `CapacityUpgrade1..4` parts. So vanilla has one capacity tier, 100 -> 200.
+- **Ours:** Silo Capacity II / III / IV (`0x53520060..62`, keys `silo_capacity_2..4`), 300 / 400 / 500
+  per slot, **3000 / 4500 / 6500**. A tier chain on the vanilla Storage Capacity card: once that is
+  owned the card shows Silo Capacity II, then III, then IV (greyed with the checkmark when all are
+  owned); `ChainVanillaRoot` gives every tier of a chain that starts on a vanilla upgrade that
+  upgrade's card (before, only the first tier took it over). Icon = the vanilla Storage Capacity icon
+  (no own sprite).
+- **Prices:** vanilla pays 1800 for +100 per slot (12 slots = +1200 items, 1.5 Newbucks per slot
+  item). Each of ours adds +100 per slot as well and costs more than the last (x ~1.5, like the
+  vanilla storage units climb), so IV is the most expensive plot upgrade after the Sell-All Button
+  (10,000): 14,000 for the three, 15,800 with the vanilla one.
+- **Applying it:** the max count is runtime only (`AmmoDataV02` saves id, count, emotions,
+  appearance, radiant; no max) and vanilla `ApplyUpgrades` writes 200 again on load and after every
+  purchase on that plot. So the ~1 Hz world tick sets the owned tier's value on every silo plot
+  (`UpdateMaxCount`, only when `GetSlotMaxCount(0)` differs; log `silo capacity on plot '...': 200 ->
+  500 per slot`). Ownership is in the sidecar like every custom upgrade, so it survives save / reload.
+- **Never deletes items:** load restores counts without clamping (`AmmoModel.Push` -> `AmmoSlot.
+  set_Count`), `ValidateAndAdjustSlots` never trims counts, and `UpdateMaxCount` only sets the max. A
+  lower max (between a load and the next tick, module off / faulted, or a mod-free load) leaves the
+  contents above it in the silo; it just takes nothing more until they are below (logged as a warning
+  with the count over the limit when we lower it).
+- **Not sellable**, like the vanilla silo storage upgrades: `CanSell` gives the same permanent reason
+  ("silo storage"), so sell_upgrades shows no Sell button and no alt-action prompt.
+
+Not checked in game yet: the card chain (vanilla card -> II -> III -> IV), the slot displays showing
+the new maximum, drones / silo input filling to 500, and the log lines after a load (200 -> 500 within
+a second).
+
 ## Selling with gamepad / keyboard
 
 The plot menu's alt action (the Info / Pedia button) sells the selected card's sellable upgrade:
