@@ -442,6 +442,8 @@ public:
     size_t offTextLabelLse_ = 0, offTextLabelTmp_ = 0;  // TextLabel._stringEvent / _textElement
     bool altOk_ = false;
     Il2CppClass* layoutGroupClass_ = nullptr;  // UnityEngine.UI.LayoutGroup (optional)
+    Il2CppClass* inputEventButtonClass_ = nullptr;   // InputEventButton (optional)
+    Il2CppClass* inputEventDisplayClass_ = nullptr;  // InputEventDisplay (optional)
     Bound<void(Il2CppObject*)> objectDestroy_;  // UnityEngine.Object.Destroy(Object)
     // RectTransform (optional: side-by-side layout of PURCHASED / Purchase and our Sell button)
     Il2CppClass* rtClass_ = nullptr;
@@ -1035,6 +1037,26 @@ void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
     Il2CppObject* btnView = unity::GetComponent(go, moreViewClass_);
     Il2CppObject* button = btnView ? unity::Field<Il2CppObject*>(btnView, offMoreButton_) : nullptr;
     btnButton_ = unity::IsAlive(button) ? button : nullptr;
+    // The prefab (TextButton_NoneSelectable) carries an InputEventButton: on pointer down / up it
+    // performs its InputEvent (the menu's submit) itself, before the Button's click reaches our
+    // Press detour. On a tier card that submit opened the purchase prompt of the shown tier, and
+    // the same click confirmed it (selling Music Box / Fast Growth I bought tier II in the same
+    // frame). Disabled, it gets no pointer events (EventSystem skips disabled behaviours); the
+    // Button's own click still sells. Its InputEventDisplay shows the submit key, which on this
+    // button would buy, not sell: hidden with its "Icon Background" (the alt-action prompt
+    // carries the key for selling).
+    Il2CppObject* goT = unity::TransformOf(go);  // Component calls below go through the transform
+    if (inputEventButtonClass_ && unity::IsAlive(goT)) {
+        Il2CppObject* ieb = getComponent_(goT, Type(inputEventButtonClass_));
+        if (unity::IsAlive(ieb) && IsA(ieb, inputEventButtonClass_)) setEnabled_(ieb, false);
+    }
+    if (inputEventDisplayClass_ && unity::IsAlive(goT)) {
+        Il2CppObject* disp = getComponentInChildren_(goT, Type(inputEventDisplayClass_), true);
+        Il2CppObject* dt = unity::IsAlive(disp) && IsA(disp, inputEventDisplayClass_) ? getTransform_(disp) : nullptr;
+        Il2CppObject* iconBg = unity::IsAlive(dt) ? getParent_(dt) : nullptr;
+        // Only the icon's own holder (a direct child of the button root), never the root itself.
+        if (unity::IsAlive(iconBg) && iconBg != goT && getParent_(iconBg) == goT) SetActive(GameObjectOf(iconBg), false);
+    }
 
     // Owned card (PURCHASED variant): Sell alone, PURCHASED hidden (user feedback). Tier card
     // (Purchase variant): side by side, by the container's LayoutGroup if it has one, else by
@@ -1746,6 +1768,10 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
             bind(tmpSetAlpha_, method(tmpClass_, "set_alpha", 1, false), false);
         }
         layoutGroupClass_ = R.Class("UnityEngine.UI", "UnityEngine.UI", "LayoutGroup");  // optional
+        // Optional: the cloned Purchase prefab's submit wiring (see AfterMoreBind).
+        inputEventButtonClass_ = R.Class(kImage, "MonomiPark.SlimeRancher.Input", "InputEventButton");
+        inputEventDisplayClass_ =
+            R.Class(kImage, "MonomiPark.SlimeRancher.UI.Framework.CommonControls", "InputEventDisplay");
         // Optional: side-by-side layout (missing -> no Sell button next to Purchase; on owned
         // items it covers the PURCHASED slot as before).
         if (why.empty()) {
