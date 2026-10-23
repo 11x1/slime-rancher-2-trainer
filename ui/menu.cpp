@@ -1730,6 +1730,7 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
         ImGui::PopTextWrapPos();
         DimText("Edits use the game's own functions, so the save stays valid, but they change your save directly and "
                 "can't be undone. Sandbox stays off until you enable it and confirm.");
+        DimText("Achievements are paused while Sandbox is on.");
         ImGui::Dummy(ImVec2(0, U(4)));
         if (AccentButton("Enable sandbox", ImVec2(U(170), U(34)))) g_sbxConfirm = true;
         EndCard();
@@ -1758,6 +1759,7 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
     SandboxSpawner(*snap, w);
     ImGui::SameLine(0, U(kGap));
     SandboxCrafter(*snap, w);
+    DimText("Achievements are paused while Sandbox is on.");
     SandboxStatus(h);
 }
 
