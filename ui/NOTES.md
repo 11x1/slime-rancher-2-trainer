@@ -27,8 +27,10 @@ The UI never draws an automatic `ui.enabled` toggle, because turning the UI off 
 | `fonts/` | Nunito and Fredoka (SIL OFL) as compressed arrays, with their licences and how they were made |
 | `game_input.cpp/.h` | gameplay input lock and cursor unlock while the overlay is open (main thread) |
 | `options_tab.cpp/.h` | "Mods" category in the game's Options menu |
+| `mod_icons.cpp/.h` | the mod's own icons (`assets/icons/`, embedded as `mod_icons_data.inc`) as Unity sprites: stb_image decode, `Texture2D` + `Sprite.Create`, cached and pinned; used by the Mods tab and the custom plot upgrades, with the game's sprite as fallback |
 | `settings_view.cpp/.h` | shared helpers (see above) |
 | `il2cpp_util.cpp/.h` | by-name IL2CPP helpers: invoke, unbox, object_new, GC handles |
+| `../third_party/stb/` | `stb_image.h` v2.30 (nothings/stb, MIT / public domain), PNG decoder only, compiled into `mod_icons.cpp` |
 | `../third_party/imgui/` | Dear ImGui **v1.93.0** (official ocornut/imgui release tag, 2026-10-14). Only the core files, the dx11 and win32 backends, and `LICENSE.txt` are vendored, unmodified. |
 
 ## Overlay (`overlay.cpp`)
@@ -180,7 +182,7 @@ Focus changes can scroll the list a frame later (`ScrollArea.HandleFocusChange` 
 - Models are built with the constructor directly.
 - Each row has its own SEH frame and logs `row m.k skipped ... at step '<step>'`. Every step of each handler is named in the error log, in the form `DISABLED for this session: <why> at step '<step>' (row m.k) in <hook>`. While disabled, every Options open logs why the Mods tab was not injected.
 - Injection runs again on every `BindCategories` (every `OptionsUIRoot` instance, every scene). Cached objects are checked with `IsAlive` and rebuilt when dead.
-- The Mods tab takes the icon of a "control/input/gameplay/accessibility/other" category, falling back to the About icon.
+- The Mods tab takes the icon of a "control/input/gameplay/accessibility/other" category, falling back to the About icon. Since the custom icons, it shows `assets/icons/mods_tab.png` (`mod_icons::Get("mods_tab", stock)`); the stock icon is only the fallback and the size reference.
 - An empty Mods tab shows "Mods: settings for sr2mods" in the details panel (optional `OptionsUIRoot.BindItemCategory` hook).
 
 **Third run:** the access violation was in `gchandle_free`. In this IL2CPP build, `Il2CppGCHandle` is pointer-sized: `Il2CppGCHandle il2cpp_gchandle_new(obj, pinned)` and `il2cpp_gchandle_free(Il2CppGCHandle)` (see `re/dump/il2cppinspectorredux/cpp/appdata/il2cpp-api-functions.h`). Core's table declares them as `uint32_t`, so handles were truncated and freeing one faulted.

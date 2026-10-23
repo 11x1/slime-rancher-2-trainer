@@ -21,6 +21,7 @@
 #include "core/unity.h"
 #include "core/version_guard.h"
 #include "il2cpp_util.h"
+#include "mod_icons.h"
 #include "settings_view.h"
 
 namespace sr2::ui {
@@ -657,7 +658,12 @@ Il2CppObject* InjectCategory(Il2CppObject* cfg, Il2CppObject* about) {
     }
     CacheModels(models);
     Stage("BindCategories: set icon");
-    if (Il2CppObject* icon = PickIcon(cfg, about)) SetRef(g_category, S.catIcon, icon);
+    {
+        // Our own icon (ui/mod_icons.h); the stock one picked above is the fallback and its size reference.
+        Il2CppObject* icon = PickIcon(cfg, about);
+        if (Il2CppObject* own = mod_icons::Get("mods_tab", icon)) icon = own;
+        if (icon) SetRef(g_category, S.catIcon, icon);
+    }
     Stage("BindCategories: append to configuration");
     Il2CppObject* list = F<Il2CppObject*>(cfg, S.cfgItems);
     if (!list || ListContains(list, g_category)) return nullptr;

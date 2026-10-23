@@ -531,6 +531,8 @@ The user wants upgrades they buy, not global switches. Built on this framework:
 | Popup | `ListUIRoot.OpenPopupPrompt`, `PopupPrompt` | plot menu (sell_upgrades) | confirmations |
 | Slider | `UnityEngine.UI.Slider`, `MapZoomSlider`, `SliderStyler` | runtime uGUI / map UI prefab | Hen Wrangler limit panel |
 
+**Own icons (current):** every custom item shows its own sprite from `assets/icons/` (`ui/mod_icons.h`, `ModIconName` in module.cpp), set in `CloneItem` for `_icon`, and for `_unavailableIcon` a greyed copy when the vanilla item uses a separate unavailable sprite (else the same sprite). The borrowed sprites below are the fallback when the sprite cannot be created and the size reference (pixelsPerUnit is scaled to their native size).
+
 **Icons (sprites reachable without scanning):**
 * `IdentifiableType.icon` on any identifiable: hens, roosters, chicks, plorts, food, gadgets.
   Examples: `LookupDirector.MarketLink.icon` (used for Sell All now), the drone station gadget
