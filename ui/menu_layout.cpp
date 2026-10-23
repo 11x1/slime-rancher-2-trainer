@@ -44,6 +44,13 @@ std::vector<Category> Spec() {
          "Sell button next to PURCHASED (or confirm the item). Silo storage upgrades can't be sold."},
     };
     ranch.tabs.push_back(ranchGeneral);
+    Tab dj;
+    dj.title = "Slime DJ";
+    dj.kind = TabKind::SlimeDj;
+    dj.module = "slime_dj";
+    dj.help = "Plays your own songs from the corral Music Box. Put .ogg, .mp3 or .wav files in the sr2mods_music "
+              "folder in the game folder, then Rescan.";
+    ranch.tabs.push_back(dj);
     cats.push_back(ranch);
 
     Category movement = Cat("movement", "Movement", Icon::Movement);
@@ -146,7 +153,7 @@ std::vector<Category> Build(const std::vector<ModuleView>& views) {
                 std::erase_if(t.nested, [&](const std::string& n) { return !find(n); });
                 placed.insert(t.module);
                 placed.insert(t.nested.begin(), t.nested.end());
-            } else if (t.kind == TabKind::Sandbox) {
+            } else if (t.kind == TabKind::Sandbox || t.kind == TabKind::SlimeDj) {
                 if (!find(t.module)) continue;
                 placed.insert(t.module);
             } else if (t.kind == TabKind::Cards) {
