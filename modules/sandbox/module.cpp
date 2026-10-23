@@ -1,7 +1,8 @@
 // sandbox: edit the character's resources from the overlay (Misc > Sandbox):
-// Newbucks, health / energy / radiation, the vacpack's ammo slots. Default OFF;
-// the overlay only turns it on after a confirmation dialog. Design and the
-// game methods used: modules/sandbox/NOTES.md.
+// Newbucks, health / energy / radiation, the vacpack's ammo slots, spawning
+// items in front of the player and crafting fabricator gadgets at no cost.
+// Default OFF; the overlay only turns it on after a confirmation dialog.
+// Design and the game methods used: modules/sandbox/NOTES.md.
 //
 // Save safety: every change goes through the game's own methods (the same ones
 // the game uses for pickups, purchases and vacuuming), with their validation,
@@ -19,6 +20,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <format>
 #include <initializer_list>
@@ -34,6 +36,7 @@
 #include "core/main_thread.h"
 #include "core/module.h"
 #include "core/unity.h"
+#include "ui/item_icons.h"
 #include "ui/sandbox_bridge.h"
 
 namespace sr2::modules {
@@ -51,6 +54,17 @@ constexpr int kNewbuckPersistenceId = 1;  // CurrencyUtility.NEWBUCK_PERSISTENCE
 constexpr unsigned long long kSnapshotMs = 250;
 constexpr unsigned long long kEnergyMs = 100;
 constexpr int kMaxSlots = 32;  // slot mask width
+constexpr unsigned long long kRecipeStateMs = 2000;  // blueprint / owned counts in the crafter
+constexpr int kMaxSpawn = 20;   // per click
+constexpr int kMaxCraft = 99;   // per click
+constexpr float kSpawnDist = 2.5f;  // metres in front of the camera
+
+struct Vec3 {
+    float x, y, z;
+};
+struct Quat {
+    float x, y, z, w;
+};
 
 bool IsA(Il2CppObject* obj, Il2CppClass* k) {
     const auto& a = api();
@@ -124,8 +138,16 @@ private:
     Il2CppObject* SlotAt(const Ctx& c, int idx);
     std::string Localized(Il2CppObject* ls);
     std::string ItemName(Il2CppObject* ident);
-    void EnsureCatalog(const Ctx& c);
+    uint32_t ItemIcon(Il2CppObject* ident);
+    bridge::Kind ItemKind(Il2CppObject* ident);
+    bool EnsureCatalog(const Ctx& c);
     Il2CppObject* CatalogItem(uintptr_t id, uint32_t* mask);
+    Il2CppObject* Lookup(const std::unordered_map<uintptr_t, CatalogEntry>& map, uintptr_t id, Il2CppClass* k);
+    bool EnsureSpawnables();
+    bool EnsureRecipes();
+    void RefreshRecipeState();
+    std::string RecipeCost(Il2CppObject* def);
+    Il2CppObject* GadgetDirector();
     void Refresh();
     void TopUpEnergy();
     void Done(bool ok, const std::string& text);
@@ -133,6 +155,11 @@ private:
     void DoNewbucks(const Ctx& c, int64_t target, const char* how);
     void DoSlotCount(const Ctx& c, int idx, int64_t value);
     void DoPutItem(const Ctx& c, int idx, uintptr_t item, int64_t value);
+    void DoSpawn(const Ctx& c, uintptr_t item, int64_t count);
+    void DoCraft(uintptr_t item, int64_t count);
+    bool SpawnPose(const Ctx& c, Vec3& pos, Vec3& fwd);
+    bool GetVec3(const MethodInfo* m, Il2CppObject* obj, Vec3& out);
+    void SetupExtras(sr2::il2cpp::Resolver& R);
 
     std::atomic<bool> enabled_{false};
     std::atomic<bool> infinite_{false};
@@ -144,6 +171,20 @@ private:
     std::unordered_map<uintptr_t, CatalogEntry> catalogById_;
     std::vector<Il2CppObject*> catalogDefs_;  // slot definitions it was built for (identity only)
     std::unordered_map<uintptr_t, std::string> nameCache_;  // identity -> name (never dereferenced)
+    std::unordered_map<uintptr_t, uint32_t> iconCache_;     // identity -> item_icons id
+    std::unordered_map<uintptr_t, bridge::Kind> kindCache_; // identity -> kind
+
+    // spawner and crafter lists (main thread), built once per enable; entries kept alive by GC handles
+    std::shared_ptr<const std::vector<bridge::Item>> spawnables_;
+    std::unordered_map<uintptr_t, CatalogEntry> spawnById_;
+    bool spawnTried_ = false;
+    std::string spawnWhy_;  // "" = spawner available
+    std::shared_ptr<const std::vector<bridge::Recipe>> recipes_;
+    std::shared_ptr<const std::vector<std::string>> recipeCats_;
+    std::unordered_map<uintptr_t, CatalogEntry> recipeById_;
+    bool recipesTried_ = false;
+    std::string craftWhy_;  // "" = crafter available
+    unsigned long long lastRecipeState_ = 0;
 
     // ---- resolved in Setup ----
     Il2CppClass* playerStateClass_ = nullptr;
@@ -188,6 +229,42 @@ private:
     const MethodInfo* isAllowed_ = nullptr;          // AmmoSlotDefinition.IsAllowed(IdentifiableType)
     const MethodInfo* locGet_ = nullptr;             // LocalizedString.GetLocalizedString()
     const MethodInfo* locIsEmpty_ = nullptr;         // LocalizedReference.get_IsEmpty (optional)
+    size_t offIdentIcon_ = 0;       // IdentifiableType.icon (Sprite)
+    size_t offIdentCategories_ = 0; // IdentifiableType.Categories (List<IdentifiableCategory>)
+    size_t offIdentIsPlort_ = 0;    // IdentifiableType.IsPlort
+    size_t offIdentIsAnimal_ = 0;   // IdentifiableType.IsAnimal
+    size_t offSlimeIsLargo_ = 0;    // SlimeDefinition.IsLargo
+    Il2CppClass* slimeDefClass_ = nullptr;
+    Il2CppClass* toyDefClass_ = nullptr;
+    Il2CppClass* liquidDefClass_ = nullptr;
+    Il2CppClass* gadgetDefClass_ = nullptr;
+
+    // ---- spawner (optional: missing symbols only disable the spawner) ----
+    Il2CppClass* actorClass_ = nullptr;              // IdentifiableActor (prefab component of spawnable actors)
+    const MethodInfo* instantiateActor_ = nullptr;   // InstantiationHelpers.InstantiateActor(10 args)
+    const MethodInfo* tryGetSceneContext_ = nullptr; // SceneContextUtility.TryGetSceneContext(out SceneContext)
+    size_t offScRegionRegistry_ = 0;                 // SceneContext.<RegionRegistry>k__BackingField
+    const MethodInfo* currentSceneGroup_ = nullptr;  // RegionRegistry.get_CurrentSceneGroup
+    const MethodInfo* trPosition_ = nullptr;         // Transform.get_position
+    const MethodInfo* trForward_ = nullptr;          // Transform.get_forward
+    const MethodInfo* raycast_ = nullptr;            // Physics.Raycast(Vector3, Vector3, out RaycastHit, float, int, QueryTriggerInteraction) (optional)
+    size_t offHitDistance_ = 0;                      // RaycastHit.m_Distance (in the unboxed struct)
+
+    // ---- crafter (optional) ----
+    const MethodInfo* tryGetGadgetDir_ = nullptr;    // SceneContextUtility.TryGetGadgetDirector(out GadgetDirector)
+    const MethodInfo* gadgetAddItem_ = nullptr;      // GadgetDirector.AddItem(IdentifiableType, int)
+    const MethodInfo* canAddGadget_ = nullptr;       // GadgetDirector.CanAddGadget(GadgetDefinition, int)
+    const MethodInfo* hasBlueprint_ = nullptr;       // GadgetDirector.HasBlueprint(GadgetDefinition)
+    const MethodInfo* gadgetCount_ = nullptr;        // GadgetDirector.GetItemCount(IdentifiableType)
+    size_t offCraftCosts_ = 0;                       // GadgetDefinition.CraftingCosts (PurchaseCost, inline)
+    size_t offCostCurrency_ = 0, offCostIdent_ = 0;  // PurchaseCost._currencyCosts / IdentCosts (in the struct)
+    size_t offIdentCostAmount_ = 0, offIdentCostType_ = 0, identCostStride_ = 0;  // IdentCostEntry (in the struct)
+    size_t offCurCostCurrency_ = 0, offCurCostAmount_ = 0;  // CurrencyCostEntry._currency / _amount
+    size_t offBuyInPairs_ = 0;                       // GadgetDefinition.BuyInPairs
+    Il2CppClass* fabMenuClass_ = nullptr;            // FabricateMenuConfiguration (optional, for categories)
+    Il2CppClass* fabGadgetCatClass_ = nullptr;       // GadgetFabricateCategory
+    size_t offFabCategories_ = 0, offFabCatTitle_ = 0;
+    const MethodInfo* fabCatContains_ = nullptr;     // GadgetFabricateCategory.Contains(GadgetDefinition)
 };
 
 Sandbox* g_self = nullptr;
@@ -278,6 +355,7 @@ bool Sandbox::Setup(sr2::core::ModuleContext& ctx) {
     locGet_ = method(locStringClass_, "GetLocalizedString", 0);
     locIsEmpty_ = method(locStringClass_, "get_IsEmpty", 0, false);
     if (!why.empty()) return ctx.Fail(why);
+    SetupExtras(R);
 
     g_self = this;
     if (!frameCb_) frameCb_ = main_thread::AddFrameCallback(kModule, [this](float) { Tick(); });
@@ -289,10 +367,135 @@ bool Sandbox::Setup(sr2::core::ModuleContext& ctx) {
     return true;
 }
 
+// Icons, item kinds, the spawner and the crafter. Nothing here is required: a
+// missing symbol only turns that part off (with the reason in the tab and log).
+void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
+    auto cls = [&](const char* image, const char* ns, const char* name, std::string& why) -> Il2CppClass* {
+        std::string err;
+        Il2CppClass* k = R.Class(image, ns, name, &err);
+        if (!k && why.empty()) why = err.empty() ? std::format("class {}.{} not found", ns, name) : err;
+        return k;
+    };
+    auto off = [&](Il2CppClass* k, const char* field, size_t& out, std::string& why) {
+        if (!k) return;
+        std::string err;
+        if (auto o = R.FieldOffset(k, field, &err)) out = *o;
+        else if (why.empty()) why = err.empty() ? std::format("field {} not found", field) : err;
+    };
+    auto method = [&](Il2CppClass* k, const char* name, int argc, std::string& why) -> const MethodInfo* {
+        std::string err;
+        for (Il2CppClass* c = k; c; c = api().il2cpp_class_get_parent ? api().il2cpp_class_get_parent(c) : nullptr)
+            if (const MethodInfo* m = R.Method(c, name, argc, &err)) return m;
+        if (k && why.empty()) why = std::format("method {}({}) not found", name, argc);
+        return nullptr;
+    };
+    // Field offset inside an unboxed struct (il2cpp reports it with the object header).
+    auto structOff = [&](Il2CppClass* k, const char* field, size_t& out, std::string& why) {
+        size_t o = 0;
+        off(k, field, o, why);
+        if (o >= 2 * sizeof(void*)) out = o - 2 * sizeof(void*);
+        else if (k && why.empty()) why = std::format("field {} has no struct offset", field);
+    };
+
+    std::string optional;  // icons and kinds: only cosmetic
+    off(identClass_, "icon", offIdentIcon_, optional);
+    off(identClass_, "Categories", offIdentCategories_, optional);
+    off(identClass_, "IsPlort", offIdentIsPlort_, optional);
+    off(identClass_, "IsAnimal", offIdentIsAnimal_, optional);
+    slimeDefClass_ = cls(kImage, "", "SlimeDefinition", optional);
+    off(slimeDefClass_, "IsLargo", offSlimeIsLargo_, optional);
+    toyDefClass_ = cls(kImage, "", "ToyDefinition", optional);
+    liquidDefClass_ = cls(kImage, "", "LiquidDefinition", optional);
+    if (!optional.empty()) SR2_WARN("[{}] item icons / kinds partly unavailable: {}", kModule, optional);
+
+    // Spawner: the same InstantiationHelpers.InstantiateActor the vacpack uses to shoot items out
+    // (VacuumItem.Expel), with the region registry's current scene group.
+    std::string& sw = spawnWhy_;
+    gadgetDefClass_ = cls(kImage, "", "GadgetDefinition", sw);
+    actorClass_ = cls(kImage, "", "IdentifiableActor", sw);
+    Il2CppClass* helpers = cls(kImage, "", "InstantiationHelpers", sw);
+    Il2CppClass* scu = cls(kImage, "MonomiPark.SlimeRancher.Util", "SceneContextUtility", sw);
+    Il2CppClass* sceneCtx = cls(kImage, "", "SceneContext", sw);
+    Il2CppClass* regions = cls(kImage, "MonomiPark.SlimeRancher.Regions", "RegionRegistry", sw);
+    Il2CppClass* transform = cls("UnityEngine.CoreModule", "UnityEngine", "Transform", sw);
+    instantiateActor_ = method(helpers, "InstantiateActor", 10, sw);
+    tryGetSceneContext_ = method(scu, "TryGetSceneContext", 1, sw);
+    off(sceneCtx, "<RegionRegistry>k__BackingField", offScRegionRegistry_, sw);
+    currentSceneGroup_ = method(regions, "get_CurrentSceneGroup", 0, sw);
+    trPosition_ = method(transform, "get_position", 0, sw);
+    trForward_ = method(transform, "get_forward", 0, sw);
+    {
+        // Optional: keeps spawns in front of walls. Triggers are ignored, the default layers hit.
+        std::string rw;
+        Il2CppClass* physics = cls("UnityEngine.PhysicsModule", "UnityEngine", "Physics", rw);
+        Il2CppClass* hit = cls("UnityEngine.PhysicsModule", "UnityEngine", "RaycastHit", rw);
+        if (physics)
+            raycast_ = R.MethodByParams(physics, "Raycast",
+                                        {"UnityEngine.Vector3", "UnityEngine.Vector3", "UnityEngine.RaycastHit&", "System.Single",
+                                         "System.Int32", "UnityEngine.QueryTriggerInteraction"},
+                                        &rw);
+        structOff(hit, "m_Distance", offHitDistance_, rw);
+        if (!rw.empty() || !offHitDistance_) {
+            raycast_ = nullptr;
+            SR2_WARN("[{}] spawner: no wall check ({})", kModule, rw);
+        }
+    }
+    if (!sw.empty()) SR2_WARN("[{}] spawner unavailable: {}", kModule, sw);
+
+    // Crafter: the fabricator's GadgetFabricatableItem.FabricateAndSpendCost minus the spending:
+    // GadgetDirector.AddItem(definition, count, x2 for BuyInPairs), within CanAddGadget.
+    std::string& cw = craftWhy_;
+    if (!gadgetDefClass_ && cw.empty()) cw = "class GadgetDefinition not found";
+    Il2CppClass* gadgetDir = cls(kImage, "", "GadgetDirector", cw);
+    Il2CppClass* cost = cls(kImage, "MonomiPark.SlimeRancher.Economy", "PurchaseCost", cw);
+    Il2CppClass* identCost = cls(kImage, "MonomiPark.SlimeRancher.Economy", "IdentCostEntry", cw);
+    Il2CppClass* curCost = cls(kImage, "MonomiPark.SlimeRancher.Economy", "CurrencyCostEntry", cw);
+    if (scu) tryGetGadgetDir_ = method(scu, "TryGetGadgetDirector", 1, cw);
+    if (gadgetDir) {
+        std::string err;
+        gadgetAddItem_ = R.MethodByParams(gadgetDir, "AddItem", {"IdentifiableType", "System.Int32"}, &err);
+        if (!gadgetAddItem_ && cw.empty()) cw = "GadgetDirector.AddItem(IdentifiableType, int): " + err;
+    }
+    canAddGadget_ = method(gadgetDir, "CanAddGadget", 2, cw);
+    hasBlueprint_ = method(gadgetDir, "HasBlueprint", 1, cw);
+    gadgetCount_ = method(gadgetDir, "GetItemCount", 1, cw);
+    off(gadgetDefClass_, "CraftingCosts", offCraftCosts_, cw);
+    off(gadgetDefClass_, "BuyInPairs", offBuyInPairs_, cw);
+    structOff(cost, "_currencyCosts", offCostCurrency_, cw);
+    structOff(cost, "IdentCosts", offCostIdent_, cw);
+    structOff(identCost, "Amount", offIdentCostAmount_, cw);
+    structOff(identCost, "IdentType", offIdentCostType_, cw);
+    off(curCost, "_currency", offCurCostCurrency_, cw);
+    off(curCost, "_amount", offCurCostAmount_, cw);
+    // IdentCostEntry is {int Amount; IdentifiableType IdentType}: the stride is the end of the
+    // later field, rounded up to pointer alignment.
+    identCostStride_ = (std::max(offIdentCostAmount_ + sizeof(int32_t), offIdentCostType_ + sizeof(void*)) + sizeof(void*) - 1) &
+                       ~(sizeof(void*) - 1);
+    if (!cw.empty()) SR2_WARN("[{}] crafter unavailable: {}", kModule, cw);
+    {
+        // Optional: the fabricator's own category list, for grouping.
+        std::string fw;
+        constexpr const char* kFab = "MonomiPark.SlimeRancher.UI.Fabricator";
+        fabMenuClass_ = cls(kImage, kFab, "FabricateMenuConfiguration", fw);
+        fabGadgetCatClass_ = cls(kImage, kFab, "GadgetFabricateCategory", fw);
+        Il2CppClass* fabCat = cls(kImage, kFab, "FabricateCategory", fw);
+        off(fabMenuClass_, "_categories", offFabCategories_, fw);
+        off(fabCat, "_title", offFabCatTitle_, fw);
+        fabCatContains_ = method(fabGadgetCatClass_, "Contains", 1, fw);
+        if (!fw.empty()) {
+            fabMenuClass_ = nullptr;
+            SR2_WARN("[{}] crafter: no fabricator categories ({})", kModule, fw);
+        }
+    }
+}
+
 void Sandbox::OnEnable() {
     enabled_.store(true);
     bridge::SetHandler(&HandleThunk);
     lastSnap_ = 0;
+    // A list that came out empty (built before the assets were loaded) is tried again.
+    if (!spawnables_ || spawnables_->empty()) spawnTried_ = false;
+    if (!recipes_ || recipes_->empty()) recipesTried_ = false;
     SR2_INFO("[{}] enabled: edits from the overlay's Sandbox tab now change the loaded game", kModule);
 }
 
@@ -388,12 +591,56 @@ std::string Sandbox::ItemName(Il2CppObject* ident) {
     return n;
 }
 
+// The type's own icon (IdentifiableType.icon), registered once with ui/item_icons.
+uint32_t Sandbox::ItemIcon(Il2CppObject* ident) {
+    if (!ident || !offIdentIcon_) return 0;
+    const auto key = reinterpret_cast<uintptr_t>(ident);
+    if (auto it = iconCache_.find(key); it != iconCache_.end()) return it->second;
+    if (!IsA(ident, identClass_) || !unity::IsAlive(ident)) return 0;
+    const uint32_t icon = sr2::ui::item_icons::Register(unity::Field<Il2CppObject*>(ident, offIdentIcon_));
+    iconCache_[key] = icon;
+    return icon;
+}
+
+// Rough kind from the class and flags, then the names of its IdentifiableCategory assets
+// (food / crafting resources have no flag of their own). Only used for looks and filters.
+bridge::Kind Sandbox::ItemKind(Il2CppObject* ident) {
+    if (!ident) return bridge::Kind::Other;
+    const auto key = reinterpret_cast<uintptr_t>(ident);
+    if (auto it = kindCache_.find(key); it != kindCache_.end()) return it->second;
+    if (!IsA(ident, identClass_) || !unity::IsAlive(ident)) return bridge::Kind::Other;
+    bridge::Kind k = bridge::Kind::Other;
+    if (slimeDefClass_ && IsA(ident, slimeDefClass_))
+        k = offSlimeIsLargo_ && unity::Field<bool>(ident, offSlimeIsLargo_) ? bridge::Kind::Largo : bridge::Kind::Slime;
+    else if (gadgetDefClass_ && IsA(ident, gadgetDefClass_)) k = bridge::Kind::Gadget;
+    else if (toyDefClass_ && IsA(ident, toyDefClass_)) k = bridge::Kind::Toy;
+    else if (liquidDefClass_ && IsA(ident, liquidDefClass_)) k = bridge::Kind::Liquid;
+    else if (offIdentIsPlort_ && unity::Field<bool>(ident, offIdentIsPlort_)) k = bridge::Kind::Plort;
+    else if (offIdentIsAnimal_ && unity::Field<bool>(ident, offIdentIsAnimal_)) k = bridge::Kind::Animal;
+    else if (offIdentCategories_) {
+        void* cats = unity::Field<void*>(ident, offIdentCategories_);
+        for (size_t i = 0, n = unity::ListCount(cats); i < n && k == bridge::Kind::Other; ++i) {
+            auto* cat = static_cast<Il2CppObject*>(unity::ListAt(cats, i));
+            if (!cat || !unity::IsAlive(cat)) continue;
+            std::string name = unity::GetName(cat);
+            for (char& ch : name) ch = static_cast<char>((ch >= 'A' && ch <= 'Z') ? ch - 'A' + 'a' : ch);
+            if (name.find("food") != std::string::npos || name.find("veggie") != std::string::npos ||
+                name.find("fruit") != std::string::npos || name.find("meat") != std::string::npos)
+                k = bridge::Kind::Food;
+            else if (name.find("craft") != std::string::npos || name.find("resource") != std::string::npos)
+                k = bridge::Kind::Resource;
+        }
+    }
+    kindCache_[key] = k;
+    return k;
+}
+
 // Items a vanilla vacpack can hold: IdentifiableType assets whose prefab has a
 // normal-size Vacuumable (largos and other LARGE / GIANT ones are only held,
 // never stored), excluding the player and scene objects, and that at least
 // one slot's AmmoSlotDefinition.IsAllowed accepts. Rebuilt only when the slot
 // definitions change; the entries are kept alive with GC handles.
-void Sandbox::EnsureCatalog(const Ctx& c) {
+bool Sandbox::EnsureCatalog(const Ctx& c) {
     std::vector<Il2CppObject*> defs;
     const size_t n = std::min<size_t>(c.slots ? unity::ArrayLength(c.slots) : 0, kMaxSlots);
     for (size_t i = 0; i < n; ++i) {
@@ -401,7 +648,7 @@ void Sandbox::EnsureCatalog(const Ctx& c) {
         Il2CppObject* d = s ? unity::Field<Il2CppObject*>(s, offSlotDef_) : nullptr;
         defs.push_back(IsA(d, slotDefClass_) && unity::IsAlive(d) ? d : nullptr);
     }
-    if (catalog_ && defs == catalogDefs_) return;
+    if (catalog_ && defs == catalogDefs_) return false;
 
     const unsigned long long t0 = GetTickCount64();
     std::vector<Il2CppGCHandle> old;
@@ -434,7 +681,7 @@ void Sandbox::EnsureCatalog(const Ctx& c) {
         if (!h) continue;
         const auto id = reinterpret_cast<uintptr_t>(o);
         catalogById_[id] = CatalogEntry{h, o};
-        items->push_back(bridge::Item{id, ItemName(o), mask});
+        items->push_back(bridge::Item{id, ItemName(o), mask, ItemIcon(o), ItemKind(o)});
     }
     // Same display name twice (variants): add the asset name.
     std::map<std::string, int> seen;
@@ -447,6 +694,7 @@ void Sandbox::EnsureCatalog(const Ctx& c) {
     catalogDefs_ = std::move(defs);
     SR2_INFO("[{}] vacpack item list: {} of {} identifiable types fit {} slot(s) ({} ms)", kModule, catalog_->size(),
              scanned, catalogDefs_.size(), GetTickCount64() - t0);
+    return true;
 }
 
 Il2CppObject* Sandbox::CatalogItem(uintptr_t id, uint32_t* mask) {
@@ -461,6 +709,178 @@ Il2CppObject* Sandbox::CatalogItem(uintptr_t id, uint32_t* mask) {
                 if (i.id == id) *mask = i.slotMask;
     }
     return o;
+}
+
+// An entry of the spawn or recipe list, re-read through its GC handle and checked.
+Il2CppObject* Sandbox::Lookup(const std::unordered_map<uintptr_t, CatalogEntry>& map, uintptr_t id, Il2CppClass* k) {
+    auto it = map.find(id);
+    if (it == map.end()) return nullptr;
+    Il2CppObject* o = unity::GCHandleTarget(it->second.handle);
+    if (o != it->second.obj || !IsA(o, k) || !unity::IsAlive(o)) return nullptr;
+    return o;
+}
+
+// What the spawner offers: IdentifiableType assets whose prefab is an actor
+// (has an IdentifiableActor), except the player, scene objects (gordos and the
+// like), gadgets (placed through gadget mode) and liquids. Built once.
+bool Sandbox::EnsureSpawnables() {
+    if (spawnTried_ || !spawnWhy_.empty()) return false;
+    spawnTried_ = true;
+    const unsigned long long t0 = GetTickCount64();
+    auto items = std::make_shared<std::vector<bridge::Item>>();
+    size_t scanned = 0;
+    for (Il2CppObject* o : unity::FindObjectsOfTypeAll(identClass_)) {
+        if (sr2::core::ModuleFaulted(kModule)) break;
+        if (!IsA(o, identClass_) || !unity::IsAlive(o)) continue;
+        ++scanned;
+        if (unity::Field<bool>(o, offIdentIsPlayer_) || unity::Field<bool>(o, offIdentIsScene_)) continue;
+        if ((gadgetDefClass_ && IsA(o, gadgetDefClass_)) || (liquidDefClass_ && IsA(o, liquidDefClass_))) continue;
+        Il2CppObject* prefab = unity::Field<Il2CppObject*>(o, offIdentPrefab_);
+        if (!prefab || !unity::IsAlive(prefab)) continue;
+        Il2CppObject* actor = unity::GetComponent(prefab, actorClass_);
+        if (!actor || !IsA(actor, actorClass_)) continue;
+        Il2CppGCHandle h = unity::NewGCHandle(o);
+        if (!h) continue;
+        const auto id = reinterpret_cast<uintptr_t>(o);
+        spawnById_[id] = CatalogEntry{h, o};
+        items->push_back(bridge::Item{id, ItemName(o), 0, ItemIcon(o), ItemKind(o)});
+    }
+    std::map<std::string, int> seen;
+    for (const auto& it : *items) ++seen[it.name];
+    for (auto& it : *items)
+        if (seen[it.name] > 1)
+            if (Il2CppObject* o = Lookup(spawnById_, it.id, identClass_)) it.name += " (" + unity::GetName(o) + ")";
+    std::sort(items->begin(), items->end(), [](const bridge::Item& a, const bridge::Item& b) { return a.name < b.name; });
+    spawnables_ = std::move(items);
+    SR2_INFO("[{}] spawn list: {} of {} identifiable types are actors ({} ms)", kModule, spawnables_->size(), scanned,
+             GetTickCount64() - t0);
+    return true;
+}
+
+// "20 x Pink Plort, 150 Newbucks": the recipe's ident and currency costs as the fabricator charges them.
+std::string Sandbox::RecipeCost(Il2CppObject* def) {
+    std::string out;
+    auto add = [&](const std::string& s) { out += (out.empty() ? "" : ", ") + s; };
+    char* costs = reinterpret_cast<char*>(def) + offCraftCosts_;
+    void* ident = *reinterpret_cast<void**>(costs + offCostIdent_);
+    if (const size_t n = unity::ListCount(ident)) {
+        size_t offItems = 0;
+        Il2CppClass* lk = api().il2cpp_object_get_class(static_cast<Il2CppObject*>(ident));
+        if (auto o = Resolver::Get().FieldOffset(lk, "_items")) offItems = *o;
+        void* arr = offItems ? unity::Field<void*>(ident, offItems) : nullptr;
+        char* data = arr ? unity::ArrayData<char>(arr) : nullptr;
+        for (size_t i = 0; data && i < n && i < unity::ArrayLength(arr); ++i) {
+            char* e = data + i * identCostStride_;
+            const int amount = *reinterpret_cast<int32_t*>(e + offIdentCostAmount_);
+            auto* type = *reinterpret_cast<Il2CppObject**>(e + offIdentCostType_);
+            if (type && amount > 0) add(std::format("{} x {}", amount, ItemName(type)));
+        }
+    }
+    void* cur = *reinterpret_cast<void**>(costs + offCostCurrency_);
+    for (size_t i = 0, n = unity::ListCount(cur); i < n; ++i) {
+        auto* e = static_cast<Il2CppObject*>(unity::ListAt(cur, i));
+        if (!e) continue;
+        const int amount = unity::Field<int32_t>(e, offCurCostAmount_);
+        Il2CppObject* c = unity::Field<Il2CppObject*>(e, offCurCostCurrency_);
+        if (amount <= 0) continue;
+        const bool bucks = c && IsA(c, currencyClass_) && unity::Field<int32_t>(c, offPersistenceId_) == kNewbuckPersistenceId;
+        add(std::format("{} {}", Thousands(amount), bucks ? std::string("Newbucks") : c ? unity::GetName(c) : std::string("?")));
+    }
+    return out;
+}
+
+Il2CppObject* Sandbox::GadgetDirector() {
+    Il2CppObject* dir = nullptr;
+    bool found = false;
+    if (!CallValue(tryGetGadgetDir_, nullptr, {&dir}, "SceneContextUtility.TryGetGadgetDirector", found) || !found || !dir ||
+        !unity::IsAlive(dir))
+        return nullptr;
+    return dir;
+}
+
+// The fabricator's gadget recipes: every GadgetDefinition asset with a crafting
+// cost, grouped by the fabricator's own categories when its menu asset is loaded.
+// Built once; blueprint state and owned counts refresh every 2 s (RefreshRecipeState).
+bool Sandbox::EnsureRecipes() {
+    if (recipesTried_ || !craftWhy_.empty()) return false;
+    recipesTried_ = true;
+    const unsigned long long t0 = GetTickCount64();
+    struct Cat {
+        Il2CppObject* obj;
+        int index;
+    };
+    std::vector<Cat> cats;
+    auto titles = std::make_shared<std::vector<std::string>>();
+    if (fabMenuClass_) {
+        for (Il2CppObject* menu : unity::FindObjectsOfTypeAll(fabMenuClass_)) {
+            if (!IsA(menu, fabMenuClass_) || !unity::IsAlive(menu)) continue;
+            void* list = unity::Field<void*>(menu, offFabCategories_);
+            for (size_t i = 0, n = unity::ListCount(list); i < n; ++i) {
+                auto* c = static_cast<Il2CppObject*>(unity::ListAt(list, i));
+                if (!c || !IsA(c, fabGadgetCatClass_) || !unity::IsAlive(c)) continue;
+                std::string t = Localized(unity::Field<Il2CppObject*>(c, offFabCatTitle_));
+                if (t.empty()) t = unity::GetName(c);
+                cats.push_back({c, static_cast<int>(titles->size())});
+                titles->push_back(t);
+            }
+            if (!cats.empty()) break;  // one menu is enough
+        }
+    }
+    auto list = std::make_shared<std::vector<bridge::Recipe>>();
+    for (Il2CppObject* d : unity::FindObjectsOfTypeAll(gadgetDefClass_)) {
+        if (sr2::core::ModuleFaulted(kModule)) break;
+        if (!IsA(d, gadgetDefClass_) || !unity::IsAlive(d)) continue;
+        char* costs = reinterpret_cast<char*>(d) + offCraftCosts_;
+        const size_t nIdent = unity::ListCount(*reinterpret_cast<void**>(costs + offCostIdent_));
+        const size_t nCur = unity::ListCount(*reinterpret_cast<void**>(costs + offCostCurrency_));
+        if (nIdent == 0 && nCur == 0) continue;  // not crafted at the fabricator
+        bridge::Recipe r;
+        r.id = reinterpret_cast<uintptr_t>(d);
+        r.name = ItemName(d);
+        r.icon = ItemIcon(d);
+        r.cost = RecipeCost(d);
+        r.perCraft = unity::Field<bool>(d, offBuyInPairs_) ? 2 : 1;
+        for (const Cat& c : cats) {
+            bool in = false;
+            if (CallValue(fabCatContains_, c.obj, {d}, "GadgetFabricateCategory.Contains", in) && in) {
+                r.category = c.index;
+                break;
+            }
+        }
+        Il2CppGCHandle h = unity::NewGCHandle(d);
+        if (!h) continue;
+        recipeById_[r.id] = CatalogEntry{h, d};
+        list->push_back(std::move(r));
+    }
+    std::sort(list->begin(), list->end(), [](const bridge::Recipe& a, const bridge::Recipe& b) { return a.name < b.name; });
+    recipes_ = std::move(list);
+    recipeCats_ = std::move(titles);
+    lastRecipeState_ = 0;
+    SR2_INFO("[{}] crafter: {} gadget recipes in {} fabricator categories ({} ms)", kModule, recipes_->size(),
+             recipeCats_->size(), GetTickCount64() - t0);
+    return true;
+}
+
+// Blueprint unlocked and how many are in the gadget inventory, per recipe. Copies the
+// list only when something changed, so the tab's shared_ptr stays the same otherwise.
+void Sandbox::RefreshRecipeState() {
+    if (!recipes_ || recipes_->empty()) return;
+    Il2CppObject* dir = GadgetDirector();
+    if (!dir) return;
+    auto next = std::make_shared<std::vector<bridge::Recipe>>(*recipes_);
+    bool changed = false;
+    for (bridge::Recipe& r : *next) {
+        Il2CppObject* d = Lookup(recipeById_, r.id, gadgetDefClass_);
+        if (!d) continue;
+        bool unlocked = false;
+        int owned = 0;
+        CallValue(hasBlueprint_, dir, {d}, "GadgetDirector.HasBlueprint", unlocked);
+        CallValue(gadgetCount_, dir, {d}, "GadgetDirector.GetItemCount", owned);
+        if (unlocked != r.unlocked || owned != r.owned) changed = true;
+        r.unlocked = unlocked;
+        r.owned = owned;
+    }
+    if (changed) recipes_ = std::move(next);
 }
 
 // ---------------------------------------------------------------- refresh ----
@@ -496,14 +916,28 @@ void Sandbox::Refresh() {
                 if (id && slot.count > 0) {
                     slot.item = reinterpret_cast<uintptr_t>(id);
                     slot.name = ItemName(id);
+                    slot.icon = ItemIcon(id);
+                    slot.kind = ItemKind(id);
                 } else {
                     slot.count = 0;
                 }
             }
             s.slots.push_back(std::move(slot));
         }
-        if (c.slots) EnsureCatalog(c);
+        // At most one list is built per refresh, so the one-time scans don't stack into one long frame.
+        bool built = c.slots && EnsureCatalog(c);
         s.catalog = catalog_;
+        if (!built) built = EnsureSpawnables();
+        s.spawnables = spawnables_;
+        s.spawnWhy = spawnWhy_;
+        if (!built) EnsureRecipes();
+        if (recipes_ && s.tick - lastRecipeState_ >= kRecipeStateMs) {
+            lastRecipeState_ = s.tick;
+            RefreshRecipeState();
+        }
+        s.recipes = recipes_;
+        s.recipeCategories = recipeCats_;
+        s.craftWhy = craftWhy_;
     }
     bridge::Publish(std::move(s));
 }
@@ -595,6 +1029,11 @@ void Sandbox::Handle(const bridge::Action& a) {
         }
         case bridge::Op::SetSlotCount: DoSlotCount(c, a.slot, a.value); break;
         case bridge::Op::PutItem: DoPutItem(c, a.slot, a.item, a.value); break;
+        case bridge::Op::Spawn: DoSpawn(c, a.item, a.value); break;
+        case bridge::Op::Craft:
+            DoCraft(a.item, a.value);
+            lastRecipeState_ = 0;  // show the new owned count at once
+            break;
         case bridge::Op::InfiniteEnergy: break;  // handled above
     }
     Refresh();
@@ -744,6 +1183,152 @@ void Sandbox::DoPutItem(const Ctx& c, int idx, uintptr_t item, int64_t value) {
         CallValue(addResource_, c.ammo, {ident, &idx, &add, &overflow}, "AmmoSlotManager.MaybeAddResource", added) && added;
     Done(ok, ok ? std::format("Slot {}: {} x {}{}", idx + 1, target, name, replaced)
                 : std::format("{} not put: the game refused it for slot {}{}", name, idx + 1, replaced));
+}
+
+bool Sandbox::GetVec3(const MethodInfo* m, Il2CppObject* obj, Vec3& out) {
+    return obj && unity::IsAlive(obj) && CallValue(m, obj, {}, "Transform.get_position/forward", out);
+}
+
+// Where spawns go: the camera's position and its forward direction flattened
+// onto the ground plane (the player's body if there is no main camera).
+bool Sandbox::SpawnPose(const Ctx& c, Vec3& pos, Vec3& fwd) {
+    Il2CppObject* tr = nullptr;
+    if (Il2CppObject* cam = unity::Camera_main()) tr = unity::TransformOf(cam);
+    if (!tr) tr = unity::TransformOf(c.player);
+    if (!GetVec3(trPosition_, tr, pos) || !GetVec3(trForward_, tr, fwd)) return false;
+    fwd.y = 0;
+    const float len = std::sqrt(fwd.x * fwd.x + fwd.z * fwd.z);
+    if (len < 1e-3f) {  // looking straight up or down: use the body's facing
+        Vec3 body{};
+        if (!GetVec3(trForward_, unity::TransformOf(c.player), body)) return false;
+        fwd = {body.x, 0, body.z};
+        const float l2 = std::sqrt(fwd.x * fwd.x + fwd.z * fwd.z);
+        if (l2 < 1e-3f) return false;
+        fwd.x /= l2, fwd.z /= l2;
+    } else {
+        fwd.x /= len, fwd.z /= len;
+    }
+    return std::isfinite(pos.x) && std::isfinite(pos.y) && std::isfinite(pos.z);
+}
+
+// Spawns `count` of a spawn-list item in front of the player through
+// InstantiationHelpers.InstantiateActor, the same call the vacpack makes when
+// it shoots an item out (VacuumItem.Expel): the actor model is registered with
+// the game model in the current scene group, so the game saves it like any
+// other loose item. A short raycast keeps spawns in front of walls.
+void Sandbox::DoSpawn(const Ctx& c, uintptr_t item, int64_t count) {
+    if (!spawnWhy_.empty()) {
+        Done(false, "Spawner unavailable: " + spawnWhy_);
+        return;
+    }
+    Il2CppObject* ident = Lookup(spawnById_, item, identClass_);
+    if (!ident) {
+        Done(false, "Not spawned: the item is not in the spawn list (anymore)");
+        return;
+    }
+    const std::string name = ItemName(ident);
+    Il2CppObject* prefab = unity::Field<Il2CppObject*>(ident, offIdentPrefab_);
+    if (!prefab || !unity::IsAlive(prefab)) {
+        Done(false, std::format("{} not spawned: it has no prefab", name));
+        return;
+    }
+    Il2CppObject* scene = nullptr;
+    bool found = false;
+    if (!CallValue(tryGetSceneContext_, nullptr, {&scene}, "SceneContextUtility.TryGetSceneContext", found) || !found ||
+        !scene || !unity::IsAlive(scene)) {
+        Done(false, std::format("{} not spawned: no scene context", name));
+        return;
+    }
+    Il2CppObject* regions = unity::Field<Il2CppObject*>(scene, offScRegionRegistry_);
+    bool ok = false;
+    Il2CppObject* group = regions ? Call(currentSceneGroup_, regions, {}, "RegionRegistry.CurrentSceneGroup", &ok) : nullptr;
+    if (!group || !unity::IsAlive(group)) {
+        Done(false, std::format("{} not spawned: the current scene group is unknown", name));
+        return;
+    }
+    Vec3 eye{}, fwd{};
+    if (!SpawnPose(c, eye, fwd)) {
+        Done(false, std::format("{} not spawned: could not read where you are looking", name));
+        return;
+    }
+    float dist = kSpawnDist;
+    if (raycast_) {
+        alignas(16) unsigned char hit[64] = {};
+        float maxDist = kSpawnDist + 0.6f;
+        int layers = -5;  // Physics.DefaultRaycastLayers (everything but Ignore Raycast)
+        int triggers = 1; // QueryTriggerInteraction.Ignore
+        bool any = false;
+        if (CallValue(raycast_, nullptr, {&eye, &fwd, hit, &maxDist, &layers, &triggers}, "Physics.Raycast", any) && any) {
+            const float d = *reinterpret_cast<float*>(hit + offHitDistance_);
+            if (std::isfinite(d)) dist = std::clamp(d - 0.6f, 0.5f, kSpawnDist);
+        }
+    }
+    const int n = static_cast<int>(std::clamp<int64_t>(count, 1, kMaxSpawn));
+    const int cols = std::min(n, 5);
+    const Vec3 right{fwd.z, 0, -fwd.x};
+    Quat rot{0, 0, 0, 1};
+    int spawned = 0;
+    for (int i = 0; i < n; ++i) {
+        const float side = (static_cast<float>(i % cols) - static_cast<float>(cols - 1) * 0.5f) * 0.55f;
+        Vec3 pos{eye.x + fwd.x * dist + right.x * side, eye.y - 0.3f + static_cast<float>(i / cols) * 0.7f,
+                 eye.z + fwd.z * dist + right.z * side};
+        bool nonActorOk = false, ignoreEmotions = false, setCollected = false;
+        int appearance = 0, secondAppearance = 0;  // SlimeAppearance.AppearanceSaveSet.NONE
+        alignas(16) unsigned char metadata[64] = {};  // Nullable<AmmoMetadata> without a value (hasValue = false)
+        Il2CppObject* go = Call(instantiateActor_, nullptr,
+                                {prefab, group, &pos, &rot, &nonActorOk, &appearance, &secondAppearance, metadata,
+                                 &ignoreEmotions, &setCollected},
+                                "InstantiationHelpers.InstantiateActor", &ok);
+        if (!ok || !go) break;
+        ++spawned;
+    }
+    Done(spawned > 0, spawned == n   ? std::format("Spawned {} x {}", n, name)
+                      : spawned > 0  ? std::format("Spawned {} of {} x {} (the game refused the rest)", spawned, n, name)
+                                     : std::format("{} not spawned: the game refused it", name));
+}
+
+// Crafts `count` of a fabricator gadget at no cost: what the fabricator's
+// GadgetFabricatableItem.FabricateAndSpendCost does after spending the recipe,
+// GadgetDirector.AddItem(definition, count x 2 for BuyInPairs gadgets). Only
+// for unlocked blueprints and within the gadget's own limit (CanAddGadget), as
+// the fabricator would allow.
+void Sandbox::DoCraft(uintptr_t item, int64_t count) {
+    if (!craftWhy_.empty()) {
+        Done(false, "Crafter unavailable: " + craftWhy_);
+        return;
+    }
+    Il2CppObject* def = Lookup(recipeById_, item, gadgetDefClass_);
+    if (!def) {
+        Done(false, "Not crafted: the gadget is not in the recipe list (anymore)");
+        return;
+    }
+    const std::string name = ItemName(def);
+    Il2CppObject* dir = GadgetDirector();
+    if (!dir) {
+        Done(false, std::format("{} not crafted: no gadget director (load a save)", name));
+        return;
+    }
+    bool unlocked = false;
+    if (!CallValue(hasBlueprint_, dir, {def}, "GadgetDirector.HasBlueprint", unlocked) || !unlocked) {
+        Done(false, std::format("{} not crafted: its blueprint is not unlocked", name));
+        return;
+    }
+    const int crafts = static_cast<int>(std::clamp<int64_t>(count, 1, kMaxCraft));
+    const int per = unity::Field<bool>(def, offBuyInPairs_) ? 2 : 1;
+    int amount = crafts * per;
+    bool can = false;
+    if (!CallValue(canAddGadget_, dir, {def, &amount}, "GadgetDirector.CanAddGadget", can) || !can) {
+        Done(false, std::format("{} not crafted: {} more would go over its limit", name, amount));
+        return;
+    }
+    int before = 0, after = 0;
+    CallValue(gadgetCount_, dir, {def}, "GadgetDirector.GetItemCount", before);
+    bool ok = false;
+    Call(gadgetAddItem_, dir, {def, &amount}, "GadgetDirector.AddItem", &ok);
+    CallValue(gadgetCount_, dir, {def}, "GadgetDirector.GetItemCount", after);
+    Done(ok && after > before, ok && after > before
+                                   ? std::format("Crafted {} x {} for free (inventory {} -> {})", after - before, name, before, after)
+                                   : std::format("{} not crafted: the game refused it", name));
 }
 
 }  // namespace
