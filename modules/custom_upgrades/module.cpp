@@ -260,58 +260,51 @@ constexpr int F(Family f) { return static_cast<int>(f); }
 
 const UpgradeDef kDefs[] = {
     {SILO_SELL_ALL, "silo_sell_all", kPlotSilo, false, 0, 0, kNoFamily, 1.0f, 0, "Sell-All Button",
-     "Adds a sell-all button to this silo (and a menu action): sell every plort stored in it at today's Plort "
-     "Market prices in one go (the market saturates like a normal sale). Food, slimes and other items stay in the silo.",
+     "A big red button for this silo that sells every plort inside at today's prices. Food and slimes stay put.",
      "Buy the Sell-All Button for this silo?"},
     {SILO_SELL_ALL_NOW, "silo_sell_all_now", kPlotSilo, true, SILO_SELL_ALL, 0, kNoFamily, 1.0f, 0,
-     "Sell All Plorts Now", "Sell every plort stored in this silo at today's Plort Market prices.",
+     "Sell All Plorts Now", "Sells every plort in this silo at today's Plort Market prices.",
      "Sell all plorts in this silo?"},
     // ---- tiers ----
     {CORRAL_COLLECTOR_2, "corral_collector_2", kPlotCorral, false, kUpgPlortCollector, 2500, F(Family::kCollector),
      1.5f, kUpgPlortCollector, "Plort Collector II",
-     "Tunes this corral's Plort Collector: it collects plorts 1.5x as often (every two thirds of the usual time).",
+     "Tunes up this corral's plort collector so it vacuums up plorts 1.5x as often.",
      "Buy Plort Collector II for this corral?"},
     {CORRAL_COLLECTOR_3, "corral_collector_3", kPlotCorral, false, CORRAL_COLLECTOR_2, 5000, F(Family::kCollector),
      2.0f, kUpgPlortCollector, "Plort Collector III",
-     "Fully tunes this corral's Plort Collector: it collects plorts twice as often (replaces the Plort Collector II "
-     "bonus).",
+     "A fully tuned plort collector that vacuums up plorts twice as often. Replaces Plort Collector II.",
      "Buy Plort Collector III for this corral?"},
     {CORRAL_FEEDER_2, "corral_feeder_2", kPlotCorral, false, kUpgFeeder, 2500, F(Family::kFeeder), 2.0f, kUpgFeeder,
      "Auto-Feeder II",
-     "This corral's Auto-Feeder hands out twice as much food per feeding cycle, from the food stored in it.",
+     "A bigger hopper drops twice as much food per feeding. Just remember to keep it stocked!",
      "Buy Auto-Feeder II for this corral?"},
     {CORRAL_MUSIC_2, "corral_music_2", kPlotCorral, false, kUpgMusicBox, 2000, F(Family::kMusicBox), 2.0f,
-     kUpgMusicBox, "Music Box II", "Doubles the calming effect of this corral's Music Box on the slimes inside.",
+     kUpgMusicBox, "Music Box II", "A catchier tune that calms this corral's slimes twice as well.",
      "Buy Music Box II for this corral?"},
     {COOP_HENS_1, "coop_hens_1", kPlotCoop, false, 0, 2000, F(Family::kCoop), 1.5f, kUpgDeluxeCoop, "Faster Hens I",
-     "Hens inside this coop lay eggs 1.5x as often.", "Buy Faster Hens I for this coop?"},
+     "Cozier nests help this coop's hens lay eggs 1.5x as fast.", "Buy Faster Hens I for this coop?"},
     {COOP_HENS_2, "coop_hens_2", kPlotCoop, false, COOP_HENS_1, 4000, F(Family::kCoop), 2.0f, kUpgDeluxeCoop,
-     "Faster Hens II", "Hens inside this coop lay eggs twice as often (replaces the Faster Hens I bonus).",
+     "Faster Hens II", "The coziest nests around: hens lay eggs twice as fast. Replaces Faster Hens I.",
      "Buy Faster Hens II for this coop?"},
     {GARDEN_GROWTH_1, "garden_growth_1", kPlotGarden, false, 0, 2000, F(Family::kGarden), 1.5f, kUpgSprinkler,
-     "Fast Growth I", "Crops on this garden grow 1.5x as fast (stacks with the Sprinkler).",
+     "Fast Growth I", "Extra-rich soil makes crops grow 1.5x as fast. Stacks with the sprinkler!",
      "Buy Fast Growth I for this garden?"},
     {GARDEN_GROWTH_2, "garden_growth_2", kPlotGarden, false, GARDEN_GROWTH_1, 4000, F(Family::kGarden), 2.0f,
      kUpgSprinkler, "Fast Growth II",
-     "Crops on this garden grow twice as fast (stacks with the Sprinkler, replaces the Fast Growth I bonus).",
+     "Crops grow twice as fast. Stacks with the sprinkler and replaces Fast Growth I.",
      "Buy Fast Growth II for this garden?"},
     {INCIN_ASH_BOOST, "incinerator_ash_boost", kPlotIncinerator, false, kUpgAshTrough, 1500, F(Family::kAsh), 2.0f,
      kUpgAshTrough, "Ash Booster",
-     "This incinerator puts twice as much ash into its Ash Trough per incinerated food (the trough's capacity is "
-     "unchanged).",
+     "Squeezes twice the ash out of everything you burn. Fire slimes approve!",
      "Buy the Ash Booster for this incinerator?"},
     // ---- world objects ----
     {COOP_AIR_NET, "coop_air_net", kPlotCoop, false, 0, 425, kNoFamily, 1.0f, kUpgAirNet, "Coop Air Net",
-     "Stretches a corral Air Net over this coop, right on top of its walls. Chickens that get launched by slimes "
-     "or your vacpack stay inside, and flying things can't drop in. Like the corral net it gives way under very "
-     "hard hits and repairs itself shortly after.",
+     "An air net for your coop. Launched chickens stay in, and nothing drops in from above.",
      "Buy the Coop Air Net for this coop?"},
     {COOP_HEN_COLLECTOR, "coop_hen_collector", kPlotCoop, false, 0, 1000, kNoFamily, 1.0f, kUpgDeluxeCoop,
      "Hen Collector",
-     "A second collector like the Deluxe Coop's elder collector, but for grown hens and roosters. Whenever more "
-     "than 20 of them are in this coop, it vacuums up the extra ones every few hours (keeping at least two "
-     "roosters) and stores them: two slots of 100, vac them out of its ports. Chicks are never counted or taken. "
-     "Once bought, set the limit with the slider here.",
+     "Vacs up extra hens and roostros when this coop has more than 20. Chicks are safe! Set the limit with the "
+     "slider.",
      "Buy the Hen Collector for this coop?"},
 };
 
@@ -377,13 +370,12 @@ int ClampHenKeep(int64_t v) {
     return static_cast<int>(std::clamp<int64_t>(v, custom_upgrades::world::kHenKeepMin, custom_upgrades::world::kHenKeepMax));
 }
 
+// Short enough for the details panel (vanilla upgrade texts are 44-156 characters).
 std::string HenDescription(int keep) {
     return std::format(
-        "A second collector like the Deluxe Coop's elder collector, but for grown hens and roosters. Whenever more "
-        "than {} of them are in this coop, it vacuums up the extra ones every few hours (keeping at least two "
-        "roosters) and stores them: two slots of 100, vac them out of its ports. Chicks are never counted or taken. "
-        "Once bought, set the limit with the slider here ({} to {}).",
-        keep, custom_upgrades::world::kHenKeepMin, custom_upgrades::world::kHenKeepMax);
+        "Vacs up extra hens and roostros when this coop has more than {}. Chicks are safe! Set the limit with the "
+        "slider.",
+        keep);
 }
 
 int HenCount(const PlotState& ps) {
@@ -1593,15 +1585,14 @@ void CustomUpgrades::AfterMenuUpdate(Il2CppObject* root) {
                 desc = "The Plort Market can't be reached right now.";
                 prompt = desc;
             } else if (s.marketClosed) {
-                desc = std::format("{} plort{} stored. The Plort Market is closed right now - come back later.",
-                                   s.plorts, s.plorts == 1 ? "" : "s");
+                desc = std::format("{} plort{} stored, but the Plort Market is closed. Come back later!", s.plorts,
+                                   s.plorts == 1 ? "" : "s");
                 prompt = "The Plort Market is closed right now. Nothing will be sold.";
             } else if (s.plorts == 0) {
-                desc = "There are no plorts in this silo. Food, slimes and other items are never sold.";
+                desc = "No plorts in this silo yet. Food and slimes are never sold.";
                 prompt = "There are no plorts in this silo. Nothing will be sold.";
             } else {
-                desc = std::format("{} plort{} of {} type{} stored, worth about {} Newbucks at today's prices. Food, "
-                                   "slimes and other items stay in the silo.",
+                desc = std::format("{} plort{} ({} kind{}) worth about {} Newbucks today. Food and slimes stay put.",
                                    s.plorts, s.plorts == 1 ? "" : "s", s.types, s.types == 1 ? "" : "s", s.value);
                 prompt = std::format("Sell all {} plort{} in this silo for about {} Newbucks?\nMarket prices drop as "
                                      "the market saturates.",
