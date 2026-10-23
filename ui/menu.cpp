@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "core/build_info.h"
 #include "core/profiles.h"
 #include "menu_layout.h"
 #include "slime_icons.h"
@@ -1073,12 +1074,30 @@ void DrawSidebar(const Host& h, const std::vector<Category>& cats, const ModuleV
     ImGui::Dummy(ImVec2(0, U(4)));
     ThemeTabs(ui, w);
 
+    // Save state as a dot (words in its tooltip), then the DLL's build stamp.
     const unsigned long long last = LastWriteTick();
     const bool busy = last != 0 && h.nowMs - last < 1500;
-    const ImU32 col = busy ? P.warn : P.ok;
-    const ImVec2 sp = Add(ImGui::GetCursorScreenPos(), ImVec2(U(12), U(14)));
+    const std::string saveErr = busy ? std::string() : settings::LastSaveError();
+    const ImU32 col = busy ? P.warn : !saveErr.empty() ? P.err : P.ok;
+    const ImVec2 sp = Add(ImGui::GetCursorScreenPos(), ImVec2(U(12), U(14)));  // sp.y = text centre line
+    ImGui::SetCursorScreenPos(ImVec2(sp.x - U(4), sp.y - U(8)));
+    ImGui::InvisibleButton("##savestate", ImVec2(U(16), U(16)));
+    HoverTip(busy ? "Saving changes to sr2mods.json..."
+             : !saveErr.empty() ? "Saving sr2mods.json failed: " + saveErr
+                                : "All changes saved to sr2mods.json");
     dl->AddCircleFilled(ImVec2(sp.x + U(4), sp.y), U(4), col);
-    Text(dl, theme::Body(), theme::kSmallSize, ImVec2(sp.x + U(14), sp.y - U(8)), col, busy ? "Saving..." : "Saved");
+
+    const char* stamp = ::sr2::core::build_info::Time();
+    const ImVec2 ts = theme::Body()->CalcTextSizeA(U(theme::kSmallSize), FLT_MAX, 0.0f, stamp);
+    const ImVec2 tp(sp.x + U(14), sp.y - U(8));
+    Text(dl, theme::Body(), theme::kSmallSize, tp, P.dim, stamp);
+    if (ts.x > 0) {
+        ImGui::SetCursorScreenPos(tp);
+        ImGui::InvisibleButton("##buildstamp", ImVec2(ts.x, std::max(ts.y, U(16))));
+        std::string tip = std::string("Built ") + ::sr2::core::build_info::TimeIso();
+        if (*::sr2::core::build_info::Commit()) tip += std::string("\nCommit ") + ::sr2::core::build_info::Commit();
+        HoverTip(tip);
+    }
     ImGui::EndChild();
     ImGui::PopStyleVar(2);
 }

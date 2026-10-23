@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "../proxy/proxy.h"
+#include "build_info.h"
 #include "config.h"
 #include "hook_manager.h"
 #include "il2cpp_api.h"
@@ -146,8 +147,8 @@ void Run() {
     ConfigStatus cfgStatus = LoadConfig(dir / L"sr2mods.json", cfg, cfgErr);
     log::Init(dir / L"sr2mods.log", cfg.logLevel, cfg.debugConsole);
 
-    SR2_INFO("sr2mods {} ({} build, {} {}) - native loader, no managed code", SR2MODS_VERSION, SR2MODS_BUILD, __DATE__,
-             __TIME__);
+    SR2_INFO("sr2mods {} ({} build, {}{}{}) - native loader, no managed code", SR2MODS_VERSION, SR2MODS_BUILD,
+             build_info::TimeIso(), *build_info::Commit() ? " " : "", build_info::Commit());
     SR2_INFO("host: {} (pid {})", log::Narrow(paths::HostExePath().wstring()), GetCurrentProcessId());
     SR2_INFO("self: {}", log::Narrow(paths::SelfPath().wstring()));
     version_guard::LogSelfIdentity();  // PE timestamp + sha256 + PDB GUID/age -> match to dist\archive

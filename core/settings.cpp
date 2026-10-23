@@ -48,6 +48,7 @@ Clock::time_point g_lastChange{};
 HANDLE g_wake = nullptr;            // auto-reset event for the saver thread
 bool g_saverStarted = false;
 bool g_parseErrorLogged = false;
+std::string g_saveError;            // why the last save failed ("" = it succeeded)
 std::map<std::string, std::string> g_rootStrings;  // top-level strings to write ("active_profile")
 struct Stashed {
     std::string module, key;
@@ -56,6 +57,11 @@ struct Stashed {
 std::map<std::string, Stashed> g_stashed;  // PKey -> saved value of an unregistered setting
 
 std::string PKey(std::string_view m, std::string_view k) { return std::format("{}\n{}", m, k); }
+
+void SetSaveError(std::string e) {
+    std::lock_guard lock(g_mutex);
+    g_saveError = std::move(e);
+}
 
 Entry* FindLocked(std::string_view module, std::string_view key) {
     for (Entry& e : g_entries)
@@ -137,6 +143,7 @@ void SaveNow() {
             doc = std::move(fresh);
         } else {
             std::lock_guard lock(g_mutex);
+            g_saveError = "sr2mods.json is not valid JSON; not overwriting it";
             if (!g_parseErrorLogged) {
                 SR2_ERROR("settings: {} is not valid JSON ({}); not overwriting it - fix or delete the file",
                           log::Narrow(file.wstring()), perr.empty() ? "unreadable" : perr);
@@ -157,11 +164,14 @@ void SaveNow() {
         std::ofstream o(tmp, std::ios::binary | std::ios::trunc);
         if (!o || !o.write(out.data(), static_cast<std::streamsize>(out.size()))) {
             SR2_ERROR("settings: cannot write {}", log::Narrow(tmp.wstring()));
+            SetSaveError("cannot write " + log::Narrow(tmp.filename().wstring()));
             return;
         }
     }
     if (!MoveFileExW(tmp.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        SR2_ERROR("settings: cannot replace {} (error {})", log::Narrow(file.wstring()), GetLastError());
+        const DWORD gle = GetLastError();
+        SR2_ERROR("settings: cannot replace {} (error {})", log::Narrow(file.wstring()), gle);
+        SetSaveError(std::format("cannot replace sr2mods.json (error {})", gle));
         DeleteFileW(tmp.c_str());
         return;
     }
@@ -169,6 +179,7 @@ void SaveNow() {
         std::lock_guard lock(g_mutex);
         g_doc = std::move(doc);
         g_parseErrorLogged = false;
+        g_saveError.clear();
     }
     SR2_DEBUG("settings: saved {} value(s) to sr2mods.json", values.size());
 }
@@ -194,7 +205,10 @@ DWORD WINAPI SaverThread(LPVOID) {
         }
         if (due) {
             std::string err;
-            if (!Try([] { SaveNow(); }, &err)) SR2_ERROR("settings: save failed: {}", err);
+            if (!Try([] { SaveNow(); }, &err)) {
+                SR2_ERROR("settings: save failed: {}", err);
+                SetSaveError(err);
+            }
         }
     }
 }
@@ -440,7 +454,15 @@ double ClampFor(const Def& d, double v) { return Clamp(d, v); }
 
 void Flush() {
     std::string err;
-    if (!Try([] { SaveNow(); }, &err)) SR2_ERROR("settings: flush failed: {}", err);
+    if (!Try([] { SaveNow(); }, &err)) {
+        SR2_ERROR("settings: flush failed: {}", err);
+        SetSaveError(err);
+    }
+}
+
+std::string LastSaveError() {
+    std::lock_guard lock(g_mutex);
+    return g_saveError;
 }
 
 }  // namespace sr2::core::settings
