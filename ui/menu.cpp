@@ -461,11 +461,12 @@ void DrawKids(const Host& h, const settings::Def& parent, const std::vector<sett
     const Palette& P = theme::Colors();
     ImGuiStorage* st = ImGui::GetStateStorage();
     const ImGuiID id = ImGui::GetID(("kids/" + parent.key + "/" + std::to_string(kids.front().parentValue)).c_str());
-    float* t = st->GetFloatRef(id, visible ? 1.0f : 0.0f);
-    *t = Approach(*t, visible ? 1.0f : 0.0f, 6.0f);
-    if (*t <= 0.001f) return;
+    // Storage refs are only valid until the next insert: copy the value before fetching fullH.
+    float* tRef = st->GetFloatRef(id, visible ? 1.0f : 0.0f);
+    const float t = *tRef = Approach(*tRef, visible ? 1.0f : 0.0f, 6.0f);
+    if (t <= 0.001f) return;
     float* fullH = st->GetFloatRef(id + 1, 0.0f);
-    const float height = std::max(1.0f, *t >= 0.999f ? *fullH : *fullH * Smooth(*t));
+    const float height = std::max(1.0f, t >= 0.999f ? *fullH : *fullH * Smooth(t));
     const ImVec2 start = ImGui::GetCursorScreenPos();
     ImGui::BeginChild(id, ImVec2(0, height), ImGuiChildFlags_None,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground);
