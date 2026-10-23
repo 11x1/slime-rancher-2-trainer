@@ -1754,16 +1754,40 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
 }
 
 // ------------------------------------------------------------- settings ----
+// Key on the left, value right-aligned; a long value wraps, each line right-aligned.
 void KeyValue(const char* k, const std::string& v, ImU32 vcol, const std::string& tip = {}) {
     const float avail = ImGui::GetContentRegionAvail().x, x0 = ImGui::GetCursorPosX();
     const float keyW = std::min(U(130), avail * 0.45f);
+    const float valW = std::max(avail - keyW, U(40));
+    ImFont* f = ImGui::GetFont();
+    const float fs = ImGui::GetFontSize();
+    ImGui::BeginGroup();
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(k);
-    ImGui::SameLine(x0 + keyW);
-    ImGui::PushTextWrapPos(x0 + avail);
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(vcol), "%s", v.c_str());
-    ImGui::PopTextWrapPos();
+    ImGui::PushStyleColor(ImGuiCol_Text, vcol);
+    const char* s = v.c_str();
+    const char* const end = s + v.size();
+    for (bool first = true; s < end; first = false) {
+        const char* e = f->CalcWordWrapPosition(fs, s, end, valW);
+        if (e <= s) {  // a single glyph wider than the column: take it anyway
+            e = s + 1;
+            while (e < end && (static_cast<unsigned char>(*e) & 0xC0) == 0x80) ++e;
+        }
+        const char* le = e;
+        while (le > s && (le[-1] == ' ' || le[-1] == '\n')) --le;
+        const float tw = ImGui::CalcTextSize(s, le).x;
+        if (first) {
+            ImGui::SameLine(x0 + avail - tw);
+            ImGui::AlignTextToFramePadding();
+        } else {
+            ImGui::SetCursorPosX(x0 + avail - tw);
+        }
+        ImGui::TextUnformatted(s, le);
+        s = e;
+        while (s < end && (*s == ' ' || *s == '\n')) ++s;
+    }
+    ImGui::PopStyleColor();
+    ImGui::EndGroup();
     HoverTip(tip);
 }
 
