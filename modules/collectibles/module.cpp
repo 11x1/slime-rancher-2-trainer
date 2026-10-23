@@ -23,6 +23,12 @@
 //   * Research drones: no static per-zone list exists; counted from the drones
 //     loaded so far this session (ResearchDroneController, low-rate scan),
 //     marked with '*' (known so far).
+//   * Ghostly drones: ComponentAcqDroneSpawner sits on a TreasurePod (InitDrone:
+//     SRGetComponent<TreasurePod>); the drone carries that pod and opening it
+//     awards it. Spawners are scene objects (no static list), so they are
+//     collected by the same low-rate scan as research drones. Zone: the pod's
+//     GetZoneId() (CellDirector), else the zone polygons. Done: pod OPEN
+//     (TreasurePod.get_CurrState), re-read at 1 Hz while the pod is loaded.
 //
 // UI: our own uGUI objects parented to the minimap's root GameObject, so they
 // follow its position, opacity and visibility (hidden with the HUD, menus,
@@ -85,7 +91,7 @@ constexpr float kDroneScanInterval = 10.0f;
 
 enum Cat {
     kPods = 0, kGordos, kShadowDepositors, kShadowDoors, kPlortDoors, kTeleporters, kStabilizers, kMapNodes, kDrones,
-    kCatCount
+    kGhostDrones, kCatCount
 };
 struct CatInfo {
     const char* key;
@@ -111,6 +117,9 @@ const CatInfo kCats[kCatCount] = {
     {"cat_research_drones", "Research drones (read)", "Drones", false,
      "Read / known research drones. The game keeps no static list per zone, so only drones loaded at least once "
      "this session are known (marked with *)"},
+    {"cat_ghostly_drones", "Ghostly drones (opened)", "Ghosts", false,
+     "Opened / known ghostly drones (each carries a treasure pod). Like research drones they exist only in the loaded "
+     "scenes, so the total counts the drones seen so far (marked with *)"},
 };
 
 struct NativeFault : std::runtime_error {
@@ -177,6 +186,7 @@ struct Sym {
                 *teleMarker = nullptr;
     Il2CppClass *gameModel = nullptr, *gordoModel = nullptr;
     Il2CppClass *droneCtrl = nullptr, *droneEntry = nullptr, *droneModel = nullptr;
+    Il2CppClass *ghostSpawner = nullptr, *treasurePod = nullptr, *identType = nullptr;
     Il2CppClass *fogElement = nullptr, *staticGameEvent = nullptr, *eventDirector = nullptr, *eventRecordModel = nullptr;
     const MethodInfo* counterGetState = nullptr;  // MapCounterDefinition.GetState (abstract; virtual slot per object)
     const MethodInfo* canBeShown = nullptr;       // IFilterableMapMarker.get_CanBeShown
@@ -184,6 +194,7 @@ struct Sym {
     const MethodInfo* descMapIcon = nullptr;      // IMapMarkerDescriptor.get_MapIcon
     ugui::Fn tryGetGameModel, getGordoModel, gordoHasPopped, puzzleSolved, puzzleShadow, depSolved, depShadow;
     ugui::Fn fogShouldReveal;  // FogMapElement.ShouldBeRevealed(EventDirector)
+    ugui::Fn podGetState, podGetZone;  // TreasurePod.get_CurrState (0 LOCKED, 1 OPEN), GetZoneId
     size_t mdCounters = kNoOff, counterIcon = kNoOff;
     size_t areaZoneData = kNoOff, areaPoints = kNoOff, zmdPrimary = kNoOff, zoneMarkerData = kNoOff,
            labZoneMarkerData = kNoOff;
@@ -191,6 +202,7 @@ struct Sym {
     size_t droneEntryF = kNoOff, droneModelF = kNoOff, entryRefId = kNoOff, droneRead = kNoOff;
     size_t fogEvent = kNoOff, sgeDirector = kNoOff, sgeKey = kNoOff, edModel = kNoOff, gmEventRecord = kNoOff,
            mdEventDirector = kNoOff;
+    size_t spawnerId = kNoOff, spawnerIdent = kNoOff, identIcon = kNoOff, podModel = kNoOff;
 };
 
 struct ResolveCtx {
@@ -285,6 +297,16 @@ public:
         s_.entryRefId = c.Field(s_.droneEntry, "referenceId");
         s_.droneModel = c.Class(nsData, "ResearchDroneModel");
         s_.droneRead = c.Field(s_.droneModel, "read");
+        // ghostly drones: ComponentAcqDroneSpawner on a TreasurePod
+        s_.ghostSpawner = c.Class("MonomiPark.SlimeRancher.Drone", "ComponentAcqDroneSpawner");
+        s_.spawnerId = c.Field(s_.ghostSpawner, "_id");  // IdHandler._id
+        s_.spawnerIdent = c.Field(s_.ghostSpawner, "_ident");
+        s_.identType = c.Class("", "IdentifiableType");
+        s_.identIcon = c.Field(s_.identType, "icon");
+        s_.treasurePod = c.Class("", "TreasurePod");
+        s_.podModel = c.Field(s_.treasurePod, "_model");
+        s_.podGetState = c.Bind(s_.treasurePod, "get_CurrState", 0);
+        s_.podGetZone = c.Bind(s_.treasurePod, "GetZoneId", 0);
         // map data nodes = fog areas (MapUIFogReveal.RevealKnownZones: SetRevealState(ShouldBeRevealed(director)))
         const char* nsEvent = "MonomiPark.SlimeRancher.Event";
         s_.fogElement = c.Class(nsUiMap, "FogMapElement");
@@ -307,13 +329,14 @@ public:
         RegisterSettings();
         if (!onChange_) onChange_ = settings::OnChange(kModule, [this](const std::string&) { cfgDirty_.store(true); });
         SR2_INFO("collectibles: resolved (counters {}, gordos {}, plort doors {}, depositors {}, teleporters {}, "
-                 "gates {}, map nodes {}, drones {}, zone areas {}, {} optional symbols missing)",
+                 "gates {}, map nodes {}, drones {}, ghostly drones {}, zone areas {}, {} optional symbols missing)",
                  (Has(s_.mdCounters) && s_.counterGetState) ? "yes" : "no",
                  (s_.gordoMarker && s_.gordoHasPopped && s_.getGordoModel && s_.tryGetGameModel) ? "yes" : "no",
                  s_.puzzleSolved ? "yes" : "no", s_.depSolved ? "yes" : "no",
                  (s_.teleMarker && s_.canBeShown) ? "yes" : "no", (s_.stabMarker && s_.canBeShown) ? "yes" : "no",
                  MapNodesResolved() ? "yes" : "no",
                  (s_.droneCtrl && Has(s_.droneModelF) && Has(s_.droneRead)) ? "yes" : "no",
+                 GhostsResolved() ? "yes" : "no",
                  (Has(s_.areaPoints) && Has(s_.zmdPrimary)) ? "yes" : "no", c.missing.size());
         return true;
     }
@@ -367,6 +390,11 @@ private:
     struct Drone {
         Il2CppObject* zone = nullptr;
         bool read = false;
+    };
+    struct Ghost {
+        Il2CppObject* zone = nullptr;
+        bool done = false;
+        Ref pod;  // TreasurePod while its scene is loaded (state re-read at 1 Hz)
     };
     // One map data node = one reveal event of the page's fog areas.
     struct FogNode {
@@ -426,6 +454,8 @@ private:
     Ref zone_;
     Il2CppObject* lastGameModel_ = nullptr;
     std::unordered_map<std::string, Drone> drones_;
+    std::unordered_map<std::string, Ghost> ghosts_;
+    Ref ghostIcon_;  // IdentifiableType.icon of the spawners' drone (kept across page rebuilds)
     float recomputeAcc_ = 1e9f, droneAcc_ = 1e9f, retryAcc_ = 0;
     Count counts_[kCatCount];
     std::string shownSig_;
@@ -481,11 +511,14 @@ private:
         }
         for (Ref& r : zonePins_) r.Abandon();
         for (Ref& r : catIcon_) r.Abandon();
+        for (auto& [id, g] : ghosts_) g.pod.Abandon();
+        ghostIcon_.Abandon();
         for (Ref* r : {&pagePrefab_, &mapT_, &mapDirector_, &zone_}) r->Abandon();
         entries_.clear();
         counters_.clear();
         areas_.clear();
         fogNodes_.clear();
+        ghosts_.clear();
         zonePins_.clear();
         if (frameCb_) main_thread::RemoveFrameCallback(frameCb_);
         frameCb_ = 0;
@@ -531,6 +564,7 @@ private:
         if (gm != lastGameModel_) {  // save change: session drone knowledge belongs to the old save
             lastGameModel_ = gm;
             drones_.clear();
+            ghosts_.clear();
             droneAcc_ = 1e9f;
             recomputeAcc_ = 1e9f;
         }
@@ -544,10 +578,16 @@ private:
         }
 
         droneAcc_ += dt;
-        if (droneAcc_ >= kDroneScanInterval && cfg_.cats[kDrones]) {
+        if (droneAcc_ >= kDroneScanInterval && (cfg_.cats[kDrones] || cfg_.cats[kGhostDrones])) {
             droneAcc_ = 0;
-            Step("research drones");
-            ScanDrones(gm);
+            if (cfg_.cats[kDrones]) {
+                Step("research drones");
+                ScanDrones(gm);
+            }
+            if (cfg_.cats[kGhostDrones]) {
+                Step("ghostly drones");
+                ScanGhosts();
+            }
         }
         recomputeAcc_ += dt;
         if (recomputeAcc_ >= kRecomputeInterval) {
@@ -907,7 +947,7 @@ private:
         }
         std::string icons;
         for (int i = 0; i < kCatCount; ++i)
-            if (catIcon_[i]) icons += std::format("{}{}", icons.empty() ? "" : ",", kCats[i].shortLabel);
+            if (IconFor(i)) icons += std::format("{}{}", icons.empty() ? "" : ",", kCats[i].shortLabel);
         int nodesNoZone = 0;
         for (const FogNode& n : fogNodes_) nodesNoZone += n.zone ? 0 : 1;
         SR2_INFO("collectibles: page '{}': {} markers (zone by own field {}, polygon {}, nearest zone label {}, "
@@ -1044,6 +1084,95 @@ private:
                 k.partial = true;
             }
         }
+        if (!hasCounter[kGhostDrones] && (forLog || cfg_.cats[kGhostDrones])) {
+            for (auto& [id, g] : ghosts_) {
+                if (g.zone != zone) continue;
+                if (!forLog && !g.done && g.pod.Alive()) {
+                    bool done = false;
+                    if (PodOpen(g.pod.get(), done)) g.done = done;
+                }
+                Count& k = c[kGhostDrones];
+                ++k.total;
+                ++k.discovered;
+                if (g.done) ++k.done;
+                k.partial = true;
+            }
+        }
+    }
+
+    bool GhostsResolved() const {
+        return s_.ghostSpawner && s_.treasurePod && s_.podGetState && Has(s_.podModel);
+    }
+
+    // TreasurePod.get_CurrState() == OPEN; get_CurrState throws while the pod has no model yet.
+    bool PodOpen(Il2CppObject* pod, bool& open) {
+        if (!ugui::IsA(pod, s_.treasurePod) || !s_.podGetState || !Has(s_.podModel)) return false;
+        Il2CppObject* model = F<Il2CppObject*>(pod, s_.podModel);
+        if (!model || !ugui::PlausiblePointer(model)) return false;
+        int state = 0;
+        if (!Managed([&] { state = ugui::Call<int>(s_.podGetState, pod); })) return false;
+        open = state == 1;
+        return true;
+    }
+
+    void ScanGhosts() {
+        if (!GhostsResolved()) return;
+        ugui::ForEachSceneObject(s_.ghostSpawner, true, [&](Il2CppObject* sp) {
+            if (!ugui::IsA(sp, s_.ghostSpawner)) return true;
+            Il2CppObject* go = unity::GameObjectOf(sp);
+            Il2CppObject* pod = nullptr;
+            if (go)
+                ugui::ForEachInChildren(go, s_.treasurePod, true, [&](Il2CppObject* p) {
+                    if (ugui::IsA(p, s_.treasurePod)) pod = p;
+                    return pod == nullptr;
+                });
+            if (!pod) return true;  // nothing to count without its pod
+            std::string id;
+            if (Has(s_.spawnerId)) {
+                auto* str = F<Il2CppString*>(sp, s_.spawnerId);
+                if (str && ugui::PlausiblePointer(str)) id = unity::ToUtf8(str);
+            }
+            if (id.empty()) id = std::format("obj:{}", static_cast<const void*>(sp));
+            if (!ghostIcon_.Alive() && Has(s_.spawnerIdent) && Has(s_.identIcon)) {
+                Il2CppObject* ident = F<Il2CppObject*>(sp, s_.spawnerIdent);
+                if (ugui::IsA(ident, s_.identType)) {
+                    Il2CppObject* icon = F<Il2CppObject*>(ident, s_.identIcon);
+                    if (ugui::IsA(icon, ugui::SpriteClass())) ghostIcon_.Reset(icon);
+                }
+            }
+            bool done = false;
+            bool known = PodOpen(pod, done);
+            auto it = ghosts_.find(id);
+            if (it != ghosts_.end()) {
+                if (!it->second.pod.Alive() || it->second.pod.get() != pod) it->second.pod.Reset(pod);
+                if (known) it->second.done = it->second.done || done;
+                return true;
+            }
+            Il2CppObject* z = nullptr;
+            const char* how = "pod zone";
+            if (s_.podGetZone) {
+                Il2CppObject* pz = nullptr;
+                Managed([&] { pz = ugui::Call<Il2CppObject*>(s_.podGetZone, pod); });
+                z = PinZone(pz);
+            }
+            if (!z) {
+                int method = 0;
+                z = ZoneAtWorld(ugui::GetPosition(unity::TransformOf(sp)), method);
+                how = method == 1 ? "polygon" : "nearest zone label";
+            }
+            if (!z && !pageHasZoneInfo_) {
+                z = zone_.get() ? PinZone(zone_.get()) : nullptr;
+                how = "current zone";
+            }
+            if (!z) return true;
+            Ghost g;
+            g.zone = z;
+            g.done = known && done;
+            g.pod.Reset(pod);
+            ghosts_.emplace(id, std::move(g));
+            SR2_DEBUG("collectibles: ghostly drone '{}' in '{}' ({}), opened {}", id, unity::GetName(z), how, known && done);
+            return true;
+        });
     }
 
     void ScanDrones(Il2CppObject* gm) {
@@ -1160,6 +1289,12 @@ private:
         unity::SetActive(ui_.root.get(), v);
     }
 
+    Il2CppObject* IconFor(int cat) {
+        if (catIcon_[cat].Alive()) return catIcon_[cat].get();
+        if (cat == kGhostDrones && ghostIcon_.Alive()) return ghostIcon_.get();
+        return nullptr;
+    }
+
     std::string Numbers(int cat) const {
         const Count& c = counts_[cat];
         std::string star = c.partial ? "*" : "";
@@ -1217,7 +1352,7 @@ private:
             for (int i : shown) {
                 Cell& c = ui_.cells[i];
                 if (!c.go.Alive()) continue;
-                Item it{i, catIcon_[i].Alive() ? catIcon_[i].get() : nullptr, 0, 0};
+                Item it{i, IconFor(i), 0, 0};
                 const std::string txt = it.spr ? Numbers(i) : std::format("{} {}", kCats[i].shortLabel, Numbers(i));
                 for (Ref* t : {&c.text, &c.textShadow}) {
                     if (!t->Alive()) continue;
@@ -1371,6 +1506,10 @@ private:
         TeardownStep("release index", [&] { ClearIndex(); });
         TeardownStep("release zone", [&] { zone_.Reset(nullptr); });
         drones_.clear();
+        TeardownStep("release ghosts", [&] {
+            ghosts_.clear();
+            ghostIcon_.Reset(nullptr);
+        });
         lastGameModel_ = nullptr;
         shownSig_.clear();
         lastSize_ = -1;
