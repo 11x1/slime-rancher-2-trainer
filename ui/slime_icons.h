@@ -42,7 +42,4 @@ bool Draw(ImDrawList* dl, ImVec2 min, ImVec2 max);
 // valid until the next Draw/OnOpen).
 const Entry* CurrentEntry();
 
-// Display name of the current icon ("" if none).
-std::string CurrentName();
-
 }  // namespace sr2::ui::slime_icons

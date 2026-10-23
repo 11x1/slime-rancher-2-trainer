@@ -521,11 +521,6 @@ bool Draw(ImDrawList* dl, ImVec2 min, ImVec2 max) {
 
 const Entry* CurrentEntry() { return (g_hasIcon && !g_waiting && !g_entry.name.empty()) ? &g_entry : nullptr; }
 
-std::string CurrentName() {
-    const Entry* e = CurrentEntry();
-    return e ? e->name : std::string();
-}
-
 }  // namespace sr2::ui::slime_icons
 
 #endif  // SR2_HAVE_IMGUI
