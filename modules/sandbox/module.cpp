@@ -41,6 +41,7 @@
 #include "core/module.h"
 #include "core/unity.h"
 #include "modules/sandbox/achievements.h"
+#include "modules/sandbox/player_extras.h"
 #include "ui/item_icons.h"
 #include "ui/sandbox_bridge.h"
 
@@ -452,6 +453,7 @@ bool Sandbox::Setup(sr2::core::ModuleContext& ctx) {
     // Required: without the pause the module does not run (fail closed).
     if (!sandbox::SetupAchievementPause(ctx)) return false;
     SetupExtras(R);
+    sandbox::SetupPlayerExtras(ctx);  // optional tools on the World card (player_extras.cpp)
 
     g_self = this;
     if (!frameCb_) frameCb_ = main_thread::AddFrameCallback(kModule, [this](float) { Tick(); });
@@ -690,6 +692,7 @@ void Sandbox::OnEnable() {
     enabled_.store(true);
     sandbox::SetAchievementsPaused(true);
     bridge::SetHandler(&HandleThunk);
+    sandbox::PlayerExtrasEnabled(true);
     lastSnap_ = 0;
     // A list that came out empty (built before the assets were loaded) is tried again.
     if (!spawnables_ || spawnables_->empty()) spawnTried_ = false;
@@ -703,6 +706,7 @@ void Sandbox::OnDisable() {
     sandbox::SetAchievementsPaused(false);
     if (infinite_.exchange(false)) SR2_INFO("[{}] infinite energy off (module disabled)", kModule);
     bridge::SetHandler(nullptr);
+    sandbox::PlayerExtrasEnabled(false);
     bridge::Snapshot s;
     s.tick = GetTickCount64();
     s.why = "Sandbox is off.";
@@ -1578,10 +1582,12 @@ void Sandbox::Tick() {
         lastEnergy_ = now;
         TopUpEnergy();
     }
-    if (bridge::WantsSnapshot() && now - lastSnap_ >= kSnapshotMs) {
+    const bool snap = bridge::WantsSnapshot() && now - lastSnap_ >= kSnapshotMs;
+    if (snap) {
         lastSnap_ = now;
         Refresh();
     }
+    sandbox::PlayerExtrasTick(snap);
 }
 
 void Sandbox::Done(bool ok, const std::string& text) {

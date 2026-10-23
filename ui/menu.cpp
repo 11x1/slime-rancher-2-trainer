@@ -21,6 +21,7 @@
 #include "menu_layout.h"
 #include "item_grid.h"
 #include "sandbox_bridge.h"
+#include "sandbox_extras_bridge.h"
 #include "slime_dj_bridge.h"
 #include "slime_icons.h"
 #include "theme.h"
@@ -2316,6 +2317,97 @@ void SandboxStatus(const Host& h) {
     ImGui::PopTextWrapPos();
 }
 
+// "Extras" card (modules/sandbox/player_extras.cpp, sandbox_extras_bridge.h): infinite health, teleport to
+// the map marker and unlocking the ranch expansions (after a confirmation, it is a permanent save change).
+namespace sbxx = ::sr2::ui::sandbox::extras;
+constexpr const char* kSbxExpPopup = "##sandbox_expansions";
+bool g_sbxExpConfirm = false;
+
+void SandboxExpansionsConfirm(const sbxx::State& st) {
+    const Palette& P = theme::Colors();
+    if (g_sbxExpConfirm) {
+        ImGui::OpenPopup(kSbxExpPopup);
+        g_sbxExpConfirm = false;
+    }
+    const float w = U(430);
+    ImGui::SetNextWindowPos(ImVec2((g_winMin.x + g_winMax.x) * 0.5f, (g_winMin.y + g_winMax.y) * 0.5f), ImGuiCond_Appearing,
+                            ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(w, 0), ImVec2(w, FLT_MAX));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(22), U(18)));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(10), U(8)));
+    ImGui::PushStyleColor(ImGuiCol_Border, P.cardBorder);
+    const ImGuiWindowFlags f = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                               ImGuiWindowFlags_AlwaysAutoResize;
+    if (ImGui::BeginPopupModal(kSbxExpPopup, nullptr, f)) {
+        {
+            FontScope fs(theme::Display(), theme::kDisplaySize + 4);
+            ImGui::PushStyleColor(ImGuiCol_Text, theme::Current() == theme::Mode::Dark ? P.grab : P.accent);
+            ImGui::TextUnformatted("Unlock ranch expansions?");
+            ImGui::PopStyleColor();
+        }
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(std::format("Opens the {} locked expansion(s) of your ranch as if you had bought them, "
+                                           "for free.",
+                                           std::max(0, st.lockedExpansions))
+                                   .c_str());
+        ImGui::PopTextWrapPos();
+        DimText("This changes your save for good: the game keeps the expansions open when it next saves, and there is "
+                "no way to lock them again.");
+        ImGui::Dummy(ImVec2(0, U(4)));
+        const ImVec2 bs(U(112), U(34));
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - 2 * bs.x -
+                             ImGui::GetStyle().ItemSpacing.x);
+        if (ImGui::Button("Cancel", bs) || PopupCancelled()) ImGui::CloseCurrentPopup();
+        ImGui::SameLine();
+        if (AccentButton("Unlock", bs)) {
+            sbxx::Request(sbxx::Op::UnlockExpansions);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+}
+
+void SandboxExtras(const Host& h, float w) {
+    const Palette& P = theme::Colors();
+    const auto st = sbxx::Get();
+    BeginCard("sbx_extras", w);
+    CardHeading("Extras", P.head);
+    if (!st || h.nowMs - st->tick > 3000) {
+        DimText("Reading...");
+        EndCard();
+        return;
+    }
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float x0 = SbxRowStart("Infinite health");
+    ImGui::SameLine(x0 + avail - U(kSwitchW));
+    if (Switch("##infhealth", st->infiniteHealth)) sbxx::Request(sbxx::Op::InfiniteHealth, st->infiniteHealth ? 0 : 1);
+    HoverTip(st->healthHook ? "Ignores all damage and keeps health at its maximum. For this session only: off again after "
+                              "a restart or when Sandbox is turned off."
+                            : "Keeps health at its maximum (refilled 10 times a second; a single hit bigger than your "
+                              "maximum still knocks you out). For this session only.");
+    const float sp = ImGui::GetStyle().ItemSpacing.x;
+    const ImVec2 bs(std::floor((avail - sp) / 2), U(32));
+    ImGui::BeginDisabled(!st->canTeleport);
+    if (ImGui::Button("Teleport to waypoint", bs)) sbxx::Request(sbxx::Op::TeleportToMarker);
+    ImGui::EndDisabled();
+    HoverTip(st->canTeleport ? "Moves you to the marker you placed on the map (onto the ground below it), with the "
+                               "game's own teleport."
+                             : st->teleportWhy);
+    ImGui::SameLine();
+    const bool canUnlock = st->lockedExpansions > 0;
+    ImGui::BeginDisabled(!canUnlock);
+    if (ImGui::Button("Unlock ranch expansions", bs)) g_sbxExpConfirm = true;
+    ImGui::EndDisabled();
+    HoverTip(canUnlock ? std::format("Opens the {} locked expansion(s) of your ranch as if bought (free). Asks first; "
+                                     "the change is saved.",
+                                     st->lockedExpansions)
+                       : st->expansionWhy);
+    EndCard();
+    SandboxExpansionsConfirm(*st);
+}
+
 void DrawSandboxPage(const Host& h, const ModuleView& mv) {
     const Palette& P = theme::Colors();
     FailedBanner(mv);
@@ -2347,12 +2439,14 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
         SandboxStatus(h);
         return;
     }
-    // Newbucks | Player, the vacpack across both columns, then Spawner | Crafter.
+    // Newbucks | Player, Extras and the vacpack across both columns, then Spawner | Crafter.
     const float full = ImGui::GetContentRegionAvail().x, w = ColumnWidth();
     const float gapY = U(kGap) - ImGui::GetStyle().ItemSpacing.y;
     SandboxNewbucks(*snap, w);
     ImGui::SameLine(0, U(kGap));
     SandboxPlayer(*snap, w);
+    ImGui::Dummy(ImVec2(0, gapY));
+    SandboxExtras(h, full);
     ImGui::Dummy(ImVec2(0, gapY));
     SandboxVacpack(*snap, full);
     ImGui::Dummy(ImVec2(0, gapY));
