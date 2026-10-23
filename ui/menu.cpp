@@ -1366,7 +1366,7 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
 }
 
 // ------------------------------------------------------------- settings ----
-void KeyValue(const char* k, const std::string& v, ImU32 vcol) {
+void KeyValue(const char* k, const std::string& v, ImU32 vcol, const std::string& tip = {}) {
     const float avail = ImGui::GetContentRegionAvail().x, x0 = ImGui::GetCursorPosX();
     const float keyW = std::min(U(130), avail * 0.45f);
     ImGui::AlignTextToFramePadding();
@@ -1376,6 +1376,7 @@ void KeyValue(const char* k, const std::string& v, ImU32 vcol) {
     ImGui::AlignTextToFramePadding();
     ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(vcol), "%s", v.c_str());
     ImGui::PopTextWrapPos();
+    HoverTip(tip);
 }
 
 void DrawSettingsPage(const Host& h, const ModuleView* ui) {
@@ -1391,9 +1392,13 @@ void DrawSettingsPage(const Host& h, const ModuleView* ui) {
     ImGui::SameLine(0, U(kGap));
     BeginCard("status", w);
     CardHeading("Status", P.head);
-    KeyValue("Overlay", OverlayStatus(), P.dim);
     KeyValue("Options menu tab", OptionsTabStatus(), P.dim);
-    KeyValue("Game build", h.versionStatus, h.versionMismatch ? P.warn : P.dim);
+    // A known build is one green line (details on hover); anything else shows the full status,
+    // a mismatch as a warning.
+    if (h.versionKnown)
+        KeyValue("Game build", "matches known build", P.ok, h.versionStatus);
+    else
+        KeyValue("Game build", h.versionStatus, h.versionMismatch ? P.warn : P.dim);
     EndCard();
 }
 

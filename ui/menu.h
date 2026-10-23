@@ -19,6 +19,7 @@ struct Host {
     std::string hotkeyName;            // "F8"
     bool versionMismatch = false;      // core::version_guard (kept out of here: it needs <windows.h>)
     std::string versionStatus;
+    bool versionKnown = false;         // GameAssembly.dll hash matches the known build (and no mismatch)
     // Startup notes (DrawHint): the "press <hotkey>" note, and quick_start's auto-continue
     // note (0 none, 1 "Hold Shift..." pending, 2 "Staying in the main menu").
     bool menuHint = false;
