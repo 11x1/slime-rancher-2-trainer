@@ -452,6 +452,9 @@ private:
         Ref page;  // our page container (RectTransform), child of the rotator
         std::vector<Marker> markers;
         std::vector<Group> fog, dyn;
+        // Fog-shader art outside every FogMapElement ("fog_static": the "covering up static fog" patches and
+        // the negative-masked outside fog). Nothing in the game toggles them; drawn while the fog is respected.
+        Group staticFog;
         std::vector<Icon> icons;
         bool ok = false;
         bool hasPagePods = false, hasPageNodes = false;
@@ -1869,7 +1872,9 @@ private:
                                                   kind == kRootFog ? " [fog]" : (kind == kRootDyn ? " [dynamic]" : ""))});
 
         if (kind != kRootFog && fogShader) {
-            // fog-shader art outside every FogMapElement: always drawn (nothing in the game toggles it)
+            // fog-shader art outside every FogMapElement: drawn as in the full map (nothing in the game
+            // toggles it), hidden only with "Respect fog of war" off
+            if (!group) view_.staticFog.gos.emplace_back(go);
             ++b.staticFog;
             if (b.staticFogNames.size() < 400) {
                 Il2CppObject* parent = ugui::GetParent(t);
@@ -1978,8 +1983,8 @@ private:
                      "to fog",
                      b.fogOpaque);
         if (b.staticFog > 0)
-            SR2_INFO("minimap: fog: {} fog-shader images outside every FogMapElement (always drawn, as in the "
-                     "prefab): {}",
+            SR2_INFO("minimap: fog: {} fog-shader images outside every FogMapElement (static fog: no game "
+                     "component toggles them, the full map always draws them; shown while fog of war is respected): {}",
                      b.staticFog, b.staticFogNames);
         {  // the largest copies: what the minimap actually draws
             std::sort(b.notes.begin(), b.notes.end(), [](const auto& x, const auto& y) { return x.area > y.area; });
@@ -2399,6 +2404,12 @@ private:
     // the minimap root) does not reach fog-shader copies: each has its own CanvasGroup with
     // ignoreParentGroups, because those shaders treat vertex alpha as the reveal threshold.
     void ApplyFogVisibility() {
+        Group& st = view_.staticFog;  // static fog: as in the full map, unless the fog is ignored
+        int svis = cfg_.respectFog ? 1 : 0;
+        if (svis != st.vis) {
+            st.vis = svis;
+            SetGroup(st, svis != 0);
+        }
         for (Group& f : view_.fog) {
             int vis = (cfg_.respectFog && f.state != 1) ? 1 : 0;  // unknown counts as unrevealed
             if (vis != f.vis) {

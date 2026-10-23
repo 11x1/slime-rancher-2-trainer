@@ -183,7 +183,7 @@ Other sources:
 
 - Fog areas: each `FogMapElement` group keeps one page-space parallelogram per copied image (its four rect corners), or the element's own RectTransform when it has no art. An icon (page marker, pod, node, teleporter gadget) is "under fog" when its page position lies in a shape of an area that is UNREVEALED or still UNKNOWN. Logged once per build: "fog: N areas (A shaped by their art, R by their own rect, E without an area); X revealed, Y unrevealed, U unknown".
 - "Respect fog of war" ON: page markers need the game's `CanBeShown` (discovery + not done) and must not be under fog; world-scanned icons must not be under fog. The minimap hides while `PlayerDisplayOnMap.IsInUnknownArea`.
-- "Respect fog of war" OFF: fog art is hidden and no icon is hidden by fog or discovery, but the DONE state still applies:
+- "Respect fog of war" OFF: fog art (fog areas and the static fog) is hidden and no icon is hidden by fog or discovery, but the DONE state still applies:
   - gordos: `SceneContextUtility.TryGetGameModel` -> `GameModel.GetGordoModel(_gordoIdentifier)` (TryGetValue, null if never fed) -> `GordoModel.HasPopped()` (eat count == -1, disassembly). `GordoMarkerUI.CanBeShown` = seen && !popped (0x704ED0), so it cannot be used without the fog.
   - plort doors: `PuzzleSlotMarkerUI.CalculateIsSolved()` (`CanBeShown` = discovered && !solved, 0x734730).
   - ancient teleporters: always (their `CanBeShown` is discovery only).
@@ -241,8 +241,25 @@ New log lines:
 - `minimap: fog: save data ready [after waiting X s] (event record stable for 1.0 s) - fog areas are queried from now on`
 - `minimap: fog: X revealed / Y unrevealed / Z unknown (<reason>[, all areas queried]); revealed: '<event key>', ...; fogged again: ...; N queries failed (kept fogged)` - only when something changed.
 - `minimap: fog: event record changed (save / session change) - all N areas unknown again`
-- `minimap: fog: N fog-shader images outside every FogMapElement (always drawn, as in the prefab): '<name>' in '<parent>', ...` (the "covering up static fog (n)" images: if fog over explored areas remains, these are the suspects)
+- `minimap: fog: N fog-shader images outside every FogMapElement (static fog: ...): '<name>' in '<parent>', ...` (see "Static fog")
 - WARN `minimap: fog: <field>'s event record is not GameModel.eventRecordModel after 10 s - querying it anyway`
+
+## Static fog: "fog_static" (verified 2026-10-23 from the prefab)
+
+Read with UnityPy from `duplicateassetisolation_assets__54b00e46….bundle` (the page prefabs). Only `RainbowIslandMap` has it:
+
+```
+RainbowIslandMap (Map)
+  zone_fog_areas            _forceActiveOnAwake[0]; 14 x map_fog_* (Image + CanvasGroup + FogMapElement)
+  fog_static (Transform)    _forceActiveOnAwake[1]
+    Temporary Static Fog Covering (RectTransform only)
+      11 x "covering up static fog (n)"   Image only (one inactive), same material as map_fog_* (PosterizedFogOfWarMask)
+    OutsideFogNegativeMasked              Image, PosterizedFogOfWarNegativeMask material
+    Negative Mask                         NegativeMaskMap (softness 0.236, roundness 0.79, noise 5.14 / 0.88, updateConstantly)
+```
+
+- The covers have no component besides Image and nothing references them (no serialized reference in the prefab, no string literal in the metadata). Their parent is force-activated by `Map.Awake`. So the full map ALWAYS draws them; no reveal ever hides them. Their colours repeat the colours of single fog areas (colour rg = the noise UV offset, so a cover's clouds join its neighbour's seamlessly): they fill the gaps between the zone fog areas and the outside fog.
+- Minimap: copied like the full map, kept as one static group, shown while "Respect fog of war" is on and hidden with it off (like all fog art). They are not fog areas: icons under them are not hidden.
 
 ## Fog shaders and minimap opacity (verified 2026-10-23)
 
