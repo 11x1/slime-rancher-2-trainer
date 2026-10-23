@@ -79,11 +79,37 @@
 //   * Save: only the vanilla HashSet changes (and ashUnits); every resulting state is one
 //     vanilla can produce (the plot simply never had that upgrade). No new save data.
 //
-// Fault policy: both detours run their logic inside a DetourGuard (native fault -> module
+// ---------------------------------------------------------------- sell button --
+//   The details panel's action area (ListUI, shared by every list menu) is built per
+//   selection by ListUI.<ShowMenu>b__4 -> CreateDetailsMoreButton(item, category, vm):
+//   available item -> Instantiate(category.detailsButton) (the "Purchase" button), not
+//   available (= owned upgrade) -> Instantiate(category.detailsInfo) (a label-only twin:
+//   the "PURCHASED" text), both into ListUI.mainActionButtonContainer, then
+//   DetailsMoreButtonView.BindData(vm) (label = vm.actionLabel if the view has a Button,
+//   else vm.infoLabel = the item's own _infoButtonLabel instance). ListUI wires no
+//   listener in code; the Purchase prefab's click performs the menu's submit input
+//   event, which ends in LandPlotUIRoot.OnAction(selected item) - like gamepad A.
+//   * LandPlotUIRoot.SetActivator detour (pre): remember the open plot menu (GC handle;
+//     the previous handle is freed by a posted job, never inside a hook).
+//   * DetailsMoreButtonView.BindData detour (post): if the bound view is the label-only
+//     variant and vm.infoLabel is the _infoButtonLabel of an upgrade item of the open
+//     plot menu (pointer identity) that the plot owns, a copy of that category's own
+//     detailsButton prefab (the game's Purchase button) is instantiated as a sibling in
+//     the same container, labelled "Sell +N" / "Can't sell" (its LocalizeStringEvent is
+//     disabled, the TMP text set). With a LayoutGroup on the container it sits next to
+//     PURCHASED; without one it covers the PURCHASED slot and reads "Owned - Sell +N".
+//     The previous sell button is destroyed on every bind (= every selection change).
+//   * UnityEngine.UI.Button.Press detour: a click on OUR button (pointer compare; other
+//     buttons are not touched) opens the sell popup (HandleAction). If the prefab's own
+//     submit routing fires in the same frame too, the second request is dropped (one
+//     popup per frame). Gamepad: A on the selected owned item = submit = same popup.
+//
+// Fault policy: every detour runs its logic inside a DetourGuard (native fault -> module
 // faulted, detours pass-through). Objects are class- and IsAlive-checked; runtime_invoke
-// native faults mark the module faulted (never used as control flow). No GC handles
-// (closure / delegate are referenced by the popup; we only compare the address), no
-// scans, nothing per frame.
+// native faults mark the module faulted (never used as control flow). The closure /
+// delegate are referenced by the popup (we only compare the address). Two GC handles
+// (open menu root, our sell button), freed only from posted main-thread jobs. No scans,
+// nothing per frame.
 
 #include <windows.h>
 
@@ -93,6 +119,7 @@
 #include <format>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "core/detour_guard.h"
@@ -197,12 +224,19 @@ public:
     void OnDisable() override {
         enabled_.store(false);
         pending_ = {};
+        main_thread::Post([this] {
+            if (!enabled_.load()) DestroySellButton();
+        });
     }
     bool On() const { return enabled_.load(std::memory_order_relaxed); }
 
     // detour bodies (main thread, inside a DetourGuard)
     bool HandleAction(Il2CppObject* root, Il2CppObject* item);
     bool HandleConfirm(Il2CppObject* closure);
+    void TrackRoot(Il2CppObject* root);
+    void AfterMoreBind(Il2CppObject* view, Il2CppObject* vm);
+    bool OnSellButton(Il2CppObject* button);
+    Il2CppObject* SellButton() const { return btnButton_; }  // pointer compare only
 
 private:
     struct Refund {
@@ -232,10 +266,26 @@ private:
     bool HasUpgrade(Il2CppObject* plot, int32_t upg) { return hasUpgrade_(plot, upg); }
     Il2CppObject* Type(Il2CppClass* k) { return unity::TypeOf(k); }
 
+    Il2CppObject* FindItemByInfoLabel(Il2CppObject* root, Il2CppObject* infoLabel, Il2CppObject*& category);
+    size_t OffsetIn(Il2CppObject* obj, const char* field, std::unordered_map<Il2CppClass*, size_t>& cache);
+    void DestroySellButton();
+
     std::atomic<bool> enabled_{false};
     PendingPrompt pending_;  // main thread only
+    unsigned long long promptTick_ = ~0ull;  // TickCount of the last opened prompt
     bool loggedFirstPrompt_ = false;
     bool warnedLabel_ = false;
+    bool loggedButton_ = false;
+
+    // open plot menu (main thread only)
+    Il2CppObject* root_ = nullptr;
+    Il2CppGCHandle rootHandle_ = nullptr;
+    // our sell button (main thread only)
+    Il2CppObject* btnGo_ = nullptr;      // GameObject (handle held)
+    Il2CppObject* btnButton_ = nullptr;  // its UnityEngine.UI.Button (may be null)
+    Il2CppObject* btnItem_ = nullptr;    // the owned item it sells (menu asset)
+    Il2CppGCHandle btnHandle_ = nullptr;
+    std::unordered_map<Il2CppClass*, size_t> offCategories_, offItems_, offDetailsButton_;
 
 public:
     // ---- resolved (Setup, worker thread) ----
@@ -280,6 +330,14 @@ public:
     size_t offPopupMsg_ = 0;      // PopupPrompt._messageText
     size_t offPopupPos_ = 0;      // PopupPrompt._positiveActionButtonText
     size_t offLocationId_ = 0;    // IdHandler._id
+    size_t offMenuConfig_ = 0;    // ListUIRoot`4.menuConfig
+    size_t offItemInfoLabel_ = 0; // MenuPurchaseItemModel._infoButtonLabel
+    size_t offMoreLabel_ = 0;     // DetailsMoreButtonView.label (LocalizeStringEvent)
+    size_t offMoreButton_ = 0;    // DetailsMoreButtonView.button (UnityEngine.UI.Button)
+    size_t offVmInfoLabel_ = 0;   // DetailsMoreButtonViewModel.infoLabel
+    Il2CppClass* moreViewClass_ = nullptr;     // DetailsMoreButtonView
+    Il2CppClass* layoutGroupClass_ = nullptr;  // UnityEngine.UI.LayoutGroup (optional)
+    Bound<void(Il2CppObject*)> objectDestroy_;  // UnityEngine.Object.Destroy(Object)
 
     FieldInfo* fClosureThis_ = nullptr;
     FieldInfo* fClosureUpgrade_ = nullptr;
@@ -328,10 +386,41 @@ SellUpgrades* g_self = nullptr;
 sr2::core::DetourGuard g_actionGuard{kModule, "LandPlotUIRoot.OnAction"};
 sr2::core::DetourGuard g_confirmGuard{kModule, "LandPlotUIRoot.<PromptForUpgrade>b__0"};
 
+sr2::core::DetourGuard g_activatorGuard{kModule, "LandPlotUIRoot.SetActivator"};
+sr2::core::DetourGuard g_bindGuard{kModule, "DetailsMoreButtonView.BindData"};
+sr2::core::DetourGuard g_pressGuard{kModule, "Button.Press"};
+
 using OnActionFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
 using ConfirmFn = void (*)(Il2CppObject*, const MethodInfo*);
+using SetActivatorFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+using MoreBindFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+using PressFn = void (*)(Il2CppObject*, const MethodInfo*);
 OnActionFn g_origOnAction = nullptr;
 ConfirmFn g_origConfirm = nullptr;
+SetActivatorFn g_origSetActivator = nullptr;
+MoreBindFn g_origMoreBind = nullptr;
+PressFn g_origPress = nullptr;
+
+void SetActivatorDetour(Il2CppObject* self, Il2CppObject* plot, const MethodInfo* mi) {
+    // Before the original: it ends in RebuildUI, which binds the details of the first item.
+    if (g_self && self && g_self->On()) g_activatorGuard.Run([&] { g_self->TrackRoot(self); });
+    g_origSetActivator(self, plot, mi);
+}
+
+void MoreBindDetour(Il2CppObject* view, Il2CppObject* vm, const MethodInfo* mi) {
+    g_origMoreBind(view, vm, mi);
+    if (g_self && view && g_self->On()) g_bindGuard.Run([&] { g_self->AfterMoreBind(view, vm); });
+}
+
+void PressDetour(Il2CppObject* button, const MethodInfo* mi) {
+    // Every UI button of the game comes through here: one pointer compare for the others.
+    if (g_self && button && button == g_self->SellButton() && g_self->On()) {
+        bool handled = false;
+        g_pressGuard.Run([&] { handled = g_self->OnSellButton(button); });
+        if (handled) return;
+    }
+    g_origPress(button, mi);
+}
 
 void OnActionDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo* mi) {
     bool handled = false;
@@ -581,6 +670,7 @@ bool SellUpgrades::OpenPrompt(Il2CppObject* root, Il2CppObject* item, int32_t up
         }
         return true;  // handled (no vanilla action for an owned upgrade anyway)
     }
+    promptTick_ = main_thread::TickCount();
     if (!loggedFirstPrompt_) {
         loggedFirstPrompt_ = true;
         SR2_INFO("[{}] first sell prompt opened via the game's popup ({} / '{}')", kModule, UpgName(upg),
@@ -599,6 +689,9 @@ bool SellUpgrades::HandleAction(Il2CppObject* root, Il2CppObject* item) {
     if (!IsA(plot, plotClass_) || !unity::IsAlive(plot)) return false;
     const int32_t upg = unity::Field<int32_t>(item, offItemUpgrade_);
     if (!HasUpgrade(plot, upg)) return false;  // not owned: vanilla purchase flow
+    // One prompt per frame: a click on our sell button can arrive twice (Button.Press and
+    // the prefab's own submit routing).
+    if (pending_.closure && promptTick_ == main_thread::TickCount()) return true;
 
     const float fraction = Fraction();
     std::string reason = CanSell(plot, upg);
@@ -641,6 +734,142 @@ bool SellUpgrades::HandleConfirm(Il2CppObject* closure) {
     if (unity::Field<int32_t>(item, offItemUpgrade_) != upg || !HasUpgrade(plot, upg)) return true;
     DoSell(root, plot, item, upg, p.fraction);
     return true;
+}
+
+// ---------------------------------------------------------------- sell button --
+
+void SellUpgrades::TrackRoot(Il2CppObject* root) {
+    if (!main_thread::IsMainThread() || root == root_) return;
+    if (!IsA(root, rootClass_) || !unity::IsAlive(root)) return;
+    DestroySellButton();  // belongs to the previous menu
+    Il2CppGCHandle h = unity::NewGCHandle(root);
+    if (!h) return;
+    Il2CppGCHandle old = rootHandle_;
+    rootHandle_ = h;
+    root_ = root;
+    if (old) main_thread::Post([old] { unity::FreeGCHandle(old); });
+}
+
+size_t SellUpgrades::OffsetIn(Il2CppObject* obj, const char* field, std::unordered_map<Il2CppClass*, size_t>& cache) {
+    Il2CppClass* k = api().il2cpp_object_get_class(obj);
+    if (!k) return 0;
+    auto it = cache.find(k);
+    if (it != cache.end()) return it->second;
+    size_t off = 0;
+    std::string err;
+    for (Il2CppClass* c = k; c && api().il2cpp_class_get_parent; c = api().il2cpp_class_get_parent(c))
+        if (auto o = Resolver::Get().FieldOffset(c, field, &err)) {
+            off = *o;
+            break;
+        }
+    cache.emplace(k, off);
+    return off;
+}
+
+// The upgrade item of the open plot menu whose own _infoButtonLabel instance is `infoLabel`.
+Il2CppObject* SellUpgrades::FindItemByInfoLabel(Il2CppObject* root, Il2CppObject* infoLabel, Il2CppObject*& category) {
+    category = nullptr;
+    Il2CppObject* config = unity::Field<Il2CppObject*>(root, offMenuConfig_);
+    if (!unity::IsAlive(config)) return nullptr;
+    const size_t offCats = OffsetIn(config, "categories", offCategories_);
+    if (!offCats) return nullptr;
+    void* cats = unity::Field<void*>(config, offCats);
+    for (size_t ci = 0, cn = unity::ListCount(cats); ci < cn && ci < 32; ++ci) {
+        auto* cat = static_cast<Il2CppObject*>(unity::ListAt(cats, ci));
+        if (!unity::IsAlive(cat)) continue;
+        const size_t offItems = OffsetIn(cat, "items", offItems_);
+        if (!offItems) continue;
+        void* items = unity::Field<void*>(cat, offItems);
+        for (size_t i = 0, n = unity::ListCount(items); i < n && i < 64; ++i) {
+            auto* item = static_cast<Il2CppObject*>(unity::ListAt(items, i));
+            if (!IsA(item, itemClass_)) continue;
+            if (unity::Field<Il2CppObject*>(item, offItemInfoLabel_) != infoLabel) continue;
+            if (!unity::IsAlive(item)) return nullptr;
+            category = cat;
+            return item;
+        }
+    }
+    return nullptr;
+}
+
+void SellUpgrades::DestroySellButton() {
+    if (!main_thread::IsMainThread()) return;
+    if (btnGo_ && unity::IsAlive(btnGo_) && objectDestroy_) objectDestroy_(btnGo_);
+    btnGo_ = btnButton_ = btnItem_ = nullptr;
+    if (Il2CppGCHandle h = btnHandle_) {
+        btnHandle_ = nullptr;
+        main_thread::Post([h] { unity::FreeGCHandle(h); });
+    }
+}
+
+void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
+    if (!main_thread::IsMainThread()) return;
+    // Any details bind (selection change, rebuild) replaces our previous button.
+    if (btnGo_) DestroySellButton();
+    if (!root_ || !unity::IsAlive(root_) || !vm) return;
+    if (!IsA(view, moreViewClass_) || !unity::IsAlive(view)) return;
+    if (unity::Field<Il2CppObject*>(view, offMoreButton_) != nullptr) return;  // Purchase variant: not owned
+    Il2CppObject* infoLabel = unity::Field<Il2CppObject*>(vm, offVmInfoLabel_);
+    if (!infoLabel) return;
+    Il2CppObject* category = nullptr;
+    Il2CppObject* item = FindItemByInfoLabel(root_, infoLabel, category);
+    if (!item || !category) return;  // another menu / not an upgrade item
+    Il2CppObject* plot = unity::Field<Il2CppObject*>(root_, offActivator_);
+    if (!IsA(plot, plotClass_) || !unity::IsAlive(plot)) return;
+    const int32_t upg = unity::Field<int32_t>(item, offItemUpgrade_);
+    if (!HasUpgrade(plot, upg)) return;
+
+    const size_t offPrefab = OffsetIn(category, "detailsButton", offDetailsButton_);
+    Il2CppObject* prefab = offPrefab ? unity::Field<Il2CppObject*>(category, offPrefab) : nullptr;
+    if (!unity::IsAlive(prefab)) return;
+    Il2CppObject* t = getTransform_(view);
+    Il2CppObject* parent = unity::IsAlive(t) ? getParent_(t) : nullptr;
+    if (!unity::IsAlive(parent)) return;
+
+    Il2CppObject* go = unity::Instantiate(prefab, parent);
+    if (!unity::IsAlive(go)) return;
+    btnHandle_ = unity::NewGCHandle(go);
+    if (!btnHandle_) {
+        if (objectDestroy_) objectDestroy_(go);
+        return;
+    }
+    btnGo_ = go;
+    btnItem_ = item;
+    unity::SetName(go, "sr2mods_SellButton");
+    Il2CppObject* btnView = unity::GetComponent(go, moreViewClass_);
+    Il2CppObject* button = btnView ? unity::Field<Il2CppObject*>(btnView, offMoreButton_) : nullptr;
+    btnButton_ = unity::IsAlive(button) ? button : nullptr;
+
+    const bool layout = layoutGroupClass_ && unity::GetComponent(parent, layoutGroupClass_) != nullptr;
+    const std::string reason = CanSell(plot, upg);
+    std::vector<Refund> refunds;
+    int32_t price = 0, refund = 0;
+    std::string text;
+    if (reason.empty() && Price(item, Fraction(), refunds, price, refund)) text = std::format("Sell +{}", refund);
+    else text = "Can't sell";
+    if (!layout) text = "Owned - " + text;
+    bool labelled = btnView && SetLabel(unity::Field<Il2CppObject*>(btnView, offMoreLabel_), text);
+    if (!labelled && btnView) {
+        // Label text not on the LocalizeStringEvent's own object: first TMP_Text below the button.
+        Il2CppObject* tmp = getComponentInChildren_(btnView, Type(tmpClass_), true);
+        if (unity::IsAlive(tmp)) {
+            bool ok = false;
+            Invoke(tmpSetTextMi_, tmp, {unity::NewString(text)}, "TMP_Text.set_text", &ok);
+            labelled = ok;
+        }
+    }
+    if (!loggedButton_) {
+        loggedButton_ = true;
+        SR2_INFO("[{}] sell button: prefab '{}' cloned into '{}' (LayoutGroup {}), Button {}, label {} - '{}'", kModule,
+                 unity::GetName(prefab), unity::GetName(parent), layout ? "yes" : "no", btnButton_ ? "found" : "MISSING",
+                 labelled ? "set" : "NOT set", text);
+    }
+}
+
+bool SellUpgrades::OnSellButton(Il2CppObject* button) {
+    if (!main_thread::IsMainThread() || button != btnButton_ || !unity::IsAlive(button)) return false;
+    if (!root_ || !unity::IsAlive(root_) || !btnItem_) return false;
+    return HandleAction(root_, btnItem_);
 }
 
 // ---------------------------------------------------------------- selling --
@@ -1032,6 +1261,37 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         why = saved;
     }
 
+    // ---- sell button (optional: missing pieces only disable the button) ----
+    const MethodInfo* setActivatorMi = nullptr;
+    const MethodInfo* moreBindMi = nullptr;
+    const MethodInfo* pressMi = nullptr;
+    std::string buttonWhy;
+    {
+        std::string saved = why;
+        why.clear();
+        moreViewClass_ = cls(kImage, "MonomiPark.SlimeRancher.UI.Adapter", "DetailsMoreButtonView");
+        Il2CppClass* moreVm = cls(kImage, "MonomiPark.SlimeRancher.UI.Adapter", "DetailsMoreButtonViewModel");
+        Il2CppClass* uiButton = cls("UnityEngine.UI", "UnityEngine.UI", "Button");
+        Il2CppClass* uobject = cls(kCore, "UnityEngine", "Object");
+        if (why.empty()) {
+            off(rootClass_, "menuConfig", offMenuConfig_);
+            off(itemClass_, "_infoButtonLabel", offItemInfoLabel_);
+            off(moreViewClass_, "label", offMoreLabel_);
+            off(moreViewClass_, "button", offMoreButton_);
+            off(moreVm, "infoLabel", offVmInfoLabel_);
+        }
+        if (why.empty()) {
+            setActivatorMi = R.Method(rootClass_, "SetActivator", 1);  // the LandPlotUIRoot override itself
+            moreBindMi = R.Method(moreViewClass_, "BindData", 1);
+            pressMi = R.Method(uiButton, "Press", 0);
+            if (!setActivatorMi || !moreBindMi || !pressMi) why = "SetActivator / BindData / Button.Press not found";
+        }
+        if (why.empty()) bind(objectDestroy_, byParams(uobject, "Destroy", {"UnityEngine.Object"}));
+        layoutGroupClass_ = R.Class("UnityEngine.UI", "UnityEngine.UI", "LayoutGroup");  // optional
+        buttonWhy = why;
+        why = saved;
+    }
+
     // ---- hooks ----
     std::string err;
     void* onActionPtr = R.MethodPointer(onActionMi, &err);
@@ -1043,6 +1303,30 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     if (!ctx.HookAddress("LandPlotUIRoot.PromptForUpgrade_b__0", confirmPtr, reinterpret_cast<void*>(&ConfirmDetour),
                          reinterpret_cast<void**>(&g_origConfirm)))
         return ctx.Fail("hook <PromptForUpgrade>b__0 failed");
+    if (buttonWhy.empty()) {
+        struct H {
+            const char* name;
+            const MethodInfo* mi;
+            void* detour;
+            void** orig;
+        };
+        const H hooks[] = {
+            {"LandPlotUIRoot.SetActivator", setActivatorMi, reinterpret_cast<void*>(&SetActivatorDetour),
+             reinterpret_cast<void**>(&g_origSetActivator)},
+            {"DetailsMoreButtonView.BindData", moreBindMi, reinterpret_cast<void*>(&MoreBindDetour),
+             reinterpret_cast<void**>(&g_origMoreBind)},
+            {"UnityEngine.UI.Button.Press", pressMi, reinterpret_cast<void*>(&PressDetour),
+             reinterpret_cast<void**>(&g_origPress)},
+        };
+        for (const H& h : hooks) {
+            void* p = R.MethodPointer(h.mi, &err);
+            if (!p) return ctx.Fail(std::format("{}: no native body ({})", h.name, err));
+            if (!ctx.HookAddress(h.name, p, h.detour, h.orig)) return ctx.Fail(std::format("hook {} failed", h.name));
+        }
+    } else {
+        SR2_WARN("[{}] sell button unavailable ({}); selling still works by confirming an owned upgrade", kModule,
+                 buttonWhy);
+    }
 
     // ---- settings ----
     settings::Def d;
@@ -1056,7 +1340,8 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     d.step = 0.05;
     d.tooltip =
         "Share of an upgrade's price paid back when you sell it (0.5 = half). Select an owned upgrade in a plot's "
-        "purchase menu and confirm to get the sell prompt. Silo storage upgrades can't be sold.";
+        "purchase menu and press the Sell button next to PURCHASED (or confirm the item) to get the sell prompt. "
+        "Silo storage upgrades can't be sold.";
     settings::Register(d);
 
     g_self = this;
