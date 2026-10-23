@@ -43,7 +43,9 @@ float U(float v) { return v * g_scale; }
 // ---------------------------------------------------------------- state ----
 std::string g_cat = "ranch";
 std::map<std::string, int> g_tab;  // selected tab per category
-std::string g_lastPage;            // category/tab drawn last frame (scroll reset on change)
+std::string g_lastPage;            // category/tab drawn last frame ("" after the overlay opens)
+std::map<std::string, float> g_pageScroll;  // scroll position per page, kept for the session
+int g_scrollRestore = 0;           // frames left to re-apply a page's saved scroll (clamped while content grows)
 ImVec2 g_winMin, g_winMax;         // window rect of the last frame
 
 struct Peel {
@@ -1762,16 +1764,40 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
 }
 
 // ------------------------------------------------------------- settings ----
+// Key on the left, value right-aligned; a long value wraps, each line right-aligned.
 void KeyValue(const char* k, const std::string& v, ImU32 vcol, const std::string& tip = {}) {
     const float avail = ImGui::GetContentRegionAvail().x, x0 = ImGui::GetCursorPosX();
     const float keyW = std::min(U(130), avail * 0.45f);
+    const float valW = std::max(avail - keyW, U(40));
+    ImFont* f = ImGui::GetFont();
+    const float fs = ImGui::GetFontSize();
+    ImGui::BeginGroup();
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(k);
-    ImGui::SameLine(x0 + keyW);
-    ImGui::PushTextWrapPos(x0 + avail);
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(vcol), "%s", v.c_str());
-    ImGui::PopTextWrapPos();
+    ImGui::PushStyleColor(ImGuiCol_Text, vcol);
+    const char* s = v.c_str();
+    const char* const end = s + v.size();
+    for (bool first = true; s < end; first = false) {
+        const char* e = f->CalcWordWrapPosition(fs, s, end, valW);
+        if (e <= s) {  // a single glyph wider than the column: take it anyway
+            e = s + 1;
+            while (e < end && (static_cast<unsigned char>(*e) & 0xC0) == 0x80) ++e;
+        }
+        const char* le = e;
+        while (le > s && (le[-1] == ' ' || le[-1] == '\n')) --le;
+        const float tw = ImGui::CalcTextSize(s, le).x;
+        if (first) {
+            ImGui::SameLine(x0 + avail - tw);
+            ImGui::AlignTextToFramePadding();
+        } else {
+            ImGui::SetCursorPosX(x0 + avail - tw);
+        }
+        ImGui::TextUnformatted(s, le);
+        s = e;
+        while (s < end && (*s == ' ' || *s == '\n')) ++s;
+    }
+    ImGui::PopStyleColor();
+    ImGui::EndGroup();
     HoverTip(tip);
 }
 
@@ -1946,19 +1972,17 @@ void DrawSidebar(const Host& h, const std::vector<Category>& cats, const ModuleV
     if (lineW > 0) {
         // Click copies the full commit ("abc1234" or "abc1234-dirty", never the
         // shortened "*" form) to the Windows clipboard (ImGui's Win32 default
-        // handler); without a commit, the ISO build time. "Copied" shows ~1.5 s.
+        // handler); without a commit, the ISO build time. "copied!" shows ~1.5 s.
         static unsigned long long copiedUntil = 0;
-        static std::string copiedText;
         ImGui::SetCursorScreenPos(ImVec2(x0, sp.y - U(8)));
         if (ImGui::InvisibleButton("##buildstamp", ImVec2(lineW, U(16)))) {
             const char* full = ::sr2::core::build_info::Commit();
-            copiedText = *full ? full : ::sr2::core::build_info::TimeIso();
-            ImGui::SetClipboardText(copiedText.c_str());
+            ImGui::SetClipboardText(*full ? full : ::sr2::core::build_info::TimeIso());
             copiedUntil = h.nowMs + 1500;
         }
         if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         if (copiedUntil != 0 && h.nowMs < copiedUntil) {
-            Tooltip("Copied " + copiedText);
+            Tooltip("copied!");
         } else {
             copiedUntil = 0;
             HoverTip(*::sr2::core::build_info::Commit() ? "Click to copy the commit" : "Click to copy the build time");
@@ -2216,7 +2240,10 @@ void SyncTheme(float scale) {
     theme::Sync(std::lround(v) == 1 ? theme::Mode::Light : theme::Mode::Dark, scale);
 }
 
-void OnOpened() { slime_icons::OnOpen(); }
+void OnOpened() {
+    slime_icons::OnOpen();
+    g_lastPage.clear();  // restore the page's saved scroll position
+}
 
 bool Draw(const Host& h) {
     g_scale = h.scale;
@@ -2266,8 +2293,25 @@ bool Draw(const Host& h) {
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(18), 0));
         ImGui::BeginChild("##body", ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoBackground);
-        if (page != g_lastPage) ImGui::SetScrollY(0);
-        g_lastPage = page;
+        // Each page keeps its scroll position across page switches and closing / reopening.
+        // SetScrollY lands next frame, clamped to the previous frame's content height (the
+        // other page's), so a restore is re-applied for a few frames.
+        if (page != g_lastPage) {
+            g_lastPage = page;
+            g_scrollRestore = 4;
+        }
+        if (g_scrollRestore > 0) {
+            const auto it = g_pageScroll.find(page);
+            const float want = it != g_pageScroll.end() ? it->second : 0.0f;
+            if (std::fabs(ImGui::GetScrollY() - want) > 0.5f) {
+                ImGui::SetScrollY(want);
+                --g_scrollRestore;
+            } else {
+                g_scrollRestore = 0;
+            }
+        } else {
+            g_pageScroll[page] = ImGui::GetScrollY();
+        }
         if (h.versionMismatch)
             Banner(P.warn, "This game build differs from the one the mod was made for; some modules may be disabled. " +
                                h.versionStatus);

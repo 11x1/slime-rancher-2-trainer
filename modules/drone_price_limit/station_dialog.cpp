@@ -120,6 +120,7 @@ constexpr int kMoveLeft = 0, kMoveUp = 1, kMoveRight = 2, kMoveDown = 3;  // Eve
 constexpr int kAlignLeft = 513, kAlignCenter = 514, kAlignRight = 516, kAlignTopLeft = 257;  // TMP
 constexpr int kStateFrames = 10;      // menu state (destination / station) re-read every N frames
 constexpr int kReapplyFrames = 4;     // re-assert the cloned prompt's key / label for a few frames
+constexpr float kPillPadX = 22.0f;    // price-limit pill: inner padding left and right of its key + label
 
 struct Vec2 {
     float x, y;
@@ -164,7 +165,7 @@ struct StationUi::Impl {
     size_t offOptPrompt = 0, offVmDest = 0, offVmStation = 0, offDestSel = 0, offActorId = 0;
     size_t offMarketPlorts = 0, offPlortEntryType = 0, offIdentIcon = 0, offIdentName = 0, offIdentIsPlort = 0;
     size_t offIconButton = 0, offIconKey = 0, offIconKeyText = 0, offIconKeyImage = 0, offIconKeyLse = 0, offIconDouble = 0;
-    size_t offEncMinW = 0;  // optional
+    size_t offEncMinW = 0, offEncPadX = 0;  // optional
     size_t offGcLookup = 0, offLookupCurrencies = 0, offCurrencyArr = 0, offCurrencyIcon = 0;  // optional (coin)
 
     // ---- methods ----
@@ -716,6 +717,8 @@ bool StationUi::Setup(sr2::core::ModuleContext& ctx, const char* module, DialogH
         p->encapsulateClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Framework.Layout", "EncapsulateChildren", &err);
         if (p->encapsulateClass)
             if (auto o = R.FieldOffset(p->encapsulateClass, "_minimumWidth", &err)) p->offEncMinW = *o;
+        if (p->encapsulateClass)
+            if (auto o = R.FieldOffset(p->encapsulateClass, "_horizontalPadding", &err)) p->offEncPadX = *o;
         // Coin icon: GameContext.Instance.LookupDirector._currencyList._currencies[0]._icon.
         Il2CppClass* gameCtx = R.Class(kImage, "", "GameContext", &err);
         Il2CppClass* lookup = R.Class(kImage, "", "LookupDirector", &err);
@@ -888,8 +891,12 @@ void StationUi::Impl::EnsurePill() {
     if (sdfRectClass) SetRaycast(unity::GetComponent(go, sdfRectClass), true);
     pillToggle = Clickable(go);
     Keep(pillHandles, pillToggle);
-    if (offEncMinW && encapsulateClass)
-        if (Il2CppObject* enc = unity::GetComponent(go, encapsulateClass)) unity::Field<float>(enc, offEncMinW) = 0.0f;
+    // Fit the pill to our label (no 264 minimum), with room inside its rounded ends.
+    if (encapsulateClass)
+        if (Il2CppObject* enc = unity::GetComponent(go, encapsulateClass); unity::IsAlive(enc)) {
+            if (offEncMinW) unity::Field<float>(enc, offEncMinW) = 0.0f;
+            if (offEncPadX) unity::Field<float>(enc, offEncPadX) = std::max(unity::Field<float>(enc, offEncPadX), kPillPadX);
+        }
     unity::SetActive(go, false);
     pillShown = false;
     pillReapply = kReapplyFrames;

@@ -10,7 +10,6 @@
 | `silo-receipt.md` | Sell-All receipt dialog, silo space tiers |
 | `sandbox-ux.md` | shift+scroll amounts, icon tabs, right-click menu, crafter |
 | `slime-dj.md` | custom songs from the music box |
-| `small-polish-2.md` | pill padding, copied!, scroll memory, [modded] label |
 | `ideas.md` | unplanned ideas |
 
 ## Where the documentation lives

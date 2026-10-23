@@ -62,12 +62,15 @@
 //       above runs unchanged. If that call fails, the original StartFrame runs
 //       (vanilla intro).
 //
+//   [modded] title-screen label (always, while the module is on): modded_label.cpp.
+//
 // Safety: objects are validated (class check, IsAlive, activeInHierarchy) before
 // use. All mod logic in hooks and in the frame callback runs inside a
 // DetourGuard: a native fault marks the module faulted for the session (hooks
 // disabled, detours pass straight through); runtime_invoke native faults do the
-// same. No GC handles: managed objects are re-found with FindObjectOfType when
-// needed; cached Il2CppObject* values are only compared, never dereferenced.
+// same. Managed objects are re-found with FindObjectOfType when needed; cached
+// Il2CppObject* values are only compared, never dereferenced (the [modded] label
+// holds GC handles to its clone).
 
 #include <windows.h>
 
@@ -87,6 +90,7 @@
 #include "core/module.h"
 #include "core/settings.h"
 #include "core/unity.h"
+#include "modules/quick_start/modded_label.h"
 #include "ui/quick_start_hint.h"
 
 namespace sr2::modules {
@@ -186,15 +190,21 @@ bool IsGameWindowForeground() {
 
 bool IsNativeFault(const std::string& invokeErr) { return invokeErr.starts_with("native exception"); }
 
+sr2::core::DetourGuard g_labelGuard{kModule, "modded label"};
+
 class QuickStart final : public sr2::core::Module {
 public:
     const char* Name() const override { return kModule; }
     bool DefaultEnabled() const override { return true; }
     bool Setup(sr2::core::ModuleContext& ctx) override;
-    void OnEnable() override { enabled_.store(true); }
+    void OnEnable() override {
+        enabled_.store(true);
+        label_.OnModuleEnable();
+    }
     void OnDisable() override {
         enabled_.store(false);
         sr2::ui::quick_start_hint::Clear();
+        if (label_.Ok()) main_thread::Post([this] { g_labelGuard.Run([this] { label_.Remove(); }); });
     }
 
     // ---- called from detours (main thread, inside a DetourGuard) ----
@@ -223,6 +233,7 @@ private:
     void PublishHint();
 
     std::atomic<bool> enabled_{false};
+    quick_start::ModdedLabel label_;  // "[modded]" on the title screen (main thread)
     bool introOk_ = false;
     bool continueOk_ = false;
     bool newGameIntroOk_ = false;
@@ -466,7 +477,9 @@ bool QuickStart::Setup(sr2::core::ModuleContext& ctx) {
                                   reinterpret_cast<void**>(&g_origPromptInteract));
         if (!ok) return false;  // ctx recorded the reason; all hooks of this module are removed
     }
-    if (continueOk_) {
+    std::string labelWhy;
+    if (!label_.Resolve(labelWhy)) SR2_WARN("[{}] [modded] title-screen label unavailable: {}", kModule, labelWhy);
+    if (continueOk_ || label_.Ok()) {
         if (!ctx.HookMethod("MainMenuLandingRootUI.OnEnable", kImage, kMenuNs, "MainMenuLandingRootUI", "OnEnable", 0,
                             reinterpret_cast<void*>(&MenuEnableDetour), reinterpret_cast<void**>(&g_origMenuEnable)))
             return false;
@@ -522,9 +535,9 @@ bool QuickStart::Setup(sr2::core::ModuleContext& ctx) {
     g_self = this;
     SR2_INFO("[{}] setup ok: skip_intro {} (CompanyLogoScene timings, PlatformEngagementPrompt), auto_continue {} "
              "(MainMenuLandingRootUI / ContinueGameBehaviorModel.InvokeBehavior), skip_new_game_intro {} "
-             "(IntroSequenceUIRoot.EndSequence) | {}",
+             "(IntroSequenceUIRoot.EndSequence), [modded] label {} | {}",
              kModule, introOk_ ? "available" : "UNAVAILABLE", continueOk_ ? "available" : "UNAVAILABLE",
-             newGameIntroOk_ ? "available" : "UNAVAILABLE", ProcessTime());
+             newGameIntroOk_ ? "available" : "UNAVAILABLE", label_.Ok() ? "available" : "UNAVAILABLE", ProcessTime());
     return true;
 }
 
@@ -665,6 +678,7 @@ void QuickStart::TryAutoInteract() {
 // ------------------------------------------------------------ auto_continue --
 
 void QuickStart::OnMenuEnable(Il2CppObject* self) {
+    label_.OnMenuEnable(self);
     if (!continueOk_ || menuSeen_ || continueDone_ || !IsA(self, landingClass_)) return;
     menuSeen_ = true;
     menuSeenAt_ = Clock::now();
@@ -867,6 +881,7 @@ bool QuickStart::OnIntroStartFrame(Il2CppObject* self, int index) {
 
 void QuickStart::Frame() {
     if (!Enabled()) return;
+    if (label_.Ok()) label_.Frame();
     if (introOk_) {
         // Fallback for a late hook install: patch the logo scene found by polling.
         if (!logoPhaseOver_ && !logoPatched_) {
