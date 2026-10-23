@@ -55,6 +55,11 @@ struct Stashed {
     json::Value value;
 };
 std::map<std::string, Stashed> g_stashed;  // PKey -> saved value of an unregistered setting
+struct Pin {
+    double value = 0;
+    std::string reason;
+};
+std::map<std::string, Pin> g_locks;  // PKey -> pinned value (settings::Lock)
 
 std::string PKey(std::string_view m, std::string_view k) { return std::format("{}\n{}", m, k); }
 
@@ -338,6 +343,10 @@ void Set(std::string_view module, std::string_view key, double v) {
             return;
         }
         double nv = Clamp(e->def, v);
+        if (auto pin = g_locks.find(PKey(module, key)); pin != g_locks.end() && nv != pin->second.value) {
+            SR2_DEBUG("settings: {}.{} is locked ({}) - change ignored", module, key, pin->second.reason);
+            return;
+        }
         if (nv == e->value) return;
         e->value = nv;
         g_persist.insert(PKey(module, key));
@@ -363,6 +372,27 @@ void Reset(std::string_view module, std::string_view key) {
         def = e->def.def;
     }
     Set(module, key, def);
+}
+
+void Lock(std::string_view module, std::string_view key, double value, std::string reason) {
+    {
+        std::lock_guard lock(g_mutex);
+        const Entry* e = FindLocked(module, key);
+        if (!e) return;
+        g_locks[PKey(module, key)] = Pin{Clamp(e->def, value), std::move(reason)};
+    }
+    Set(module, key, value);
+}
+
+void Unlock(std::string_view module, std::string_view key) {
+    std::lock_guard lock(g_mutex);
+    g_locks.erase(PKey(module, key));
+}
+
+std::string LockReason(std::string_view module, std::string_view key) {
+    std::lock_guard lock(g_mutex);
+    auto it = g_locks.find(PKey(module, key));
+    return it != g_locks.end() ? it->second.reason : std::string();
 }
 
 int OnChange(std::string_view module, std::function<void(const std::string& key)> fn) {

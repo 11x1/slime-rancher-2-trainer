@@ -2,7 +2,8 @@
 
 Applies the effects of the purchasable per-plot upgrade tiers. The tiers are custom upgrades
 (`modules/custom_upgrades`): bought in the plot's own purchase menu, stored in the sidecar
-`sr2mods_saves\<game>.json` (never in the vanilla save), sold back with sell_upgrades.
+`sr2mods_saves\<game>.json` (never in the vanilla save), sold back with sell_upgrades. They only show once Custom Upgrades is switched on (off by default; it
+then stays locked on for that save, see `re/custom-upgrades.md` 1.2b).
 
 ## Tiers
 

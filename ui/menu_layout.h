@@ -5,6 +5,7 @@
 // unchanged. Anything not listed still shows up: an unknown module lands on
 // Misc > General, an unknown setting in its module's tab.
 
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -35,6 +36,7 @@ struct Tab {
                                             //   the tab also needs `module` enabled
     std::string help;                       // tooltip of the (?) next to the switch
     std::vector<std::vector<std::string>> columns;  // Cards: module ids per column
+    std::map<std::string, std::string> cardHelp;    // Cards: tooltip of a module's switch (default: its own)
 };
 
 struct Category {

@@ -138,6 +138,20 @@
 //   clears the slot at 0). Only IdentifiableType.IsPlort types are sold, everything else
 //   stays. Order per slot: TrySell first (no money -> no item change), then Decrement.
 //
+// ---------------------------------------------------------------- gate --------------
+//   The module is off by default: no custom item in any purchase menu until the switch is
+//   turned on. Once it is on with a save loaded, that save is marked (per-save value
+//   "custom_upgrades.on", written with the next game save) and the switch is pinned on
+//   (settings::Lock, the overlay shows it locked with kLockReason) while the save stays
+//   loaded. A save whose sidecar has the mark or any owned custom upgrade counts the same.
+//   Setup also runs while the module is off (SetupWhileDisabled, hooks stay disabled), so
+//   the frame callback can watch the loaded save (GateTick, 2 Hz: SceneContext.GameModel
+//   + AutoSaveDirector._currentGameMetadata, one read-only sidecar lookup per new save):
+//   loading such a save with the switch off turns the module on (posted settings::Set) and
+//   remembers that; leaving that save again (title screen, or a save without custom
+//   upgrades) turns it back off. Purchases made in an unsaved session vanish with it, and
+//   so does the mark: a save never saved with the module on is not locked.
+//
 // Fault policy: DetourGuard on every detour, objects class + IsAlive checked, game calls
 // on the main thread only (runtime_invoke for everything that can throw), native faults
 // mark the module faulted. Custom ids never reach vanilla AddUpgrade, also not when the
@@ -198,6 +212,11 @@ constexpr const char* kPlotUiNs = "MonomiPark.SlimeRancher.UI.Plot";
 constexpr const char* kKeyPrice = "sell_all_price";
 constexpr int kSidecarFormat = 2;  // 1 = one file per game (legacy), 2 = one file per .sav
 constexpr const char* kRotationSuffix = ".sav.json";  // sidecar of <save>.sav = sr2mods_saves/<save>.sav.json
+// Gate: per-save value "the module was on with this save loaded" (see the Gate section above).
+constexpr const char* kOnKey = "custom_upgrades.on";
+constexpr float kGateTickSeconds = 0.5f;
+constexpr const char* kLockReason =
+    "Locked on: this save uses custom upgrades. Load a save without them, or go to the title screen, to turn it off.";
 constexpr int kHideFlagsDontUnloadUnusedAsset = 32;
 
 // LandPlot.Id
@@ -431,7 +450,8 @@ HasUpgradeFn g_origHas = nullptr;  // original LandPlot.HasUpgrade (vanilla ids 
 class CustomUpgrades final : public sr2::core::Module {
 public:
     const char* Name() const override { return kModule; }
-    bool DefaultEnabled() const override { return true; }
+    bool DefaultEnabled() const override { return false; }  // gate: nothing in the menus until switched on
+    bool SetupWhileDisabled() const override { return true; }  // GateTick watches the loaded save while off
     bool Setup(sr2::core::ModuleContext& ctx) override;
     void OnEnable() override {
         // The Load / NewGame hooks were off while disabled: the loaded save may be another one
@@ -462,6 +482,7 @@ public:
     void OnNewGame();
     void ResetState(const char* why);
     void FrameCheck(float dt);
+    void GateTick();
     void WorldTick();
     bool OnSiloButton(Il2CppObject* activator);
     SiloSummary SellAllNow(Il2CppObject* plot, const std::string& id, const char* via, bool fromMenu);
@@ -534,6 +555,17 @@ private:
     std::atomic<bool> enabled_{false};
     std::atomic<bool> resync_{false};  // (re-)enabled: state must be re-read for the loaded save
     bool cleaned_ = false;
+    // gate (main thread)
+    float gateAccum_ = 0.0f;
+    bool locked_ = false;                 // "enabled" pinned on (settings::Lock) for the loaded save
+    bool autoOn_ = false;                 // switched on by GateTick for such a save: off again once it is left
+    std::string polledGame_;              // while off: the loaded save last checked
+    unsigned long long polledNumber_ = 0;
+    static bool UsesCustom(const SaveState& s);
+    bool InGame();
+    bool SaveLocked(const std::string& game, unsigned long long number);
+    void SetLocked(bool on);
+    void SwitchModule(bool on, const char* why);
     float worldAccum_ = 0.0f;
     Il2CppObject* LookupDirector();
     std::map<int32_t, Il2CppObject*> globalUpgItems_;  // vanilla upgrade -> menu item of any plot menu (icons)
@@ -589,6 +621,7 @@ public:
            offItemIcon_ = 0;
     size_t offCostCurrency_ = 0, offCostAmount_ = 0, offLocationId_ = 0, offIdentIsPlort_ = 0, offIdentIcon_ = 0;
     size_t offGcAutoSave_ = 0, offGcLookup_ = 0, offScEcon_ = 0;
+    size_t offScGameModel_ = 0;  // SceneContext.GameModel (optional; 0 = the gate trusts the game name alone)
     // save file identification (optional: missing -> one legacy sidecar per game, as before)
     Il2CppClass* fileProviderClass_ = nullptr;  // FileStorageProvider
     size_t offProviderSavePath_ = 0;            // FileStorageProvider.savePath
@@ -633,6 +666,7 @@ sr2::core::DetourGuard g_menuGuard{kModule, "LandPlotUIRoot.UpdateMenuItemAvaila
 sr2::core::DetourGuard g_saveGuard{kModule, "AutoSaveDirector.SaveGameImpl"};
 sr2::core::DetourGuard g_loadGuard{kModule, "AutoSaveDirector.Load/StartNewGame"};
 sr2::core::DetourGuard g_worldGuard{kModule, "custom_upgrades.CoopWorld"};
+sr2::core::DetourGuard g_gateGuard{kModule, "custom_upgrades.Gate"};
 sr2::core::DetourGuard g_siloGuard{kModule, "PlortCollectorActivator.Activate"};
 using ActivateFn = void (*)(Il2CppObject*, const MethodInfo*);
 ActivateFn g_origActivate = nullptr;
@@ -1671,7 +1705,13 @@ void CustomUpgrades::Cleanup(const char* why) {
 void CustomUpgrades::FrameCheck(float dt) {
     if (sr2::core::ModuleFaulted(kModule)) {
         if (!cleaned_) Cleanup("module faulted");
+        SetLocked(false);
         return;
+    }
+    if (std::isfinite(dt) && dt > 0.0f) gateAccum_ += std::min(dt, 1.0f);
+    if (gateAccum_ >= kGateTickSeconds) {
+        gateAccum_ = 0.0f;
+        g_gateGuard.Run([&] { GateTick(); });
     }
     if (On() && slider_.Active()) g_sliderGuard.Run([&] { SliderTick(dt); });
     if (On() && silo_.Ready()) g_siloGuard.Run([&] { silo_.Frame(); });  // button message (cheap when none)
@@ -1681,6 +1721,105 @@ void CustomUpgrades::FrameCheck(float dt) {
     if (worldAccum_ < kWorldTickSeconds) return;
     worldAccum_ = 0.0f;
     g_worldGuard.Run([&] { WorldTick(); });
+}
+
+// ---------------------------------------------------------------- gate ------
+
+bool CustomUpgrades::UsesCustom(const SaveState& s) {
+    if (s.values.count(kOnKey)) return true;
+    return std::any_of(s.plots.begin(), s.plots.end(), [](const auto& p) { return !p.second.owned.empty(); });
+}
+
+// A save game is running (not the title screen, where _currentGameMetadata keeps the last game).
+bool CustomUpgrades::InGame() {
+    if (offScGameModel_) {
+        bool ok = false;
+        Il2CppObject* sc = Invoke(sceneCtxInstMi_, nullptr, {}, "SceneContext.Instance", &ok);
+        if (!ok || !unity::IsAlive(sc) || !unity::Field<Il2CppObject*>(sc, offScGameModel_)) return false;
+    }
+    return !CurrentGameName().empty();
+}
+
+// Read-only: does the sidecar the loaded save would use (same order as LoadSidecar) say custom
+// upgrades are on for it? Never touches state_.
+bool CustomUpgrades::SaveLocked(const std::string& game, unsigned long long number) {
+    if (Il2CppObject* asd = AutoSave(); asd && IsA(asd, autoSaveClass_) && offAsdProvider_) {
+        auto p = ProviderSavePath(unity::Field<Il2CppObject*>(asd, offAsdProvider_));
+        if (!p.empty()) savePath_ = p;
+    }
+    auto locked = [&](const std::filesystem::path& p) {
+        SaveState tmp;
+        SidecarMeta m;
+        std::string err;
+        return ReadSidecarFile(p, tmp, m, err) && UsesCustom(tmp);
+    };
+    std::error_code ec;
+    std::string save;
+    if (number && FindExactRotation(game, number, save)) return locked(RotationPath(save));
+    if (const auto p = LegacyPath(game); std::filesystem::exists(p, ec)) return locked(p);
+    std::filesystem::path p;
+    SidecarMeta m;
+    return FindOlderRotation(game, number, save, p, m) && locked(p);
+}
+
+void CustomUpgrades::SetLocked(bool on) {
+    if (on == locked_) return;
+    locked_ = on;
+    if (on) settings::Lock(kModule, "enabled", 1.0, kLockReason);
+    else settings::Unlock(kModule, "enabled");
+}
+
+// Through the setting, like the switch: the module manager does the switch in a posted job,
+// never inside this frame callback.
+void CustomUpgrades::SwitchModule(bool on, const char* why) {
+    SR2_INFO("[{}] {} - turning custom upgrades {}", kModule, why, on ? "on" : "off");
+    main_thread::Post([on] { settings::Set(kModule, "enabled", on ? 1.0 : 0.0); });
+}
+
+void CustomUpgrades::GateTick() {
+    if (!main_thread::IsMainThread()) return;
+    const bool inGame = InGame();
+    if (!On()) {
+        SetLocked(false);
+        autoOn_ = false;
+        if (!inGame) {
+            polledGame_.clear();
+            polledNumber_ = 0;
+            return;
+        }
+        std::string game;
+        unsigned long long number = 0;
+        if (!CurrentMetadata(AutoSave(), game, number)) game = CurrentGameName();
+        if (game.empty() || (game == polledGame_ && number == polledNumber_)) return;
+        polledGame_ = game;
+        polledNumber_ = number;
+        if (!SaveLocked(game, number)) return;
+        autoOn_ = true;
+        SwitchModule(true, std::format("save game '{}' (save #{}) has custom upgrades", game, number).c_str());
+        return;
+    }
+    polledGame_.clear();
+    polledNumber_ = 0;
+    if (!inGame || !EnsureLoaded()) {
+        SetLocked(false);
+        if (autoOn_) {
+            autoOn_ = false;
+            SwitchModule(false, "left the save game that has custom upgrades");
+        }
+        return;
+    }
+    if (!UsesCustom(state_)) {
+        if (autoOn_) {  // on only for the save before; this one has none
+            autoOn_ = false;
+            SetLocked(false);
+            SwitchModule(false, std::format("save game '{}' has no custom upgrades", state_.game).c_str());
+            return;
+        }
+        state_.values[kOnKey] = "1";
+        SR2_INFO("[{}] custom upgrades are on with save game '{}' loaded: they stay on for it (saved with the next "
+                 "game save)", kModule, state_.game);
+    }
+    SetLocked(true);
 }
 
 Il2CppObject* CustomUpgrades::LookupDirector() {
@@ -2227,6 +2366,8 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     off(gameCtx, "<LookupDirector>k__BackingField", offGcLookup_);
     off(sceneCtx, "<PlortEconomyDirector>k__BackingField", offScEcon_);
     if (!why.empty()) return ctx.Fail(why);
+    if (auto gm = R.FieldOffset(sceneCtx, "<GameModel>k__BackingField")) offScGameModel_ = *gm;  // optional (gate)
+    else SR2_WARN("[{}] SceneContext.GameModel not found - the gate tells the title screen by the game name only", kModule);
 
     const MethodInfo* hasMi = method(plotClass_, "HasUpgrade", 1);
     hasMi_ = hasMi;

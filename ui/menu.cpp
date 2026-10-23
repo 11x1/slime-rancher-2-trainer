@@ -715,8 +715,12 @@ void DrawCardsPage(const Host& h, const Tab& tab, const std::vector<ModuleView>&
             }
             if (mv->hasEnabled) {
                 ImGui::SameLine(x0 + avail - U(kSwitchW));
+                const std::string lock = settings::LockReason(m, "enabled");  // pinned by the module (settings::Lock)
+                ImGui::BeginDisabled(!lock.empty());
                 if (Switch("##enabled", on)) Write(mv->enabled, on ? 0.0 : 1.0);
-                HoverTip(mv->enabled.tooltip);
+                ImGui::EndDisabled();
+                const auto help = tab.cardHelp.find(m);
+                HoverTip(!lock.empty() ? lock : help != tab.cardHelp.end() ? help->second : mv->enabled.tooltip);
             }
             bool failed = false;
             const std::string status = ModuleStatus(mv->module, &failed);
@@ -1534,7 +1538,8 @@ bool IconButton(const char* id, float size) {
 struct TabState {
     bool on = true;            // module (and master) enabled
     const settings::Def* sw = nullptr;  // the tab's switch
-    bool locked = false;       // switch unusable (master tab whose module is off)
+    bool locked = false;       // switch unusable (master tab whose module is off, or pinned by its module)
+    std::string lock;          // why the module pinned its switch (settings::LockReason)
 };
 
 TabState StateOf(const Tab& t, const std::vector<ModuleView>& views) {
@@ -1546,6 +1551,8 @@ TabState StateOf(const Tab& t, const std::vector<ModuleView>& views) {
     if (t.masterKey.empty()) {
         s.sw = mv->hasEnabled ? &mv->enabled : nullptr;
         s.on = moduleOn;
+        s.lock = settings::LockReason(t.module, "enabled");
+        s.locked = !s.lock.empty();
     } else {
         s.sw = FindDef(*mv, t.masterKey);
         s.locked = !moduleOn;
@@ -1644,7 +1651,7 @@ bool DrawTopBar(const Category& cat, int& ti, const std::vector<ModuleView>& vie
             else Write(*st.sw, on ? 0.0 : 1.0);
         }
         ImGui::EndDisabled();
-        HoverTip(st.locked ? tab.help : st.sw->tooltip);
+        HoverTip(!st.lock.empty() ? st.lock : st.locked ? tab.help : st.sw->tooltip);
         const ImVec2 ls = TextSize(f, 15, "Enabled");
         rx -= ls.x + U(9);
         Text(dl, f, 15, ImVec2(rx, cy - ls.y * 0.5f), WithAlpha(P.soft, st.locked ? 0.45f : 1.0f), "Enabled");

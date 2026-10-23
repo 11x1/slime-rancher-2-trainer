@@ -60,4 +60,13 @@ bool ParentAllows(const Def& d, double parentValue);
 // settings are visible.
 bool Visible(std::string_view module, std::string_view key);
 
+// ---- locks ----
+// Pins module.key to `value` (set now, with the usual notification) and records why. While
+// locked, Set() / Reset() / profiles with any other value are ignored; the overlay draws the
+// control locked with `reason` as its tooltip. A module uses it for a switch that must not be
+// turned off right now (custom_upgrades: a save with custom upgrades is loaded).
+void Lock(std::string_view module, std::string_view key, double value, std::string reason);
+void Unlock(std::string_view module, std::string_view key);
+std::string LockReason(std::string_view module, std::string_view key);  // "" = not locked
+
 }  // namespace sr2::core::settings

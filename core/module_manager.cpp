@@ -87,8 +87,8 @@ void ModuleManager::Register(std::unique_ptr<Module> m) {
     entries_.push_back({std::move(m)});
 }
 
-// Runs Setup() and enables the module's hooks. Caller holds mutex_.
-bool ModuleManager::SetupLocked(Entry& e) {
+// Runs Setup() and enables the module's hooks (enable = false: leaves them off). Caller holds mutex_.
+bool ModuleManager::SetupLocked(Entry& e, bool enable) {
     const char* name = e.module->Name();
     ModuleContext ctx(name, *cfg_);
     bool ok = false;
@@ -100,7 +100,7 @@ bool ModuleManager::SetupLocked(Entry& e) {
         ctx.Fail("unknown exception in Setup");
     }
     std::string err;
-    if (ok && !HookManager::Get().EnableModule(name, &err)) {
+    if (ok && enable && !HookManager::Get().EnableModule(name, &err)) {
         ok = false;
         ctx.Fail(err);
     }
@@ -111,8 +111,13 @@ bool ModuleManager::SetupLocked(Entry& e) {
         SR2_ERROR("module {}: DISABLED - {}", name, e.reason);
         return false;
     }
-    e.state = ModuleState::Enabled;
     e.reason.clear();
+    if (!enable) {
+        e.state = ModuleState::Disabled;
+        SR2_INFO("module {}: set up, disabled in config", name);
+        return true;
+    }
+    e.state = ModuleState::Enabled;
     std::string cbErr;
     if (!Try([&] { e.module->OnEnable(); }, &cbErr)) SR2_ERROR("module {}: OnEnable failed: {}", name, cbErr);
     SR2_INFO("module {}: enabled", name);
@@ -142,6 +147,10 @@ void ModuleManager::SetupAll(const Config& cfg) {
         });
 
         if (!settings::GetBool(name, "enabled")) {
+            if (e.module->SetupWhileDisabled()) {
+                SetupLocked(e, false);
+                continue;
+            }
             e.state = ModuleState::DisabledByConfig;
             SR2_INFO("module {}: disabled in config", name);
             continue;
