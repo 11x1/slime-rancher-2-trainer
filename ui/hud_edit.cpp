@@ -233,8 +233,8 @@ void SoftShadow(ImDrawList* dl, ImVec2 a, ImVec2 b, float rounding, float dy, fl
     }
 }
 
-// ---- help bar: a pill at the top centre in the overlay's theme; key hints as
-// keycap chips, then the cancel (X) and keep (check) buttons ----
+// ---- help bar: a slightly rounded bar at the top centre in the overlay's theme;
+// key hints as keycap chips, then the cancel ([Esc] X) and keep ([Enter] check) buttons ----
 
 struct Hint {
     const char* key;
@@ -242,27 +242,39 @@ struct Hint {
     int prio;  // the lowest go first when the bar is wider than the screen
 };
 constexpr Hint kHints[] = {
-    {"Drag", "move", 3},        {"Corner", "resize", 3}, {"Alt", "from the centre", 1},
-    {"Shift", "equal gaps", 1}, {"Enter", "keep", 2},    {"Esc", "cancel", 2},
-};
+    {"Drag", "move", 3},
+    {"Corner", "resize", 3},
+    {"Alt", "from the centre", 1},
+    {"Shift", "equal gaps", 1},
+};  // Enter / Esc are shown on the buttons themselves
+constexpr const char* kCancelKey = "Esc";
+constexpr const char* kKeepKey = "Enter";
 
 // Bar metrics in px for the overlay scale `s` (1 = 1080p).
 struct Metrics {
-    float u, h, padL, gap, hintGap, keyGap, chipX, chipY, btnD, btnGap, edge, top;
+    float u, h, padL, gap, hintGap, keyGap, chipX, chipY, btnH, btnPadL, btnPadR, glyph, btnGap, edge, top, barR,
+        btnRound;
     float fsTitle, fsText, fsKey;
     explicit Metrics(float s)
         : u(s), h(44 * s), padL(20 * s), gap(14 * s), hintGap(16 * s), keyGap(6 * s), chipX(7 * s), chipY(3 * s),
-          btnD(32 * s), btnGap(6 * s), edge(6 * s), top(16 * s), fsTitle(theme::kDisplaySize * s),
-          fsText(theme::kBodySize * s), fsKey((theme::kSmallSize + 0.5f) * s) {}
+          btnH(32 * s), btnPadL(5 * s), btnPadR(9 * s), glyph(14 * s), btnGap(6 * s), edge(6 * s), top(16 * s),
+          barR(8 * s), btnRound(6 * s), fsTitle(theme::kDisplaySize * s), fsText(theme::kBodySize * s),
+          fsKey((theme::kSmallSize + 0.5f) * s) {}
     float Sep() const { return std::max(1.0f, std::round(2 * u)); }
 };
 
 struct Bar {
-    ImVec2 mn, mx;        // the pill
-    ImVec2 cancel, keep;  // button centres
-    float btnR = 0;
-    int minPrio = 0;      // hints with prio >= minPrio are shown
+    ImVec2 mn, mx;              // the bar
+    ImVec2 cancelMn, cancelMx;  // the cancel button
+    ImVec2 keepMn, keepMx;      // the keep button
+    int minPrio = 0;            // hints with prio >= minPrio are shown
 };
+
+// A bar button: its key as a keycap, then the glyph (X or check).
+float ButtonW(const Metrics& bm, const char* key) {
+    const float chip = TextSz(theme::Mono(), bm.fsKey, key).x + bm.chipX * 2;
+    return std::round(bm.btnPadL + std::round(chip) + bm.keyGap + bm.glyph + bm.btnPadR);
+}
 
 enum class BarHit { None, Body, Cancel, Keep };
 
@@ -273,7 +285,8 @@ float HintW(const Metrics& bm, const Hint& h) {
 
 Bar LayoutBar(Element e, float W, const Metrics& bm) {
     const float titleW = TextSz(theme::Display(), bm.fsTitle, D(e).title).x;
-    const float fixed = bm.padL + titleW + bm.gap + bm.Sep() + bm.gap + bm.gap + bm.btnD * 2 + bm.btnGap + bm.edge;
+    const float cancelW = ButtonW(bm, kCancelKey), keepW = ButtonW(bm, kKeepKey);
+    const float fixed = bm.padL + titleW + bm.gap + bm.Sep() + bm.gap + bm.gap + cancelW + keepW + bm.btnGap + bm.edge;
     const float maxW = W - bm.top * 2;
     Bar b;
     float w = fixed;
@@ -292,20 +305,18 @@ Bar LayoutBar(Element e, float W, const Metrics& bm) {
     b.minPrio = std::min(b.minPrio, 4);
     b.mn = ImVec2(std::round((W - w) * 0.5f), std::round(bm.top));
     b.mx = ImVec2(b.mn.x + std::round(w), b.mn.y + std::round(bm.h));
-    b.btnR = bm.btnD * 0.5f;
-    const float cy = (b.mn.y + b.mx.y) * 0.5f;
-    b.keep = ImVec2(b.mx.x - bm.edge - b.btnR, cy);
-    b.cancel = ImVec2(b.keep.x - bm.btnD - bm.btnGap, cy);
+    const float y0 = std::round((b.mn.y + b.mx.y - bm.btnH) * 0.5f), y1 = y0 + std::round(bm.btnH);
+    b.keepMx = ImVec2(b.mx.x - std::round(bm.edge), y1);
+    b.keepMn = ImVec2(b.keepMx.x - keepW, y0);
+    b.cancelMx = ImVec2(b.keepMn.x - std::round(bm.btnGap), y1);
+    b.cancelMn = ImVec2(b.cancelMx.x - cancelW, y0);
     return b;
 }
 
 BarHit HitBar(const Bar& b, ImVec2 p) {
-    auto in = [&](ImVec2 c) {
-        const float dx = p.x - c.x, dy = p.y - c.y;
-        return dx * dx + dy * dy <= b.btnR * b.btnR;
-    };
-    if (in(b.cancel)) return BarHit::Cancel;
-    if (in(b.keep)) return BarHit::Keep;
+    auto in = [&](ImVec2 mn, ImVec2 mx) { return p.x >= mn.x && p.x <= mx.x && p.y >= mn.y && p.y <= mx.y; };
+    if (in(b.cancelMn, b.cancelMx)) return BarHit::Cancel;
+    if (in(b.keepMn, b.keepMx)) return BarHit::Keep;
     if (p.x >= b.mn.x && p.x <= b.mx.x && p.y >= b.mn.y && p.y <= b.mx.y) return BarHit::Body;
     return BarHit::None;
 }
@@ -324,13 +335,22 @@ float KeyChip(ImDrawList* dl, ImVec2 at, const char* key, const Metrics& bm, flo
     return sz.x;
 }
 
-// Round button with a drawn glyph (no font dependency): X = cancel, check = keep.
-void RoundButton(ImDrawList* dl, ImVec2 c, float r, bool keep, bool hot, const Metrics& bm, float alpha) {
+// Bar button: the key as a keycap, then a drawn glyph (no font dependency): X = cancel,
+// check = keep.
+void BarButton(ImDrawList* dl, ImVec2 mn, ImVec2 mx, const char* key, bool keep, bool hot, const Metrics& bm,
+               float alpha) {
     const theme::Palette& P = theme::Colors();
     const ImU32 fill = keep ? (hot ? Darker(P.accent, 0.88f) : P.accent) : (hot ? P.btnHover : P.btn);
     const ImU32 ink = keep ? P.accentInk : P.text;
-    if (hot) dl->AddCircle(c, r + 2 * bm.u, Fade(P.tabSel, alpha), 0, std::max(1.0f, 2 * bm.u));
-    dl->AddCircleFilled(c, r, Fade(fill, alpha));
+    const float ring = 2 * bm.u;
+    if (hot)
+        dl->AddRect(ImVec2(mn.x - ring, mn.y - ring), ImVec2(mx.x + ring, mx.y + ring), Fade(P.tabSel, alpha),
+                    bm.btnRound + ring, 0, std::max(1.0f, 2 * bm.u));
+    dl->AddRectFilled(mn, mx, Fade(fill, alpha), bm.btnRound);
+    const float cy = (mn.y + mx.y) * 0.5f;
+    const float chipW = KeyChip(dl, ImVec2(mn.x + bm.btnPadL, cy), key, bm, alpha);
+    const ImVec2 c(std::round(mn.x + bm.btnPadL + chipW + bm.keyGap + bm.glyph * 0.5f), cy);
+    const float r = 16 * bm.u;  // the glyphs' size as on the old 32 px round buttons
     const float t = std::max(1.5f, 2.4f * bm.u);
     if (keep) {
         const ImVec2 pts[3] = {ImVec2(c.x - r * 0.40f, c.y + r * 0.02f), ImVec2(c.x - r * 0.12f, c.y + r * 0.30f),
@@ -345,7 +365,7 @@ void RoundButton(ImDrawList* dl, ImVec2 c, float r, bool keep, bool hot, const M
 
 void DrawBar(ImDrawList* dl, Element e, const Bar& b, const Metrics& bm, float alpha, BarHit hot) {
     const theme::Palette& P = theme::Colors();
-    const float r = (b.mx.y - b.mn.y) * 0.5f;
+    const float r = bm.barR;
     SoftShadow(dl, b.mn, b.mx, r, 2 * bm.u, 6 * bm.u, Fade(P.shadow, alpha));
     dl->AddRectFilled(b.mn, b.mx, Fade(P.win, alpha), r);
     dl->AddRect(b.mn, b.mx, Fade(P.line, alpha), r, 0, bm.Sep());
@@ -370,8 +390,8 @@ void DrawBar(ImDrawList* dl, Element e, const Bar& b, const Metrics& bm, float a
                     h.text);
         x += hs.x;
     }
-    RoundButton(dl, b.cancel, b.btnR, false, hot == BarHit::Cancel, bm, alpha);
-    RoundButton(dl, b.keep, b.btnR, true, hot == BarHit::Keep, bm, alpha);
+    BarButton(dl, b.cancelMn, b.cancelMx, kCancelKey, false, hot == BarHit::Cancel, bm, alpha);
+    BarButton(dl, b.keepMn, b.keepMx, kKeepKey, true, hot == BarHit::Keep, bm, alpha);
 }
 
 // Enters edit mode for `e` with the stored placement. False if its settings are missing.
