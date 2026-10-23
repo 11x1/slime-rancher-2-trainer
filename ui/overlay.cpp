@@ -95,6 +95,17 @@ bool g_prevHotkeyDown = true;  // require a release first (key may be held at st
 bool g_wasOpen = false;
 bool g_softCursor = false;
 bool g_textInputActive = false;  // ImGui text field had focus last frame (render thread)
+// io.WantCaptureMouse of the last overlay frame (render thread writes, window
+// thread reads). While open and false (pointer outside the overlay's windows,
+// no ImGui drag, no modal), mouse input goes on to the game, so the game's own
+// menus beside the overlay (Slimepedia, Options) stay clickable. Gameplay
+// actions stay locked through the Input System map (game_input). true until
+// the first frame after opening has computed it.
+std::atomic<bool> g_imguiWantsMouse{true};
+// Mouse buttons whose press went to the game: their release goes there too,
+// wherever it happens (window thread only).
+unsigned g_gameButtons = 0;
+int g_openFrames = 0;  // overlay frames rendered since opening, capped at 2 (render thread)
 
 
 // Window messages are queued on the window thread and replayed into ImGui on
@@ -147,11 +158,59 @@ bool IsInputMsg(UINT msg) {
 
 enum class WndAction { PassToGame, Swallow, DefaultProc };
 
+bool IsMouseMsg(UINT msg) {
+    return (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) || msg == WM_MOUSELEAVE || msg == WM_NCMOUSELEAVE;
+}
+
+// Bit for the button a WM_*BUTTON* message is about (0 for other messages).
+unsigned ButtonBit(UINT msg, WPARAM wp, bool& down) {
+    down = false;
+    switch (msg) {
+        case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: down = true; [[fallthrough]];
+        case WM_LBUTTONUP: return 1u;
+        case WM_RBUTTONDOWN: case WM_RBUTTONDBLCLK: down = true; [[fallthrough]];
+        case WM_RBUTTONUP: return 2u;
+        case WM_MBUTTONDOWN: case WM_MBUTTONDBLCLK: down = true; [[fallthrough]];
+        case WM_MBUTTONUP: return 4u;
+        case WM_XBUTTONDOWN: case WM_XBUTTONDBLCLK: down = true; [[fallthrough]];
+        case WM_XBUTTONUP: return GET_XBUTTON_WPARAM(wp) == XBUTTON2 ? 16u : 8u;
+        default: return 0u;
+    }
+}
+
+// Mouse message while the overlay is open: true = let the game have it.
+bool MouseToGame(UINT msg, WPARAM wp) {
+    bool down = false;
+    const unsigned bit = ButtonBit(msg, wp, down);
+    if (bit && !down && (g_gameButtons & bit)) {  // release of a press the game got
+        g_gameButtons &= ~bit;
+        return true;
+    }
+    // Key capture takes mouse 3-5 too: nothing goes to the game meanwhile.
+    if (g_imguiWantsMouse.load(std::memory_order_relaxed) || g_captureState.load(std::memory_order_relaxed)) return false;
+    if (bit && down) g_gameButtons |= bit;
+    return true;
+}
+
+// Raw input from the mouse (not the keyboard): the header only, the game can
+// still read the whole packet afterwards.
+bool RawInputIsMouse(LPARAM lp) {
+    RAWINPUTHEADER hdr{};
+    UINT size = sizeof(hdr);
+    if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lp), RID_HEADER, &hdr, &size, sizeof(RAWINPUTHEADER)) ==
+        static_cast<UINT>(-1))
+        return false;
+    return hdr.dwType == RIM_TYPEMOUSE;
+}
+
 // Mod logic of the WndProc detour (C++ part; exceptions never escape).
 WndAction WndFilterCpp(UINT msg, WPARAM wp, LPARAM lp) noexcept {
     LatchMouseDown(msg, wp);  // open or not: the hotkey may be a mouse button
     const bool open = g_open.load(std::memory_order_relaxed);
-    if (!open) return WndAction::PassToGame;
+    if (!open) {
+        g_gameButtons = 0;
+        return WndAction::PassToGame;
+    }
     const bool forward = IsInputMsg(msg) || msg == WM_SETFOCUS || msg == WM_KILLFOCUS ||
                          msg == WM_INPUTLANGCHANGE || msg == WM_DEVICECHANGE;
     if (forward && msg != WM_INPUT) {
@@ -162,12 +221,21 @@ WndAction WndFilterCpp(UINT msg, WPARAM wp, LPARAM lp) noexcept {
         }
     }
     if (!IsInputMsg(msg)) return WndAction::PassToGame;
-    // Keep mouse/keyboard away from the game while the overlay is open.
+    // Keep the keyboard, and the mouse over the overlay, away from the game
+    // while the overlay is open. The mouse outside the overlay's windows goes
+    // on to the game (MouseToGame), so its menus stay usable next to it.
     // System keys (Alt+F4, Alt+Enter) still reach the game's own handler
-    // (gameplay actions are locked separately, see game_input.h); raw input
-    // only gets the mandatory DefWindowProc cleanup.
+    // (gameplay actions are locked separately, see game_input.h); other raw
+    // input only gets the mandatory DefWindowProc cleanup.
     if (msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP || msg == WM_SYSCHAR) return WndAction::PassToGame;
-    if (msg == WM_INPUT) return WndAction::DefaultProc;
+    if (msg == WM_INPUT) {
+        const bool mouseFree =
+            !g_imguiWantsMouse.load(std::memory_order_relaxed) && !g_captureState.load(std::memory_order_relaxed);
+        if ((g_gameButtons || mouseFree) && RawInputIsMouse(lp))
+            return WndAction::PassToGame;
+        return WndAction::DefaultProc;
+    }
+    if (IsMouseMsg(msg) && MouseToGame(msg, wp)) return WndAction::PassToGame;
     return WndAction::Swallow;
 }
 
@@ -501,6 +569,10 @@ void RenderFrame() {
     PollCapture();
 
     const bool open = g_open.load();
+    if (!open) {
+        g_openFrames = 0;
+        g_imguiWantsMouse = true;
+    }
     if (g_wasOpen && !open) {
         g_captureState = 0;
         FlushNow();
@@ -542,6 +614,12 @@ void RenderFrame() {
     }
 
     ImGui::NewFrame();
+    if (open) {
+        // NewFrame computed it from the windows drawn last frame: only valid
+        // once the menu has been drawn at least once since opening.
+        if (g_openFrames < 2) ++g_openFrames;
+        g_imguiWantsMouse = g_openFrames < 2 || io.WantCaptureMouse;
+    }
     if (hudMarkers) hud::Draw();  // foreground draw list (the module hides them while the settings window is open)
     if (momentum) momentum_hud::Draw();
     if (open) {
