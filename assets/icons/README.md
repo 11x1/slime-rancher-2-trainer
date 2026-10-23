@@ -21,6 +21,8 @@ plot-upgrade icons (white outline, darker shadow band). They are embedded into t
 | `map_node.png` | collectible tracker: map data nodes (the game has no sprite for them) |
 | `research_drone.png` | collectible tracker: research drones (no map / Slimepedia / HUD sprite in the game) |
 | `ghost_drone.png` | collectible tracker: ghostly drones (their IdentifiableType has no icon) |
+| `gordo.png` | collectible tracker: gordos (the map marker sprite is not recognisable at tracker size) |
+| `plort_door.png`, `shadow_door.png` | collectible tracker: plort doors / shadow plort doors (same reason) |
 
 Tier icons share the object and carry a badge with the tier's Roman numeral (I green,
 II blue, III gold); the Ash Booster has an orange "boost" badge.

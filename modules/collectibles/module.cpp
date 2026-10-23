@@ -45,17 +45,20 @@
 // follow its position, opacity and visibility (hidden with the HUD, menus,
 // the full map, loads). No per-frame work besides an "is the parent still
 // ours" check; counts are recomputed once per second while shown. There is no
-// background panel: compact mode is one row of "icon X/Y" per category,
-// spread over the minimap's width (a second row only when it does not fit),
-// list mode one text line per category; every icon and text has a dark copy
-// offset down-right as a drop shadow, so it stays readable on bright terrain.
-// Icons: the game's own sprite where one exists (map marker / counter /
-// identifiable icon); map data nodes, research drones and ghostly drones have
-// none (the ghostly drone's IdentifiableType has no icon), so they use the
-// mod's own icons (assets/icons/map_node, research_drone, ghost_drone, via
-// ui/mod_icons).
-// Size: row height 6.8 % of the minimap's size (list font 4.6 %) times the
-// "size" setting (60-160 %).
+// background panel: compact mode is a fixed 3-column grid of "icon X/Y" cells
+// (rows as needed, usually 2), spread over the minimap's width with the outer
+// columns flush with its edges, each cell optionally with a tiny label under
+// the count ("show_labels"); list mode is one text line per category. Every
+// icon and text has a dark copy offset down-right as a drop shadow, so it
+// stays readable on bright terrain.
+// Icons: the game's own sprite where one exists and reads well (pod / shadow
+// depositor counter, teleporter and stabilizer markers); gordos and plort
+// doors use the mod's own icons (the map marker sprites were not recognisable
+// at tracker size), as do map data nodes, research drones and ghostly drones
+// (no game sprite; the ghostly drone's IdentifiableType has no icon): see
+// assets/icons, loaded via ui/mod_icons. The game sprite stays the fallback.
+// Size: icon / count row 6.8 % of the minimap's size (list font 4.6 %) times
+// the "size" setting (60-160 %); the label line adds half of that.
 //
 // Fault policy: every game call runs under core::Try + a native-fault guard;
 // managed exceptions of single queries are contained, any native fault
@@ -116,7 +119,7 @@ enum Cat {
 struct CatInfo {
     const char* key;
     const char* label;   // list mode / settings
-    const char* shortLabel;  // compact mode without an icon
+    const char* shortLabel;  // compact mode: label under the count, or before it without an icon
     bool discoveryOnly;  // "done" == discovered (no other state)
     const char* tip;
 };
@@ -158,6 +161,7 @@ struct Cfg {
     Cfg() { std::fill(std::begin(cats), std::end(cats), true); }
     bool showCompleted = true;
     bool compact = true;
+    bool showLabels = true;
     bool spoilerFree = false;
     float scale = 1.0f;  // "size" setting / 100
 };
@@ -178,9 +182,12 @@ void RegisterSettings() {
         x.tooltip = tip;
         settings::Register(x);
     };
-    def("compact", "Compact row (icons + numbers)", "Display", 1,
-        "One row under the minimap: the category's icon (the game's map icon where it has one) and the count, "
-        "spread over the minimap's width (wraps to a second row only when needed). Off: one text line per category");
+    def("compact", "Compact grid (icons + numbers)", "Display", 1,
+        "A grid of 3 columns under the minimap: each category's icon and count, spread over the minimap's width "
+        "(usually 2 rows). Off: one text line per category");
+    def("show_labels", "Show labels", "Display", 1,
+        "A tiny name under each count (Pods, Gordos, Doors, Nodes, Drones, Ghosts, ...)");
+    settings::SetParent(kModule, "show_labels", "compact");
     def("show_completed_categories", "Show completed categories (dimmed)", "Display", 1,
         "Off: categories with everything collected are hidden");
     def("hide_totals_until_discovered", "Spoiler-free totals", "Display", 0,
@@ -206,6 +213,7 @@ Cfg LoadCfg() {
     for (int i = 0; i < kCatCount; ++i) c.cats[i] = settings::GetBool(kModule, kCats[i].key);
     c.showCompleted = settings::GetBool(kModule, "show_completed_categories");
     c.compact = settings::GetBool(kModule, "compact");
+    c.showLabels = settings::GetBool(kModule, "show_labels");
     c.spoilerFree = settings::GetBool(kModule, "hide_totals_until_discovered");
     const float pct = settings::GetFloat(kModule, "size");
     c.scale = std::isfinite(pct) ? std::clamp(pct, 60.0f, 160.0f) / 100.0f : 1.0f;
@@ -454,7 +462,7 @@ private:
     // No background panel: every graphic gets a dark copy one or two pixels down-right
     // (drawn first, so behind it), which keeps icons and numbers readable on bright terrain.
     struct Cell {
-        Ref go, icon, iconGo, iconShadow, iconShadowGo, text, textShadow;
+        Ref go, icon, iconGo, iconShadow, iconShadowGo, text, textShadow, label, labelShadow;
     };
     struct Ui {
         Ref root, rootT, listText, listShadow;
@@ -546,7 +554,8 @@ private:
         auto abandonUi = [](Ui& u) {
             for (Ref* r : {&u.root, &u.rootT, &u.listText, &u.listShadow, &u.parent}) r->Abandon();
             for (Cell& c : u.cells)
-                for (Ref* r : {&c.go, &c.icon, &c.iconGo, &c.iconShadow, &c.iconShadowGo, &c.text, &c.textShadow})
+                for (Ref* r : {&c.go, &c.icon, &c.iconGo, &c.iconShadow, &c.iconShadowGo, &c.text, &c.textShadow,
+                               &c.label, &c.labelShadow})
                     r->Abandon();
         };
         abandonUi(ui_);
@@ -1397,6 +1406,9 @@ private:
             if (Il2CppObject* sg = NewChild(unity::TransformOf(go), "CountShadow", layer))
                 c.textShadow.Reset(NewText(sg, fontSrc));
             if (Il2CppObject* tg = NewChild(unity::TransformOf(go), "Count", layer)) c.text.Reset(NewText(tg, fontSrc));
+            if (Il2CppObject* sg = NewChild(unity::TransformOf(go), "LabelShadow", layer))
+                c.labelShadow.Reset(NewText(sg, fontSrc));
+            if (Il2CppObject* lg = NewChild(unity::TransformOf(go), "Label", layer)) c.label.Reset(NewText(lg, fontSrc));
             unity::SetActive(go, false);
         }
         unity::SetActive(root, false);
@@ -1411,10 +1423,16 @@ private:
         unity::SetActive(ui_.root.get(), v);
     }
 
-    // The game's own sprite (map marker / counter / identifiable icon) when it has one, else the
-    // mod's icon for categories without any game sprite (map data nodes, research drones, ghostly
-    // drones: ComponentAcqDrone has no icon), else nullptr (text label).
+    // Gordos and plort doors: the mod's own icon (their map marker sprites were not recognisable
+    // at tracker size), the game's marker sprite as fallback. Otherwise the game's own sprite
+    // (counter / marker / identifiable icon) when it has one, else the mod's icon for categories
+    // without any game sprite (map data nodes, research drones, ghostly drones: ComponentAcqDrone
+    // has no icon), else nullptr (text label).
     Il2CppObject* IconFor(int cat) {
+        const char* preferred = cat == kGordos ? "gordo" : cat == kPlortDoors ? "plort_door"
+                              : cat == kShadowDoors ? "shadow_door" : nullptr;
+        if (preferred)
+            if (Il2CppObject* own = sr2::ui::mod_icons::Get(preferred)) return own;
         if (catIcon_[cat].Alive()) return catIcon_[cat].get();
         if (cat == kGhostDrones && ghostIcon_.Alive()) return ghostIcon_.get();
         const char* own = cat == kMapNodes ? "map_node" : cat == kDrones ? "research_drone"
@@ -1440,8 +1458,8 @@ private:
             if (!cfg_.showCompleted && c.done >= c.total) continue;
             shown.push_back(i);
         }
-        std::string sig = std::format("{}|{}|{}|{:.1f}|{:.2f}|", cfg_.compact, cfg_.spoilerFree, snap.position,
-                                      snap.size, cfg_.scale);
+        std::string sig = std::format("{}|{}|{}|{}|{:.1f}|{:.2f}|", cfg_.compact, cfg_.showLabels, cfg_.spoilerFree,
+                                      snap.position, snap.size, cfg_.scale);
         for (int i : shown) sig += std::format("{}:{}/{}/{}{};", i, counts_[i].done, counts_[i].total,
                                                counts_[i].discovered, counts_[i].partial ? "*" : "");
         lastSize_ = snap.size;
@@ -1464,102 +1482,121 @@ private:
         if (cfg_.compact) {
             for (Ref* t : {&ui_.listText, &ui_.listShadow})
                 if (t->Alive()) unity::SetActive(unity::GameObjectOf(t->get()), false);
-            // One row of "icon X/Y" per category, as wide as the minimap; wraps only when it does not fit.
-            const float h = std::max(10.0f, std::round(S * 0.068f * cfg_.scale));  // row height = icon size
+            // A fixed grid of 3 columns ("icon X/Y", label under the count), rows as needed. Column k is
+            // as wide as its widest cell; the outer columns sit flush with the minimap's edges.
+            constexpr size_t kCols = 3;
+            const bool labels = cfg_.showLabels;
+            const float h = std::max(10.0f, std::round(S * 0.068f * cfg_.scale));  // icon size = count line
             const float font = std::max(8.0f, std::round(h * 0.72f));
+            const float lfont = std::max(6.0f, std::round(h * 0.46f));
+            const float lh = labels ? std::round(lfont * 1.15f) : 0.0f;  // label line under the count
+            const float rh = h + lh;                                       // cell height
             const float iconGap = std::max(2.0f, std::round(h * 0.15f));
-            const float spacing = std::max(4.0f, std::round(h * 0.55f));  // between two categories
-            const float rowGap = std::max(1.0f, std::round(h * 0.2f));
+            const float minColGap = std::max(4.0f, std::round(h * 0.4f));
+            const float rowGap = std::max(1.0f, std::round(h * 0.25f));
             const float d = std::max(1.0f, std::round(h * 0.07f));  // shadow offset
             struct Item {
                 int cat;
                 Il2CppObject* spr;
-                float textW, w;
+                float textW, labelW, w;
+            };
+            auto measure = [](Ref& tr, const std::string& txt, float size) {
+                float w = tr.Alive() ? ugui::TmpPreferredWidth(tr.get()) : -1.0f;
+                if (!std::isfinite(w) || w <= 0 || w > size * 40) w = static_cast<float>(txt.size()) * size * 0.56f;
+                return std::ceil(w) + 2;
             };
             std::vector<Item> items;
             for (int i : shown) {
                 Cell& c = ui_.cells[i];
                 if (!c.go.Alive()) continue;
-                Item it{i, IconFor(i), 0, 0};
-                const std::string txt = it.spr ? Numbers(i) : std::format("{} {}", kCats[i].shortLabel, Numbers(i));
+                Item it{i, IconFor(i), 0, 0, 0};
+                const std::string txt = (it.spr || labels) ? Numbers(i) : std::format("{} {}", kCats[i].shortLabel, Numbers(i));
                 for (Ref* t : {&c.text, &c.textShadow}) {
                     if (!t->Alive()) continue;
                     ugui::TmpSetFontSize(t->get(), font);
                     ugui::TmpSetText(t->get(), txt);
                 }
-                float tw = c.text.Alive() ? ugui::TmpPreferredWidth(c.text.get()) : -1.0f;
-                if (!std::isfinite(tw) || tw <= 0 || tw > S * 4) tw = static_cast<float>(txt.size()) * font * 0.56f;
-                it.textW = std::ceil(tw) + 2;
-                it.w = (it.spr ? h + iconGap : 0) + it.textW;
+                it.textW = measure(c.text, txt, font);
+                if (labels) {
+                    const std::string lab = kCats[i].shortLabel;
+                    for (Ref* t : {&c.label, &c.labelShadow}) {
+                        if (!t->Alive()) continue;
+                        ugui::TmpSetFontSize(t->get(), lfont);
+                        ugui::TmpSetText(t->get(), lab);
+                    }
+                    it.labelW = measure(c.label, lab, lfont);
+                }
+                it.w = (it.spr ? h + iconGap : 0) + std::max(it.textW, it.labelW);
                 items.push_back(it);
             }
             if (items.empty()) {
                 SetVisible(false);
                 return;
             }
-            std::vector<std::pair<size_t, size_t>> rows;  // [begin, end) into items
-            for (size_t b = 0; b < items.size();) {
-                size_t e = b + 1;
-                float w = items[b].w;
-                while (e < items.size() && w + spacing + items[e].w <= S) w += spacing + items[e++].w;
-                rows.push_back({b, e});
-                b = e;
+            const size_t cols = std::min(kCols, items.size());
+            const size_t nRows = (items.size() + kCols - 1) / kCols;
+            float colW[kCols] = {}, colX[kCols] = {};
+            for (size_t k = 0; k < items.size(); ++k) colW[k % kCols] = std::max(colW[k % kCols], items[k].w);
+            float total = 0;
+            for (size_t j = 0; j < cols; ++j) total += colW[j];
+            float sp = cols > 1 ? (S - total) / static_cast<float>(cols - 1) : 0.0f, x0 = 0;
+            if (cols == 1) x0 = std::round((S - total) * 0.5f);  // a single cell is centred
+            else if (sp < minColGap) {                           // wider than the minimap: centred overflow
+                sp = minColGap;
+                x0 = std::round((S - total - sp * static_cast<float>(cols - 1)) * 0.5f);
             }
+            for (size_t j = 0; j < cols; ++j) colX[j] = j ? colX[j - 1] + colW[j - 1] + sp : x0;
             std::vector<bool> used(kCatCount, false);
-            for (size_t r = 0; r < rows.size(); ++r) {
-                const size_t b = rows[r].first, e = rows[r].second, n = e - b;
-                float total = 0;
-                for (size_t k = b; k < e; ++k) total += items[k].w;
-                // Spread the row over the minimap's width; a short row is centred instead of pulled apart.
-                float sp = n > 1 ? (S - total) / static_cast<float>(n - 1) : spacing, x = 0;
-                if (n == 1 || sp > spacing * 2.5f) {
-                    sp = spacing;
-                    x = std::round((S - total - sp * static_cast<float>(n - 1)) * 0.5f);
+            for (size_t k = 0; k < items.size(); ++k) {
+                const Item& it = items[k];
+                const size_t col = k % kCols, row = k / kCols;
+                Cell& c = ui_.cells[it.cat];
+                used[it.cat] = true;
+                const Count& cnt = counts_[it.cat];
+                const bool complete = cnt.done >= cnt.total;
+                const float alpha = complete ? 0.5f : 1.0f;  // completed categories are dimmed
+                Il2CppObject* t = unity::TransformOf(c.go.get());
+                ugui::SetAnchors(t, {0, 1}, {0, 1});
+                ugui::SetPivot(t, {0, 1});
+                ugui::SetSizeDelta(t, {it.w, rh});
+                ugui::SetAnchoredPosition(t, {std::round(colX[col]), -static_cast<float>(row) * (rh + rowGap)});
+                auto place = [&](Ref& go, Ref& img, Vec2 pos, Color col) {
+                    if (!go.Alive()) return;
+                    unity::SetActive(go.get(), it.spr != nullptr);
+                    if (!it.spr) return;
+                    Il2CppObject* gt = unity::TransformOf(go.get());
+                    ugui::SetAnchors(gt, {0, 0.5f}, {0, 0.5f});  // centred on the cell (count + label)
+                    ugui::SetPivot(gt, {0, 0.5f});
+                    ugui::SetSizeDelta(gt, {h, h});
+                    ugui::SetAnchoredPosition(gt, pos);
+                    ugui::ImageSetSprite(img.get(), it.spr);
+                    ugui::GraphicSetColor(img.get(), col);
+                };
+                place(c.iconShadowGo, c.iconShadow, {d, -d}, shadowCol(alpha));
+                place(c.iconGo, c.icon, {0, 0}, {1, 1, 1, alpha});
+                const float left = it.spr ? h + iconGap : 0;
+                // count: the top line of the cell; label: the line under it
+                auto text = [&](Ref& tr, Vec2 pos, float w, float lineH, bool top, Color col) {
+                    if (!tr.Alive()) return;
+                    Il2CppObject* tt = unity::TransformOf(tr.get());
+                    ugui::SetAnchors(tt, {0, top ? 1.0f : 0.0f}, {0, top ? 1.0f : 0.0f});
+                    ugui::SetPivot(tt, {0, top ? 1.0f : 0.0f});
+                    ugui::SetSizeDelta(tt, {w, lineH});
+                    ugui::SetAnchoredPosition(tt, pos);
+                    ugui::TmpSetColor(tr.get(), col);
+                };
+                text(c.textShadow, {left + d, -d}, it.textW, h, true, shadowCol(complete ? 0.6f : 1.0f));
+                text(c.text, {left, 0}, it.textW, h, true, complete ? kDoneCol : kTextCol);
+                for (Ref* lr : {&c.label, &c.labelShadow})
+                    if (lr->Alive()) unity::SetActive(unity::GameObjectOf(lr->get()), labels);
+                if (labels) {
+                    const Color labCol = complete ? kDoneCol : Color{kTextCol.r, kTextCol.g, kTextCol.b, 0.85f};
+                    text(c.labelShadow, {left + d, -d}, it.labelW, lh, false, shadowCol(complete ? 0.5f : 0.85f));
+                    text(c.label, {left, 0}, it.labelW, lh, false, labCol);
                 }
-                const float y = -static_cast<float>(r) * (h + rowGap);
-                for (size_t k = b; k < e; ++k) {
-                    const Item& it = items[k];
-                    Cell& c = ui_.cells[it.cat];
-                    used[it.cat] = true;
-                    const Count& cnt = counts_[it.cat];
-                    const bool complete = cnt.done >= cnt.total;
-                    const float alpha = complete ? 0.5f : 1.0f;  // completed categories are dimmed
-                    Il2CppObject* t = unity::TransformOf(c.go.get());
-                    ugui::SetAnchors(t, {0, 1}, {0, 1});
-                    ugui::SetPivot(t, {0, 1});
-                    ugui::SetSizeDelta(t, {it.w, h});
-                    ugui::SetAnchoredPosition(t, {std::round(x), y});
-                    auto place = [&](Ref& go, Ref& img, Vec2 pos, Color col) {
-                        if (!go.Alive()) return;
-                        unity::SetActive(go.get(), it.spr != nullptr);
-                        if (!it.spr) return;
-                        Il2CppObject* gt = unity::TransformOf(go.get());
-                        ugui::SetAnchors(gt, {0, 0.5f}, {0, 0.5f});
-                        ugui::SetPivot(gt, {0, 0.5f});
-                        ugui::SetSizeDelta(gt, {h, h});
-                        ugui::SetAnchoredPosition(gt, pos);
-                        ugui::ImageSetSprite(img.get(), it.spr);
-                        ugui::GraphicSetColor(img.get(), col);
-                    };
-                    place(c.iconShadowGo, c.iconShadow, {d, -d}, shadowCol(alpha));
-                    place(c.iconGo, c.icon, {0, 0}, {1, 1, 1, alpha});
-                    const float left = it.spr ? h + iconGap : 0;
-                    auto text = [&](Ref& tr, Vec2 pos, Color col) {
-                        if (!tr.Alive()) return;
-                        Il2CppObject* tt = unity::TransformOf(tr.get());
-                        ugui::SetAnchors(tt, {0, 0.5f}, {0, 0.5f});
-                        ugui::SetPivot(tt, {0, 0.5f});
-                        ugui::SetSizeDelta(tt, {it.textW, h});
-                        ugui::SetAnchoredPosition(tt, pos);
-                        ugui::TmpSetColor(tr.get(), col);
-                    };
-                    text(c.textShadow, {left + d, -d}, shadowCol(complete ? 0.6f : 1.0f));
-                    text(c.text, {left, 0}, complete ? kDoneCol : kTextCol);
-                    unity::SetActive(c.go.get(), true);
-                    x += it.w + sp;
-                }
+                unity::SetActive(c.go.get(), true);
             }
-            height = static_cast<float>(rows.size()) * h + static_cast<float>(rows.size() - 1) * rowGap;
+            height = static_cast<float>(nRows) * rh + static_cast<float>(nRows - 1) * rowGap;
             for (int i = 0; i < kCatCount; ++i)
                 if (!used[i] && ui_.cells[i].go.Alive()) unity::SetActive(ui_.cells[i].go.get(), false);
         } else {

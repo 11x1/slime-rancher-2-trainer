@@ -183,6 +183,7 @@ std::vector<void*> g_keptTextures;     // main thread: native textures already h
 Il2CppObject* g_lastPick = nullptr;    // main thread: identity only, never dereferenced
 std::mt19937 g_pickRng{std::random_device{}()};
 bool g_loggedCount = false;
+bool g_loggedPinkMiss = false;
 size_t g_lastCount = static_cast<size_t>(-1);
 
 // Drops rich-text tags (<b>, <color=...>, <sprite ...>) and trims.
@@ -277,6 +278,8 @@ bool NativeTexture(Il2CppObject* tex, void*& out) {
     return out != nullptr;
 }
 
+bool ReadSprite(Il2CppObject* spr, Snapshot& s);
+
 // Fills the icon part of `s` from the entry's list icon. False if it can't be drawn.
 bool ReadIcon(Il2CppObject* entry, Snapshot& s) {
     Il2CppObject* spr = nullptr;
@@ -286,6 +289,11 @@ bool ReadIcon(Il2CppObject* entry, Snapshot& s) {
         Il2CppObject* id = unity::Field<Il2CppObject*>(entry, S.entryIdent);
         spr = id ? unity::Field<Il2CppObject*>(id, S.identIcon) : nullptr;
     }
+    return ReadSprite(spr, s);
+}
+
+// Fills the icon part of `s` from a Sprite. False if it can't be drawn.
+bool ReadSprite(Il2CppObject* spr, Snapshot& s) {
     if (!spr || !unity::IsAlive(spr)) return false;
     Il2CppObject* tex = il::Invoke(S.sprTexture, spr, {});
     if (!tex || !unity::IsAlive(tex)) return false;
@@ -362,6 +370,27 @@ Il2CppObject* SaveDirector() {
     return dir;
 }
 
+// The default logo when there is nothing to pick (title screen, nothing
+// discovered): the game's own Pink Slime icon, from the "Pink" SlimeDefinition
+// asset (GameContext keeps the slime definitions loaded from the start, so it
+// is there on the title screen too). Icon only: `s.entry` stays empty, which
+// means no hover tooltip. False if it is not loaded or its icon can't be read;
+// the menu then draws its own slime.
+bool ReadPink(Snapshot& s) {
+    for (Il2CppObject* d : unity::FindObjectsOfTypeAll(S.slimeDef)) {
+        if (il::AnyFault()) return false;
+        if (!d || !unity::IsAlive(d) || !il::IsA(d, S.slimeDef) || unity::Field<bool>(d, S.slimeIsLargo)) continue;
+        if (_stricmp(unity::GetName(d).c_str(), "Pink") != 0) continue;
+        if (!ReadSprite(unity::Field<Il2CppObject*>(d, S.identIcon), s)) continue;
+        s.entry = {};
+        s.has = true;
+        return true;
+    }
+    if (!g_loggedPinkMiss) SR2_INFO("ui: overlay logo: Pink SlimeDefinition icon not available, using the drawn slime");
+    g_loggedPinkMiss = true;
+    return false;
+}
+
 void Publish(Snapshot s) {
     std::lock_guard lk(g_mutex);
     s.serial = g_snap.serial + 1;
@@ -374,7 +403,10 @@ void Refresh() {
     Snapshot s;
     if (il::AnyFault() || !Resolve()) return Publish(std::move(s));
     Il2CppObject* dir = SaveDirector();
-    if (!dir) return Publish(std::move(s));
+    if (!dir) {
+        ReadPink(s);
+        return Publish(std::move(s));
+    }
 
     std::vector<Il2CppObject*> found;
     for (Il2CppObject* e : SlimeEntries(dir)) {
@@ -399,6 +431,7 @@ void Refresh() {
         g_lastPick = e;
         break;
     }
+    if (!s.has && !il::AnyFault()) ReadPink(s);
     Publish(std::move(s));
 }
 
