@@ -104,6 +104,19 @@ void DrawMarker(ImDrawList* dl, ImVec2 p, float r, ImU32 fill, float alpha, cons
     }
 }
 
+// A world-space message: the text centred on p, with a dark backing box.
+void DrawText(ImDrawList* dl, ImVec2 p, float fs, ImU32 color, float alpha, const std::string& text) {
+    if (text.empty()) return;
+    ImFont* font = ImGui::GetFont();
+    ImVec2 ts = font->CalcTextSizeA(fs, 1e9f, 0.0f, text.c_str());
+    ImVec2 at(p.x - ts.x * 0.5f, p.y - ts.y * 0.5f);
+    const float pad = fs * 0.35f;
+    dl->AddRectFilled(ImVec2(at.x - pad, at.y - pad * 0.6f), ImVec2(at.x + ts.x + pad, at.y + ts.y + pad * 0.6f),
+                      IM_COL32(15, 10, 30, static_cast<int>(170 * alpha)), pad);
+    dl->AddText(font, fs, ImVec2(at.x + 1, at.y + 1), IM_COL32(0, 0, 0, static_cast<int>(200 * alpha)), text.c_str());
+    dl->AddText(font, fs, at, WithAlpha(color, alpha), text.c_str());
+}
+
 }  // namespace
 
 void Draw() {
@@ -128,6 +141,10 @@ void Draw() {
             float k = f.range > 1 ? std::clamp(m.distance / f.range, 0.0f, 1.0f) : 0.0f;
             float alpha = 1.0f - 0.5f * k;          // fades to half towards the range limit
             float rr = r * (1.15f - 0.35f * k);      // and shrinks a little
+            if (f.textOnly) {
+                DrawText(dl, p, std::max(14.0f, r * 1.9f), f.color, alpha, f.tag);
+                continue;
+            }
             DrawMarker(dl, p, rr, f.color, alpha, f, m);
         }
     }

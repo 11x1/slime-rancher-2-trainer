@@ -302,7 +302,7 @@ Original plan:
     springs Vacuumables to `CollectPt` and then calls `storage.MaybeAddToAnySlot`, so we need our
     own sink. Alternative: no physics, a direct destroy plus a puff FX (simpler and robust).
 
-### 2.2 Silo "Sell All" - IMPLEMENTED (v1 = menu action; world button = next step)
+### 2.2 Silo "Sell All" - IMPLEMENTED (menu action + world button)
 
 * Economy: `SceneContext.PlortEconomyDirector.TrySell(id, count, ignoreMarketShutdown,
   showUiNotification, source)` (0x9E52A0):
@@ -327,10 +327,22 @@ Original plan:
      (HUD currency notification from the game, log line with every type × count @ price). If the
      market is closed, it says so and nothing is sold.
   3. The upgrade can be sold back with sell_upgrades.
-* Next: world button. Clone the corral `PlortCollectorActivator` button GameObject next to the
-  silo's slot buttons (position from the SILO prefab bounds) and detour
-  `PlortCollectorActivator.Activate` for our clones → the same sale, plus a short popup or HUD
-  text. Needs in-game placement tuning.
+* World button (`modules/custom_upgrades/silo_world.cpp`, built, not yet tested in game): while
+  the upgrade is owned, the corral Plort Collector's press button (`PlortCollectorUpgrader.Collector`
+  -> child "techActivator": Animator, stand, button mesh, "triggerActivate" with
+  `PlortCollectorActivator` + `TechUIInteractable`) is cloned under the silo plot as
+  `sr2mods_SiloSellButton#<generation>`, at the outer (+x, -z) corner (5.58, 1.20, -5.58), turned
+  135 deg to face outwards (front side, opposite corner from the plot menu terminal at
+  (-5.54, -5.54); the slot panels sit mid-side at 3.05 m). The clone's `Collector` is set to null.
+  A detour on `PlortCollectorActivator.Activate` never calls the original for an activator without
+  a Collector; for ours it plays the button animation (`_buttonAnimator.SetTrigger`) and
+  `PressButtonCue` (0.4 s rate limit like vanilla), checks ownership and runs the same sale as the
+  menu action. Feedback: the game's currency HUD notification (TrySell showUi) plus a short
+  world-space text above the button through `ui::hud` (new `Frame.textOnly`): "Sold N plorts for
+  V Newbucks", "The Plort Market is closed - nothing sold", "No plorts in this silo". Silos come
+  from the sidecar ids -> `SceneContext.GameModel.GetLandPlotModel(id).gameObj` (the
+  LandPlotLocation) -> `GetComponentInChildren<LandPlot>` at ~1 Hz; sold / disabled / faulted
+  removes the button, load / plot rebuild rebuilds it. The menu action stays.
 
 ### 2.3 Quantum drones: "sell only at or above a limit price" - IMPLEMENTED (`modules/drone_price_limit/`)
 

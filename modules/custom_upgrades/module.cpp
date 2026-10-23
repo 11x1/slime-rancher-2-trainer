@@ -1,7 +1,9 @@
 // custom_upgrades: framework for NEW land-plot upgrades bought in the game's own plot
 // purchase menu, with save-safe sidecar persistence (SR2 1.3.0). Upgrades: the silo
 // "Sell-All Button" (sell every plort stored in that silo at the current Plort Market
-// price, market saturation applied by the game) and the per-plot upgrade TIERS whose
+// price, market saturation applied by the game; a "Sell All Plorts Now" menu action plus a
+// press button on the silo, cloned from the corral collector button - silo_world.cpp) and
+// the per-plot upgrade TIERS whose
 // effects plot_upgrades applies (api.h Multiplier):
 //
 //   tier                 plot         needs                 price   effect
@@ -171,6 +173,7 @@
 #include "modules/custom_upgrades/api.h"
 #include "modules/custom_upgrades/coop_world.h"
 #include "modules/custom_upgrades/plot_menu_slider.h"
+#include "modules/custom_upgrades/silo_world.h"
 
 namespace sr2::modules {
 namespace {
@@ -252,8 +255,8 @@ constexpr int F(Family f) { return static_cast<int>(f); }
 
 const UpgradeDef kDefs[] = {
     {SILO_SELL_ALL, "silo_sell_all", kPlotSilo, false, 0, 0, kNoFamily, 1.0f, 0, "Sell-All Button",
-     "Adds a sell-all action to this silo: sell every plort stored in it at today's Plort Market prices in "
-     "one go (the market saturates like a normal sale). Food, slimes and other items stay in the silo.",
+     "Adds a sell-all button to this silo (and a menu action): sell every plort stored in it at today's Plort "
+     "Market prices in one go (the market saturates like a normal sale). Food, slimes and other items stay in the silo.",
      "Buy the Sell-All Button for this silo?"},
     {SILO_SELL_ALL_NOW, "silo_sell_all_now", kPlotSilo, true, SILO_SELL_ALL, 0, kNoFamily, 1.0f, 0,
      "Sell All Plorts Now", "Sell every plort stored in this silo at today's Plort Market prices.",
@@ -457,6 +460,8 @@ public:
     void ResetState(const char* why);
     void FrameCheck(float dt);
     void WorldTick();
+    bool OnSiloButton(Il2CppObject* activator);
+    SiloSummary SellAllNow(Il2CppObject* plot, const std::string& id, const char* via);
     bool WorldQuery(Il2CppObject* plot, custom_upgrades::world::CoopRequest& req);
     void AfterDetailsBind(Il2CppObject* view, Il2CppObject* vm);
     void SliderTick(float dt);
@@ -528,6 +533,7 @@ private:
     bool globalUpgItemsTried_ = false;
     Il2CppObject* GlobalUpgradeItem(int32_t upgrade);
     custom_upgrades::world::CoopWorld world_;
+    custom_upgrades::world::SiloButtons silo_;  // Sell-All Button world button
     custom_upgrades::ui::PlotMenuSlider slider_;  // Hen Collector limit (one at a time)
     Il2CppObject* menuRoot_ = nullptr;            // last updated LandPlotUIRoot (handle held)
     Il2CppGCHandle menuRootHandle_ = nullptr;
@@ -615,6 +621,23 @@ sr2::core::DetourGuard g_menuGuard{kModule, "LandPlotUIRoot.UpdateMenuItemAvaila
 sr2::core::DetourGuard g_saveGuard{kModule, "AutoSaveDirector.SaveGameImpl"};
 sr2::core::DetourGuard g_loadGuard{kModule, "AutoSaveDirector.Load/StartNewGame"};
 sr2::core::DetourGuard g_worldGuard{kModule, "custom_upgrades.CoopWorld"};
+sr2::core::DetourGuard g_siloGuard{kModule, "PlortCollectorActivator.Activate"};
+using ActivateFn = void (*)(Il2CppObject*, const MethodInfo*);
+ActivateFn g_origActivate = nullptr;
+size_t g_offActCollector = 0;  // PlortCollectorActivator.Collector
+
+// Our silo button clones have Collector == null (silo_world.cpp): the original would only NRE on
+// them, so it never runs for them - also not while the module is off / faulted. Vanilla buttons
+// (Collector set) always go to the original.
+void ActivateDetour(Il2CppObject* self, const MethodInfo* mi) {
+    if (!self || !g_offActCollector || unity::Field<Il2CppObject*>(self, g_offActCollector) != nullptr) {
+        g_origActivate(self, mi);
+        return;
+    }
+    bool handled = false;
+    if (g_self) g_siloGuard.Run([&] { handled = g_self->OnSiloButton(self); });
+    if (!handled) SR2_DEBUG("[{}] plort collector button without a collector pressed - ignored", kModule);
+}
 sr2::core::DetourGuard g_detailsGuard{kModule, "PurchaseItemDetailsContentView.BindData"};
 sr2::core::DetourGuard g_sliderGuard{kModule, "custom_upgrades.PlotMenuSlider"};
 
@@ -799,6 +822,7 @@ void CustomUpgrades::ResetState(const char* why) {
     Bump();
     tierCache_.clear();
     world_.Reset();  // clones of the previous game are destroyed (never read) at the next tick
+    silo_.Reset();
     slider_.Destroy();  // its value callback belongs to the old state
 }
 
@@ -936,6 +960,7 @@ void CustomUpgrades::LoadSidecar(const std::string& game) {
     state_.game = game;
     Bump();
     world_.Reset();  // world objects built before belong to another state: rebuilt from this one
+    silo_.Reset();
 
     // The exact .sav this game was loaded from (AutoSaveDirector.Load), if we saw it.
     std::string save;
@@ -1483,6 +1508,10 @@ void CustomUpgrades::Cleanup(const char* why) {
         world_.RemoveAll(&query);
         SR2_INFO("[{}] {}: coop world objects removed", kModule, why);
     }
+    if (silo_.Ready() && main_thread::IsMainThread()) {
+        silo_.RemoveAll();
+        SR2_INFO("[{}] {}: silo sell buttons removed", kModule, why);
+    }
     int removed = 0;
     for (auto& inj : injections_) {
         for (Injected& in : inj->items) {
@@ -1505,7 +1534,8 @@ void CustomUpgrades::FrameCheck(float dt) {
         return;
     }
     if (On() && slider_.Active()) g_sliderGuard.Run([&] { SliderTick(dt); });
-    if (!On() || !world_.Ready()) return;
+    if (On() && silo_.Ready()) g_siloGuard.Run([&] { silo_.Frame(); });  // button message (cheap when none)
+    if (!On() || (!world_.Ready() && !silo_.Ready())) return;
     if (std::isfinite(dt) && dt > 0.0f) worldAccum_ += std::min(dt, 1.0f);
     if (worldAccum_ < kWorldTickSeconds) return;
     worldAccum_ = 0.0f;
@@ -1537,8 +1567,51 @@ bool CustomUpgrades::WorldQuery(Il2CppObject* plot, custom_upgrades::world::Coop
 void CustomUpgrades::WorldTick() {
     if (!main_thread::IsMainThread() || !EnsureLoaded()) return;  // no save game: nothing to build
     cleaned_ = false;
-    world_.Tick([&](Il2CppObject* plot, custom_upgrades::world::CoopRequest& req) { return WorldQuery(plot, req); },
-                [&]() { return LookupDirector(); });
+    if (world_.Ready())
+        world_.Tick([&](Il2CppObject* plot, custom_upgrades::world::CoopRequest& req) { return WorldQuery(plot, req); },
+                    [&]() { return LookupDirector(); });
+    if (silo_.Ready() && !sr2::core::ModuleFaulted(kModule)) {
+        // Silos that own the Sell-All Button (the button checks the plot type itself).
+        const UpgradeDef* d = FindDef(SILO_SELL_ALL);
+        std::vector<std::string> wanted;
+        for (const auto& [id, ps] : state_.plots)
+            if (d && ps.type == kPlotSilo && ps.owned.count(d->key)) wanted.push_back(id);
+        silo_.Tick(wanted, [&]() { return LookupDirector(); });
+    }
+}
+
+// ---------------------------------------------------------------- silo button --
+
+SiloSummary CustomUpgrades::SellAllNow(Il2CppObject* plot, const std::string& id, const char* via) {
+    std::string log;
+    const SiloSummary s = Summarize(plot, true, &log);
+    if (!s.marketAvailable) SR2_INFO("[{}] sell all ({}, plot '{}'): Plort Market not available", kModule, via, id);
+    else if (s.marketClosed) SR2_INFO("[{}] sell all ({}, plot '{}'): Plort Market closed, nothing sold", kModule, via, id);
+    else SR2_INFO("[{}] sell all ({}, plot '{}'): sold {} plort(s) for {} Newbucks{}{}", kModule, via, id, s.plorts, s.value,
+                  log.empty() ? "" : ": ", log);
+    return s;
+}
+
+bool CustomUpgrades::OnSiloButton(Il2CppObject* activator) {
+    if (!main_thread::IsMainThread() || !silo_.IsOurs(activator)) return false;
+    if (!On()) return true;  // swallowed (the button is removed with the next frame)
+    Il2CppObject* plot = silo_.OwnerPlot(activator);
+    if (!plot || !silo_.Press(activator)) return true;  // no silo / pressed again within 0.4 s
+    const UpgradeDef* d = FindDef(SILO_SELL_ALL);
+    std::string id;
+    if (!d || !OwnsKey(plot, *d, &id)) {
+        silo_.Message(activator, "This silo has no Sell-All Button", false);
+        worldAccum_ = kWorldTickSeconds;  // remove the stale button
+        return true;
+    }
+    const SiloSummary s = SellAllNow(plot, id, "world button");
+    if (!s.marketAvailable) silo_.Message(activator, "The Plort Market can't be reached right now", false);
+    else if (s.marketClosed) silo_.Message(activator, "The Plort Market is closed - nothing sold", false);
+    else if (s.plorts == 0) silo_.Message(activator, "No plorts in this silo", false);
+    else  // the game shows its own currency notification (TrySell showUi)
+        silo_.Message(activator, std::format("Sold {} plort{} for {} Newbucks", s.plorts, s.plorts == 1 ? "" : "s", s.value),
+                      true);
+    return true;
 }
 
 // ---------------------------------------------------------------- limit slider --
@@ -1625,12 +1698,7 @@ void CustomUpgrades::OnAddUpgrade(Il2CppObject* plot, int32_t upg) {
                 SR2_WARN("[{}] sell-all on plot '{}' without the Sell-All Button - ignored", kModule, id);
                 return;
             }
-            std::string log;
-            const SiloSummary s = Summarize(plot, true, &log);
-            if (!s.marketAvailable) SR2_INFO("[{}] sell all (plot '{}'): Plort Market not available", kModule, id);
-            else if (s.marketClosed) SR2_INFO("[{}] sell all (plot '{}'): Plort Market closed, nothing sold", kModule, id);
-            else SR2_INFO("[{}] sell all (plot '{}'): sold {} plort(s) for {} Newbucks{}{}", kModule, id, s.plorts, s.value,
-                          log.empty() ? "" : ": ", log);
+            SellAllNow(plot, id, "menu");
         }
         return;
     }
@@ -1638,7 +1706,7 @@ void CustomUpgrades::OnAddUpgrade(Il2CppObject* plot, int32_t upg) {
     ps.type = d->plotType;
     ps.owned.insert(d->key);
     Bump();
-    if (IsWorldUpgrade(d->id)) worldAccum_ = kWorldTickSeconds;  // build it at the next frame
+    if (IsWorldUpgrade(d->id) || d->id == SILO_SELL_ALL) worldAccum_ = kWorldTickSeconds;  // build it at the next frame
     SR2_INFO("[{}] bought {} on plot '{}' (saved with the next game save)", kModule, d->title, id);
 }
 
@@ -1792,6 +1860,7 @@ bool CustomUpgrades::RemoveCustom(Il2CppObject* plot, int32_t upg, std::string& 
     Bump();
     if (IsWorldUpgrade(d->id) && world_.Ready())
         world_.Remove(plot, d->id == COOP_AIR_NET, d->id == COOP_HEN_COLLECTOR);
+    if (d->id == SILO_SELL_ALL && silo_.Ready()) silo_.Remove(plot);
     notes += "custom upgrade removed (saved with the next game save)";
     SR2_INFO("[{}] {} removed from plot '{}'", kModule, d->title, id);
     return true;
@@ -2073,6 +2142,29 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
                                  reinterpret_cast<void**>(&g_origDetailsBind)))
             report += std::format(" PurchaseItemDetailsContentView.BindData@0x{:X}", Resolver::Rva(p));
         else SR2_WARN("[{}] hook PurchaseItemDetailsContentView.BindData failed ({}) - no limit slider", kModule, err);
+    }
+
+    // Silo Sell-All world button (optional; missing -> only the "Sell All Plorts Now" menu action).
+    {
+        std::string serr;
+        Il2CppClass* act = R.Class(kImage, "", "PlortCollectorActivator", &serr);
+        auto collector = act ? R.FieldOffset(act, "Collector", &serr) : std::nullopt;
+        const MethodInfo* activateMi = act ? R.Method(act, "Activate", 0, &serr) : nullptr;
+        void* p = activateMi ? R.MethodPointer(activateMi, &serr) : nullptr;
+        bool ok = collector && p && silo_.Setup(R, kModule, serr);
+        if (ok) {
+            g_offActCollector = *collector;
+            ok = ctx.HookAddress("PlortCollectorActivator.Activate", p, reinterpret_cast<void*>(&ActivateDetour),
+                                 reinterpret_cast<void**>(&g_origActivate));
+            if (ok) report += std::format(" PlortCollectorActivator.Activate@0x{:X}", Resolver::Rva(p));
+            else serr = "hook failed";
+        }
+        if (!ok) {
+            silo_ = custom_upgrades::world::SiloButtons{};  // not Ready(): no buttons are built
+            g_offActCollector = 0;
+            SR2_WARN("[{}] silo sell button unavailable ({}) - the Sell-All Button keeps only its menu action", kModule,
+                     serr);
+        }
     }
 
     // The exact .sav file (optional; missing -> one sidecar per game as before): SaveGameImpl
