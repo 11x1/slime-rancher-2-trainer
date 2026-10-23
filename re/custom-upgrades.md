@@ -66,6 +66,13 @@ RVAs are only for reference (GameAssembly.dll 1.3.0). The code finds everything 
        `.json.migrated` after the first per-save write, so it is used only until then);
     3. this game's sidecar with the highest `save_number` below the loaded file's;
     4. nothing. The log line says which one was used.
+  * Re-enabling the module (its hooks, `Load` included, were off meanwhile, so another save of
+    the same game may be loaded now) drops the in-memory state at the next main-thread question
+    and re-reads it for the loaded save: `_currentGameMetadata` gives GameName + SaveNumber; this
+    game's sidecar with that `save_number` (whose `.sav` still exists; several -> newest `.sav`)
+    stands in for `SaveName`, then the order above. No metadata (or SaveNumber 0) -> empty state
+    for that game, logged; without the metadata fields (legacy mode) the per-game file, as on
+    load. Nothing is written by this re-read; the 1 Hz tick rebuilds the world objects.
   * Once a game has had a sidecar, every save writes one (also an empty one), so loading that
     save never falls back to an older state. A game that never had a custom upgrade gets no files.
   * Without the StoreGameData hook (other storage provider, name not found) it falls back to the
