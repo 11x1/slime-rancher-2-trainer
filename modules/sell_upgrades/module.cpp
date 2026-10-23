@@ -123,8 +123,32 @@
 //   * UnityEngine.UI.Button.Press detour: a click on OUR button (pointer compare; other
 //     buttons are not touched) sells at once and never reaches the original Press (whose
 //     submit would buy the selected card's tier). An OnAction in that frame or the next (the
-//     prefab's own submit routing) is swallowed. Gamepad: the cloned prefab
-//     (TextButton_NoneSelectable) is not reachable by navigation, so selling is mouse-only.
+//     prefab's own submit routing) is swallowed. The cloned prefab (TextButton_NoneSelectable) is
+//     not reachable by gamepad navigation: gamepad / keyboard selling is the alt action below.
+//
+// ---------------------------------------------------------------- alt-action sell --
+//   The list menus have a second action, the alt action ("Info": opens the Pedia). ListUI
+//   subscribes AltSubmit to its `altSubmit` InputEvent while focused; every selection
+//   (ListUI.<ShowMenu>b__4) sets onAltSubmitActionPerformed = onAltActionPerformed(item) for
+//   EVERY item (button shown or not), i.e. ListUIRoot`4.OnAltAction(item) (0x11AF260, shared
+//   generic body: Pedia for an IPediaEntryProvider, else nothing). After CreateDetailsMoreButton
+//   (our BindData detour) b__4 calls CreateDetailsAltButton(item, category, showAlt): destroy the
+//   previous ListUI.altActionButtonGameObject, then, if category.altDetailsButton and
+//   ListUIRoot`4.ShowAltActionButton(item) (0x11AFE20: item has a Pedia entry), instantiate
+//   altDetailsButton into ListUI.altActionButtonContainer. No label is set in code: the prefab is
+//   an input hint (key / button icon of the altSubmit event + "Info" label).
+//   * BindData detour: when the selected card has a sellable target (the same target and checks
+//     as the Sell button, but only when it can be sold now), a copy of that category's own
+//     altDetailsButton is instantiated into altActionButtonContainer (ListUIRoot`4.swapper = the
+//     ListUI), labelled "Sell +N" (InputHint._label disabled, _labelText set; fallbacks TextLabel,
+//     DetailsMoreButtonView). Its input icon is the game's own, for the current device. Destroyed
+//     on every bind like the Sell button. No prompt (and no gamepad sale) when nothing is
+//     sellable or the label could not be set.
+//   * ShowAltActionButton detour (shared body, one class check for other menus): false for the
+//     card that shows our prompt, so the vanilla Info hint is not stacked on it.
+//   * OnAltAction detour (shared body, LandPlotUIRoot only): for the card that shows our prompt,
+//     sells once (SellNow, one sale per frame) and never reaches the original (no Pedia for that
+//     press). Other cards: vanilla. A click on the prompt performs the same InputEvent -> same path.
 //
 // Fault policy: every detour runs its logic inside a DetourGuard (native fault -> module
 // faulted, detours pass-through). Objects are class- and IsAlive-checked; runtime_invoke
@@ -244,7 +268,10 @@ public:
     void OnDisable() override {
         enabled_.store(false);
         main_thread::Post([this] {
-            if (!enabled_.load()) DestroySellButton();
+            if (!enabled_.load()) {
+                DestroySellButton();
+                DestroyAltPrompt();
+            }
         });
     }
     bool On() const { return enabled_.load(std::memory_order_relaxed); }
@@ -255,6 +282,10 @@ public:
     void AfterMoreBind(Il2CppObject* view, Il2CppObject* vm);
     bool OnSellButton(Il2CppObject* button);
     Il2CppObject* SellButton() const { return btnButton_; }  // pointer compare only
+    bool HidesAltButton(Il2CppObject* root, Il2CppObject* item) const {
+        return altGo_ && item == altItem_ && root == root_;  // pointer compare only
+    }
+    bool HandleAltAction(Il2CppObject* root, Il2CppObject* item);
 
     // Ash Trough re-purchase: a vanilla purchase closure about to buy ASH_TROUGH on a plot
     // whose ash was remembered at its sale (else plot == nullptr).
@@ -297,6 +328,10 @@ private:
     Il2CppObject* FindItemByInfoLabel(Il2CppObject* root, Il2CppObject* infoLabel, Il2CppObject*& category);
     size_t OffsetIn(Il2CppObject* obj, const char* field, std::unordered_map<Il2CppClass*, size_t>& cache);
     void DestroySellButton();
+    void CreateAltPrompt(Il2CppObject* category, Il2CppObject* item, Il2CppObject* priceItem, int32_t upg,
+                         int32_t refund);
+    bool SetAltLabel(Il2CppObject* go, const std::string& text, const char*& via);
+    void DestroyAltPrompt();
 
     std::atomic<bool> enabled_{false};
     // TickCount of the last sale: a click on our button can also reach OnAction through the
@@ -305,6 +340,7 @@ private:
     unsigned long long sellTick_ = ~0ull;
     bool loggedButton_ = false;
     bool loggedLayout_ = false;
+    bool loggedAlt_ = false;
 
     // open plot menu (main thread only)
     Il2CppObject* root_ = nullptr;
@@ -315,7 +351,13 @@ private:
     Il2CppObject* btnItem_ = nullptr;    // the menu item whose price the refund uses (menu asset)
     int32_t btnUpgrade_ = 0;             // the owned upgrade it sells
     Il2CppGCHandle btnHandle_ = nullptr;
-    std::unordered_map<Il2CppClass*, size_t> offCategories_, offItems_, offDetailsButton_;
+    // our alt-action "Sell +N" prompt (main thread only)
+    Il2CppObject* altGo_ = nullptr;         // GameObject (handle held)
+    Il2CppObject* altItem_ = nullptr;       // the selected card's menu item (pointer compare)
+    Il2CppObject* altPriceItem_ = nullptr;  // the menu item whose price the refund uses
+    int32_t altUpgrade_ = 0;                // the owned upgrade it sells
+    Il2CppGCHandle altHandle_ = nullptr;
+    std::unordered_map<Il2CppClass*, size_t> offCategories_, offItems_, offDetailsButton_, offAltButton_;
     // ash in a sold Ash Trough, per LandPlotModel (main thread only; handle keeps the key alive)
     struct AshRecord {
         Il2CppGCHandle handle = nullptr;
@@ -370,6 +412,16 @@ public:
     size_t offMoreButton_ = 0;    // DetailsMoreButtonView.button (UnityEngine.UI.Button)
     size_t offVmInfoLabel_ = 0;   // DetailsMoreButtonViewModel.infoLabel
     Il2CppClass* moreViewClass_ = nullptr;     // DetailsMoreButtonView
+    // alt-action sell (optional: missing -> no gamepad / keyboard selling)
+    Il2CppClass* listUiClass_ = nullptr;       // ListUI
+    size_t offSwapper_ = 0;                    // ListUIRoot`4.swapper (the ListUI)
+    size_t offAltContainer_ = 0;               // ListUI.altActionButtonContainer
+    size_t offAltSubmit_ = 0;                  // ListUI.altSubmit (InputEvent, for the log)
+    Il2CppClass* hintClass_ = nullptr;         // InputHint (optional label route)
+    size_t offHintLabel_ = 0, offHintText_ = 0;         // InputHint._label / _labelText
+    Il2CppClass* textLabelClass_ = nullptr;    // TextLabel (optional label route)
+    size_t offTextLabelLse_ = 0, offTextLabelTmp_ = 0;  // TextLabel._stringEvent / _textElement
+    bool altOk_ = false;
     Il2CppClass* layoutGroupClass_ = nullptr;  // UnityEngine.UI.LayoutGroup (optional)
     Bound<void(Il2CppObject*)> objectDestroy_;  // UnityEngine.Object.Destroy(Object)
     // RectTransform (optional: side-by-side layout of PURCHASED / Purchase and our Sell button)
@@ -432,17 +484,23 @@ sr2::core::DetourGuard g_confirmGuard{kModule, "LandPlotUIRoot.<PromptForUpgrade
 sr2::core::DetourGuard g_activatorGuard{kModule, "LandPlotUIRoot.SetActivator"};
 sr2::core::DetourGuard g_bindGuard{kModule, "DetailsMoreButtonView.BindData"};
 sr2::core::DetourGuard g_pressGuard{kModule, "Button.Press"};
+sr2::core::DetourGuard g_showAltGuard{kModule, "ListUIRoot.ShowAltActionButton"};
+sr2::core::DetourGuard g_altGuard{kModule, "ListUIRoot.OnAltAction"};
 
 using OnActionFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
 using ConfirmFn = void (*)(Il2CppObject*, const MethodInfo*);
 using SetActivatorFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
 using MoreBindFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
 using PressFn = void (*)(Il2CppObject*, const MethodInfo*);
+using ShowAltFn = bool (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+using OnAltActionFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
 OnActionFn g_origOnAction = nullptr;
 ConfirmFn g_origConfirm = nullptr;
 SetActivatorFn g_origSetActivator = nullptr;
 MoreBindFn g_origMoreBind = nullptr;
 PressFn g_origPress = nullptr;
+ShowAltFn g_origShowAlt = nullptr;
+OnAltActionFn g_origOnAlt = nullptr;
 
 void SetActivatorDetour(Il2CppObject* self, Il2CppObject* plot, const MethodInfo* mi) {
     // Before the original: it ends in RebuildUI, which binds the details of the first item.
@@ -463,6 +521,24 @@ void PressDetour(Il2CppObject* button, const MethodInfo* mi) {
         if (handled) return;
     }
     g_origPress(button, mi);
+}
+
+// ListUIRoot`4.ShowAltActionButton / OnAltAction are shared generic bodies (every list menu):
+// LandPlotUIRoot only, by class.
+bool ShowAltDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo* mi) {
+    if (g_self && self && item && g_self->On() && IsA(self, g_self->rootClass_)) {
+        bool hide = false;
+        g_showAltGuard.Run([&] { hide = g_self->HidesAltButton(self, item); });
+        if (hide) return false;  // our Sell prompt stands in the alt slot for this card
+    }
+    return g_origShowAlt(self, item, mi);
+}
+
+void OnAltActionDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo* mi) {
+    bool handled = false;
+    if (g_self && self && item && g_self->On() && IsA(self, g_self->rootClass_))
+        g_altGuard.Run([&] { handled = g_self->HandleAltAction(self, item); });
+    if (!handled) g_origOnAlt(self, item, mi);
 }
 
 void OnActionDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo* mi) {
@@ -701,6 +777,7 @@ void SellUpgrades::TrackRoot(Il2CppObject* root) {
     if (!main_thread::IsMainThread() || root == root_) return;
     if (!IsA(root, rootClass_) || !unity::IsAlive(root)) return;
     DestroySellButton();  // belongs to the previous menu
+    DestroyAltPrompt();
     Il2CppGCHandle h = unity::NewGCHandle(root);
     if (!h) return;
     Il2CppGCHandle old = rootHandle_;
@@ -827,8 +904,9 @@ bool TemporaryReason(const std::string& brief) { return brief.rfind("holds ", 0)
 
 void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
     if (!main_thread::IsMainThread()) return;
-    // Any details bind (selection change, rebuild) replaces our previous button.
+    // Any details bind (selection change, rebuild) replaces our previous button and prompt.
     if (btnGo_) DestroySellButton();
+    if (altGo_ || altItem_) DestroyAltPrompt();
     if (!root_ || !unity::IsAlive(root_) || !vm) return;
     if (!IsA(view, moreViewClass_) || !unity::IsAlive(view)) return;
     Il2CppObject* infoLabel = unity::Field<Il2CppObject*>(vm, offVmInfoLabel_);
@@ -852,6 +930,8 @@ void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
     std::vector<Refund> refunds;
     int32_t price = 0, refund = 0;
     const bool sellable = reason.empty() && Price(priceItem, refunds, price, refund);
+    // Gamepad / keyboard: the alt action sells it (prompt only while it can be sold now).
+    if (sellable && altOk_) CreateAltPrompt(category, item, priceItem, upg, refund);
     if (!sellable && !TemporaryReason(brief)) return;  // no "can't sell" button (user feedback)
 
     const size_t offPrefab = OffsetIn(category, "detailsButton", offDetailsButton_);
@@ -925,6 +1005,133 @@ bool SellUpgrades::OnSellButton(Il2CppObject* button) {
     // Always handled: the original Press would submit the menu, i.e. buy the selected card's tier.
     if (sellTick_ == main_thread::TickCount()) return true;  // one sale per frame
     if (root_ && unity::IsAlive(root_) && btnItem_ && btnUpgrade_) SellNow(root_, btnItem_, btnUpgrade_, "sell button");
+    return true;
+}
+
+// ---------------------------------------------------------------- alt-action sell --
+
+void SellUpgrades::DestroyAltPrompt() {
+    if (!main_thread::IsMainThread()) return;
+    if (altGo_ && unity::IsAlive(altGo_) && objectDestroy_) objectDestroy_(altGo_);
+    altGo_ = altItem_ = altPriceItem_ = nullptr;
+    altUpgrade_ = 0;
+    if (Il2CppGCHandle h = altHandle_) {
+        altHandle_ = nullptr;
+        main_thread::Post([h] { unity::FreeGCHandle(h); });
+    }
+}
+
+// The prompt's label: InputHint (_label / _labelText), else TextLabel, else a DetailsMoreButtonView.
+// The LocalizeStringEvent is disabled first so it can't write "Info" back (InputHint.Start ->
+// Configure only sets its StringReference, which a disabled event does not apply).
+bool SellUpgrades::SetAltLabel(Il2CppObject* go, const std::string& text, const char*& via) {
+    via = "none";
+    Il2CppObject* t = unity::TransformOf(go);
+    if (!unity::IsAlive(t)) return false;
+    auto set = [&](Il2CppObject* lse, Il2CppObject* tmp) -> bool {
+        const bool lseOk = unity::IsAlive(lse) && IsA(lse, lseClass_);
+        if (lseOk) setEnabled_(lse, false);
+        if (!unity::IsAlive(tmp) && lseOk) tmp = getComponent_(lse, Type(tmpClass_));
+        if (!unity::IsAlive(tmp) || !IsA(tmp, tmpClass_)) return false;
+        Il2CppString* s = unity::NewString(text);
+        if (!s) return false;
+        bool ok = false;
+        Invoke(tmpSetTextMi_, tmp, {s}, "TMP_Text.set_text", &ok);
+        return ok;
+    };
+    if (hintClass_) {
+        Il2CppObject* hint = getComponentInChildren_(t, Type(hintClass_), true);
+        if (unity::IsAlive(hint) && IsA(hint, hintClass_)) {
+            via = "InputHint";
+            return set(unity::Field<Il2CppObject*>(hint, offHintLabel_), unity::Field<Il2CppObject*>(hint, offHintText_));
+        }
+    }
+    if (textLabelClass_) {
+        Il2CppObject* label = getComponentInChildren_(t, Type(textLabelClass_), true);
+        if (unity::IsAlive(label) && IsA(label, textLabelClass_)) {
+            via = "TextLabel";
+            return set(unity::Field<Il2CppObject*>(label, offTextLabelLse_),
+                       unity::Field<Il2CppObject*>(label, offTextLabelTmp_));
+        }
+    }
+    Il2CppObject* view = getComponentInChildren_(t, Type(moreViewClass_), true);
+    if (unity::IsAlive(view) && IsA(view, moreViewClass_)) {
+        via = "DetailsMoreButtonView";
+        return SetLabel(unity::Field<Il2CppObject*>(view, offMoreLabel_), text);
+    }
+    return false;
+}
+
+// A copy of the game's own alt-action hint (category.altDetailsButton) in the ListUI's alt slot,
+// labelled "Sell +N". Called from the details bind, before ListUI.CreateDetailsAltButton (which only
+// destroys its own instance, and skips this card through the ShowAltActionButton detour).
+void SellUpgrades::CreateAltPrompt(Il2CppObject* category, Il2CppObject* item, Il2CppObject* priceItem, int32_t upg,
+                                   int32_t refund) {
+    Il2CppObject* list = unity::Field<Il2CppObject*>(root_, offSwapper_);
+    if (!IsA(list, listUiClass_) || !unity::IsAlive(list)) return;
+    Il2CppObject* container = unity::Field<Il2CppObject*>(list, offAltContainer_);
+    if (!unity::IsAlive(container)) return;
+    // The card's own category first, else any category of this menu that has the hint prefab.
+    Il2CppObject* prefab = nullptr;
+    if (const size_t o = OffsetIn(category, "altDetailsButton", offAltButton_))
+        prefab = unity::Field<Il2CppObject*>(category, o);
+    bool borrowed = false;
+    if (!unity::IsAlive(prefab)) {
+        prefab = nullptr;
+        Il2CppObject* config = unity::Field<Il2CppObject*>(root_, offMenuConfig_);
+        const size_t offCats = unity::IsAlive(config) ? OffsetIn(config, "categories", offCategories_) : 0;
+        void* cats = offCats ? unity::Field<void*>(config, offCats) : nullptr;
+        for (size_t ci = 0, cn = unity::ListCount(cats); ci < cn && ci < 32 && !prefab; ++ci) {
+            auto* cat = static_cast<Il2CppObject*>(unity::ListAt(cats, ci));
+            const size_t o = unity::IsAlive(cat) ? OffsetIn(cat, "altDetailsButton", offAltButton_) : 0;
+            Il2CppObject* p = o ? unity::Field<Il2CppObject*>(cat, o) : nullptr;
+            if (unity::IsAlive(p)) prefab = p;
+        }
+        borrowed = prefab != nullptr;
+    }
+    if (!prefab) {
+        if (!loggedAlt_) {
+            loggedAlt_ = true;
+            SR2_WARN("[{}] alt-action sell: no altDetailsButton prefab in this menu - no Sell prompt", kModule);
+        }
+        return;
+    }
+    Il2CppObject* go = unity::Instantiate(prefab, container);
+    if (!unity::IsAlive(go)) return;
+    altHandle_ = unity::NewGCHandle(go);
+    if (!altHandle_) {
+        if (objectDestroy_) objectDestroy_(go);
+        return;
+    }
+    altGo_ = go;
+    unity::SetName(go, "sr2mods_SellHint");
+    const char* via = "none";
+    const std::string text = std::format("Sell +{}", refund);
+    const bool labelled = SetAltLabel(go, text, via);
+    if (!loggedAlt_) {
+        loggedAlt_ = true;
+        Il2CppObject* ev = unity::Field<Il2CppObject*>(list, offAltSubmit_);
+        SR2_INFO("[{}] alt-action sell: prefab '{}'{} cloned into '{}', label via {} {} - '{}'; input event '{}'",
+                 kModule, unity::GetName(prefab), borrowed ? " (from another category)" : "",
+                 unity::GetName(container), via, labelled ? "set" : "NOT set (no prompt)", text,
+                 unity::IsAlive(ev) ? unity::GetName(ev) : std::string("?"));
+    }
+    if (!labelled) {  // an "Info" hint that sells would mislead: no prompt, no alt-action sale
+        DestroyAltPrompt();
+        return;
+    }
+    altItem_ = item;
+    altPriceItem_ = priceItem;
+    altUpgrade_ = upg;
+}
+
+bool SellUpgrades::HandleAltAction(Il2CppObject* root, Il2CppObject* item) {
+    if (!main_thread::IsMainThread()) return false;
+    if (!altGo_ || item != altItem_ || root != root_) return false;  // vanilla Info / Pedia
+    if (!unity::IsAlive(root) || !unity::IsAlive(altGo_)) return false;
+    // Handled either way: this press is the Sell prompt's, never the Pedia's. One sale per frame.
+    if (sellTick_ != main_thread::TickCount() && altPriceItem_ && altUpgrade_)
+        SellNow(root, altPriceItem_, altUpgrade_, "alt action");
     return true;
 }
 
@@ -1468,6 +1675,49 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         why = saved;
     }
 
+    // ---- alt-action sell (optional: needs the sell button's pieces; missing -> mouse only) ----
+    const MethodInfo* showAltMi = nullptr;
+    const MethodInfo* onAltMi = nullptr;
+    std::string altWhy = buttonWhy.empty() ? "" : "sell button unavailable";
+    if (altWhy.empty()) {
+        std::string saved = why;
+        why.clear();
+        listUiClass_ = cls(kImage, "MonomiPark.SlimeRancher.UI.Adapter", "ListUI");
+        if (why.empty()) {
+            off(rootClass_, "swapper", offSwapper_);
+            off(listUiClass_, "altActionButtonContainer", offAltContainer_);
+            off(listUiClass_, "altSubmit", offAltSubmit_);
+        }
+        // ListUIRoot`4 (inflated base of LandPlotUIRoot): the shared generic bodies.
+        if (why.empty()) {
+            showAltMi = method(rootClass_, "ShowAltActionButton", 1);
+            onAltMi = method(rootClass_, "OnAltAction", 1);
+        }
+        altWhy = why;
+        why = saved;
+        // Label routes (each optional; none found -> no prompt is shown).
+        constexpr const char* kControlsNs = "MonomiPark.SlimeRancher.UI.Framework.CommonControls";
+        std::string lerr;
+        if (Il2CppClass* k = R.Class(kImage, kControlsNs, "InputHint", &lerr)) {
+            auto a = R.FieldOffset(k, "_label", &lerr);
+            auto b = R.FieldOffset(k, "_labelText", &lerr);
+            if (a && b) {
+                hintClass_ = k;
+                offHintLabel_ = *a;
+                offHintText_ = *b;
+            }
+        }
+        if (Il2CppClass* k = R.Class(kImage, kControlsNs, "TextLabel", &lerr)) {
+            auto a = R.FieldOffset(k, "_stringEvent", &lerr);
+            auto b = R.FieldOffset(k, "_textElement", &lerr);
+            if (a && b) {
+                textLabelClass_ = k;
+                offTextLabelLse_ = *a;
+                offTextLabelTmp_ = *b;
+            }
+        }
+    }
+
     // ---- hooks ----
     std::string err;
     void* onActionPtr = R.MethodPointer(onActionMi, &err);
@@ -1502,6 +1752,27 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     } else {
         SR2_WARN("[{}] sell button unavailable ({}) - upgrades can't be sold this session", kModule, buttonWhy);
     }
+    if (altWhy.empty()) {
+        void* sp = R.MethodPointer(showAltMi, &err);
+        void* ap = sp ? R.MethodPointer(onAltMi, &err) : nullptr;
+        if (!sp || !ap)
+            altWhy = "ShowAltActionButton / OnAltAction: no native body (" + err + ")";
+        else if (!ctx.HookAddress("ListUIRoot.ShowAltActionButton", sp, reinterpret_cast<void*>(&ShowAltDetour),
+                                  reinterpret_cast<void**>(&g_origShowAlt)))
+            altWhy = "hook ListUIRoot.ShowAltActionButton failed";
+        else if (!ctx.HookAddress("ListUIRoot.OnAltAction", ap, reinterpret_cast<void*>(&OnAltActionDetour),
+                                  reinterpret_cast<void**>(&g_origOnAlt)))
+            altWhy = "hook ListUIRoot.OnAltAction failed";  // ShowAlt stays pass-through (altOk_ false)
+        else
+            altOk_ = true;
+    }
+    if (!altOk_)
+        SR2_WARN("[{}] alt-action sell unavailable ({}) - selling is mouse-only this session", kModule, altWhy);
+    else
+        SR2_INFO("[{}] alt-action sell: ShowAltActionButton RVA 0x{:X}, OnAltAction RVA 0x{:X}; label via InputHint {}, "
+                 "TextLabel {}",
+                 kModule, Resolver::Rva(R.MethodPointer(showAltMi)), Resolver::Rva(R.MethodPointer(onAltMi)),
+                 hintClass_ ? "yes" : "no", textLabelClass_ ? "yes" : "no");
 
     g_self = this;
     SR2_INFO("[{}] setup ok: OnAction RVA 0x{:X}, <PromptForUpgrade>b__0 RVA 0x{:X}; offsets item._upgrade +0x{:X}, "

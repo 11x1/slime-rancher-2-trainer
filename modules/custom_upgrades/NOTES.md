@@ -53,6 +53,20 @@ findings from in-game tests that are easy to get wrong again.
   arrows for roosters (`kSecondary`). The grid navigation detour offers left / right to both;
   each takes only its own (Shift held or not).
 
+## Selling with gamepad / keyboard
+
+The plot menu's alt action (the Info / Pedia button) sells the selected card's sellable upgrade:
+the same target as the mouse Sell button (`ChainSellTarget` on tier cards, the owned item
+otherwise) and the same `CanSell` checks, one sale per press, no popup, no Pedia for that press.
+The prompt is a copy of the game's own alt-action hint (`category.altDetailsButton`: key / button
+icon + label) relabelled "Sell +N"; it is only shown while the upgrade can be sold now (a passing
+reason such as "holds food" shows no prompt, the mouse Sell button shows the reason). Code and
+findings: sell_upgrades header (`alt-action sell`), `re/custom-upgrades.md` 2b.1b.
+
+Not checked in game yet: that the plot categories have an `altDetailsButton`, that the prompt's
+label is set (log `alt-action sell: prefab ... label via ...`), and the keyboard key of the
+altSubmit event (the prompt shows it).
+
 ## Tier props (checklist u5, u6, u9, u11)
 
 `plot_props.cpp` puts a visible prop on a plot while a tier is owned; it goes when the tier is
