@@ -345,8 +345,15 @@ Original plan:
   a Collector; for ours it plays the button animation (`_buttonAnimator.SetTrigger`) and
   `PressButtonCue` (0.4 s rate limit like vanilla), checks ownership and runs the same sale as the
   menu action. Feedback: the game's currency HUD notification (TrySell showUi) plus a short
-  world-space text above the button through `ui::hud` (new `Frame.textOnly`): "Sold N plorts for
-  V Newbucks", "The Plort Market is closed - nothing sold", "No plorts in this silo". Silos come
+  world-space text above the button through `ui::hud` (new `Frame.textOnly`): "The Plort Market
+  is closed - nothing sold", "No plorts in this silo". A successful sale (button or menu) instead
+  raises one HUD notification per plort type, the quantum drones' "plorts sold" ones
+  (`modules/custom_upgrades/sale_notify.cpp`): `DroneActivitySceneNotifications.AddPlortSold(type,
+  count)` on the HUD drone provider's `_activeNotifications`, then
+  `ItemAcquisitionNotificationList.HandleNotificationAvailable(provider)` (icon, PlortSoldFormat
+  name, count). Only while `get_CanQueueAny` is true (the list discards notices while the HUD is
+  suppressed by an open menu), so menu sales show after the menu closes. Without the HUD list the
+  button falls back to the text "Sold N plorts for V Newbucks". Silos come
   from the sidecar ids -> `SceneContext.GameModel.GetLandPlotModel(id).gameObj` (the
   LandPlotLocation) -> `GetComponentInChildren<LandPlot>` at ~1 Hz; sold / disabled / faulted
   removes the button, load / plot rebuild rebuilds it. The menu action stays.
