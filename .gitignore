@@ -52,3 +52,6 @@ desktop.ini
 *.sav
 .venv/
 venv/
+
+# Claude Code agent worktrees
+/.claude/worktrees/
