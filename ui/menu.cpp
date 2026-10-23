@@ -88,10 +88,10 @@ struct FontScope {
     ~FontScope() { ImGui::PopFont(); }
 };
 
-// Background, border and flat drop shadow of a floating window (tooltip, open
+// Background, optional border and flat drop shadow of a floating window (tooltip, open
 // dropdown), drawn by the window itself: its own ImGui background is turned off
 // (PopupBg transparent, no border) so the shadow can sit underneath.
-void FloatingSurface() {
+void FloatingSurface(bool outline) {
     const Palette& P = theme::Colors();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 a = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize(), b(a.x + sz.x, a.y + sz.y);
@@ -99,7 +99,7 @@ void FloatingSurface() {
     dl->PushClipRectFullScreen();
     dl->AddRectFilled(ImVec2(a.x + U(3), a.y + U(5)), ImVec2(b.x + U(3), b.y + U(5)), P.shadow, r);
     dl->AddRectFilled(a, b, P.popBg, r);
-    dl->AddRect(a, b, P.popBorder, r, 0, std::max(1.0f, U(1)));
+    if (outline) dl->AddRect(a, b, P.popBorder, r, 0, std::max(1.0f, U(1)));
     dl->PopClipRect();
 }
 
@@ -118,7 +118,7 @@ void Tooltip(const std::string& text) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(12), U(9)));
     PushFloatingStyle();
     if (ImGui::BeginTooltip()) {
-        FloatingSurface();
+        FloatingSurface(false);
         {
             FontScope f(theme::Body(), theme::kSmallSize + 0.5f);  // popped before EndTooltip
             ImGui::PushTextWrapPos(U(300));
@@ -325,7 +325,7 @@ void ComboDef(const settings::Def& d, double cur, float w) {
                                         ImGuiComboFlags_NoArrowButton | ImGuiComboFlags_HeightLarge);
     PopFloatingStyle();
     ImGui::PopStyleVar();
-    if (open) FloatingSurface();
+    if (open) FloatingSurface(true);
     DrawChevron(dl, ImVec2(pos.x + w - U(17), pos.y + fh * 0.5f), ImGui::GetColorU32(P.grab));
     if (!open) return;
     // Options sit flush against each other inside the list's padding.
