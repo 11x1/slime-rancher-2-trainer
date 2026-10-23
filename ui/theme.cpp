@@ -158,14 +158,14 @@ void LoadFonts(ImGuiIO& io, const char* fallbackTtf) {
     };
 
     ImFontConfig body;
-    std::strncpy(body.Name, "Nunito Bold", sizeof(body.Name) - 1);
+    strncpy_s(body.Name, "Nunito Bold", _TRUNCATE);
     g_body = io.Fonts->AddFontFromMemoryCompressedTTF(nunito_bold_compressed_data, static_cast<int>(nunito_bold_compressed_size),
                                                       kBodySize, &body);
     if (!g_body) g_body = io.Fonts->AddFontDefault();
     merge();
 
     ImFontConfig disp;
-    std::strncpy(disp.Name, "Fredoka SemiBold", sizeof(disp.Name) - 1);
+    strncpy_s(disp.Name, "Fredoka SemiBold", _TRUNCATE);
     g_display = io.Fonts->AddFontFromMemoryCompressedTTF(fredoka_semibold_compressed_data,
                                                          static_cast<int>(fredoka_semibold_compressed_size), kDisplaySize, &disp);
     if (g_display) merge();
