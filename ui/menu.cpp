@@ -1193,14 +1193,25 @@ namespace sbx = ::sr2::ui::sandbox;
 constexpr const char* kSbxPopup = "##sandbox_confirm";
 bool g_sbxConfirm = false;   // open the "Enable sandbox?" dialog (set by the button or the tab switch)
 int g_sbxSlot = 0;           // selected vacpack slot
-int g_sbxAmount = 0;         // amount slider
-int g_sbxAmountSlot = -1;    // slot the amount slider belongs to
 long long g_sbxBucks = 1000;
-item_grid::State g_vacGrid, g_spawnGrid, g_craftGrid;  // search text per grid
-int g_spawnKind = -1;        // spawner filter (sbx::Kind as int, -1 = all)
+item_grid::State g_vacGrid, g_spawnGrid, g_craftGrid;  // search text and tab per grid
 int g_spawnCount = 1;
-int g_craftCat = -1;         // crafter filter (index into recipeCategories, -1 = all)
-int g_craftCount = 1;
+std::map<uintptr_t, int> g_vacPick;    // vacpack multi-selection: item -> amount (0 = the slot's maximum)
+std::map<uintptr_t, int> g_craftPick;  // crafter multi-selection: recipe / material -> amount
+uintptr_t g_vacFocus = 0;    // last picked vacpack item: Shift+wheel on a slot puts this one in
+// Slot counts asked for but not in a snapshot yet, so quick wheel notches add up.
+struct SlotPending {
+    uintptr_t item = 0;
+    int count = 0;
+    double until = 0;  // ImGui::GetTime() deadline
+};
+SlotPending g_slotPending[32];
+// Right-click menu on an item tile.
+enum class SbxGrid { Vacpack, Spawner };
+uintptr_t g_ctxItem = 0;
+SbxGrid g_ctxGrid = SbxGrid::Vacpack;
+constexpr const char* kSbxCtx = "##sbx_item_ctx";
+constexpr const char* kSlotDrag = "SR2_SLOT";  // drag payload: a vacpack slot index (int)
 
 std::string Thousands(long long v) {
     std::string s = std::to_string(v < 0 ? -v : v);
@@ -1367,60 +1378,48 @@ ImU32 KindAccent(sbx::Kind k) {
     return IM_COL32(0xA8, 0xB4, 0xC8, 0xFF);
 }
 
-const char* KindLabel(sbx::Kind k) {
+// The tooltip's group tag (singular).
+const char* KindTag(sbx::Kind k) {
     switch (k) {
-        case sbx::Kind::Slime: return "Slimes";
-        case sbx::Kind::Largo: return "Largos";
-        case sbx::Kind::Plort: return "Plorts";
+        case sbx::Kind::Slime: return "Slime";
+        case sbx::Kind::Largo: return "Largo";
+        case sbx::Kind::Plort: return "Plort";
         case sbx::Kind::Food: return "Food";
-        case sbx::Kind::Animal: return "Animals";
-        case sbx::Kind::Toy: return "Toys";
-        case sbx::Kind::Resource: return "Resources";
-        case sbx::Kind::Liquid: return "Liquids";
-        case sbx::Kind::Gadget: return "Gadgets";
+        case sbx::Kind::Animal: return "Meat";
+        case sbx::Kind::Toy: return "Toy";
+        case sbx::Kind::Resource: return "Resource";
+        case sbx::Kind::Liquid: return "Liquid";
+        case sbx::Kind::Gadget: return "Gadget";
         case sbx::Kind::Other: break;
     }
-    return "Other";
+    return "Item";
 }
 
-// Small toggle pill for a filter row; true when clicked.
-bool Chip(const char* label, bool on) {
-    const Palette& P = theme::Colors();
-    FontScope f(theme::Body(), theme::kSmallSize);
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(U(9), U(3)));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, U(10));
-    ImGui::PushStyleColor(ImGuiCol_Button, on ? P.sel : P.frame);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, on ? P.sel : P.frameHover);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, P.sel);
-    ImGui::PushStyleColor(ImGuiCol_Text, on ? P.text : P.soft);
-    const bool r = ImGui::Button(label);
-    ImGui::PopStyleColor(4);
-    ImGui::PopStyleVar(2);
-    return r;
-}
-
-// A wrapping row of chips: "All" (-1) and one per label. Returns the new selection.
-int ChipRow(const char* id, const std::vector<std::pair<int, std::string>>& chips, int sel) {
-    ImGui::PushID(id);
-    const float avail = ImGui::GetContentRegionAvail().x, sp = U(6);
-    float x = 0;
-    auto place = [&](const char* label) {
-        FontScope f(theme::Body(), theme::kSmallSize);
-        const float w = ImGui::CalcTextSize(label).x + U(18);
-        if (x > 0 && x + sp + w <= avail) ImGui::SameLine(0, sp), x += sp;
-        else x = 0;
-        x += w;
-    };
-    place("All");
-    if (Chip("All", sel == -1)) sel = -1;
-    for (const auto& [value, label] : chips) {
-        ImGui::PushID(value);
-        place(label.c_str());
-        if (Chip(label.c_str(), sel == value)) sel = value;
-        ImGui::PopID();
+// Which group tab shows an item (sbx::Group; All shows everything).
+bool InGroup(sbx::Kind k, int group) {
+    switch (group) {
+        case sbx::kGroupPlorts: return k == sbx::Kind::Plort;
+        case sbx::kGroupSlimes: return k == sbx::Kind::Slime || k == sbx::Kind::Largo;
+        case sbx::kGroupFood: return k == sbx::Kind::Food || k == sbx::Kind::Animal;
+        case sbx::kGroupResources: return k == sbx::Kind::Resource;
+        default: return true;
     }
-    ImGui::PopID();
-    return sel;
+}
+
+// The vacpack and spawner tabs: All, Plorts, Slimes, Food, Resources with the game's icons.
+const std::vector<item_grid::Tab>& GroupTabs(const sbx::Snapshot& s) {
+    static std::vector<item_grid::Tab> tabs(sbx::kGroupCount);
+    static const char* const kTips[] = {"All", "Plorts", "Slimes", "Food", "Resources"};
+    static const char kGlyph[] = {0, 'P', 'S', 'F', 'R'};
+    static const sbx::Kind kTint[] = {sbx::Kind::Other, sbx::Kind::Plort, sbx::Kind::Slime, sbx::Kind::Food, sbx::Kind::Resource};
+    for (int i = 0; i < sbx::kGroupCount; ++i) {
+        item_grid::Tab& t = tabs[static_cast<size_t>(i)];
+        t.icon = s.groupIcons[i];
+        t.glyph = kGlyph[i];
+        t.tint = i == 0 ? 0 : KindAccent(kTint[i]);
+        t.tip = kTips[i];
+    }
+    return tabs;
 }
 
 void SmallHeading(const char* text) {
@@ -1448,9 +1447,265 @@ item_grid::Options GridOptions(float height) {
     return o;
 }
 
-// Vacpack: the slots in a row across the top, the selected slot's amount
-// controls, then a grid of what that slot accepts. Clicking an item fills the
-// selected slot with it; dragging an item onto any slot fills that slot.
+// Item by id from the vacpack list or the spawn list (lookup table rebuilt when a list changes).
+const sbx::Item* FindItem(const sbx::Snapshot& s, uintptr_t id) {
+    static const void* builtFor[2] = {};
+    static std::map<uintptr_t, const sbx::Item*> byId;
+    if (builtFor[0] != s.spawnables.get() || builtFor[1] != s.catalog.get()) {
+        builtFor[0] = s.spawnables.get();
+        builtFor[1] = s.catalog.get();
+        byId.clear();
+        for (const auto* list : {s.spawnables.get(), s.catalog.get()})
+            if (list)
+                for (const sbx::Item& it : *list) byId.emplace(it.id, &it);
+    }
+    const auto it = byId.find(id);
+    return it == byId.end() ? nullptr : it->second;
+}
+
+const sbx::Relation* FindRelation(const sbx::Snapshot& s, uintptr_t id) {
+    if (!s.relations) return nullptr;
+    const auto it = s.relations->find(id);
+    return it == s.relations->end() ? nullptr : &it->second;
+}
+
+// True if `other` relates to `id` through a slime diet (either direction).
+bool Related(const sbx::Relation* r, uintptr_t other) {
+    if (!r) return false;
+    for (const auto* v : {&r->favourites, &r->plorts, &r->favouriteOf, &r->plortOf})
+        if (std::find(v->begin(), v->end(), other) != v->end()) return true;
+    return false;
+}
+
+// Group tag pill after the last item on the line.
+void TagPill(const char* tag, ImU32 accent) {
+    const Palette& P = theme::Colors();
+    ImFont* f = theme::Body();
+    const float size = theme::kSmallSize - 1;
+    const ImVec2 ts = TextSize(f, size, tag);
+    ImGui::SameLine(0, U(8));
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float h = ts.y + U(4), w = ts.x + U(12);
+    const float y = p.y + (ImGui::GetTextLineHeight() - h) * 0.5f;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(ImVec2(p.x, y), ImVec2(p.x + w, y + h), Mix(P.frame, accent, 0.28f), h * 0.5f);
+    Text(dl, f, size, ImVec2(p.x + U(6), y + U(2)), P.text, tag);
+    ImGui::Dummy(ImVec2(w, ImGui::GetTextLineHeight()));
+}
+
+// One row of related items in a tooltip: label, then icon + name for each (at most `max`).
+void RelationRow(const sbx::Snapshot& s, const char* label, const std::vector<uintptr_t>& ids, size_t max) {
+    std::vector<const sbx::Item*> items;
+    for (uintptr_t id : ids)
+        if (const sbx::Item* it = FindItem(s, id); it && items.size() < max) items.push_back(it);
+    if (items.empty()) return;
+    const Palette& P = theme::Colors();
+    FontScope f(theme::Body(), theme::kSmallSize);
+    ImGui::PushStyleColor(ImGuiCol_Text, P.soft);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(label);
+    ImGui::PopStyleColor();
+    const float e = U(22);
+    for (size_t i = 0; i < items.size(); ++i) {
+        ImGui::SameLine(0, i == 0 ? U(8) : U(10));
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float y = p.y + (ImGui::GetFrameHeight() - e) * 0.5f;
+        if (!item_grid::DrawIcons(ImGui::GetWindowDrawList(), items[i]->icon, items[i]->icon2, ImVec2(p.x, y),
+                                  ImVec2(p.x + e, y + e)))
+            ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(p.x + e * 0.5f, y + e * 0.5f), e * 0.25f, KindAccent(items[i]->kind));
+        ImGui::Dummy(ImVec2(e, ImGui::GetFrameHeight()));
+        if (items.size() <= 2) {  // with one or two, the names fit too
+            ImGui::SameLine(0, U(4));
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(items[i]->name.c_str());
+        }
+    }
+    if (ids.size() > items.size() && items.size() == max) {
+        ImGui::SameLine(0, U(6));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.dim), "+%d", static_cast<int>(ids.size() - items.size()));
+    }
+}
+
+// Item tooltip: the name with its group as a small tag; for slimes, foods and plorts the
+// diet links with icons (favourite food, plort, who loves / makes it); an optional dim hint.
+void ItemTooltip(const sbx::Snapshot& s, const std::string& name, sbx::Kind kind, uintptr_t id, const char* hint) {
+    const Palette& P = theme::Colors();
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(12), U(9)));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(6), U(3)));
+    PushFloatingStyle();
+    if (ImGui::BeginTooltip()) {
+        FloatingSurface(false);
+        {
+            FontScope f(theme::Body(), theme::kSmallSize + 1.5f);
+            ImGui::TextUnformatted(name.c_str());
+        }
+        TagPill(KindTag(kind), KindAccent(kind));
+        if (const sbx::Relation* r = id ? FindRelation(s, id) : nullptr) {
+            RelationRow(s, "Favourite", r->favourites, 3);
+            RelationRow(s, "Plort", r->plorts, 2);
+            RelationRow(s, "Favourite of", r->favouriteOf, 6);
+            RelationRow(s, "Made by", r->plortOf, 6);
+        }
+        if (hint && *hint) {
+            FontScope f(theme::Body(), theme::kSmallSize - 1);
+            ImGui::PushStyleColor(ImGuiCol_Text, P.dim);
+            ImGui::PushTextWrapPos(U(280));
+            ImGui::TextUnformatted(hint);
+            ImGui::PopTextWrapPos();
+            ImGui::PopStyleColor();
+        }
+        ImGui::EndTooltip();
+    }
+    PopFloatingStyle();
+    ImGui::PopStyleVar(2);
+}
+
+void TabTip(const item_grid::Result& r, const std::vector<item_grid::Tab>& tabs) {
+    if (r.hoveredTab >= 0 && static_cast<size_t>(r.hoveredTab) < tabs.size()) Tooltip(tabs[static_cast<size_t>(r.hoveredTab)].tip);
+}
+
+// Amount step of one wheel notch: 1, or 10 with Ctrl.
+int WheelStep(float wheel) {
+    const int step = ImGui::GetIO().KeyCtrl ? 10 : 1;
+    return wheel > 0 ? step : -step;
+}
+
+// A slot's count as the tab last asked for it (quick wheel notches add up before the next snapshot).
+int SlotCount(const sbx::Slot& sl, int idx) {
+    const SlotPending& p = g_slotPending[idx & 31];
+    return p.until > ImGui::GetTime() ? p.count : sl.count;
+}
+
+void SetSlotPending(int idx, uintptr_t item, int count) { g_slotPending[idx & 31] = {item, count, ImGui::GetTime() + 0.8}; }
+
+// What a slot holds as the tab last asked for it (see SlotCount).
+uintptr_t SlotItem(const sbx::Slot& sl, int idx) {
+    const SlotPending& p = g_slotPending[idx & 31];
+    return p.until > ImGui::GetTime() ? p.item : sl.item;
+}
+
+// The slot an item goes into from the vacpack grid: the selected slot if it accepts the item,
+// else the first unlocked one that holds it or is empty and accepts it. -1: none.
+int TargetSlot(const sbx::Snapshot& s, const sbx::Item& it) {
+    auto ok = [&](int i) {
+        const sbx::Slot& sl = s.slots[static_cast<size_t>(i)];
+        return i < 32 && sl.unlocked && (it.slotMask & (1u << i));
+    };
+    const int n = static_cast<int>(s.slots.size());
+    if (g_sbxSlot < n && ok(g_sbxSlot)) return g_sbxSlot;
+    for (int i = 0; i < n; ++i)
+        if (ok(i) && s.slots[static_cast<size_t>(i)].item == it.id) return i;
+    for (int i = 0; i < n; ++i)
+        if (ok(i) && !s.slots[static_cast<size_t>(i)].item) return i;
+    return -1;
+}
+
+// Puts `amount` (<= 0: the slot's maximum) of a vacpack item into slot `idx`.
+void PutInSlot(const sbx::Snapshot& s, int idx, const sbx::Item& it, int amount) {
+    const sbx::Slot& sl = s.slots[static_cast<size_t>(idx)];
+    const int n = amount > 0 ? std::min(amount, std::max(1, sl.max)) : std::max(1, sl.max);
+    SetSlotPending(idx, it.id, n);
+    SbxRequest(sbx::Op::PutItem, n, idx, it.id);
+}
+
+// Right-click menu entries for an item: "Give slime / food / plort" from the diets, applied with
+// the grid's own action (vacpack: put into a slot; spawner: spawn in front of you).
+void ItemContextMenu(const sbx::Snapshot& s) {
+    const Palette& P = theme::Colors();
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(8), U(8)));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(6), U(4)));
+    PushFloatingStyle();
+    if (ImGui::BeginPopup(kSbxCtx)) {
+        FloatingSurface(true);
+        const sbx::Item* self = FindItem(s, g_ctxItem);
+        const sbx::Relation* r = FindRelation(s, g_ctxItem);
+        const bool vac = g_ctxGrid == SbxGrid::Vacpack;
+        if (!self) {
+            ImGui::CloseCurrentPopup();
+        } else {
+            {
+                FontScope f(theme::Body(), theme::kSmallSize);
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.soft), "%s", self->name.c_str());
+            }
+            int entries = 0;
+            auto entry = [&](const char* verb, uintptr_t id) {
+                const sbx::Item* it = FindItem(s, id);
+                if (!it) return;
+                // Vacpack: it must be in the vacpack list with a slot for it; spawner: in the spawn list.
+                bool can = false;
+                int slot = -1;
+                if (vac && s.catalog) {
+                    for (const sbx::Item& c : *s.catalog)
+                        if (c.id == id) {
+                            slot = TargetSlot(s, c);
+                            can = slot >= 0;
+                            it = &c;
+                            break;
+                        }
+                } else if (!vac && s.spawnables) {
+                    for (const sbx::Item& c : *s.spawnables)
+                        if (c.id == id) {
+                            can = !(c.tarr && s.tarrsOff);
+                            it = &c;
+                            break;
+                        }
+                }
+                ++entries;
+                ImGui::PushID(static_cast<int>(entries));
+                const float e = U(22);
+                const ImVec2 p = ImGui::GetCursorScreenPos();
+                const std::string label = std::format("{}: {}", verb, it->name);
+                ImGui::BeginDisabled(!can);
+                const bool hit = ImGui::Selectable("##give", false, 0, ImVec2(U(240), e));
+                ImGui::EndDisabled();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                item_grid::DrawIcons(dl, it->icon, it->icon2, p, ImVec2(p.x + e, p.y + e), can ? IM_COL32_WHITE : IM_COL32(255, 255, 255, 90));
+                const float fs = theme::kSmallSize + 0.5f;
+                const ImVec2 ts = TextSize(theme::Body(), fs, label.c_str());
+                Text(dl, theme::Body(), fs, ImVec2(p.x + e + U(8), p.y + (e - ts.y) * 0.5f), can ? P.text : P.dim, label.c_str());
+                if (!can && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    Tooltip(vac ? "No unlocked vacpack slot takes this." : "Not available here.");
+                if (hit && can) {
+                    if (vac) {
+                        g_sbxSlot = slot;
+                        PutInSlot(s, slot, *it, 0);
+                    } else {
+                        SbxRequest(sbx::Op::Spawn, g_spawnCount, -1, it->id);
+                    }
+                }
+                ImGui::PopID();
+            };
+            if (r) {
+                for (uintptr_t id : r->favouriteOf) entry("Give slime", id);
+                for (uintptr_t id : r->favourites) entry("Give food", id);
+                for (uintptr_t id : r->plorts) entry("Give plort", id);
+                for (uintptr_t id : r->plortOf) entry("Give slime", id);
+            }
+            if (entries == 0) DimText("No favourites or plorts known for this item.");
+        }
+        if (PopupCancelled()) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    PopFloatingStyle();
+    ImGui::PopStyleVar(2);
+}
+
+void OpenItemContext(uintptr_t id, SbxGrid grid) {
+    g_ctxItem = id;
+    g_ctxGrid = grid;
+    ImGui::OpenPopup(kSbxCtx);
+}
+
+constexpr const char* kVacHint = "Click: fill the selected slot. Ctrl+click: select several. Shift+wheel: amount "
+                                 "(Ctrl: 10 at a time). Right-click: favourites. Drag onto a slot.";
+
+// Vacpack: the slots in a row across the top, the selected slot's line (Fill / Empty), then a
+// grid of what that slot accepts with group tabs, search and "Put in slots".
+//   * Item: click fills the selected slot; Ctrl+click selects several; Shift+wheel sets the
+//     amount (shown on the tile); drag onto any slot; right-click for favourites.
+//   * Slot: wheel changes its count; Shift+wheel puts the last picked item in; drag a slot onto
+//     another to move / swap; a locked slot shows a lock that unlocks it on click.
 void SandboxVacpack(const sbx::Snapshot& s, float w) {
     const Palette& P = theme::Colors();
     BeginCard("sbx_vac", w);
@@ -1460,7 +1715,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
         EndCard();
         return;
     }
-    const int n = static_cast<int>(s.slots.size());
+    const int n = std::min(static_cast<int>(s.slots.size()), 32);
     g_sbxSlot = std::clamp(g_sbxSlot, 0, n - 1);
     if (!s.slots[static_cast<size_t>(g_sbxSlot)].unlocked)  // move off a locked slot
         for (int i = 0; i < n; ++i)
@@ -1468,6 +1723,8 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
                 g_sbxSlot = i;
                 break;
             }
+    const ImGuiIO& io = ImGui::GetIO();
+    const sbx::Item* focus = g_vacFocus ? FindItem(s, g_vacFocus) : nullptr;
 
     // ---- slot row ----
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1476,116 +1733,239 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     const float e = std::max(U(24), std::floor(std::min(U(92), (avail - gap * static_cast<float>(n - 1)) / static_cast<float>(n))));
     for (int i = 0; i < n; ++i) {
         const sbx::Slot& sl = s.slots[static_cast<size_t>(i)];
+        const int count = SlotCount(sl, i);
         ImGui::PushID(i);
         if (i > 0) ImGui::SameLine(0, gap);
-        if (ImGui::InvisibleButton("##slot", ImVec2(e, e)) && sl.unlocked) g_sbxSlot = i;
-        const bool hot = ImGui::IsItemHovered() && sl.unlocked;
+        const bool clicked = ImGui::InvisibleButton("##slot", ImVec2(e, e));
+        const bool hovered = ImGui::IsItemHovered();
+        const bool hot = hovered && (sl.unlocked || sl.unlockable);
         const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
-        if (sl.unlocked && ImGui::BeginDragDropTarget()) {
-            if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(item_grid::kDragType);
-                p && p->DataSize == sizeof(uintptr_t)) {
-                g_sbxSlot = i;
-                SbxRequest(sbx::Op::PutItem, sl.max > 0 ? sl.max : 1, i, *static_cast<const uintptr_t*>(p->Data));
+        if (clicked) {
+            if (sl.unlocked) g_sbxSlot = i;
+            else if (sl.unlockable) SbxRequest(sbx::Op::UnlockSlot, 0, i);
+        }
+        if (sl.unlocked) {
+            // Wheel over a slot: its count (Shift: put the last picked item in). The page does not scroll.
+            if (hovered) {
+                ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+                ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelX);
+                const float wheel = io.MouseWheel != 0.0f ? io.MouseWheel : io.MouseWheelH;
+                if (wheel != 0.0f) {
+                    const int step = WheelStep(wheel);
+                    const uintptr_t holds = SlotItem(sl, i);
+                    if (io.KeyShift && focus && focus->slotMask & (1u << i) && holds != focus->id) {
+                        if (step > 0) PutInSlot(s, i, *focus, step);
+                    } else if ((!io.KeyShift || (focus && holds == focus->id)) && holds) {
+                        const int next = std::clamp(count + step, 0, std::max(0, sl.max));
+                        if (next != count) {
+                            SetSlotPending(i, next > 0 ? holds : 0, next);
+                            SbxRequest(sbx::Op::SetSlotCount, next, i);
+                        }
+                    }
+                }
             }
-            ImGui::EndDragDropTarget();
+            if (sl.item && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoPreviewTooltip)) {
+                ImGui::SetDragDropPayload(kSlotDrag, &i, sizeof(i));
+                ImGui::EndDragDropSource();
+            }
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(item_grid::kDragType); p && p->DataSize == sizeof(uintptr_t)) {
+                    const uintptr_t id = *static_cast<const uintptr_t*>(p->Data);
+                    if (const sbx::Item* it = FindItem(s, id)) {
+                        g_sbxSlot = i;
+                        const auto pick = g_vacPick.find(id);
+                        PutInSlot(s, i, *it, pick != g_vacPick.end() ? pick->second : 0);
+                    }
+                }
+                if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(kSlotDrag); p && p->DataSize == sizeof(int)) {
+                    const int from = *static_cast<const int*>(p->Data);
+                    if (from != i) SbxRequest(sbx::Op::MoveSlot, i, from);
+                    g_sbxSlot = i;
+                }
+                ImGui::EndDragDropTarget();
+            }
         }
         item_grid::Tile t;
         t.id = sl.item;
         t.name = sl.item ? &sl.name : nullptr;
         t.icon = sl.item ? sl.icon : 0;
+        t.icon2 = sl.item ? sl.icon2 : 0;
         t.accent = sl.item ? KindAccent(sl.kind) : 0;
         t.dimmed = !sl.unlocked;
         item_grid::DrawTile(dl, a, b, t, hot, sl.unlocked && i == g_sbxSlot, g_scale);
         const float fs = theme::kSmallSize;
         Text(dl, body, fs, ImVec2(a.x + U(6), a.y + U(4)), P.dim, std::to_string(i + 1).c_str());
-        const char* mid = !sl.unlocked ? "Locked" : !sl.item ? "Empty" : nullptr;
-        if (mid) {
-            const ImVec2 ts = TextSize(body, fs, mid);
-            Text(dl, body, fs, ImVec2((a.x + b.x - ts.x) * 0.5f, (a.y + b.y - ts.y) * 0.5f), P.dim, mid);
-        }
-        if (sl.unlocked && sl.item) {
-            const std::string c = std::format("{}/{}", sl.count, sl.max);
+        if (!sl.unlocked) {
+            // Lock; over an unlockable slot it opens on hover.
+            const ImU32 lc = hot ? (theme::Current() == theme::Mode::Dark ? P.grab : P.accent) : P.dim;
+            item_grid::DrawLock(dl, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f + U(2)), std::min(U(26), e * 0.42f),
+                                hot && sl.unlockable, lc);
+        } else if (!sl.item) {
+            const ImVec2 ts = TextSize(body, fs, "Empty");
+            Text(dl, body, fs, ImVec2((a.x + b.x - ts.x) * 0.5f, (a.y + b.y - ts.y) * 0.5f), P.dim, "Empty");
+        } else {
+            const std::string c = std::format("{}/{}", count, sl.max);
             const ImVec2 cs = TextSize(body, fs, c.c_str());
             const ImVec2 cp(b.x - U(6) - cs.x, b.y - U(6) - cs.y);
             Text(dl, body, fs, ImVec2(cp.x + 1, cp.y + 1), IM_COL32(0, 0, 0, 150), c.c_str());
             Text(dl, body, fs, cp, P.text, c.c_str());
         }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
-            Tooltip(!sl.unlocked ? std::format("Slot {} is locked. Vacpack upgrades unlock it.", i + 1)
-                    : sl.item    ? std::format("Slot {}: {} ({} / {})", i + 1, sl.name, sl.count, sl.max)
-                                 : std::format("Slot {} is empty. Click an item below to fill it.", i + 1));
+        if (hot && !sl.unlocked) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort) && !ImGui::GetDragDropPayload()) {
+            if (!sl.unlocked)
+                Tooltip(sl.unlockable ? std::format("Slot {} is locked. Click to unlock it (applies the vacpack upgrade, free).", i + 1)
+                                      : std::format("Slot {} is locked. No vacpack upgrade for it was found.", i + 1));
+            else if (sl.item)
+                ItemTooltip(s, sl.name, sl.kind, sl.item,
+                            std::format("Slot {}: {} / {}. Wheel: amount. Shift+wheel: put the picked item in. Drag onto "
+                                        "another slot to move or swap.",
+                                        i + 1, count, sl.max)
+                                .c_str());
+            else
+                Tooltip(std::format("Slot {} is empty. Click an item below, drag one here, or Shift+wheel to put the "
+                                    "picked item in.",
+                                    i + 1));
+        }
         ImGui::PopID();
+    }
+    // A dragged slot: its icon follows the cursor.
+    if (const ImGuiPayload* p = ImGui::GetDragDropPayload(); p && p->IsDataType(kSlotDrag) && p->DataSize == sizeof(int)) {
+        const int from = *static_cast<const int*>(p->Data);
+        if (from >= 0 && from < n) {
+            const sbx::Slot& sl = s.slots[static_cast<size_t>(from)];
+            item_grid::Tile ghost;
+            ghost.id = sl.item;
+            ghost.name = &sl.name;
+            ghost.icon = sl.icon;
+            ghost.icon2 = sl.icon2;
+            ghost.accent = KindAccent(sl.kind);
+            const ImVec2 m = ImGui::GetMousePos(), ga(m.x + U(10), m.y + U(10));
+            item_grid::DrawTile(ImGui::GetForegroundDrawList(), ga, ImVec2(ga.x + U(58), ga.y + U(58)), ghost, true, false, g_scale);
+        }
     }
 
     const sbx::Slot& sl = s.slots[static_cast<size_t>(g_sbxSlot)];
     if (!sl.unlocked) {
-        DimText("Every slot is locked. Vacpack upgrades unlock them.");
+        DimText("Every slot is locked. Click a lock to unlock its slot.");
         EndCard();
         return;
     }
 
-    // ---- selected slot: amount ----
+    // ---- selected slot: name, Fill / Empty ----
     ImGui::Dummy(ImVec2(0, U(2)));
-    if (g_sbxAmountSlot != g_sbxSlot) {
-        g_sbxAmountSlot = g_sbxSlot;
-        g_sbxAmount = sl.item ? sl.count : sl.max;
-    }
     const int max = std::max(0, sl.max);
-    g_sbxAmount = std::clamp(g_sbxAmount, 0, max);
     {
-        const float row = ImGui::GetContentRegionAvail().x, sp = ImGui::GetStyle().ItemSpacing.x;
-        const float bw = std::floor(std::min(U(104), (row * 0.5f - 2 * sp) / 3));
+        const float sp = ImGui::GetStyle().ItemSpacing.x, bw = U(84);
+        const float x0 = ImGui::GetCursorPosX(), row = ImGui::GetContentRegionAvail().x;
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted(std::format("Slot {}", g_sbxSlot + 1).c_str());
         ImGui::SameLine();
         ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(sl.item ? P.soft : P.dim), "%s", sl.item ? sl.name.c_str() : "Empty");
-        ImGui::SameLine(0, U(14));
-        const float sw = std::max(U(80), ImGui::GetContentRegionAvail().x - 3 * bw - 3 * sp);
-        ImGui::SetNextItemWidth(sw);
-        ImGui::SliderInt("##amount", &g_sbxAmount, 0, max, "%d", ImGuiSliderFlags_AlwaysClamp);
-        HoverTip("Ctrl+click to type. Used by Set.");
-        ImGui::BeginDisabled(!sl.item);
-        ImGui::SameLine();
-        if (ImGui::Button("Set", ImVec2(bw, 0))) SbxRequest(sbx::Op::SetSlotCount, g_sbxAmount, g_sbxSlot);
-        HoverTip("Change how many of the current item the slot holds (0 empties it).");
-        ImGui::SameLine();
-        ImGui::BeginDisabled(sl.count >= max);
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(sl.item ? P.soft : P.dim), "%s",
+                           sl.item ? std::format("{}  {} / {}", sl.name, SlotCount(sl, g_sbxSlot), max).c_str() : "Empty");
+        ImGui::SameLine(x0 + row - 2 * bw - sp);
+        ImGui::BeginDisabled(!sl.item || sl.count >= max);
         if (ImGui::Button("Fill", ImVec2(bw, 0))) SbxRequest(sbx::Op::SetSlotCount, max, g_sbxSlot);
         ImGui::EndDisabled();
         HoverTip("Fill the slot to its maximum.");
         ImGui::SameLine();
+        ImGui::BeginDisabled(!sl.item);
         if (ImGui::Button("Empty", ImVec2(bw, 0))) SbxRequest(sbx::Op::SetSlotCount, 0, g_sbxSlot);
-        HoverTip("Remove everything from this slot.");
         ImGui::EndDisabled();
+        HoverTip("Remove everything from this slot. The wheel over a slot changes its amount.");
     }
 
     // ---- items the selected slot accepts ----
     ImGui::Dummy(ImVec2(0, U(2)));
-    SmallHeading("Click an item to fill the selected slot, or drag it onto any slot");
-    const uint32_t bit = g_sbxSlot < 32 ? (1u << g_sbxSlot) : 0u;
+    const uint32_t bit = 1u << g_sbxSlot;
+    const auto& tabs = GroupTabs(s);
+    const sbx::Relation* hoverRel = nullptr;
+    static uintptr_t lastHover = 0;  // hovered last frame (related tiles light up)
+    if (lastHover) hoverRel = FindRelation(s, lastHover);
     std::vector<item_grid::Tile> tiles;
+    std::vector<const sbx::Item*> src;
     if (s.catalog) {
         tiles.reserve(s.catalog->size());
         for (const sbx::Item& it : *s.catalog) {
-            if (!(it.slotMask & bit)) continue;
+            if (!(it.slotMask & bit) || !InGroup(it.kind, g_vacGrid.tab)) continue;
             item_grid::Tile t;
             t.id = it.id;
             t.name = &it.name;
             t.icon = it.icon;
+            t.icon2 = it.icon2;
             t.accent = KindAccent(it.kind);
+            if (const auto pk = g_vacPick.find(it.id); pk != g_vacPick.end()) {
+                t.selected = true;
+                t.amount = pk->second;
+            }
+            t.related = Related(hoverRel, it.id);
             tiles.push_back(t);
+            src.push_back(&it);
         }
     }
+    // Selected items still in the list (a slot change can hide some).
+    int picked = 0;
+    for (auto it = g_vacPick.begin(); it != g_vacPick.end();)
+        if (!FindItem(s, it->first)) it = g_vacPick.erase(it);
+        else ++picked, ++it;
     item_grid::Options o = GridOptions(212);
     o.selected = sl.item;
     o.drag = true;
+    o.tabs = &tabs;
     o.empty = s.catalog ? "No matching items." : "Reading the item list...";
+    const std::string put = picked > 0 ? std::format("Put {} in slots", picked) : std::string("Put in slots");
+    o.button = put.c_str();
+    o.buttonEnabled = picked > 0;
     const item_grid::Result r = item_grid::Draw("vac", tiles, g_vacGrid, o);
-    if (r.hovered >= 0 && !ImGui::GetDragDropPayload())
-        Tooltip(std::format("{}\nClick: fill slot {} ({} max). Drag onto a slot to fill that one.",
-                            *tiles[static_cast<size_t>(r.hovered)].name, g_sbxSlot + 1, max));
-    if (r.clicked >= 0) SbxRequest(sbx::Op::PutItem, max > 0 ? max : 1, g_sbxSlot, tiles[static_cast<size_t>(r.clicked)].id);
+    lastHover = r.hovered >= 0 ? tiles[static_cast<size_t>(r.hovered)].id : 0;
+    TabTip(r, tabs);
+    if (r.buttonHovered)
+        Tooltip("Puts the selected items into the selected slot and the empty slots after it, each with its amount "
+                "(no amount: the slot's maximum). Ctrl+click items to select them.");
+    if (r.hovered >= 0 && !ImGui::GetDragDropPayload()) {
+        const sbx::Item& it = *src[static_cast<size_t>(r.hovered)];
+        ItemTooltip(s, it.name, it.kind, it.id, kVacHint);
+    }
+    if (r.wheel != 0.0f && r.hovered >= 0) {
+        // Shift+wheel on an item: its amount (adds it to the selection; 0 removes it).
+        const sbx::Item& it = *src[static_cast<size_t>(r.hovered)];
+        auto pk = g_vacPick.find(it.id);
+        const int cur = pk != g_vacPick.end() ? pk->second : 0;
+        const int next = std::clamp(cur + WheelStep(r.wheel), 0, std::max(1, max));
+        if (next <= 0) g_vacPick.erase(it.id);
+        else g_vacPick[it.id] = next;
+        g_vacFocus = it.id;
+    }
+    if (r.clicked >= 0) {
+        const sbx::Item& it = *src[static_cast<size_t>(r.clicked)];
+        g_vacFocus = it.id;
+        if (io.KeyCtrl) {
+            if (!g_vacPick.erase(it.id)) g_vacPick[it.id] = 0;
+        } else {
+            const auto pk = g_vacPick.find(it.id);
+            PutInSlot(s, g_sbxSlot, it, pk != g_vacPick.end() ? pk->second : 0);
+        }
+    }
+    if (r.rightClicked >= 0) OpenItemContext(tiles[static_cast<size_t>(r.rightClicked)].id, SbxGrid::Vacpack);
+    if (r.button) {
+        // Selected slot first, then the empty unlocked slots after it (wrapping) that accept each item.
+        std::vector<bool> used(static_cast<size_t>(n), false);
+        for (const auto& [id, amount] : g_vacPick) {
+            const sbx::Item* it = FindItem(s, id);
+            if (!it) continue;
+            for (int k = 0; k < n; ++k) {
+                const int i = (g_sbxSlot + k) % n;
+                const sbx::Slot& t = s.slots[static_cast<size_t>(i)];
+                if (used[static_cast<size_t>(i)] || !t.unlocked || !(it->slotMask & (1u << i))) continue;
+                if (k > 0 && t.item && t.item != id) continue;  // never replace other slots' contents
+                used[static_cast<size_t>(i)] = true;
+                PutInSlot(s, i, *it, amount);
+                break;
+            }
+        }
+        g_vacPick.clear();
+    }
+    ItemContextMenu(s);
     EndCard();
 }
 
@@ -1604,48 +1984,50 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
         EndCard();
         return;
     }
-    // Filter chips: the kinds present in the list, in enum order.
-    std::vector<std::pair<int, std::string>> chips;
-    {
-        bool have[16] = {};
-        for (const sbx::Item& it : *s.spawnables) have[static_cast<int>(it.kind) & 15] = true;
-        for (int k = 1; k < 16; ++k)
-            if (have[k]) chips.emplace_back(k, KindLabel(static_cast<sbx::Kind>(k)));
-        if (have[0]) chips.emplace_back(0, KindLabel(sbx::Kind::Other));
-    }
-    g_spawnKind = ChipRow("kinds", chips, g_spawnKind);
     CountRow("How many", "##spawncount", g_spawnCount, 20, "How many to spawn per click.");
+    const auto& tabs = GroupTabs(s);
+    static uintptr_t lastHover = 0;
+    const sbx::Relation* hoverRel = lastHover ? FindRelation(s, lastHover) : nullptr;
     std::vector<item_grid::Tile> tiles;
     tiles.reserve(s.spawnables->size());
     std::vector<const sbx::Item*> src;
     for (const sbx::Item& it : *s.spawnables) {
-        if (g_spawnKind >= 0 && static_cast<int>(it.kind) != g_spawnKind) continue;
+        if (!InGroup(it.kind, g_spawnGrid.tab)) continue;
         item_grid::Tile t;
         t.id = it.id;
         t.name = &it.name;
         t.icon = it.icon;
+        t.icon2 = it.icon2;
         t.accent = KindAccent(it.kind);
         t.dimmed = it.tarr && s.tarrsOff;
+        t.related = Related(hoverRel, it.id);
         tiles.push_back(t);
         src.push_back(&it);
     }
-    const item_grid::Result r = item_grid::Draw("spawn", tiles, g_spawnGrid, GridOptions(250));
+    item_grid::Options o = GridOptions(250);
+    o.tabs = &tabs;
+    const item_grid::Result r = item_grid::Draw("spawn", tiles, g_spawnGrid, o);
+    lastHover = r.hovered >= 0 ? tiles[static_cast<size_t>(r.hovered)].id : 0;
+    TabTip(r, tabs);
     if (r.hovered >= 0) {
         const sbx::Item& it = *src[static_cast<size_t>(r.hovered)];
-        if (it.tarr && s.tarrsOff)
-            Tooltip(std::format("{}\nTarrs are disabled in this save's game settings.", it.name));
-        else
-            Tooltip(std::format("{}\n{}. Click to spawn {} in front of you.", it.name, KindLabel(it.kind), g_spawnCount));
+        ItemTooltip(s, it.name, it.kind, it.id,
+                    it.tarr && s.tarrsOff ? "Tarrs are disabled in this save's game settings."
+                                          : "Click: spawn in front of you. Right-click: favourites.");
     }
     if (r.clicked >= 0) {
         const sbx::Item& it = *src[static_cast<size_t>(r.clicked)];
         if (it.tarr && s.tarrsOff) sbx::SetStatus(it.name + " not spawned: Tarrs are disabled in this save's game settings", true);
         else SbxRequest(sbx::Op::Spawn, g_spawnCount, -1, it.id);
     }
+    if (r.rightClicked >= 0) OpenItemContext(tiles[static_cast<size_t>(r.rightClicked)].id, SbxGrid::Spawner);
+    ItemContextMenu(s);
     EndCard();
 }
 
-// Crafter: the fabricator's gadget recipes, added to your gadget inventory at no cost.
+// Crafter: the fabricator's gadget recipes (locked blueprints first) and, in their own section,
+// the crafting materials the refinery stores. Click selects (Shift+wheel: amount), Craft adds
+// everything selected at no cost: gadgets to the gadget inventory, materials to the refinery.
 void SandboxCrafter(const sbx::Snapshot& s, float w) {
     const Palette& P = theme::Colors();
     BeginCard("sbx_craft", w);
@@ -1660,50 +2042,116 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
         EndCard();
         return;
     }
-    std::vector<std::pair<int, std::string>> chips;
+    // Tabs: All, each fabricator category that has recipes (its icon), Materials.
+    static std::vector<item_grid::Tab> tabs;
+    static std::vector<int> tabCat;  // category per tab; -1 = all, -2 = materials
+    tabs.clear();
+    tabCat.clear();
+    tabs.push_back({0, 0, 0, "All"});
+    tabCat.push_back(-1);
     if (s.recipeCategories) {
         std::vector<bool> used(s.recipeCategories->size(), false);
-        for (const sbx::Recipe& r : *s.recipes)
-            if (r.category >= 0 && static_cast<size_t>(r.category) < used.size()) used[static_cast<size_t>(r.category)] = true;
-        for (size_t i = 0; i < used.size(); ++i)
-            if (used[i]) chips.emplace_back(static_cast<int>(i), (*s.recipeCategories)[i]);
+        for (const sbx::Recipe& rc : *s.recipes)
+            if (rc.category >= 0 && static_cast<size_t>(rc.category) < used.size()) used[static_cast<size_t>(rc.category)] = true;
+        for (size_t i = 0; i < used.size(); ++i) {
+            if (!used[i]) continue;
+            const std::string& title = (*s.recipeCategories)[i];
+            const uint32_t icon = s.recipeCategoryIcons && i < s.recipeCategoryIcons->size() ? (*s.recipeCategoryIcons)[i] : 0;
+            tabs.push_back({icon, title.empty() ? '?' : static_cast<unsigned char>(title[0]), KindAccent(sbx::Kind::Gadget), title});
+            tabCat.push_back(static_cast<int>(i));
+        }
     }
-    if (!chips.empty()) g_craftCat = ChipRow("cats", chips, g_craftCat);
-    else g_craftCat = -1;
-    CountRow("How many", "##craftcount", g_craftCount, 20, "How many to craft per click.");
+    if (s.materials && !s.materials->empty()) {
+        tabs.push_back({s.groupIcons[sbx::kGroupResources], 'M', KindAccent(sbx::Kind::Resource), "Crafting materials (refinery)"});
+        tabCat.push_back(-2);
+    }
+    g_craftGrid.tab = std::clamp(g_craftGrid.tab, 0, static_cast<int>(tabs.size()) - 1);
+    const int cat = tabCat[static_cast<size_t>(g_craftGrid.tab)];
+
+    static const std::vector<std::string> kSections = {"Blueprint not unlocked", "Gadgets", "Crafting materials (refinery)"};
     std::vector<item_grid::Tile> tiles;
     std::vector<const sbx::Recipe*> src;
-    tiles.reserve(s.recipes->size());
-    for (const sbx::Recipe& rc : *s.recipes) {
-        if (g_craftCat >= 0 && rc.category != g_craftCat) continue;
+    std::vector<bool> isMat;
+    auto add = [&](const sbx::Recipe& rc, int section, bool material) {
         item_grid::Tile t;
         t.id = rc.id;
         t.name = &rc.name;
         t.icon = rc.icon;
-        t.accent = KindAccent(sbx::Kind::Gadget);
+        t.accent = KindAccent(material ? rc.kind : sbx::Kind::Gadget);
         t.dimmed = !rc.unlocked;
         t.badge = rc.owned;
+        t.section = section;
+        if (const auto pk = g_craftPick.find(rc.id); pk != g_craftPick.end()) {
+            t.selected = true;
+            t.amount = pk->second;
+        }
         tiles.push_back(t);
         src.push_back(&rc);
+        isMat.push_back(material);
+    };
+    if (cat != -2) {
+        for (int pass = 0; pass < 2; ++pass)  // locked blueprints first
+            for (const sbx::Recipe& rc : *s.recipes)
+                if (rc.unlocked == (pass == 1) && (cat < 0 || rc.category == cat)) add(rc, pass, false);
+    }
+    if ((cat == -1 || cat == -2) && s.materials)
+        for (const sbx::Recipe& rc : *s.materials) add(rc, 2, true);
+    // Selection entries that are gone from both lists are dropped.
+    int picked = 0;
+    for (auto it = g_craftPick.begin(); it != g_craftPick.end();) {
+        bool found = false;
+        for (const auto* list : {s.recipes.get(), s.materials.get()})
+            if (list)
+                for (const sbx::Recipe& rc : *list) found = found || rc.id == it->first;
+        if (!found) it = g_craftPick.erase(it);
+        else ++picked, ++it;
     }
     item_grid::Options o = GridOptions(250);
     o.hint = "Search gadgets...";
+    o.tabs = &tabs;
+    o.sections = &kSections;
+    const std::string craft = picked > 0 ? std::format("Craft {}", picked) : std::string("Craft");
+    o.button = craft.c_str();
+    o.buttonEnabled = picked > 0;
     const item_grid::Result r = item_grid::Draw("craft", tiles, g_craftGrid, o);
+    TabTip(r, tabs);
+    if (r.buttonHovered)
+        Tooltip("Crafts every selected item at no cost: gadgets into your gadget inventory (a locked blueprint stays "
+                "locked), materials into the refinery.");
     if (r.hovered >= 0) {
         const sbx::Recipe& rc = *src[static_cast<size_t>(r.hovered)];
-        std::string tip = rc.name;
-        if (!rc.cost.empty()) tip += "\nFabricator cost: " + rc.cost;
-        tip += std::format("\nIn your inventory: {}", rc.owned);
-        if (!rc.unlocked) tip += "\nBlueprint not unlocked yet.";
-        else
-            tip += std::format("\nClick to craft {} for free{}.", g_craftCount * rc.perCraft,
-                               rc.perCraft > 1 ? " (made in pairs)" : "");
-        Tooltip(tip);
+        const bool mat = isMat[static_cast<size_t>(r.hovered)];
+        std::string hint;
+        if (mat) hint = std::format("In the refinery: {}. ", rc.owned);
+        else {
+            if (!rc.cost.empty()) hint = "Fabricator cost: " + rc.cost + ". ";
+            hint += std::format("In your inventory: {}{}. ", rc.owned, rc.perCraft > 1 ? " (made in pairs)" : "");
+            if (!rc.unlocked) hint += "Blueprint not unlocked: crafting puts it in your inventory anyway. ";
+        }
+        hint += "Click: select. Shift+wheel: amount (Ctrl: 10 at a time). Craft adds all selected.";
+        ItemTooltip(s, rc.name, mat ? rc.kind : sbx::Kind::Gadget, mat ? rc.id : 0, hint.c_str());
+    }
+    if (r.wheel != 0.0f && r.hovered >= 0) {
+        const sbx::Recipe& rc = *src[static_cast<size_t>(r.hovered)];
+        const int cap = isMat[static_cast<size_t>(r.hovered)] ? 999 : 99;
+        auto pk = g_craftPick.find(rc.id);
+        const int cur = pk != g_craftPick.end() ? pk->second : 0;
+        const int next = std::clamp(cur + WheelStep(r.wheel), 0, cap);
+        if (next <= 0) g_craftPick.erase(rc.id);
+        else g_craftPick[rc.id] = next;
     }
     if (r.clicked >= 0) {
         const sbx::Recipe& rc = *src[static_cast<size_t>(r.clicked)];
-        if (rc.unlocked) SbxRequest(sbx::Op::Craft, g_craftCount, -1, rc.id);
-        else sbx::SetStatus(rc.name + " not crafted: its blueprint is not unlocked", true);
+        if (!g_craftPick.erase(rc.id)) g_craftPick[rc.id] = 1;
+    }
+    if (r.button) {
+        for (const auto& [id, amount] : g_craftPick) {
+            bool material = false;
+            if (s.materials)
+                for (const sbx::Recipe& rc : *s.materials) material = material || rc.id == id;
+            SbxRequest(material ? sbx::Op::AddMaterial : sbx::Op::Craft, std::max(1, amount), -1, id);
+        }
+        g_craftPick.clear();
     }
     EndCard();
 }
