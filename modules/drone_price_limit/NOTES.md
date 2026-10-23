@@ -17,6 +17,9 @@ Status: built, not yet tested in game.
   brings back that save's limits.
 - Without custom_upgrades (disabled / failed) the limits work for the session only (log warning, and
   the dialog says so).
+  Since upgrades-gate, custom_upgrades is **off by default** (switched on per save), so on a save
+  without it the limits are session-only. Open question: let the per-save values work while the
+  custom_upgrades gate is off (needs an api.h change in custom_upgrades).
 - The old global settings `min_price` / `min_price_fraction_of_base` (F8) are gone and ignored if
   still in `sr2mods.json`. F8 keeps only the module's on / off switch.
 - A demolished station loses nothing visible; its entry stays in the sidecar (harmless, a new
