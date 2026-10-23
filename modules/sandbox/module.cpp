@@ -164,7 +164,7 @@ private:
     bool EnsureRecipes();
     bool EnsureMaterials();
     void RefreshRecipeState();
-    Il2CppObject* SlotUnlockUpgrade(const Ctx& c, Il2CppObject* slot, Il2CppObject** upgradeModel);
+    Il2CppObject* SlotUnlockUpgrade(const Ctx& c, Il2CppObject* slot, Il2CppObject** upgradeModel, int* level = nullptr);
     std::string RecipeCost(Il2CppObject* def);
     Il2CppObject* GadgetDirector();
     void Refresh();
@@ -340,10 +340,13 @@ private:
     // ---- vacpack slot unlock (optional): the upgrade levels the fabricator sells ----
     const MethodInfo* getUpgradeModel_ = nullptr;    // PlayerModel.GetUpgradeModel()
     const MethodInfo* incUpgrade_ = nullptr;         // UpgradeModel.IncrementUpgradeLevel(UpgradeDefinition)
+    const MethodInfo* getUpgradeLevel_ = nullptr;    // UpgradeModel.GetUpgradeLevel(UpgradeDefinition)
     size_t offUmDefs_ = 0;                           // UpgradeModel.upgradeDefinitions (UpgradeDefinitionList)
     size_t offUdLevels_ = 0;                         // UpgradeDefinition._levels (List<UpgradeLevelDefinition>)
     size_t offUlEffects_ = 0;                        // UpgradeLevelDefinition.Effects (List<FloatModifier>)
     size_t offSlotDefUnlockProp_ = 0;                // AmmoSlotDefinition._isUnlockedProperty
+    size_t offSlotDefThreshold_ = 0;                 // AmmoSlotDefinition._isUnlockedThreshold
+    size_t offModValue_ = 0;                         // FloatModifier.Value (from the live object's class)
     Il2CppClass* upgradeDefClass_ = nullptr;
 };
 
@@ -527,9 +530,11 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
         upgradeDefClass_ = cls(kImage, "", "UpgradeDefinition", uw);
         getUpgradeModel_ = method(playerModelClass_, "GetUpgradeModel", 0, uw);
         incUpgrade_ = method(upModel, "IncrementUpgradeLevel", 1, uw);
+        getUpgradeLevel_ = method(upModel, "GetUpgradeLevel", 1, uw);
         off(upModel, "upgradeDefinitions", offUmDefs_, uw);
         off(upgradeDefClass_, "_levels", offUdLevels_, uw);
         off(slotDefClass_, "_isUnlockedProperty", offSlotDefUnlockProp_, uw);
+        off(slotDefClass_, "_isUnlockedThreshold", offSlotDefThreshold_, uw);
         // UpgradeLevelDefinition (nested) and FloatModifier (generic base): their fields are read
         // on the live objects (offUlEffects_ and the modifier's TargetProperty, resolved once).
         if (!uw.empty()) {
@@ -1948,12 +1953,13 @@ void Sandbox::DoAddMaterial(uintptr_t item, int64_t count) {
 // The upgrade the fabricator sells that unlocks `slot`: an UpgradeDefinition (from the player's
 // UpgradeModel.upgradeDefinitions) with a level whose effects target the slot definition's
 // _isUnlockedProperty (AmmoSlot.IsUnlocked: that property >= _isUnlockedThreshold). Field reads only.
-Il2CppObject* Sandbox::SlotUnlockUpgrade(const Ctx& c, Il2CppObject* slot, Il2CppObject** upgradeModel) {
+Il2CppObject* Sandbox::SlotUnlockUpgrade(const Ctx& c, Il2CppObject* slot, Il2CppObject** upgradeModel, int* level) {
     if (!incUpgrade_ || !slot) return nullptr;
     Il2CppObject* def = unity::Field<Il2CppObject*>(slot, offSlotDef_);
     if (!IsA(def, slotDefClass_) || !unity::IsAlive(def)) return nullptr;
     Il2CppObject* prop = unity::Field<Il2CppObject*>(def, offSlotDefUnlockProp_);
     if (!prop) return nullptr;
+    const int threshold = unity::Field<int32_t>(def, offSlotDefThreshold_);
     bool ok = false;
     Il2CppObject* um = Call(getUpgradeModel_, c.model, {}, "PlayerModel.GetUpgradeModel", &ok);
     if (!ok || !um) return nullptr;
@@ -1966,6 +1972,7 @@ Il2CppObject* Sandbox::SlotUnlockUpgrade(const Ctx& c, Il2CppObject* slot, Il2Cp
     for (size_t i = 0, n = unity::ListCount(defs); i < n; ++i) {
         auto* up = static_cast<Il2CppObject*>(unity::ListAt(defs, i));
         if (!IsA(up, upgradeDefClass_) || !unity::IsAlive(up)) continue;
+        int firstAny = -1;
         void* levels = unity::Field<void*>(up, offUdLevels_);
         for (size_t l = 0, nl = unity::ListCount(levels); l < nl; ++l) {
             auto* lvl = static_cast<Il2CppObject*>(unity::ListAt(levels, l));
@@ -1982,12 +1989,25 @@ Il2CppObject* Sandbox::SlotUnlockUpgrade(const Ctx& c, Il2CppObject* slot, Il2Cp
                 Il2CppClass* mk = a.il2cpp_object_get_class(mod);
                 if (mk != modClass_) {
                     auto o = Resolver::Get().FieldOffset(mk, "TargetProperty");
-                    if (!o) continue;
+                    auto v = Resolver::Get().FieldOffset(mk, "Value");
+                    if (!o || !v) continue;
                     modClass_ = mk;
                     offModTarget_ = *o;
+                    offModValue_ = *v;
                 }
-                if (unity::Field<Il2CppObject*>(mod, offModTarget_) == prop) return up;
+                if (unity::Field<Il2CppObject*>(mod, offModTarget_) != prop) continue;
+                // The level that unlocks it: the first whose modifier on the property reaches the
+                // threshold (a level may also list the property with a lower value).
+                if (firstAny < 0) firstAny = static_cast<int>(l);
+                if (unity::Field<float>(mod, offModValue_) >= static_cast<float>(threshold)) {
+                    if (level) *level = static_cast<int>(l);
+                    return up;
+                }
             }
+        }
+        if (firstAny >= 0) {  // targets it, but no value reaches the threshold: assume the first level
+            if (level) *level = firstAny;
+            return up;
         }
     }
     return nullptr;
@@ -1995,9 +2015,10 @@ Il2CppObject* Sandbox::SlotUnlockUpgrade(const Ctx& c, Il2CppObject* slot, Il2Cp
 
 // Unlocks a locked slot the way buying the vacpack upgrade does
 // (PlayerUpgradeFabricatableItem.FabricateAndSpendCost, 1.3.0 RVA 0x82AFA0, minus the
-// spending and analytics): UpgradeModel.IncrementUpgradeLevel, one level at a time, until
-// the slot reports unlocked or the upgrade has no more levels. Earlier slots that the same
-// levels unlock open too, as in the shop.
+// spending and analytics): UpgradeModel.IncrementUpgradeLevel, one level at a time, up to
+// the level that unlocks it (the model's level n applies UpgradeDefinition._levels[n]; the
+// fabricator buys GetUpgradeLevel + 1). Never past that level, even if the slot does not
+// report unlocked at once. Earlier slots the same levels unlock open too, as in the shop.
 void Sandbox::DoUnlockSlot(const Ctx& c, int idx) {
     Il2CppObject* slot = SlotAt(c, idx);
     if (!slot) {
@@ -2010,14 +2031,16 @@ void Sandbox::DoUnlockSlot(const Ctx& c, int idx) {
         return;
     }
     Il2CppObject* um = nullptr;
-    Il2CppObject* up = SlotUnlockUpgrade(c, slot, &um);
-    if (!up || !um) {
+    int target = -1;
+    Il2CppObject* up = SlotUnlockUpgrade(c, slot, &um, &target);
+    if (!up || !um || target < 0) {
         Done(false, std::format("Slot {} not unlocked: no vacpack upgrade unlocks it", idx + 1));
         return;
     }
     const std::string upName = unity::GetName(up);
-    int levels = 0;
+    int levels = 0, cur = 0;
     for (int guard = 0; guard < 16 && !unlocked; ++guard) {
+        if (!CallValue(getUpgradeLevel_, um, {up}, "UpgradeModel.GetUpgradeLevel", cur) || cur >= target) break;
         bool inc = false;
         if (!CallValue(incUpgrade_, um, {up}, "UpgradeModel.IncrementUpgradeLevel", inc) || !inc) break;
         ++levels;
@@ -2025,7 +2048,8 @@ void Sandbox::DoUnlockSlot(const Ctx& c, int idx) {
     }
     Done(unlocked, unlocked ? std::format("Slot {} unlocked ({} level(s) of the {} upgrade)", idx + 1, levels, upName)
                    : levels ? std::format("Slot {}: applied {} level(s) of {}, but it is still locked", idx + 1, levels, upName)
-                            : std::format("Slot {} not unlocked: the {} upgrade has no further level", idx + 1, upName));
+                            : std::format("Slot {} not unlocked: the {} upgrade is at level {} already (needs {})", idx + 1,
+                                          upName, cur, target));
 }
 
 // Moves a slot's contents onto another slot: onto the same item it merges (up to the
