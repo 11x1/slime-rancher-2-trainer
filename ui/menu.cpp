@@ -111,7 +111,7 @@ void FloatingSurface(bool outline) {
     const ImVec2 a = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize(), b(a.x + sz.x, a.y + sz.y);
     const float r = ImGui::GetStyle().PopupRounding;
     dl->PushClipRectFullScreen();
-    SoftShadow(dl, a, b, r, U(4), U(10), P.shadow);
+    SoftShadow(dl, a, b, r, U(2), U(6), P.shadow);
     dl->AddRectFilled(a, b, P.popBg, r);
     if (outline) dl->AddRect(a, b, P.popBorder, r, 0, std::max(1.0f, U(1)));
     dl->PopClipRect();
@@ -1281,7 +1281,7 @@ bool Draw(const Host& h) {
         g_winMin = pos;
         g_winMax = ImVec2(pos.x + ws.x, pos.y + ws.y);
         const float border = ImGui::GetStyle().WindowBorderSize, rounding = ImGui::GetStyle().WindowRounding;
-        SoftShadow(ImGui::GetBackgroundDrawList(), pos, g_winMax, rounding, U(10), U(26), P.shadow);
+        SoftShadow(ImGui::GetBackgroundDrawList(), pos, g_winMax, rounding, U(5), U(12), P.shadow);
         ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(pos.x + border, pos.y + border),
                                                   ImVec2(pos.x + U(kSideW), g_winMax.y - border), P.side,
                                                   std::max(0.0f, rounding - border), ImDrawFlags_RoundCornersLeft);
