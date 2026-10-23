@@ -104,7 +104,7 @@ Not checked in game yet: all of the above (layout and centring, the hidden icon,
 buys, the label, the slider keys on keyboard and pad, the Activate button's position, prompt and
 animation).
 
-## Sell-All receipt (checklist ut4)
+## Sell-All receipt
 
 Pressing the silo's Sell-All button no longer sells at once: it opens a receipt (`silo_receipt.cpp`).
 One row per sellable plort type (icon, name, "x count", "@ unit price", line total + coin), the grand
@@ -139,6 +139,44 @@ locker really freezes movement / camera and shows the cursor here, that Esc / St
 pause menu as well (they should not: `PauseMenuDirector.TogglePause` (0xAEFF20) only calls `PauseGame`
 while `Time.timeScale > 0`, and the locker sets it to 0), mouse clicks (needs the scene's
 EventSystem), pad A / B and the d-pad / stick.
+
+## Silo capacity tiers
+
+Storage per silo slot: 100 -> 200 (vanilla) -> 300 -> 400 -> 500 (ours).
+
+- **Vanilla** (prefab `patchSilo` read with UnityPy, disassembly): one `SiloStorage` with 12 slot
+  definitions, all `SiloNonSlimes` (`_maxAmount` 100). STORAGE2 / 3 / 4 (500 / 575 / 650) only swap
+  slot GameObjects (`StorageUpgrader.StorageAdd*` / `StorageOnly*`); the single capacity upgrade
+  STORAGE_CAPACITY_INCREASE ("Storage Capacity Upgrade", 1800, in the
+  `scriptableobjectlookupdata_assets_all_*` bundle) runs `AmmoSlotManager.UpdateMaxCount(
+  StorageCapacityUpgradeAmount = 200)` (`StorageUpgrader.Apply` 0x996E30) and shows the four
+  `CapacityUpgrade1..4` parts. So vanilla has one capacity tier, 100 -> 200.
+- **Ours:** Silo Capacity II / III / IV (`0x53520060..62`, keys `silo_capacity_2..4`), 300 / 400 / 500
+  per slot, **3000 / 4500 / 6500**. A tier chain on the vanilla Storage Capacity card: once that is
+  owned the card shows Silo Capacity II, then III, then IV (greyed with the checkmark when all are
+  owned); `ChainVanillaRoot` gives every tier of a chain that starts on a vanilla upgrade that
+  upgrade's card (before, only the first tier took it over). Icon = the vanilla Storage Capacity icon
+  (no own sprite).
+- **Prices:** vanilla pays 1800 for +100 per slot (12 slots = +1200 items, 1.5 Newbucks per slot
+  item). Each of ours adds +100 per slot as well and costs more than the last (x ~1.5, like the
+  vanilla storage units climb), so IV is the most expensive plot upgrade after the Sell-All Button
+  (10,000): 14,000 for the three, 15,800 with the vanilla one.
+- **Applying it:** the max count is runtime only (`AmmoDataV02` saves id, count, emotions,
+  appearance, radiant; no max) and vanilla `ApplyUpgrades` writes 200 again on load and after every
+  purchase on that plot. So the ~1 Hz world tick sets the owned tier's value on every silo plot
+  (`UpdateMaxCount`, only when `GetSlotMaxCount(0)` differs; log `silo capacity on plot '...': 200 ->
+  500 per slot`). Ownership is in the sidecar like every custom upgrade, so it survives save / reload.
+- **Never deletes items:** load restores counts without clamping (`AmmoModel.Push` -> `AmmoSlot.
+  set_Count`), `ValidateAndAdjustSlots` never trims counts, and `UpdateMaxCount` only sets the max. A
+  lower max (between a load and the next tick, module off / faulted, or a mod-free load) leaves the
+  contents above it in the silo; it just takes nothing more until they are below (logged as a warning
+  with the count over the limit when we lower it).
+- **Not sellable**, like the vanilla silo storage upgrades: `CanSell` gives the same permanent reason
+  ("silo storage"), so sell_upgrades shows no Sell button and no alt-action prompt.
+
+Not checked in game yet: the card chain (vanilla card -> II -> III -> IV), the slot displays showing
+the new maximum, drones / silo input filling to 500, and the log lines after a load (200 -> 500 within
+a second).
 
 ## Selling with gamepad / keyboard
 

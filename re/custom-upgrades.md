@@ -435,7 +435,7 @@ Original plan:
   * Not used (unverified, risky): building a `NotificationEntry` ourselves and adding it to the
     list's `_pendingNotifications` with another or no provider. The list calls the entry's provider
     (`TryDequeueMergeNext`, paging), and the shop provider expects its own entry type.
-  * **Receipt (checklist ut4, `modules/custom_upgrades/silo_receipt.cpp`).** A press quotes the
+  * **Receipt (`modules/custom_upgrades/silo_receipt.cpp`).** A press quotes the
     silo (per plort type: count, `TryGetMarketValues` current price) and opens a runtime uGUI dialog
     (own overlay Canvas + CanvasScaler 1920 x 1080 + GraphicRaycaster, SDFRoundedRectangle shapes,
     the menu palette, a HUD text's TMP font). Findings (disassembly, 1.3.0) on how game menus lock
@@ -453,6 +453,27 @@ Original plan:
   from the sidecar ids -> `SceneContext.GameModel.GetLandPlotModel(id).gameObj` (the
   LandPlotLocation) -> `GetComponentInChildren<LandPlot>` at ~1 Hz; sold / disabled / faulted
   removes the button, load / plot rebuild rebuilds it. The menu action stays.
+
+### 2.2b Silo capacity tiers - IMPLEMENTED
+
+* Vanilla (prefab `patchSilo`, UnityPy; disassembly 1.3.0): `SiloStorage.AmmoSlotDefinitions` = 12 x
+  `SiloNonSlimes` (`_maxAmount` 100, block list = slimes). `StorageUpgrader` (on the plot root):
+  STORAGE2 / 3 / 4 toggle `StorageAdd2..4` / `StorageOnly1/2/3And4`; STORAGE_CAPACITY_INCREASE
+  (item "Storage Capacity Upgrade", 1800) = `StorageSilo.Ammo.UpdateMaxCount(StorageCapacityUpgradeAmount
+  = 200)` + `CapacityUpgrade1..4` active (`Apply` 0x996E30). `AmmoSlotManager.UpdateMaxCount`
+  (0xA3AB70) -> `AmmoModel.UpdateMaxCount` (0xA6EB00, every slot's `set_MaxCount` = the
+  `_maxCountValue` NullableFloatProperty default) or `_pendingMaxCountOverride` while no model;
+  `SetModel` (0xA3A860) = `Reset(defs)`, the pending override, `ValidateAndAdjustSlots`.
+* Not in the save: `AmmoDataV02` = ID, EmotionData, Count, Appearance, Radiant. `AmmoModel.Push`
+  (0xA6E530, load) copies Count with `set_Count` (0xA3C110, no clamp). `ValidateAndAdjustSlots`
+  (0xA3AC00) resizes the slot array to the definitions and clears slots whose type is not allowed,
+  never a count. So a max below the contents never deletes anything.
+* Built: Silo Capacity II / III / IV (`0x5352_0060..62`), 300 / 400 / 500 per slot, 3000 / 4500 /
+  6500, a chain on the vanilla Storage Capacity card (`ChainVanillaRoot`). The world tick applies
+  the owned tier per silo (`GameModel.GetLandPlotModel(id).gameObj` -> LandPlot -> StorageUpgrader ->
+  StorageSilo -> LocalAmmo, only while its `_ammoModel` exists), module off / fault puts the vanilla
+  value back. Unsellable (same reason as the vanilla silo storage upgrades). Details:
+  `modules/custom_upgrades/NOTES.md`.
 
 ### 2.3 Quantum drones: "sell only at or above a limit price" - IMPLEMENTED (`modules/drone_price_limit/`)
 
@@ -577,6 +598,8 @@ Original research:
     `alt-action sell: prefab ... label via ...`), which key the altSubmit event has on keyboard
     (the hint shows it; the event name is logged), and whether the plot categories have an
     `altDetailsButton` at all.
+* **Silo Capacity II-IV** (`0x5352_0060..62`) are a tier chain too (section 2.2b); every tier of a
+  chain that starts on a vanilla upgrade now shows on that upgrade's card (`ChainVanillaRoot`).
 * **2b.2 as built:** prices/multipliers as proposed below, ids `0x5352_0013..0040` (Plort
   Collector II / III and Auto-Feeder II, `0x5352_0010..0012`, were retired), one menu card per
   chain (section 1.3), effects in
