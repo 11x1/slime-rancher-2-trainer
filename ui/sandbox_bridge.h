@@ -33,6 +33,7 @@ struct Item {
     uint32_t slotMask = 0;  // bit i: vacpack slot i accepts it (AmmoSlotDefinition.IsAllowed); 0 in the spawn list
     uint32_t icon = 0;      // ui/item_icons.h id (0 = none)
     Kind kind = Kind::Other;
+    bool tarr = false;      // spawn list: in GameModel.tarrTypeGroup (grayed out while Tarrs are off)
 };
 
 struct Slot {
@@ -71,6 +72,7 @@ struct Snapshot {
     std::shared_ptr<const std::vector<Item>> catalog;  // items the vacpack can hold, sorted by name
     std::shared_ptr<const std::vector<Item>> spawnables;  // items the spawner can place, sorted by name
     std::string spawnWhy;                                 // spawner unavailable: why ("" = available)
+    bool tarrsOff = false;                                // the save's game settings have Tarrs disabled
     std::shared_ptr<const std::vector<Recipe>> recipes;   // fabricator gadget recipes, sorted by name
     std::shared_ptr<const std::vector<std::string>> recipeCategories;  // the fabricator's category titles
     std::string craftWhy;                                 // crafter unavailable: why ("" = available)

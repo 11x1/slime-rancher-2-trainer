@@ -148,6 +148,8 @@ private:
     Il2CppObject* SaveIndex();
     bool Saveable(Il2CppObject* index, Il2CppObject* ident);
     static void LogLeftOut(const char* list, const std::vector<std::string>& names);
+    bool TarrsOff();
+    Il2CppObject* TarrGroup();
     bool EnsureSpawnables();
     bool EnsureRecipes();
     void RefreshRecipeState();
@@ -256,6 +258,14 @@ private:
     size_t offTableReverse_ = 0;                     // its _reverseIndex (Dictionary<string, int>)
     Il2CppClass* dictClass_ = nullptr;               // Dictionary<string, int> (from the live object)
     const MethodInfo* containsKey_ = nullptr;        // its ContainsKey(string)
+
+    // ---- Tarr setting (optional: without it no entry is grayed out; spawning stays save-checked) ----
+    size_t offGcSettings_ = 0;                       // GameContext.<GameSettingsDirector>k__BackingField
+    const MethodInfo* tarrEnabled_ = nullptr;        // GameSettingsDirector.get_TarrEnabled
+    size_t offScGameModel_ = 0;                      // SceneContext.<GameModel>k__BackingField
+    size_t offGmTarrGroup_ = 0;                      // GameModel.tarrTypeGroup
+    Il2CppClass* groupClass_ = nullptr;              // IdentifiableTypeGroup
+    const MethodInfo* groupIsMember_ = nullptr;      // IdentifiableTypeGroup.IsMember(IdentifiableType)
 
     // ---- spawner (optional: missing symbols only disable the spawner) ----
     Il2CppClass* actorClass_ = nullptr;              // IdentifiableActor (prefab component of spawnable actors)
@@ -479,6 +489,23 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
         }
     }
     if (!sw.empty()) SR2_WARN("[{}] spawner unavailable: {}", kModule, sw);
+    {
+        // Optional: gray out the Tarr entries while the save's game settings have Tarrs off.
+        std::string tw;
+        Il2CppClass* gameCtx = cls(kImage, "", "GameContext", tw);
+        Il2CppClass* settings = cls(kImage, "MonomiPark.SlimeRancher", "GameSettingsDirector", tw);
+        Il2CppClass* gameModel = cls(kImage, "MonomiPark.SlimeRancher.DataModel", "GameModel", tw);
+        groupClass_ = cls(kImage, "", "IdentifiableTypeGroup", tw);
+        off(gameCtx, "<GameSettingsDirector>k__BackingField", offGcSettings_, tw);
+        tarrEnabled_ = method(settings, "get_TarrEnabled", 0, tw);
+        off(sceneCtx, "<GameModel>k__BackingField", offScGameModel_, tw);
+        off(gameModel, "tarrTypeGroup", offGmTarrGroup_, tw);
+        groupIsMember_ = method(groupClass_, "IsMember", 1, tw);
+        if (!tw.empty() || !sceneCtx || !gameCtxInstance_ || !tryGetSceneContext_) {
+            tarrEnabled_ = groupIsMember_ = nullptr;
+            SR2_WARN("[{}] spawner: Tarr entries are not grayed out when Tarrs are off ({})", kModule, tw);
+        }
+    }
 
     // Crafter: the fabricator's GadgetFabricatableItem.FabricateAndSpendCost minus the spending:
     // GadgetDirector.AddItem(definition, count, x2 for BuyInPairs), within CanAddGadget.
@@ -832,6 +859,30 @@ void Sandbox::LogLeftOut(const char* list, const std::vector<std::string>& names
     SR2_INFO("[{}] {}: left out {} type(s) the save can't store: {}", kModule, list, names.size(), s);
 }
 
+// The save's "Tarr" game setting is off (GameContext.GameSettingsDirector.TarrEnabled).
+bool Sandbox::TarrsOff() {
+    if (!tarrEnabled_) return false;
+    Il2CppObject* gc = GameContextObj();
+    Il2CppObject* settings = gc ? unity::Field<Il2CppObject*>(gc, offGcSettings_) : nullptr;
+    if (!settings || !unity::IsAlive(settings)) return false;
+    bool on = true;
+    return CallValue(tarrEnabled_, settings, {}, "GameSettingsDirector.TarrEnabled", on) && !on;
+}
+
+// The game's own list of Tarr types (SceneContext.GameModel.tarrTypeGroup), nullptr if not loaded.
+Il2CppObject* Sandbox::TarrGroup() {
+    if (!groupIsMember_) return nullptr;
+    Il2CppObject* scene = nullptr;
+    bool found = false;
+    if (!CallValue(tryGetSceneContext_, nullptr, {&scene}, "SceneContextUtility.TryGetSceneContext", found) || !found ||
+        !scene || !unity::IsAlive(scene))
+        return nullptr;
+    Il2CppObject* model = unity::Field<Il2CppObject*>(scene, offScGameModel_);
+    if (!model || !unity::IsAlive(model)) return nullptr;
+    Il2CppObject* group = unity::Field<Il2CppObject*>(model, offGmTarrGroup_);
+    return IsA(group, groupClass_) && unity::IsAlive(group) ? group : nullptr;
+}
+
 // What the spawner offers: IdentifiableType assets whose prefab is an actor
 // (has an IdentifiableActor), except the player, scene objects (gordos and the
 // like), gadgets (placed through gadget mode), liquids and anything the save
@@ -844,6 +895,7 @@ bool Sandbox::EnsureSpawnables() {
     const unsigned long long t0 = GetTickCount64();
     auto items = std::make_shared<std::vector<bridge::Item>>();
     std::vector<std::string> leftOut;
+    Il2CppObject* tarrs = TarrGroup();
     size_t scanned = 0;
     for (Il2CppObject* o : unity::FindObjectsOfTypeAll(identClass_)) {
         if (sr2::core::ModuleFaulted(kModule)) break;
@@ -863,7 +915,9 @@ bool Sandbox::EnsureSpawnables() {
         if (!h) continue;
         const auto id = reinterpret_cast<uintptr_t>(o);
         spawnById_[id] = CatalogEntry{h, o};
-        items->push_back(bridge::Item{id, ItemName(o), 0, ItemIcon(o), ItemKind(o)});
+        bool tarr = false;
+        if (tarrs) CallValue(groupIsMember_, tarrs, {o}, "IdentifiableTypeGroup.IsMember", tarr);
+        items->push_back(bridge::Item{id, ItemName(o), 0, ItemIcon(o), ItemKind(o), tarr});
     }
     std::map<std::string, int> seen;
     for (const auto& it : *items) ++seen[it.name];
@@ -1059,6 +1113,7 @@ void Sandbox::Refresh() {
         if (!built) built = EnsureSpawnables();
         s.spawnables = spawnables_;
         s.spawnWhy = spawnWhy_;
+        s.tarrsOff = spawnables_ && TarrsOff();
         if (!built) EnsureRecipes();
         if (recipes_ && s.tick - lastRecipeState_ >= kRecipeStateMs) {
             lastRecipeState_ = s.tick;
@@ -1364,6 +1419,12 @@ void Sandbox::DoSpawn(const Ctx& c, uintptr_t item, int64_t count) {
         Done(false, std::format("{} not spawned: the game can't save it", name));
         return;
     }
+    if (spawnables_ && TarrsOff())
+        for (const bridge::Item& it : *spawnables_)
+            if (it.id == item && it.tarr) {
+                Done(false, std::format("{} not spawned: Tarrs are disabled in this save's game settings", name));
+                return;
+            }
     Il2CppObject* prefab = unity::Field<Il2CppObject*>(ident, offIdentPrefab_);
     if (!prefab || !unity::IsAlive(prefab)) {
         Done(false, std::format("{} not spawned: it has no prefab", name));
