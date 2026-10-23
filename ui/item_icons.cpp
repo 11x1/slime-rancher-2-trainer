@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <d3d11.h>
+
 #include <algorithm>
 #include <atomic>
 #include <mutex>
@@ -21,10 +23,10 @@ namespace unity = ::sr2::core::unity;
 
 constexpr const char* kCore = "UnityEngine.CoreModule";
 
-// One registered icon: the D3D11 resource of its texture and its rectangle in
-// D3D texture coordinates (v down).
+// One registered icon: the D3D11 texture it samples and its rectangle in D3D
+// texture coordinates (v down).
 struct Icon {
-    void* nativeTex = nullptr;  // ID3D11Resource* (Texture.GetNativeTexturePtr)
+    ID3D11Texture2D* tex = nullptr;  // our own reference (HoldTexture), never released
     float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
     float aspect = 1.0f;
 };
@@ -54,7 +56,7 @@ struct Syms {
 Syms S;
 bool g_symsTried = false, g_symsOk = false;
 std::unordered_map<Il2CppObject*, uint32_t> g_bySprite;  // main thread; 0 = could not be read
-std::unordered_map<void*, bool> g_keptTex;               // main thread: textures already held
+std::unordered_map<void*, ID3D11Texture2D*> g_heldTex;  // main thread: native resource -> our reference to it
 
 bool Resolve() {
     if (g_symsTried) return g_symsOk;
@@ -116,6 +118,31 @@ void* NativeTexture(Il2CppObject* tex) {
     return out;
 }
 
+// Our own COM reference to a texture's D3D11 resource, taken on the main thread
+// right after Texture.GetNativeTexturePtr handed out the pointer (the texture is
+// alive and the pointer current at that moment). The render thread only ever
+// uses this reference, never Unity's raw pointer later: the GC handle keeps the
+// managed Texture, not its GPU resource, which Unity can release or recreate
+// while the managed object lives on. Held for the process lifetime (a handful of
+// atlases), so the address is never reused for another texture either.
+// Texture2D (no arrays) only.
+ID3D11Texture2D* HoldTexture(Il2CppObject* tex, void* native) {
+    if (auto it = g_heldTex.find(native); it != g_heldTex.end()) return it->second;
+    ID3D11Texture2D* t = nullptr;
+    if (FAILED(static_cast<ID3D11Resource*>(native)->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&t))) ||
+        !t)
+        return nullptr;
+    D3D11_TEXTURE2D_DESC td{};
+    t->GetDesc(&td);
+    if (td.ArraySize != 1 || td.Width == 0 || td.Height == 0) {
+        t->Release();
+        return nullptr;
+    }
+    il::Keep(tex);  // the managed texture too: never unloaded while the overlay samples it
+    g_heldTex[native] = t;
+    return t;
+}
+
 struct UnityRect {
     float x, y, w, h;
 };
@@ -132,6 +159,8 @@ bool ReadSprite(Il2CppObject* spr, Icon& out) {
     if (tw <= 0 || th <= 0) return false;
     void* native = NativeTexture(tex);
     if (!native) return false;
+    ID3D11Texture2D* held = HoldTexture(tex, native);
+    if (!held) return false;
 
     // textureRect throws for tightly packed atlas sprites; the bounds of the mesh
     // UVs give the same rectangle for those.
@@ -161,14 +190,10 @@ bool ReadSprite(Il2CppObject* spr, Icon& out) {
     // Unity uploads rows bottom-up, so Unity's v is the D3D v: the sprite's top edge
     // is (y + h) / th. Half a texel in, against atlas bleeding.
     const float ftw = static_cast<float>(tw), fth = static_cast<float>(th);
-    out.nativeTex = native;
+    out.tex = held;
     out.u0 = (x + 0.5f) / ftw, out.v0 = (y + h - 0.5f) / fth;
     out.u1 = (x + w - 0.5f) / ftw, out.v1 = (y + 0.5f) / fth;
     out.aspect = w / h;
-    if (!g_keptTex[native]) {
-        il::Keep(tex);  // never unloaded while the overlay samples it
-        g_keptTex[native] = true;
-    }
     return true;
 }
 
@@ -196,7 +221,6 @@ uint32_t Register(Il2CppObject* sprite) {
 // ------------------------------------------------ render thread: drawing ----
 #if defined(SR2_HAVE_IMGUI)
 
-#include <d3d11.h>
 #include <d3dcompiler.h>
 
 #include <cstring>
@@ -213,7 +237,7 @@ struct View {
 };
 
 std::vector<Icon> g_local;          // render thread copy of g_icons
-std::map<void*, View> g_views;      // per native texture; a failure is remembered as an empty view
+std::map<ID3D11Texture2D*, View> g_views;  // per held texture; a failure is remembered as an empty view
 ID3D11PixelShader* g_gammaPs = nullptr;
 bool g_psTried = false;
 
@@ -265,13 +289,12 @@ void SetGammaShader(const ImDrawList*, const ImDrawCmd*) {
     if (rs && g_gammaPs) rs->DeviceContext->PSSetShader(g_gammaPs, nullptr, 0);
 }
 
-// Shader resource view for a native texture, created once (on the texture's own device).
-const View* ViewFor(void* nativeTex) {
-    if (auto it = g_views.find(nativeTex); it != g_views.end()) return it->second.srv ? &it->second : nullptr;
-    View& v = g_views[nativeTex];
-    ID3D11Texture2D* tex = nullptr;
-    auto* res = static_cast<ID3D11Resource*>(nativeTex);
-    if (FAILED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex))) || !tex) return nullptr;
+// Shader resource view for a held texture (HoldTexture), created once on the
+// texture's own device and never released, like the texture reference.
+const View* ViewFor(ID3D11Texture2D* tex) {
+    if (!tex) return nullptr;
+    if (auto it = g_views.find(tex); it != g_views.end()) return it->second.srv ? &it->second : nullptr;
+    View& v = g_views[tex];
     ID3D11Device* device = nullptr;
     tex->GetDevice(&device);
     D3D11_TEXTURE2D_DESC td{};
@@ -284,7 +307,6 @@ const View* ViewFor(void* nativeTex) {
     if (!device || td.ArraySize != 1 || FAILED(device->CreateShaderResourceView(tex, &sd, &v.srv))) v.srv = nullptr;
     if (device && v.srgb && v.srv && !g_psTried) CreateGammaShader(device);
     if (device) device->Release();
-    tex->Release();
     return v.srv ? &v : nullptr;
 }
 
@@ -302,7 +324,7 @@ bool Draw(ImDrawList* dl, uint32_t id, ImVec2 min, ImVec2 max, ImU32 tint) {
     Sync();
     if (id > g_local.size()) return false;
     const Icon& ic = g_local[id - 1];
-    const View* v = ViewFor(ic.nativeTex);
+    const View* v = ViewFor(ic.tex);
     if (!v) return false;
     const float bw = max.x - min.x, bh = max.y - min.y;
     float w = bw, h = bw / ic.aspect;

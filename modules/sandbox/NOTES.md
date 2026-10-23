@@ -79,7 +79,7 @@ Placement: the main camera's position and its forward direction flattened onto t
 
 ## Crafter
 
-List: every `GadgetDefinition` asset whose `CraftingCosts` has ident or currency costs (what the fabricator charges for), read from the game data, not hardcoded. Grouped by the fabricator's own categories when its `FabricateMenuConfiguration` asset is loaded (`_categories`, `GadgetFabricateCategory.Contains(def)`, title from `FabricateCategory._title`); without it there are no category chips. The cost text in the tooltip comes from `PurchaseCost.IdentCosts` (`IdentCostEntry {Amount, IdentType}`, struct list read through `List._items`) and `_currencyCosts` (`CurrencyCostEntry`). Blueprint state (`HasBlueprint`) and the inventory count (`GetItemCount`) refresh every 2 s while the tab is open, and right after a craft.
+List: every `GadgetDefinition` asset whose `CraftingCosts` has ident or currency costs (what the fabricator charges for), read from the game data, not hardcoded. Grouped by the fabricator's own categories when its `FabricateMenuConfiguration` asset is loaded (`_categories`, `GadgetFabricateCategory.Contains(def)`, title from `FabricateCategory._title`); without it there are no category chips. That asset is only loaded once the fabricator UI has been opened (2026-10-24 log: `crafter: 417 gadget recipes in 0 fabricator categories`), so while the list has no categories the module looks for them again every 5 s (one `FindObjectsOfTypeAll(FabricateMenuConfiguration)`, only while the tab is open, never in the same refresh as another one-time scan). When they turn up it regroups the existing list (`Contains` per recipe) and logs `crafter: N fabricator categories loaded now`. The tab shows All (its tooltip says to open the fabricator once) and Materials until then; when the tab list changes it stays on the category that was selected. The cost text in the tooltip comes from `PurchaseCost.IdentCosts` (`IdentCostEntry {Amount, IdentType}`, struct list read through `List._items`) and `_currencyCosts` (`CurrencyCostEntry`). Blueprint state (`HasBlueprint`) and the inventory count (`GetItemCount`) refresh every 2 s while the tab is open, and right after a craft.
 
 Crafting mirrors `GadgetFabricatableItem.FabricateAndSpendCost` (1.3.0, RVA 0x827E20) without `SpendableDirector.Spend`: `SceneContext.GadgetDirector.AddItem(definition, count * (BuyInPairs ? 2 : 1))`. It respects the gadget's count limit (`CanAddGadget`). It does not send the fabricate analytics event or `MetaGameDirector.OnGadgetFabricated`. The category icons are `FabricateCategory._icon`.
 
@@ -127,6 +127,31 @@ Limits:
 - The tab's buttons post an `Action` to the main thread (`main_thread::Post`); the module validates it, applies it, logs one line (`[sandbox] Newbucks set: 1,200 -> 5,000`, ...), sets the tab's status line and refreshes the snapshot.
 - Every game call is `Resolver::Invoke` (runtime_invoke, managed exceptions captured and logged). A native fault there marks the module faulted (`MarkModuleFaulted`); from then on it makes no game calls.
 - Each step re-reads the player: `SceneContextUtility.TryGetPlayerState`, `IsAlive` + class checks on `PlayerState`, `PlayerModel`, `AmmoSlotManager`, every `AmmoSlot` and every item.
+- Snapshot data is immutable once published: every list is a `shared_ptr<const ...>` built in full on the main thread, then swapped into a new `Snapshot` under the bridge's lock; a change (recipe state, categories) copies the list. The render thread keeps the snapshot it got for the whole frame. The icon table (`ui/item_icons`) is append-only; the render thread draws from its own copy, refreshed under a lock, and an id it doesn't have draws nothing.
+
+### Overlay crash on the Sandbox page (fixed 2026-10-24)
+
+Seen: opening the Sandbox page, the whole overlay disappeared. Log (main thread 28372, render thread 28408):
+```
+01:10:33.527 [sandbox] vacpack item list: 104 of 806 identifiable types fit 7 slot(s) (31 ms)
+01:10:33.793 [sandbox] 17 identifiable type group(s) with an icon: ...
+01:10:33.797 [sandbox] spawn list: 332 of 806 identifiable types are actors (63 ms)
+01:10:33.809 [ERROR] [28408] ui: native exception 0xC0000005 in overlay Present - overlay disabled
+```
+The fault is in the first overlay frame that drew the new spawn list (the snapshot with it was published at the end of the 54 ms main-thread frame logged as the hitch at 33.809). That frame is the first to draw the spawn list's icons, many on textures no earlier icon used (slime and largo appearance icons through `get_Icon`, group icons).
+
+Cause: `item_icons` stored Unity's raw `Texture.GetNativeTexturePtr` value at `Register` (main thread) and the render thread called `QueryInterface` on it the first time an icon on that texture was drawn, to make the shader resource view. Only the managed `Texture` was held (GC handle); a GC handle does not hold the GPU resource, which Unity can release or recreate while the managed object stays alive. Between `Register` and the first draw nothing kept the `ID3D11Resource` alive, so the render thread could dereference a freed COM object, an access violation inside the overlay's `Present`. The log has no fault address (the guard did not log one then), so the exact texture is not known; nothing else in the page's render path reads memory the frame does not own (checked below).
+
+Fix: `Register` takes its own COM reference right after the icall, while Unity's pointer is current (`QueryInterface` to `ID3D11Texture2D`, which also rejects non-2D / array textures there), and holds it for the process lifetime, one per texture. The render thread only uses that reference (and the view it makes from it); Unity's pointer is never used again. Since the reference is never released, a texture address can't be reused for another texture either. The Slimepedia logo (`ui/slime_icons.cpp`) had the same pattern and got the same fix. The overlay's SEH guards now log the faulting instruction (`module+offset`) and the access-violation address, so a future fault can be pinned to a line with the PDB.
+
+Audit of the page's render path (no other fault found):
+- Snapshot lists, relations, slots: owned by the frame's `shared_ptr<const Snapshot>`; the module never mutates a published list.
+- `FindItem`'s lookup table (`ui/menu.cpp`) cached raw pointers into the lists and compared bare list addresses to detect a change: a rebuilt list allocated where a freed one had been would have kept the table with dangling pointers (ABA). It now holds the two lists it was built from (`shared_ptr`), so they can't be freed under it.
+- Group-tab icons: ids from the snapshot (0 until `EnsureGroupIcons`), validated by `item_icons::Draw` (`id > local table` draws the glyph fallback).
+- Grid tiles keep `const std::string*` into the snapshot's lists, used only within the frame that holds the snapshot.
+- Crafter tabs with 0 categories: All and Materials only; the tab index is clamped, and now follows the selected category when the list changes.
+
+The `frame:ui.overlay` cost (avg 0.98 ms, 570 frames > 2 ms in the 10 s before) was not the Sandbox page: that perf stage is `game_input`'s main-thread tick, and the overlay was open on the title screen (the modded label was added at 01:10:12, in the same window), where `game_input` found no `InputDirector` and ran `FindObjectOfType` on every tick (in game, with the director cached, the same stage costs 0.001 ms). It now retries at most once a second (`ui/NOTES.md`). The Sandbox page itself makes no game calls per frame; its main-thread work is the 4 Hz snapshot (`frame:sandbox`, ~0.001 ms) and the one-time list scans (31-63 ms each, one per refresh).
 
 ## Not done (possible later)
 

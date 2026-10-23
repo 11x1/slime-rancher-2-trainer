@@ -159,12 +159,12 @@ bool Resolve() {
 
 // ------------------------------------------- main thread: reading entries ----
 // The picked entry's icon as Unity describes it. The texture is kept alive by a
-// GC handle; its D3D11 resource by our shader resource view (render thread).
+// GC handle; its D3D11 resource by our own COM reference (ReadSprite).
 struct Snapshot {
     unsigned serial = 0;
     bool has = false;
     Entry entry;
-    void* nativeTex = nullptr;  // ID3D11Resource* (Texture.GetNativeTexturePtr)
+    void* nativeTex = nullptr;  // ID3D11Texture2D*: our own reference (ReadSprite), never Unity's raw pointer
     float x = 0, y = 0, w = 0, h = 0;  // sprite rect in texels, origin bottom-left
     int texW = 0, texH = 0;
 };
@@ -179,7 +179,7 @@ struct Vec2 {
 std::mutex g_mutex;
 Snapshot g_snap;                       // guarded by g_mutex
 std::atomic<bool> g_busy{false};       // a refresh is posted or running
-std::vector<void*> g_keptTextures;     // main thread: native textures already held by a GC handle
+std::map<void*, ID3D11Texture2D*> g_heldTextures;  // main thread: native resource -> our reference (never released)
 Il2CppObject* g_lastPick = nullptr;    // main thread: identity only, never dereferenced
 std::mt19937 g_pickRng{std::random_device{}()};
 bool g_loggedCount = false;
@@ -324,11 +324,18 @@ bool ReadSprite(Il2CppObject* spr, Snapshot& s) {
         s.x = r.x, s.y = r.y, s.w = r.w, s.h = r.h;
     }
     if (s.w <= 0 || s.h <= 0) return false;
-    s.nativeTex = native;
-    if (std::find(g_keptTextures.begin(), g_keptTextures.end(), native) == g_keptTextures.end()) {
+    // Our own reference to the D3D11 resource, taken while Unity's pointer is current: the
+    // render thread only uses this one (see item_icons.cpp, HoldTexture).
+    auto held = g_heldTextures.find(native);
+    if (held == g_heldTextures.end()) {
+        ID3D11Texture2D* t = nullptr;
+        if (FAILED(static_cast<ID3D11Resource*>(native)->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&t))) ||
+            !t)
+            return false;
         il::Keep(tex);  // never unloaded while we draw from it
-        g_keptTextures.push_back(native);
+        held = g_heldTextures.emplace(native, t).first;
     }
+    s.nativeTex = held->second;
     return true;
 }
 

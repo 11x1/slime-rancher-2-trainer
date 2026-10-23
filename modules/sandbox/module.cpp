@@ -60,6 +60,7 @@ constexpr unsigned long long kSnapshotMs = 250;
 constexpr unsigned long long kEnergyMs = 100;
 constexpr int kMaxSlots = 32;  // slot mask width
 constexpr unsigned long long kRecipeStateMs = 2000;  // blueprint / owned counts in the crafter
+constexpr unsigned long long kCatRetryMs = 5000;     // look for the fabricator categories again (not loaded yet)
 constexpr int kMaxSpawn = 20;   // per click
 constexpr int kMaxCraft = 99;   // per click
 constexpr float kSpawnDist = 2.5f;  // metres in front of the camera
@@ -161,6 +162,13 @@ private:
     bool TarrsOff();
     Il2CppObject* TarrGroup();
     bool EnsureSpawnables();
+    struct FabCat {
+        Il2CppObject* obj;
+        int index;  // into the category titles
+    };
+    void ReadFabCategories(std::vector<FabCat>& cats, std::vector<std::string>& titles, std::vector<uint32_t>& icons);
+    int RecipeCategory(const std::vector<FabCat>& cats, Il2CppObject* def);
+    bool RetryRecipeCategories();
     bool EnsureRecipes();
     bool EnsureMaterials();
     void RefreshRecipeState();
@@ -218,6 +226,7 @@ private:
     bool materialsTried_ = false;
     std::string craftWhy_;  // "" = crafter available
     unsigned long long lastRecipeState_ = 0;
+    unsigned long long lastCatTry_ = 0;  // last look for the fabricator categories (RetryRecipeCategories)
 
     // ---- resolved in Setup ----
     Il2CppClass* playerStateClass_ = nullptr;
@@ -1282,6 +1291,60 @@ Il2CppObject* Sandbox::GadgetDirector() {
     return dir;
 }
 
+// The fabricator's gadget categories from its FabricateMenuConfiguration asset (one
+// FindObjectsOfTypeAll of that class). Nothing until the asset is loaded, which is
+// when the fabricator UI is first opened.
+void Sandbox::ReadFabCategories(std::vector<FabCat>& cats, std::vector<std::string>& titles, std::vector<uint32_t>& icons) {
+    if (!fabMenuClass_) return;
+    for (Il2CppObject* menu : unity::FindObjectsOfTypeAll(fabMenuClass_)) {
+        if (!IsA(menu, fabMenuClass_) || !unity::IsAlive(menu)) continue;
+        void* list = unity::Field<void*>(menu, offFabCategories_);
+        for (size_t i = 0, n = unity::ListCount(list); i < n; ++i) {
+            auto* c = static_cast<Il2CppObject*>(unity::ListAt(list, i));
+            if (!c || !IsA(c, fabGadgetCatClass_) || !unity::IsAlive(c)) continue;
+            std::string t = Localized(unity::Field<Il2CppObject*>(c, offFabCatTitle_));
+            if (t.empty()) t = unity::GetName(c);
+            cats.push_back({c, static_cast<int>(titles.size())});
+            titles.push_back(t);
+            icons.push_back(offFabCatIcon_ ? SpriteIcon(unity::Field<Il2CppObject*>(c, offFabCatIcon_)) : 0);
+        }
+        if (!cats.empty()) break;  // one menu is enough
+    }
+}
+
+// Index of the first category that contains the gadget, -1 if none.
+int Sandbox::RecipeCategory(const std::vector<FabCat>& cats, Il2CppObject* def) {
+    for (const FabCat& c : cats) {
+        bool in = false;
+        if (CallValue(fabCatContains_, c.obj, {def}, "GadgetFabricateCategory.Contains", in) && in) return c.index;
+    }
+    return -1;
+}
+
+// The recipe list was built before the fabricator's categories were loaded: look for them
+// again every few seconds (only while the tab is open, like every refresh) and, once they
+// are there, group the existing list by them. True if it did the work this refresh.
+bool Sandbox::RetryRecipeCategories() {
+    if (!fabMenuClass_ || !recipes_ || recipes_->empty() || (recipeCats_ && !recipeCats_->empty())) return false;
+    const unsigned long long t0 = GetTickCount64();
+    if (t0 - lastCatTry_ < kCatRetryMs) return false;
+    lastCatTry_ = t0;
+    std::vector<FabCat> cats;
+    auto titles = std::make_shared<std::vector<std::string>>();
+    auto icons = std::make_shared<std::vector<uint32_t>>();
+    ReadFabCategories(cats, *titles, *icons);
+    if (cats.empty()) return false;
+    auto next = std::make_shared<std::vector<bridge::Recipe>>(*recipes_);
+    for (bridge::Recipe& r : *next)
+        if (Il2CppObject* d = Lookup(recipeById_, r.id, gadgetDefClass_)) r.category = RecipeCategory(cats, d);
+    recipes_ = std::move(next);
+    recipeCats_ = std::move(titles);
+    recipeCatIcons_ = std::move(icons);
+    SR2_INFO("[{}] crafter: {} fabricator categories loaded now; recipes grouped ({} ms)", kModule, recipeCats_->size(),
+             GetTickCount64() - t0);
+    return true;
+}
+
 // The fabricator's gadget recipes: every GadgetDefinition asset with a crafting
 // cost, grouped by the fabricator's own categories when its menu asset is loaded.
 // Built once; blueprint state and owned counts refresh every 2 s (RefreshRecipeState).
@@ -1292,29 +1355,11 @@ bool Sandbox::EnsureRecipes() {
     recipesTried_ = true;
     std::vector<std::string> leftOut;
     const unsigned long long t0 = GetTickCount64();
-    struct Cat {
-        Il2CppObject* obj;
-        int index;
-    };
-    std::vector<Cat> cats;
+    std::vector<FabCat> cats;
     auto titles = std::make_shared<std::vector<std::string>>();
     auto catIcons = std::make_shared<std::vector<uint32_t>>();
-    if (fabMenuClass_) {
-        for (Il2CppObject* menu : unity::FindObjectsOfTypeAll(fabMenuClass_)) {
-            if (!IsA(menu, fabMenuClass_) || !unity::IsAlive(menu)) continue;
-            void* list = unity::Field<void*>(menu, offFabCategories_);
-            for (size_t i = 0, n = unity::ListCount(list); i < n; ++i) {
-                auto* c = static_cast<Il2CppObject*>(unity::ListAt(list, i));
-                if (!c || !IsA(c, fabGadgetCatClass_) || !unity::IsAlive(c)) continue;
-                std::string t = Localized(unity::Field<Il2CppObject*>(c, offFabCatTitle_));
-                if (t.empty()) t = unity::GetName(c);
-                cats.push_back({c, static_cast<int>(titles->size())});
-                titles->push_back(t);
-                catIcons->push_back(offFabCatIcon_ ? SpriteIcon(unity::Field<Il2CppObject*>(c, offFabCatIcon_)) : 0);
-            }
-            if (!cats.empty()) break;  // one menu is enough
-        }
-    }
+    ReadFabCategories(cats, *titles, *catIcons);
+    lastCatTry_ = t0;
     auto list = std::make_shared<std::vector<bridge::Recipe>>();
     for (Il2CppObject* d : unity::FindObjectsOfTypeAll(gadgetDefClass_)) {
         if (sr2::core::ModuleFaulted(kModule)) break;
@@ -1333,13 +1378,7 @@ bool Sandbox::EnsureRecipes() {
         r.icon = ItemIcon(d);
         r.cost = RecipeCost(d);
         r.perCraft = unity::Field<bool>(d, offBuyInPairs_) ? 2 : 1;
-        for (const Cat& c : cats) {
-            bool in = false;
-            if (CallValue(fabCatContains_, c.obj, {d}, "GadgetFabricateCategory.Contains", in) && in) {
-                r.category = c.index;
-                break;
-            }
-        }
+        r.category = RecipeCategory(cats, d);
         Il2CppGCHandle h = unity::NewGCHandle(d);
         if (!h) continue;
         recipeById_[r.id] = CatalogEntry{h, d};
@@ -1486,7 +1525,8 @@ void Sandbox::Refresh() {
         if (!built) built = EnsureMaterials();
         // Cheap one-time extras, each in its own refresh after the lists.
         if (!built && spawnables_ && !relations_) EnsureRelations(), built = true;
-        if (!built && spawnables_ && !groupIconsBuilt_) EnsureGroupIcons();
+        if (!built && spawnables_ && !groupIconsBuilt_) EnsureGroupIcons(), built = true;
+        if (!built) built = RetryRecipeCategories();
         if ((recipes_ || materials_) && s.tick - lastRecipeState_ >= kRecipeStateMs) {
             lastRecipeState_ = s.tick;
             RefreshRecipeState();
