@@ -67,7 +67,7 @@ struct State {
     // textures
     Fn texCtor, texSetPixels32, texApply, texSetFilter, texGetFilter, texSetWrap, spriteCreate;
     // TMP
-    Fn tmpSetText, tmpSetFontSize, tmpSetAlignment, tmpSetColor, tmpGetFont, tmpSetFont, tmpSetWrap;
+    Fn tmpSetText, tmpSetFontSize, tmpSetAlignment, tmpSetColor, tmpGetFont, tmpSetFont, tmpSetWrap, tmpPreferredWidth;
     // misc
     Fn cursorLockState, timeScale, screenHeight;
     bool resolved = false;
@@ -314,6 +314,7 @@ bool Resolve(std::string& err) {
         s.tmpGetFont = A(s.tmpText, "get_font", 0, &opt);
         s.tmpSetFont = A(s.tmpText, "set_font", 1, &opt);
         s.tmpSetWrap = A(s.tmpText, "set_enableWordWrapping", 1, nullptr);
+        s.tmpPreferredWidth = A(s.tmpText, "get_preferredWidth", 0, nullptr);
     }
     // Misc
     s.cursorLockState = A(cursor, "get_lockState", 0, &opt);
@@ -812,6 +813,12 @@ void TmpSetCenter(Il2CppObject* t) {
     if (!Alive(t)) return;
     if (S.tmpSetAlignment) Call<void>(S.tmpSetAlignment, t, 514 /* TextAlignmentOptions.Center */);
     if (S.tmpSetWrap) Call<void>(S.tmpSetWrap, t, false);
+}
+void TmpSetAlignment(Il2CppObject* t, int alignment) {
+    if (Alive(t) && S.tmpSetAlignment) Call<void>(S.tmpSetAlignment, t, alignment);
+}
+float TmpPreferredWidth(Il2CppObject* t) {
+    return (Alive(t) && S.tmpPreferredWidth) ? Call<float>(S.tmpPreferredWidth, t) : -1.0f;
 }
 void TmpSetColor(Il2CppObject* t, Color c) {
     if (Alive(t) && S.tmpSetColor) Call<void>(S.tmpSetColor, t, c);
