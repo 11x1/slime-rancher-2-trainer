@@ -272,3 +272,27 @@ No hook is needed for the projection:
 3. Log `buildGUID` on first run and pin it.
 
 Name-based resolution makes the mod survive minor patches. Fail closed on any missing class, method or field.
+
+---
+
+## UI: Slimepedia (overlay logo)
+
+Used by `ui/slime_icons.cpp` (the overlay sidebar logo). Read-only: no hooks, only field reads and calls on the main thread.
+
+| Class (namespace) | Member | Kind | RVA / offset | Verified behaviour | Hook-safe? |
+|---|---|---|---|---|---|
+| SceneContext (global) | `<PediaDirector>k__BackingField` | field | +0x38 | dump. The scene's PediaDirector. `SceneContext` comes from `SRSingleton<SceneContext>.get_Instance()` (parent class, shared generic body 0x4DC510). | Read |
+| SceneContext | `<GameModel>k__BackingField` | field | +0x98 | **IDA** (`SceneContextUtility.TryGetGameModel` 0x693A80 reads +0x98 and tests it with `Object.op_Inequality`). Null means no save is loaded. | Read |
+| PediaDirector (global) | `_pediaConfiguration` | field | +0x28 | dump. `PediaConfiguration` asset. | Read |
+| PediaDirector | `_pediaModel` | field | +0x80 | dump. The loaded save's `PediaModel`; null before a save is loaded. | Read |
+| PediaDirector | `IsUnlocked(PediaEntry)` | method | 0x52C210 | **IDA (capstone).** `return _pediaModel.unlocked.Contains(entry)`; throws NullReferenceException if `_pediaModel` or `unlocked` is null. Overloaded with `IsUnlocked(IdentifiableType)` (0x52C140), so resolve by parameter type (`MethodByParams`, `"MonomiPark.SlimeRancher.Pedia.PediaEntry"`). | Call (check the model first) |
+| PediaModel (MonomiPark.SlimeRancher.DataModel) | `unlocked` | field | +0x18 | dump. `HashSet<PediaEntry>` of the save's unlocked entries; changes during play (`Unlock`). | Read |
+| PediaConfiguration (MP.SR.Pedia) | `_categoryList` | field | +0x18 | dump. `Object[]`: the Slimepedia's categories (PediaCategory and others, e.g. MusicPediaCategory). | Read |
+| PediaCategory (MP.SR.Pedia) | `_items` | field | +0x30 | dump. `PediaEntry[]` shown in that category (`Count` reads its length). | Read |
+| PediaEntry (MP.SR.Pedia), abstract ScriptableObject | `_details` | field | +0x20 | dump. `PediaEntryDetail[]`: the entry's sections in page order (`Pages`). | Read |
+| PediaEntry | `_title`, `_description` | field | +0x38, +0x40 | dump. `LocalizedString` name and intro text. | Read |
+| PediaEntry | `get_Icon()` | abstract | | dump. The list icon. `IdentifiablePediaEntry.get_Icon` (0x99E3D0, **IDA (capstone)**) returns `_identifiableType`'s icon through a virtual call, null if the type is null. | Call (virtual: resolve on the object's class) |
+| IdentifiablePediaEntry (MP.SR.Pedia) : PediaEntry | `_identifiableType` | field | +0x58 | dump. The `IdentifiableType` the entry describes; slime entries have a `SlimeDefinition` here. Other entry kinds: `FixedPediaEntry` (own `_icon`), `RadiantSlimePediaEntry` (`_slimeDefinition` +0x58). | Read |
+| PediaEntryDetail (MP.SR.Pedia), plain class | `Section`, `Text` | field | +0x10, +0x18 | dump. `Section` is a `PediaDetailSection` asset; `Text` the section body (`LocalizedString`). `TextGamepad` +0x20 / `TextPS4` +0x28 are controller variants, `Contents` +0x30 sub-contents (input prompts). | Read |
+| PediaDetailSection (MP.SR.Pedia), ScriptableObject | `_title`, `_icon` | field | +0x18, +0x20 | dump. Section heading (`LocalizedString`) and icon. | Read |
+| LocalizedReference (UnityEngine.Localization) | `get_IsEmpty()` | method | 0x2DAF4A0 | dump. True when no table entry is set; checked before `LocalizedString.GetLocalizedString()` (0x2DB1FC0). | Call |

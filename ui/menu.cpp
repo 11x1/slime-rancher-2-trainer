@@ -146,6 +146,40 @@ void Tooltip(const std::string& text) {
     ImGui::PopStyleVar();
 }
 
+// The logo's Slimepedia entry: the slime's name as a heading, then each section's
+// title and text as the Slimepedia page shows them (the intro has no title).
+void EntryTooltip(const slime_icons::Entry& e) {
+    const Palette& P = theme::Colors();
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(14), U(11)));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(6), U(2)));
+    PushFloatingStyle();
+    if (ImGui::BeginTooltip()) {
+        FloatingSurface(false);
+        ImGui::PushTextWrapPos(U(360));
+        {
+            FontScope f(theme::Display(), theme::kDisplaySize + 2);
+            ImGui::PushStyleColor(ImGuiCol_Text, theme::Current() == theme::Mode::Dark ? P.grab : P.accent);
+            ImGui::TextUnformatted(e.name.c_str());
+            ImGui::PopStyleColor();
+        }
+        for (const auto& s : e.sections) {
+            ImGui::Dummy(ImVec2(0, U(5)));
+            if (!s.title.empty()) {
+                FontScope f(theme::Display(), theme::kSmallSize + 1);
+                ImGui::PushStyleColor(ImGuiCol_Text, P.soft);
+                ImGui::TextUnformatted(s.title.c_str());
+                ImGui::PopStyleColor();
+            }
+            FontScope f(theme::Body(), theme::kSmallSize);
+            ImGui::TextUnformatted(s.text.c_str());
+        }
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+    PopFloatingStyle();
+    ImGui::PopStyleVar(2);
+}
+
 void HoverTip(const std::string& text) {
     if (!text.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled))
         Tooltip(text);
@@ -997,8 +1031,8 @@ void DrawSidebar(const Host& h, const std::vector<Category>& cats, const ModuleV
     const ImVec2 lmin(la.x + w * 0.5f - U(66), la.y + U(2)), lmax(la.x + w * 0.5f + U(66), la.y + U(112));
     if (!slime_icons::Draw(dl, lmin, lmax)) DrawSlimeFallback(dl, lmin, lmax);
     ImGui::Dummy(ImVec2(w, U(124)));
-    const std::string slime = slime_icons::CurrentName();
-    if (!slime.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) Tooltip(slime);
+    if (const slime_icons::Entry* slime = slime_icons::CurrentEntry(); slime && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+        EntryTooltip(*slime);
 
     size_t bottomCount = 0;
     for (const auto& c : cats) {
