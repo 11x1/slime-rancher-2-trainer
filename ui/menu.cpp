@@ -132,6 +132,118 @@ void PopFloatingStyle() {
     ImGui::PopStyleColor();
 }
 
+// ---------------------------------------------------------- inline code ----
+// Console names (HL2 Movement's sv_gravity, hl2_walkspeed, ...) are shown as
+// inline code: monospace text on a small rounded chip.
+bool IsConsoleName(std::string_view s) {
+    const size_t us = s.find('_');
+    if (us == std::string_view::npos || us == 0 || us + 1 >= s.size()) return false;
+    const std::string_view prefix = s.substr(0, us);
+    if (prefix != "sv" && prefix != "hl2" && prefix != "cl" && prefix != "mp") return false;
+    return std::all_of(s.begin(), s.end(), [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; });
+}
+
+constexpr float kCodeSize = theme::kSmallSize + 0.5f;
+
+ImVec2 CodeChipSize(const char* text, float size) {
+    const ImVec2 ts = TextSize(theme::Mono(), size, text);
+    return ImVec2(ts.x + U(10), ts.y + U(4));
+}
+
+// Draws the chip with its top-left at `a`; returns its size.
+ImVec2 DrawCodeChip(ImDrawList* dl, ImVec2 a, const char* text, float size, ImU32 ink) {
+    const Palette& P = theme::Colors();
+    const ImVec2 cs = CodeChipSize(text, size);
+    a = ImVec2(std::round(a.x), std::round(a.y));
+    dl->AddRectFilled(a, ImVec2(a.x + cs.x, a.y + cs.y), ImGui::GetColorU32(P.frame), U(5));
+    dl->AddText(theme::Mono(), U(size), ImVec2(a.x + U(5), a.y + U(2)), ImGui::GetColorU32(ink), text);
+    return cs;
+}
+
+// A chip as a layout item, vertically centred on a frame-height line (like
+// AlignTextToFramePadding text).
+void CodeChipItem(const char* text, ImU32 ink) {
+    const ImVec2 cs = CodeChipSize(text, kCodeSize);
+    const ImVec2 cur = ImGui::GetCursorScreenPos();
+    const float fh = ImGui::GetFrameHeight();
+    ImGui::Dummy(ImVec2(cs.x, fh));
+    DrawCodeChip(ImGui::GetWindowDrawList(), ImVec2(cur.x, cur.y + (fh - cs.y) * 0.5f), text, kCodeSize, ink);
+}
+
+// Wrapped text whose console names are chips (word by word, wrapping at `wrap`
+// px from the line start). Plain text otherwise keeps ImGui's own wrapping.
+void RichText(const std::string& text, float wrap) {
+    ImFont* f = ImGui::GetFont();
+    const float fs = ImGui::GetFontSize();
+    const float space = f->CalcTextSizeA(fs, FLT_MAX, 0, " ").x;
+    const float lineH = std::max(fs, CodeChipSize("x", kCodeSize).y);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImU32 ink = ImGui::GetColorU32(ImGuiCol_Text);
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    float x = 0, y = 0, maxX = 0;
+    size_t i = 0;
+    while (i <= text.size()) {
+        const size_t nl = text.find('\n', i);
+        const std::string line = text.substr(i, nl == std::string::npos ? std::string::npos : nl - i);
+        size_t p = 0;
+        bool first = true;
+        while (p < line.size()) {
+            const size_t e = std::min(line.find(' ', p), line.size());
+            const std::string word = line.substr(p, e - p);
+            p = e + 1;
+            if (word.empty()) continue;
+            // "(sv_gravity)." -> "(", "sv_gravity", ")."
+            size_t a = 0, b = word.size();
+            while (a < b && std::strchr("(\"'", word[a])) ++a;
+            while (b > a && std::strchr(".,;:)\"'", word[b - 1])) --b;
+            const std::string pre = word.substr(0, a), core = word.substr(a, b - a), post = word.substr(b);
+            const bool code = IsConsoleName(core);
+            const float w = code ? f->CalcTextSizeA(fs, FLT_MAX, 0, pre.c_str()).x + CodeChipSize(core.c_str(), kCodeSize).x +
+                                       f->CalcTextSizeA(fs, FLT_MAX, 0, post.c_str()).x
+                                 : f->CalcTextSizeA(fs, FLT_MAX, 0, word.c_str()).x;
+            if (!first && x + space + w > wrap) {
+                x = 0;
+                y += lineH;
+            } else if (!first) {
+                x += space;
+            }
+            first = false;
+            const float ty = origin.y + y + (lineH - fs) * 0.5f;
+            if (code) {
+                dl->AddText(f, fs, ImVec2(origin.x + x, ty), ink, pre.c_str());
+                x += f->CalcTextSizeA(fs, FLT_MAX, 0, pre.c_str()).x;
+                const ImVec2 cs = CodeChipSize(core.c_str(), kCodeSize);
+                DrawCodeChip(dl, ImVec2(origin.x + x, origin.y + y + (lineH - cs.y) * 0.5f), core.c_str(), kCodeSize, ink);
+                x += cs.x;
+                dl->AddText(f, fs, ImVec2(origin.x + x, ty), ink, post.c_str());
+                x += f->CalcTextSizeA(fs, FLT_MAX, 0, post.c_str()).x;
+            } else {
+                dl->AddText(f, fs, ImVec2(origin.x + x, ty), ink, word.c_str());
+                x += w;
+            }
+            maxX = std::max(maxX, x);
+        }
+        y += lineH;
+        if (nl == std::string::npos) break;
+        i = nl + 1;
+    }
+    ImGui::Dummy(ImVec2(maxX, y));
+}
+
+bool HasConsoleName(const std::string& text) {
+    size_t p = 0;
+    while (p < text.size()) {
+        size_t e = text.find_first_of(" \n", p);
+        if (e == std::string::npos) e = text.size();
+        std::string_view w(text.data() + p, e - p);
+        while (!w.empty() && std::strchr("(\"'", w.front())) w.remove_prefix(1);
+        while (!w.empty() && std::strchr(".,;:)\"'", w.back())) w.remove_suffix(1);
+        if (IsConsoleName(w)) return true;
+        p = e + 1;
+    }
+    return false;
+}
+
 void Tooltip(const std::string& text) {
     if (text.empty()) return;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(12), U(9)));
@@ -140,9 +252,13 @@ void Tooltip(const std::string& text) {
         FloatingSurface(false);
         {
             FontScope f(theme::Body(), theme::kSmallSize + 0.5f);  // popped before EndTooltip
-            ImGui::PushTextWrapPos(U(300));
-            ImGui::TextUnformatted(text.c_str());
-            ImGui::PopTextWrapPos();
+            if (HasConsoleName(text)) {
+                RichText(text, U(300) - ImGui::GetStyle().WindowPadding.x);
+            } else {
+                ImGui::PushTextWrapPos(U(300));
+                ImGui::TextUnformatted(text.c_str());
+                ImGui::PopTextWrapPos();
+            }
         }
         ImGui::EndTooltip();
     }
@@ -494,12 +610,16 @@ void DrawRow(const Host& h, const settings::Def& d, const std::string& label, bo
 
     ImU32 col = nested ? P.soft : P.text;
     if (isBool && cur < 0.5) col = rowHovered ? P.soft : P.dim;
-    ImGui::AlignTextToFramePadding();
-    ImGui::PushTextWrapPos(x0 + avail - ctlW - U(12));
-    ImGui::PushStyleColor(ImGuiCol_Text, col);
-    ImGui::TextUnformatted(label.c_str());
-    ImGui::PopStyleColor();
-    ImGui::PopTextWrapPos();
+    if (IsConsoleName(label)) {  // HL2 console names ("sv_gravity") as inline code
+        CodeChipItem(label.c_str(), col);
+    } else {
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushTextWrapPos(x0 + avail - ctlW - U(12));
+        ImGui::PushStyleColor(ImGuiCol_Text, col);
+        ImGui::TextUnformatted(label.c_str());
+        ImGui::PopStyleColor();
+        ImGui::PopTextWrapPos();
+    }
     HoverTip(d.tooltip);
     const float labelBottom = ImGui::GetItemRectMax().y;
     ImGui::SameLine(x0 + avail - ctlW);
