@@ -1147,11 +1147,30 @@ void DrawSidebar(const Host& h, const std::vector<Category>& cats, const ModuleV
         lineW += TextSize(bf, tailSize, tail.c_str()).x;
     }
     if (lineW > 0) {
+        // Click copies the full commit ("abc1234" or "abc1234-dirty", never the
+        // shortened "*" form) to the Windows clipboard (ImGui's Win32 default
+        // handler); without a commit, the ISO build time. "Copied" shows ~1.5 s.
+        static unsigned long long copiedUntil = 0;
+        static std::string copiedText;
         ImGui::SetCursorScreenPos(ImVec2(x0, sp.y - U(8)));
-        ImGui::InvisibleButton("##buildstamp", ImVec2(lineW, U(16)));
-        std::string tip = std::string("Built ") + ::sr2::core::build_info::TimeIso();
-        if (*::sr2::core::build_info::Commit()) tip += std::string("\nCommit ") + ::sr2::core::build_info::Commit();
-        HoverTip(tip);
+        if (ImGui::InvisibleButton("##buildstamp", ImVec2(lineW, U(16)))) {
+            const char* full = ::sr2::core::build_info::Commit();
+            copiedText = *full ? full : ::sr2::core::build_info::TimeIso();
+            ImGui::SetClipboardText(copiedText.c_str());
+            copiedUntil = h.nowMs + 1500;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        if (copiedUntil != 0 && h.nowMs < copiedUntil) {
+            Tooltip("Copied " + copiedText);
+        } else {
+            copiedUntil = 0;
+            std::string tip = std::string("Built ") + ::sr2::core::build_info::TimeIso();
+            if (*::sr2::core::build_info::Commit())
+                tip += std::string("\nCommit ") + ::sr2::core::build_info::Commit() + "\nClick to copy the commit";
+            else
+                tip += "\nClick to copy the build time";
+            HoverTip(tip);
+        }
     }
     ImGui::EndChild();
     ImGui::PopStyleVar(2);
