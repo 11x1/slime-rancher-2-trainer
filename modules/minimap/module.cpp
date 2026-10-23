@@ -98,6 +98,7 @@ constexpr float kRoundBorder = 52;            // 9-slice border (px) of the 128 
 constexpr int kMarkerQueriesPerTick = 8;      // CanBeShown queries per 10 Hz tick (round robin)
 constexpr int kMarkerMaxFailures = 3;
 constexpr float kBuildRetry = 5.0f;
+constexpr float kPagePendingError = 60.0f;  // "no page prefab yet" is normal while loading; ERROR only after this long
 constexpr float kHudWait = 10.0f;
 constexpr float kMarkerRecheck = 2.0f;
 constexpr int kBuildChunk = 32;              // graphics copied per frame while building
@@ -541,6 +542,8 @@ private:
     float buildCd_ = 0, hudWait_ = 0, time_ = 0;
     bool podsSeeded_ = false;
     std::string lastBuildError_;
+    float pagePendingSince_ = -1;  // time_ of the first "no page prefab yet" of this map (-1: none)
+    bool pagePendingReported_ = false;
 
     // Map UI preload: the full map's UI scene (MapUI prefab -> MapPrefabMapping -> page prefabs) is an
     // Addressables scene the game loads only while the map is open and unloads after it closes. We hold
@@ -919,6 +922,7 @@ private:
         mappingScanCd_ = 0;
         mappingScanMisses_ = 0;
         lastBuildError_.clear();
+        pagePendingSince_ = -1;
         unknownArea_ = false;
         mapWasOpen_ = false;
         lastAlt_ = 1 << 30;
@@ -1477,6 +1481,7 @@ private:
             wantedMap_.Reset(mapDef);
             buildCd_ = 0;
             lastBuildError_.clear();
+        pagePendingSince_ = -1;
         }
     }
 
@@ -1567,6 +1572,28 @@ private:
         DestroyView();
     }
 
+    // No page prefab yet: normal on every load (the map UI scene loads after the world), so INFO;
+    // ERROR once only if the map still has no page after kPagePendingError seconds.
+    void BuildPending(const char* reason) {
+        if (pagePendingSince_ < 0) {
+            pagePendingSince_ = time_;
+            pagePendingReported_ = false;
+        }
+        std::string why = std::format("no map page prefab yet ({})", reason);
+        const float waited = time_ - pagePendingSince_;
+        if (waited >= kPagePendingError && !pagePendingReported_) {
+            pagePendingReported_ = true;
+            SR2_ERROR("minimap: cannot show map '{}': {} - still none after {:.0f} s (also taken from the full map "
+                      "when it opens)",
+                      unity::GetName(wantedMap_.get()), why, waited);
+        } else if (why != lastBuildError_) {
+            SR2_INFO("minimap: map '{}': {} - retrying every second", unity::GetName(wantedMap_.get()), why);
+        }
+        lastBuildError_ = std::move(why);
+        buildCd_ = 1.0f;
+        DestroyView();
+    }
+
     // Phase 0 of the page copy (one frame): read the prefab's structure.
     void StartBuild() {
         DestroyView();
@@ -1578,11 +1605,9 @@ private:
                               : !preloadEntry_    ? "map UI preload not requested yet"
                               : PreloadPending()  ? "map UI scene still loading"
                                                   : "map UI scene loaded but no MapPrefabMapping has this map";
-            return BuildFail(std::format("no map page prefab yet ({}; retried, also taken from the full map when it "
-                                         "opens)",
-                                         why),
-                             1.0f);  // re-checked every second (asset scans are rate limited separately)
+            return BuildPending(why);  // re-checked every second (asset scans are rate limited separately)
         }
+        pagePendingSince_ = -1;
         Il2CppObject* mapComp = unity::GetComponent(prefab, sym_.map);
         if (!ugui::IsA(mapComp, sym_.map)) return BuildFail("map page prefab has no Map component on its root");
         Il2CppObject* mapT = unity::TransformOf(mapComp);
@@ -2020,6 +2045,7 @@ private:
         build_ = Build{};  // drops the build pins
         view_.ok = true;
         lastBuildError_.clear();
+        pagePendingSince_ = -1;
         lastS_ = -1;
         lastR_ = 1e9f;
         fogAcc_ = kFogInterval;
