@@ -1998,6 +1998,7 @@ std::vector<custom_upgrades::world::PropRequest> CustomUpgrades::WantedProps() c
         if (owns(ps, GARDEN_GROWTH_1) || owns(ps, GARDEN_GROWTH_2)) kinds |= w::kPropGardenSprinkler;
         if (owns(ps, GARDEN_GROWTH_2)) kinds |= w::kPropGardenSprinkler2;
         if (owns(ps, INCIN_ASH_BOOST)) kinds |= w::kPropIncinGlow;
+        if (owns(ps, CORRAL_MUSIC_2)) kinds |= w::kPropCorralMusic;
         if (kinds) out.push_back({id, kinds});
     }
     return out;

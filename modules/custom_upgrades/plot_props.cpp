@@ -19,6 +19,11 @@
 //     (the fire particle system at (0, 3.55, 0), scale (0.75, 1.5, 0.75)) has two INACTIVE
 //     children "Glow" (scale 0.67) and "Embers" (at -0.96, turned -90 deg about x, scale 1.4 /
 //     1.2 / 1.2) that vanilla never shows. We clone and switch them on at the same place.
+//   * corral prefab "patchCorral": "Music Box/techCorralMusicBox/MusicBox/Music" = the Music Box
+//     upgrade's speaker (Animator, a game script, capsule collider; children: bone_musicBase ->
+//     bone_musicEmmit -> "FX Music" note particles + "musicbox (1)" mesh, and the skinned
+//     "musicbox" mesh). Its chain (container turned 180 deg, inner offsets cancel) puts it on
+//     the (-x, +z) corner post, the speaker head ~0.8 m inwards at 2.5 m.
 //   * decorFireFlower (decoration gadget): child "FX Fireflower" (two ember particle systems,
 //     "Embers_01" / "Embers_02" at y 2.59 / 1.17 above the flower), set so they rise out of
 //     the incinerator's opening.
@@ -32,6 +37,11 @@
 // side. Garden: a third sprinkler head in the middle of the +x side (Fast Growth I or II) and a
 // fourth in the middle of the -x side (Fast Growth II; the deposit port at (-5.44, -3.14) is
 // outside the soil), spraying inwards like the vanilla ones. Nothing has a collider, so nothing blocks chickens, crops, the vac or the player.
+//
+// Corral: the second speaker goes on the (-x, -z) corner post, above the plot menu terminal
+// (which stands outside the post at ground height), head 2.5 m up and leaning inwards; the other
+// corners hold the vanilla speaker (-x, +z), the plort collector (+x, +z) and the auto-feeder
+// (+x, -z).
 //
 // Holders: "sr2props_<Kind>#<generation>", a plain GameObject under the plot (identity local
 // transform), made inactive before the clones go in, activated after stripping.
@@ -64,6 +74,7 @@ using sr2::il2cpp::Resolver;
 constexpr const char* kImage = "Assembly-CSharp";
 constexpr const char* kCore = "UnityEngine.CoreModule";
 constexpr const char* kPhysics = "UnityEngine.PhysicsModule";
+constexpr int32_t kPlotCorral = 2;
 constexpr int32_t kPlotCoop = 3;
 constexpr int32_t kPlotGarden = 4;
 constexpr int32_t kPlotIncinerator = 7;
@@ -116,6 +127,10 @@ const Part kSprinkler2[] = {  // the same head mirrored onto the -x side (turned
     {Src::kPlot, kPlotGarden, nullptr, "Sprinkler/SprinklerBase", {-4.38f, -0.33f, 0.0f}, YawQ(1.0f, 0.0f), S(1.0f),
      false},
 };
+const Part kMusic[] = {  // the vanilla speaker, from its (-x, +z) corner post (turned 180 deg) to (-x, -z) (90 deg)
+    {Src::kPlot, kPlotCorral, nullptr, "Music Box/techCorralMusicBox/MusicBox/Music", {-4.75f, 0.0f, -4.75f},
+     YawQ(0.70710678f, 0.70710678f), S(1.0f), false},
+};
 const Part kGlow[] = {
     {Src::kPlot, kPlotIncinerator, nullptr, "objIncinerator/Meshes/meshIncinerator/FireTest/Glow", {0.0f, 3.55f, 0.0f},
      kId, {0.5f, 1.0f, 0.5f}, true},
@@ -137,6 +152,7 @@ const KindDef kKinds[] = {
     {kPropGardenSprinkler, "GardenSprinkler", kPlotGarden, kSprinkler, std::size(kSprinkler)},
     {kPropGardenSprinkler2, "GardenSprinklerII", kPlotGarden, kSprinkler2, std::size(kSprinkler2)},
     {kPropIncinGlow, "IncineratorGlow", kPlotIncinerator, kGlow, std::size(kGlow)},
+    {kPropCorralMusic, "CorralMusicII", kPlotCorral, kMusic, std::size(kMusic)},
 };
 
 }  // namespace
