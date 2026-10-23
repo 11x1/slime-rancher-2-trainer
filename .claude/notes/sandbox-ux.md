@@ -16,3 +16,6 @@ Crafter:
 Right-click menu on items:
 - Food: "Give slime" (a slime that has this food as favourite). Slime: "Give food" (its favourite), "Give plort". Design a good UX for favourites (e.g. favourite shown in the tooltip with its icon, related items).
 Icons: largos, containers, giant eggs, vine buds have none. Research generating them (e.g. compose two slime icons for largos, render from models).
+
+Achievements:
+- While Sandbox is enabled, no achievement progress: block the game's achievement unlocks and progress updates (Steam and in-game tracker) so nothing is granted or advanced. Find the game's achievement director/service by name and gate it at the source. Say in the Sandbox card that achievements are paused.
