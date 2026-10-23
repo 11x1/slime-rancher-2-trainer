@@ -2,8 +2,9 @@
 // The sidebar logo: a different slime every time the overlay opens, picked
 // from the Slimepedia slime entries the loaded save has unlocked, drawn with
 // the entry's own icon straight from Unity's D3D11 texture. With no save
-// loaded, nothing discovered, or the Pedia not readable, the menu draws its
-// own pink slime instead.
+// loaded or nothing discovered it shows the game's Pink Slime icon (no
+// entry, so no tooltip); only if even that can't be read, or the Pedia is not
+// readable, does the menu draw its own pink slime.
 
 #include <string>
 #include <vector>
