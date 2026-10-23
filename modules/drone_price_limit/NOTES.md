@@ -29,7 +29,8 @@ Status: built, not yet tested in game.
 
 - Drone station menu, Programming page, destination **Plort Market** selected: a second pill next to
   the destination's "Change" pill: `[C] Price limit` (or `Price limit: 120` / `: 80%` when set). It is
-  a clone of the game's `PromptContainer` with the key drawn by hand (C) and our label.
+  a clone of the game's `PromptContainer` with the key drawn by hand (C) and our label. The clone's
+  `EncapsulateChildren` fits it to the label (minimum width 0) with 22 px `_horizontalPadding` per side.
 - Opens with **C**, the pad's **right stick click** (the button R3, not the stick deflection that steps
   the second Hen Collector slider; that is the plot menu, not this one), or a click on the pill. The
   dialog uses one primary slider (d-pad / left stick / arrows). The dialog:
