@@ -261,6 +261,15 @@ RainbowIslandMap (Map)
 - The covers have no component besides Image and nothing references them (no serialized reference in the prefab, no string literal in the metadata). Their parent is force-activated by `Map.Awake`. So the full map ALWAYS draws them; no reveal ever hides them. Their colours repeat the colours of single fog areas (colour rg = the noise UV offset, so a cover's clouds join its neighbour's seamlessly): they fill the gaps between the zone fog areas and the outside fog.
 - Minimap: copied like the full map, kept as one static group, shown while "Respect fog of war" is on and hidden with it off (like all fog art). They are not fog areas: icons under them are not hidden.
 
+Outside fog (`OutsideFogNegativeMasked`, `Custom/PosterizedFogOfWarNegativeMask`):
+
+- `NegativeMaskMap.OnEnable` (0x6346A0) caches `GetComponentInParent<Canvas>().transform` and registers `UpdateBeforeRender` on `Canvas.willRenderCanvases`. `UpdateBeforeRender` (0x6347A0, only with `updateConstantly`): `M = transform.worldToLocalMatrix * canvasTransform.localToWorldMatrix`, then `M[3] = maskEdgeNoiseScale`, `M[7] = maskEdgeNoiseStrength`, `M[11] = softness`, `M[15] = roundness`, `Shader.SetGlobalMatrix(_NegativeMask, M)`. A GLOBAL, written only while the full map's mask is enabled.
+- Shader: the position goes through M into mask space, a rounded box (`|2p| < 1`, roundness, softness, edge noise) is cut OUT of the fog: fog only outside the island's rounded rect.
+- Before this fix the minimap drew this image with whatever the full map wrote last (or nothing if it was never opened): mask in the wrong place, so the outside fog could cover the whole minimap, explored land included, right after the full map was opened once.
+- Now: at build time a "NegativeMask" transform is created in our page where the prefab's NegativeMaskMap sits relative to the Map (position, angle, scale from TransformPoint/InverseTransformPoint, like the art copies). Every frame while the static fog is shown and the full map is closed (it owns the global while open), the module computes the same M from that transform and sets the global. The canvas is the ROOT canvas of the minimap (uGUI batches vertices in the root canvas's space; our nested Canvas has no overrideSorting). For a ScreenSpaceOverlay root the canvas matrix is applied exactly as the game does; for Camera / World render modes the shader position is already the world position, so only `worldToLocal(mask)` is used. ASSUMED (not testable offline): which space the shader position is in; check in game that the outside fog ring follows the island edge like on the full map.
+- If anything is missing (class, fields, `Shader.SetGlobalMatrix`, matrix getters, no NegativeMaskMap on the page), the outside-fog image is not copied at all (no stale mask).
+- Logs: "fog: outside fog (NegativeMask shader): N image(s) copied, M skipped; mask = our copy of NegativeMaskMap ... / skipped: <reason>" and once "fog: outside-fog mask relative to root canvas '<name>' (render mode N: ...)".
+
 ## Fog shaders and minimap opacity (verified 2026-10-23)
 
 Source: the three shaders in `shaders_assets__b2000203….bundle` (`Custom/PosterizedFogOfWarMask` = the FogMapElement art and the static covers, `…Clouds`, `…NegativeMask` = the outside fog), DXBC disassembled with `D3DDisassemble`, constant buffer names from the serialized shader.
@@ -329,6 +338,8 @@ R = required, Setup fails without it. O = optional, the feature degrades and the
 | `PlayerDisplayOnMap` (`Awake` hook, `IsInUnknownArea`) | player transform, hidden cells | R / O |
 | `FogMapElement.ShouldBeRevealed`, `DynamicMapElement.get_CanBeShown` | fog / dynamic groups | O |
 | `FogMapElement._fogRevealEvent`, `StaticGameEvent._eventDirector/._eventKey`, `EventDirector._model`, `EventRecordModel`, `GameModel.eventRecordModel` | fog reveal source + readiness, area names in logs | O |
+| `NegativeMaskMap.softness/roundness/maskEdgeNoiseScale/maskEdgeNoiseStrength`, `Shader.PropertyToID/SetGlobalMatrix(int, Matrix4x4)`, `Transform.localToWorldMatrix/worldToLocalMatrix`, `Canvas.renderMode` | outside-fog mask (image skipped if missing) | O |
+| `CanvasGroup.ignoreParentGroups` | fog copies ignore the opacity group | O |
 | `IFilterableMapMarker.get_CanBeShown`, `IMapMarkerDescriptorProvider.GetMapMarkerDescriptor`, `IMapMarkerDescriptor.get_MapIcon` (interface slots via `il2cpp_object_get_virtual_method`) | markers | O |
 | `MapMarker._image`, `GordoMarkerUI._iconImage` | marker icons | O |
 | `MapDirector.Marker` (nested class) | validates `Markers` dictionary values | O |

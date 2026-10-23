@@ -138,6 +138,13 @@ struct Symbols {
     Il2CppClass* gameModel = nullptr;            // MonomiPark.SlimeRancher.DataModel.GameModel
     size_t gmEventRecord = kNoOffset;            // GameModel.eventRecordModel (the loaded save's record)
 
+    // ---- outside fog: NegativeMaskMap sets the global _NegativeMask matrix the NegativeMask fog shader reads
+    Il2CppClass* negativeMask = nullptr;         // MonomiPark.SlimeRancher.NegativeMaskMap
+    size_t nmSoftness = kNoOffset;               // NegativeMaskMap.softness (float)
+    size_t nmRoundness = kNoOffset;              // NegativeMaskMap.roundness (float)
+    size_t nmNoiseScale = kNoOffset;             // NegativeMaskMap.maskEdgeNoiseScale (float)
+    size_t nmNoiseStrength = kNoOffset;          // NegativeMaskMap.maskEdgeNoiseStrength (float)
+
     // ---- resource nodes: the node object a spawner actually spawned
     Il2CppClass* resourceNode = nullptr;         // ResourceNode (global ns)
     size_t spawnerNode = kNoOffset;              // ResourceNodeSpawner._attachedResourceNode

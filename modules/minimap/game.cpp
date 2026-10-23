@@ -243,6 +243,11 @@ bool Resolve(Symbols& s, std::string& err, std::vector<std::string>& optionalMis
     s.edModel = c.Field(s.eventDirector, "_model", false);
     s.eventRecordModel = c.Class(nsEvent, "EventRecordModel", false);
     s.gmEventRecord = c.Field(s.gameModel, "eventRecordModel", false);
+    s.negativeMask = c.Class("MonomiPark.SlimeRancher", "NegativeMaskMap", false);
+    s.nmSoftness = c.Field(s.negativeMask, "softness", false);
+    s.nmRoundness = c.Field(s.negativeMask, "roundness", false);
+    s.nmNoiseScale = c.Field(s.negativeMask, "maskEdgeNoiseScale", false);
+    s.nmNoiseStrength = c.Field(s.negativeMask, "maskEdgeNoiseStrength", false);
     if (Il2CppClass* scu = c.Class("MonomiPark.SlimeRancher.Util", "SceneContextUtility", false))
         s.tryGetGameModel = c.Bind(c.Method(scu, "TryGetGameModel", 1, false), "SceneContextUtility.TryGetGameModel", false);
 

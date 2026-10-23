@@ -455,6 +455,14 @@ private:
         // Fog-shader art outside every FogMapElement ("fog_static": the "covering up static fog" patches and
         // the negative-masked outside fog). Nothing in the game toggles them; drawn while the fog is respected.
         Group staticFog;
+        // The outside fog's mask: our copy of the prefab's NegativeMaskMap transform (child of our page).
+        struct NegMask {
+            Ref t, canvasT;        // our mask transform; the canvas whose space the shader sees (re-resolved)
+            float noiseScale = 0, noiseStrength = 0, softness = 0, roundness = 0;
+            bool ok = false, overlay = true;
+            int copies = 0;        // NegativeMask-shader images copied
+            std::string info;      // build log
+        } neg;
         std::vector<Icon> icons;
         bool ok = false;
         bool hasPagePods = false, hasPageNodes = false;
@@ -491,6 +499,7 @@ private:
         };
         std::vector<Note> notes;
         std::string placeholders;
+        int skipNegMask = 0;         // outside-fog images skipped (their mask cannot be driven)
         int fogOpaque = 0;           // fog-shader copies shielded from the root CanvasGroup's opacity
         int staticFog = 0;           // fog-shader images outside FogMapElements (always drawn)
         std::string staticFogNames;
@@ -716,6 +725,8 @@ private:
         // 4. per frame: transform only
         Step("transform");
         UpdateTransform();
+        Step("negative mask");
+        UpdateNegativeMask();
 
         // 5. low rate
         fogFullAcc_ += dt;
@@ -1642,6 +1653,7 @@ private:
                 return true;
             });
         }
+        SetupNegativeMask(prefab);
         if (sym_.dynamicElement) {
             ugui::ForEachInChildren(prefab, sym_.dynamicElement, true, [&](Il2CppObject* c) {
                 Group g;
@@ -1777,6 +1789,10 @@ private:
         // material / texture source
         const Build::MatInfo& mi = MaterialInfo(g);
         bool fogShader = mi.custom && Contains(Lower(mi.label), "fogofwar");  // Custom/PosterizedFogOfWar*
+        // Outside fog (Custom/PosterizedFogOfWarNegativeMask): its mask is a global matrix set from the
+        // FULL map's transforms. Without our own mask it would be stale or wrong on the minimap: skip it.
+        bool negMask = fogShader && Contains(Lower(mi.label), "negativemask");
+        if (negMask && (!view_.neg.ok || group)) return skip(b.skipNegMask);
         Il2CppObject* useMat = nullptr;  // custom material to assign
         Il2CppObject* matTex = nullptr;  // null-sprite Image drawn as RawImage(material main texture)
         if (mi.custom) {
@@ -1875,6 +1891,7 @@ private:
             // fog-shader art outside every FogMapElement: drawn as in the full map (nothing in the game
             // toggles it), hidden only with "Respect fog of war" off
             if (!group) view_.staticFog.gos.emplace_back(go);
+            if (negMask) ++view_.neg.copies;
             ++b.staticFog;
             if (b.staticFogNames.size() < 400) {
                 Il2CppObject* parent = ugui::GetParent(t);
@@ -1982,6 +1999,9 @@ private:
                      "the shader uses vertex alpha as its reveal threshold, so the minimap opacity does not apply "
                      "to fog",
                      b.fogOpaque);
+        if (view_.neg.copies > 0 || b.skipNegMask > 0)
+            SR2_INFO("minimap: fog: outside fog (NegativeMask shader): {} image(s) copied, {} skipped; {}",
+                     view_.neg.copies, b.skipNegMask, view_.neg.info);
         if (b.staticFog > 0)
             SR2_INFO("minimap: fog: {} fog-shader images outside every FogMapElement (static fog: no game "
                      "component toggles them, the full map always draws them; shown while fog of war is respected): {}",
@@ -2359,6 +2379,7 @@ private:
 
     // Re-query (unrevealed + unknown areas, or every area when fogFullDue_), then show / hide.
     void UpdateFog(const char* reason) {
+        view_.neg.canvasT.Reset(nullptr);  // re-resolved next frame (the minimap may have changed canvas)
         if (!view_.ok) return;
         int failures = 0;
         std::string revealedNow, fogged;
@@ -2398,6 +2419,112 @@ private:
                      failures ? std::format("; {} queries failed (kept fogged)", failures) : std::string(),
                      cfg_.respectFog ? "" : " - fog of war ignored by setting");
         }
+    }
+
+    // ---- outside fog ------------------------------------------------------
+    // NegativeMaskMap.UpdateBeforeRender (0x6347A0, Canvas.willRenderCanvases, updateConstantly):
+    //   M = transform.worldToLocalMatrix * canvasTransform.localToWorldMatrix (canvasTransform =
+    //   GetComponentInParent<Canvas>().transform, OnEnable 0x6346A0); M[3] = maskEdgeNoiseScale,
+    //   M[7] = maskEdgeNoiseStrength, M[11] = softness, M[15] = roundness; Shader.SetGlobalMatrix(_NegativeMask, M).
+    // The shader turns the vertex position into mask space with M (rounded box |2p| < 1, softness/noise
+    // edge) and draws fog only OUTSIDE it. We place our own mask transform in our page where the prefab's
+    // sits relative to the Map and set the same global every frame while our outside fog is visible.
+    int negMaskId_ = -1;
+    bool negCanvasLogged_ = false;
+
+    void SetupNegativeMask(Il2CppObject* prefab) {
+        View::NegMask& n = view_.neg;
+        n = View::NegMask{};
+        if (!sym_.negativeMask || !game::Has(sym_.nmSoftness) || !game::Has(sym_.nmRoundness) ||
+            !game::Has(sym_.nmNoiseScale) || !game::Has(sym_.nmNoiseStrength) || !ugui::HasShaderGlobals()) {
+            n.info = "skipped: NegativeMaskMap fields or Shader.SetGlobalMatrix / matrix getters not resolved";
+            return;
+        }
+        if (negMaskId_ == -1) negMaskId_ = ugui::ShaderPropertyId("_NegativeMask");
+        if (negMaskId_ == -1) {
+            n.info = "skipped: Shader.PropertyToID(_NegativeMask) failed";
+            return;
+        }
+        Il2CppObject* mapT = view_.mapT.get();
+        int layer = ugui::GetLayer(ui_.root.get());
+        n.info = "skipped: the page has no NegativeMaskMap";
+        ugui::ForEachInChildren(prefab, sym_.negativeMask, true, [&](Il2CppObject* c) {
+            Il2CppObject* t = unity::TransformOf(c);
+            if (!t || !mapT) return false;
+            Vec3 o = ugui::InverseTransformPoint(mapT, ugui::TransformPoint(t, {0, 0, 0}));
+            auto axis = [&](Vec3 u) {
+                Vec3 p = ugui::InverseTransformPoint(mapT, ugui::TransformPoint(t, u));
+                return Vec3{p.x - o.x, p.y - o.y, p.z - o.z};
+            };
+            Vec3 ax = axis({1, 0, 0}), ay = axis({0, 1, 0}), az = axis({0, 0, 1});
+            float sx = std::hypot(ax.x, ax.y), sy = std::hypot(ay.x, ay.y);
+            float sz = std::sqrt(az.x * az.x + az.y * az.y + az.z * az.z);
+            if (!std::isfinite(o.x) || !std::isfinite(o.y) || !std::isfinite(sx) || !std::isfinite(sy) ||
+                !(sx > 1e-3f) || !(sy > 1e-3f)) {
+                n.info = "skipped: the NegativeMaskMap transform is degenerate";
+                return false;
+            }
+            if (!std::isfinite(sz) || !(sz > 1e-3f)) sz = 1;
+            float angle = std::atan2(ax.y, ax.x) * 180.0f / kPi;
+            bool mirrored = (ax.x * ay.y - ax.y * ay.x) < 0;
+            Il2CppObject* go = Child(view_.page.get(), "NegativeMask", layer);
+            Il2CppObject* gt = go ? unity::TransformOf(go) : nullptr;
+            if (!ugui::IsRectTransform(gt)) {
+                n.info = "skipped: could not create the mask object";
+                return false;
+            }
+            ugui::Center(gt, {0, 0});
+            ugui::SetAnchoredPosition(gt, {o.x, o.y});
+            ugui::SetLocalEuler(gt, {0, 0, angle});
+            ugui::SetLocalScale(gt, {sx, mirrored ? -sy : sy, sz});
+            n.t.Reset(gt);
+            n.softness = F<float>(c, sym_.nmSoftness);
+            n.roundness = F<float>(c, sym_.nmRoundness);
+            n.noiseScale = F<float>(c, sym_.nmNoiseScale);
+            n.noiseStrength = F<float>(c, sym_.nmNoiseStrength);
+            n.ok = true;
+            n.info = std::format("mask = our copy of NegativeMaskMap '{}' at page ({:.0f}, {:.0f}), {:.0f} x {:.0f}, "
+                                 "{:.1f} deg (softness {:.3f}, roundness {:.2f}, edge noise {:.2f} / {:.2f}); "
+                                 "Shader.SetGlobalMatrix(_NegativeMask) every frame while shown",
+                                 unity::GetName(unity::GameObjectOf(c)), o.x, o.y, sx, sy, angle, n.softness,
+                                 n.roundness, n.noiseScale, n.noiseStrength);
+            return false;  // one per page
+        });
+    }
+
+    void UpdateNegativeMask() {
+        View::NegMask& n = view_.neg;
+        // The full map's own NegativeMaskMap owns the global while it is open.
+        if (!n.ok || n.copies == 0 || view_.staticFog.vis != 1 || mapOpen_ || !n.t.Alive()) return;
+        if (!n.canvasT.Alive()) {
+            // The shader sees vertices in the space of the canvas the geometry is batched in: the root canvas
+            // (our nested Canvas has no overrideSorting). Overlay: shader position = canvas-local, so the
+            // canvas matrix is applied as the game does; Camera / World: it already is the world position.
+            Il2CppObject* c =
+                ugui::CanvasRoot(ugui::ComponentInParent(unity::GameObjectOf(n.t.get()), ugui::CanvasClass()));
+            if (!ugui::IsA(c, ugui::CanvasClass())) return;
+            int mode = ugui::CanvasRenderMode(c);
+            n.overlay = mode != 1 && mode != 2;
+            n.canvasT.Reset(unity::TransformOf(c));
+            if (!negCanvasLogged_) {
+                negCanvasLogged_ = true;
+                SR2_INFO("minimap: fog: outside-fog mask relative to root canvas '{}' (render mode {}: {})",
+                         unity::GetName(unity::GameObjectOf(c)), mode,
+                         n.overlay ? "worldToLocal(mask) * localToWorld(canvas), as the game" : "worldToLocal(mask)");
+            }
+        }
+        ugui::Mat4 m{};
+        if (!ugui::WorldToLocal(n.t.get(), m)) return;
+        if (n.overlay) {
+            ugui::Mat4 c{};
+            if (!ugui::LocalToWorld(n.canvasT.get(), c)) return;
+            m = ugui::Mul(m, c);
+        }
+        m.m[3] = n.noiseScale;
+        m.m[7] = n.noiseStrength;
+        m.m[11] = n.softness;
+        m.m[15] = n.roundness;
+        ugui::ShaderSetGlobalMatrix(negMaskId_, m);
     }
 
     // Fog images are SetActive per area: fully shown or fully hidden. The user opacity (CanvasGroup on

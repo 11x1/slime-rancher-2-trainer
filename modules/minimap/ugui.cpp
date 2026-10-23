@@ -50,7 +50,8 @@ struct State {
         getHideFlags;
     // Transform
     Fn setParent, setAsLastSibling, setLocalPosition, setLocalScale, setLocalEuler, getPosition, getRotation,
-        transformPoint, inverseTransformPoint;
+        transformPoint, inverseTransformPoint, getL2W, getW2L;
+    Fn shaderPropId, shaderSetGlobalMatrix, canvasGetRenderMode;
     // RectTransform
     Fn setAnchorMin, setAnchorMax, setPivot, setSizeDelta, setAnchoredPosition, getAnchorMin, getAnchorMax,
         getSizeDelta, getRect;
@@ -249,6 +250,12 @@ bool Resolve(std::string& err) {
     s.getRotation = A(s.transform, "get_rotation", 0, &req);
     s.transformPoint = P(s.transform, "TransformPoint", {V3}, &opt);
     s.inverseTransformPoint = P(s.transform, "InverseTransformPoint", {V3}, &opt);
+    s.getL2W = A(s.transform, "get_localToWorldMatrix", 0, &opt);
+    s.getW2L = A(s.transform, "get_worldToLocalMatrix", 0, &opt);
+    if (Il2CppClass* shader = cls(core, "UnityEngine", "Shader", opt)) {
+        s.shaderPropId = P(shader, "PropertyToID", {"System.String"}, &opt);
+        s.shaderSetGlobalMatrix = P(shader, "SetGlobalMatrix", {"System.Int32", "UnityEngine.Matrix4x4"}, &opt);
+    }
     // RectTransform
     s.setAnchorMin = P(s.rectTransform, "set_anchorMin", {V2}, &req);
     s.setAnchorMax = P(s.rectTransform, "set_anchorMax", {V2}, &req);
@@ -273,6 +280,7 @@ bool Resolve(std::string& err) {
     s.cgSetInteractable = A(s.canvasGroup, "set_interactable", 1, &opt);
     s.cgSetIgnoreParent = A(s.canvasGroup, "set_ignoreParentGroups", 1, &opt);
     s.canvasRoot = A(s.canvas, "get_rootCanvas", 0, &opt);
+    s.canvasGetRenderMode = A(s.canvas, "get_renderMode", 0, &opt);
     s.canvasSetRenderMode = A(s.canvas, "set_renderMode", 1, &opt);
     s.canvasSetSorting = A(s.canvas, "set_sortingOrder", 1, &opt);
     s.canvasSetOverrideSorting = A(s.canvas, "set_overrideSorting", 1, &opt);
@@ -648,6 +656,35 @@ Vec3 TransformPoint(Il2CppObject* t, Vec3 p) {
 Vec3 InverseTransformPoint(Il2CppObject* t, Vec3 p) {
     return (Alive(t) && S.inverseTransformPoint) ? Call<Vec3>(S.inverseTransformPoint, t, p) : p;
 }
+bool LocalToWorld(Il2CppObject* t, Mat4& out) {
+    if (!Alive(t) || !S.getL2W) return false;
+    out = Call<Mat4>(S.getL2W, t);
+    return true;
+}
+bool WorldToLocal(Il2CppObject* t, Mat4& out) {
+    if (!Alive(t) || !S.getW2L) return false;
+    out = Call<Mat4>(S.getW2L, t);
+    return true;
+}
+Mat4 Mul(const Mat4& a, const Mat4& b) {
+    Mat4 c{};
+    for (int col = 0; col < 4; ++col)
+        for (int row = 0; row < 4; ++row) {
+            float v = 0;
+            for (int k = 0; k < 4; ++k) v += a.m[row + 4 * k] * b.m[k + 4 * col];
+            c.m[row + 4 * col] = v;
+        }
+    return c;
+}
+bool HasShaderGlobals() { return S.shaderPropId && S.shaderSetGlobalMatrix && S.getL2W && S.getW2L; }
+int ShaderPropertyId(std::string_view name) {
+    if (!S.shaderPropId) return -1;
+    Il2CppString* n = unity::NewString(name);
+    return n ? Call<int>(S.shaderPropId, n) : -1;
+}
+void ShaderSetGlobalMatrix(int id, const Mat4& m) {
+    if (S.shaderSetGlobalMatrix && id != -1) Call<void>(S.shaderSetGlobalMatrix, id, m);
+}
 
 // ------------------------------------------------------------ RectTransform ---
 namespace {
@@ -745,6 +782,9 @@ bool HasIgnoreParentGroups() { return static_cast<bool>(S.cgSetIgnoreParent); }
 Il2CppObject* AddCanvas(Il2CppObject* go) { return AddComponent(go, S.canvas); }
 Il2CppObject* CanvasRoot(Il2CppObject* canvas) {
     return (Alive(canvas) && S.canvasRoot) ? Call<Il2CppObject*>(S.canvasRoot, canvas) : canvas;
+}
+int CanvasRenderMode(Il2CppObject* canvas) {
+    return (Alive(canvas) && S.canvasGetRenderMode) ? Call<int>(S.canvasGetRenderMode, canvas) : -1;
 }
 void CanvasSetOverlay(Il2CppObject* canvas, int sortingOrder) {
     if (!Alive(canvas)) return;
