@@ -27,6 +27,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -143,6 +144,12 @@ private:
     bool EnsureCatalog(const Ctx& c);
     Il2CppObject* CatalogItem(uintptr_t id, uint32_t* mask);
     Il2CppObject* Lookup(const std::unordered_map<uintptr_t, CatalogEntry>& map, uintptr_t id, Il2CppClass* k);
+    Il2CppObject* GameContextObj();
+    Il2CppObject* SaveIndex();
+    bool Saveable(Il2CppObject* index, Il2CppObject* ident);
+    static void LogLeftOut(const char* list, const std::vector<std::string>& names);
+    bool TarrsOff();
+    Il2CppObject* TarrGroup();
     bool EnsureSpawnables();
     bool EnsureRecipes();
     void RefreshRecipeState();
@@ -238,6 +245,27 @@ private:
     Il2CppClass* toyDefClass_ = nullptr;
     Il2CppClass* liquidDefClass_ = nullptr;
     Il2CppClass* gadgetDefClass_ = nullptr;
+
+    // ---- save check: every list only offers types the save code can store ----
+    std::string saveWhy_;                            // "" = save check available (else nothing is offered)
+    const MethodInfo* gameCtxInstance_ = nullptr;    // GameContext.get_Instance (SRSingleton)
+    size_t offGcAutoSave_ = 0;                       // GameContext.<AutoSaveDirector>k__BackingField
+    size_t offAsdTranslation_ = 0;                   // AutoSaveDirector._saveReferenceTranslation
+    Il2CppClass* saveRefClass_ = nullptr;            // SaveReferenceTranslation
+    size_t offSrtIdentTable_ = 0;                    // SaveReferenceTranslation._identifiableTypeToPersistenceId
+    const MethodInfo* referenceId_ = nullptr;        // IdentifiableType.get_ReferenceId
+    Il2CppClass* tableClass_ = nullptr;              // PersistenceIdLookupTable<IdentifiableType> (from the live object)
+    size_t offTableReverse_ = 0;                     // its _reverseIndex (Dictionary<string, int>)
+    Il2CppClass* dictClass_ = nullptr;               // Dictionary<string, int> (from the live object)
+    const MethodInfo* containsKey_ = nullptr;        // its ContainsKey(string)
+
+    // ---- Tarr setting (optional: without it no entry is grayed out; spawning stays save-checked) ----
+    size_t offGcSettings_ = 0;                       // GameContext.<GameSettingsDirector>k__BackingField
+    const MethodInfo* tarrEnabled_ = nullptr;        // GameSettingsDirector.get_TarrEnabled
+    size_t offScGameModel_ = 0;                      // SceneContext.<GameModel>k__BackingField
+    size_t offGmTarrGroup_ = 0;                      // GameModel.tarrTypeGroup
+    Il2CppClass* groupClass_ = nullptr;              // IdentifiableTypeGroup
+    const MethodInfo* groupIsMember_ = nullptr;      // IdentifiableTypeGroup.IsMember(IdentifiableType)
 
     // ---- spawner (optional: missing symbols only disable the spawner) ----
     Il2CppClass* actorClass_ = nullptr;              // IdentifiableActor (prefab component of spawnable actors)
@@ -408,9 +436,29 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
     liquidDefClass_ = cls(kImage, "", "LiquidDefinition", optional);
     if (!optional.empty()) SR2_WARN("[{}] item icons / kinds partly unavailable: {}", kModule, optional);
 
+    // Save check: the dictionary the save code looks identifiable types up in
+    // (GameModelPullHelpers.BuildActorData -> SaveReferenceTranslation.GetPersistenceId).
+    // Without it nothing is offered: the vacpack list stays empty, spawner and crafter are off.
+    {
+        std::string& vw = saveWhy_;
+        Il2CppClass* gameCtx = cls(kImage, "", "GameContext", vw);
+        Il2CppClass* autoSave = cls(kImage, "MonomiPark.SlimeRancher", "AutoSaveDirector", vw);
+        saveRefClass_ = cls(kImage, "MonomiPark.SlimeRancher", "SaveReferenceTranslation", vw);
+        gameCtxInstance_ = method(gameCtx, "get_Instance", 0, vw);
+        off(gameCtx, "<AutoSaveDirector>k__BackingField", offGcAutoSave_, vw);
+        off(autoSave, "_saveReferenceTranslation", offAsdTranslation_, vw);
+        off(saveRefClass_, "_identifiableTypeToPersistenceId", offSrtIdentTable_, vw);
+        referenceId_ = method(identClass_, "get_ReferenceId", 0, vw);
+        if (!vw.empty()) {
+            vw = "save check unavailable (" + vw + ")";
+            SR2_WARN("[{}] {}: the sandbox offers no items", kModule, vw);
+        }
+    }
+
     // Spawner: the same InstantiationHelpers.InstantiateActor the vacpack uses to shoot items out
     // (VacuumItem.Expel), with the region registry's current scene group.
     std::string& sw = spawnWhy_;
+    sw = saveWhy_;
     gadgetDefClass_ = cls(kImage, "", "GadgetDefinition", sw);
     actorClass_ = cls(kImage, "", "IdentifiableActor", sw);
     Il2CppClass* helpers = cls(kImage, "", "InstantiationHelpers", sw);
@@ -441,10 +489,28 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
         }
     }
     if (!sw.empty()) SR2_WARN("[{}] spawner unavailable: {}", kModule, sw);
+    {
+        // Optional: gray out the Tarr entries while the save's game settings have Tarrs off.
+        std::string tw;
+        Il2CppClass* gameCtx = cls(kImage, "", "GameContext", tw);
+        Il2CppClass* settings = cls(kImage, "MonomiPark.SlimeRancher", "GameSettingsDirector", tw);
+        Il2CppClass* gameModel = cls(kImage, "MonomiPark.SlimeRancher.DataModel", "GameModel", tw);
+        groupClass_ = cls(kImage, "", "IdentifiableTypeGroup", tw);
+        off(gameCtx, "<GameSettingsDirector>k__BackingField", offGcSettings_, tw);
+        tarrEnabled_ = method(settings, "get_TarrEnabled", 0, tw);
+        off(sceneCtx, "<GameModel>k__BackingField", offScGameModel_, tw);
+        off(gameModel, "tarrTypeGroup", offGmTarrGroup_, tw);
+        groupIsMember_ = method(groupClass_, "IsMember", 1, tw);
+        if (!tw.empty() || !sceneCtx || !gameCtxInstance_ || !tryGetSceneContext_) {
+            tarrEnabled_ = groupIsMember_ = nullptr;
+            SR2_WARN("[{}] spawner: Tarr entries are not grayed out when Tarrs are off ({})", kModule, tw);
+        }
+    }
 
     // Crafter: the fabricator's GadgetFabricatableItem.FabricateAndSpendCost minus the spending:
     // GadgetDirector.AddItem(definition, count, x2 for BuyInPairs), within CanAddGadget.
     std::string& cw = craftWhy_;
+    cw = saveWhy_;
     if (!gadgetDefClass_ && cw.empty()) cw = "class GadgetDefinition not found";
     Il2CppClass* gadgetDir = cls(kImage, "", "GadgetDirector", cw);
     Il2CppClass* cost = cls(kImage, "MonomiPark.SlimeRancher.Economy", "PurchaseCost", cw);
@@ -649,6 +715,9 @@ bool Sandbox::EnsureCatalog(const Ctx& c) {
         defs.push_back(IsA(d, slotDefClass_) && unity::IsAlive(d) ? d : nullptr);
     }
     if (catalog_ && defs == catalogDefs_) return false;
+    // Not readable right now: try again on a later refresh (no symbols: build it empty).
+    Il2CppObject* index = SaveIndex();
+    if (!index && saveWhy_.empty()) return false;
 
     const unsigned long long t0 = GetTickCount64();
     std::vector<Il2CppGCHandle> old;
@@ -660,6 +729,7 @@ bool Sandbox::EnsureCatalog(const Ctx& c) {
         });
 
     auto items = std::make_shared<std::vector<bridge::Item>>();
+    std::vector<std::string> leftOut;
     size_t scanned = 0;
     for (Il2CppObject* o : unity::FindObjectsOfTypeAll(identClass_)) {
         if (sr2::core::ModuleFaulted(kModule)) break;
@@ -677,6 +747,10 @@ bool Sandbox::EnsureCatalog(const Ctx& c) {
                 mask |= 1u << i;
         }
         if (!mask) continue;
+        if (!Saveable(index, o)) {
+            leftOut.push_back(unity::GetName(o));
+            continue;
+        }
         Il2CppGCHandle h = unity::NewGCHandle(o);
         if (!h) continue;
         const auto id = reinterpret_cast<uintptr_t>(o);
@@ -694,6 +768,7 @@ bool Sandbox::EnsureCatalog(const Ctx& c) {
     catalogDefs_ = std::move(defs);
     SR2_INFO("[{}] vacpack item list: {} of {} identifiable types fit {} slot(s) ({} ms)", kModule, catalog_->size(),
              scanned, catalogDefs_.size(), GetTickCount64() - t0);
+    LogLeftOut("vacpack item list", leftOut);
     return true;
 }
 
@@ -720,14 +795,107 @@ Il2CppObject* Sandbox::Lookup(const std::unordered_map<uintptr_t, CatalogEntry>&
     return o;
 }
 
+Il2CppObject* Sandbox::GameContextObj() {
+    bool ok = false;
+    Il2CppObject* gc = Call(gameCtxInstance_, nullptr, {}, "GameContext.Instance", &ok);
+    return ok && gc && unity::IsAlive(gc) ? gc : nullptr;
+}
+
+// The dictionary the save code looks identifiable types up in:
+// GameContext.AutoSaveDirector._saveReferenceTranslation._identifiableTypeToPersistenceId
+// ._reverseIndex, a Dictionary<string, int> keyed by IdentifiableType.ReferenceId.
+// GameModelPullHelpers.BuildActorData (and the other Pull* helpers) index it for
+// every actor, ammo slot and gadget, so one type missing from it makes every save
+// throw KeyNotFoundException (seen with a spawned Glitch Tarr). The game fills it
+// from AutoSaveDirectorConfiguration._identifiableTypes. nullptr if not readable.
+Il2CppObject* Sandbox::SaveIndex() {
+    if (!saveWhy_.empty()) return nullptr;
+    const auto& a = api();
+    Il2CppObject* gc = GameContextObj();
+    Il2CppObject* asd = gc ? unity::Field<Il2CppObject*>(gc, offGcAutoSave_) : nullptr;
+    if (!asd || !unity::IsAlive(asd)) return nullptr;
+    Il2CppObject* srt = unity::Field<Il2CppObject*>(asd, offAsdTranslation_);
+    if (!IsA(srt, saveRefClass_)) return nullptr;
+    Il2CppObject* table = unity::Field<Il2CppObject*>(srt, offSrtIdentTable_);
+    if (!table || !a.il2cpp_object_get_class || !a.il2cpp_class_get_name) return nullptr;
+    auto named = [&](Il2CppClass* k, std::string_view prefix) {
+        const char* n = k ? a.il2cpp_class_get_name(k) : nullptr;
+        return n && std::string_view(n).starts_with(prefix);
+    };
+    // Generic instances: resolved from the live objects, once per class.
+    Il2CppClass* tk = a.il2cpp_object_get_class(table);
+    if (tk != tableClass_) {
+        if (!named(tk, "PersistenceIdLookupTable")) return nullptr;
+        auto o = Resolver::Get().FieldOffset(tk, "_reverseIndex");
+        if (!o) return nullptr;
+        tableClass_ = tk;
+        offTableReverse_ = *o;
+    }
+    Il2CppObject* dict = unity::Field<Il2CppObject*>(table, offTableReverse_);
+    if (!dict) return nullptr;
+    Il2CppClass* dk = a.il2cpp_object_get_class(dict);
+    if (dk != dictClass_) {
+        containsKey_ = named(dk, "Dictionary") ? Resolver::Get().Method(dk, "ContainsKey", 1) : nullptr;
+        dictClass_ = containsKey_ ? dk : nullptr;
+        if (!containsKey_) return nullptr;
+    }
+    return dict;
+}
+
+// True if the save code can store `ident`: its ReferenceId is a key of the save index.
+bool Sandbox::Saveable(Il2CppObject* index, Il2CppObject* ident) {
+    if (!index || !ident || !containsKey_) return false;
+    bool ok = false;
+    Il2CppObject* ref = Call(referenceId_, ident, {}, "IdentifiableType.ReferenceId", &ok);
+    if (!ok || !ref) return false;
+    bool has = false;
+    return CallValue(containsKey_, index, {ref}, "save index ContainsKey", has) && has;
+}
+
+void Sandbox::LogLeftOut(const char* list, const std::vector<std::string>& names) {
+    if (names.empty()) return;
+    std::string s;
+    for (const std::string& n : names) s += (s.empty() ? "" : ", ") + n;
+    SR2_INFO("[{}] {}: left out {} type(s) the save can't store: {}", kModule, list, names.size(), s);
+}
+
+// The save's "Tarr" game setting is off (GameContext.GameSettingsDirector.TarrEnabled).
+bool Sandbox::TarrsOff() {
+    if (!tarrEnabled_) return false;
+    Il2CppObject* gc = GameContextObj();
+    Il2CppObject* settings = gc ? unity::Field<Il2CppObject*>(gc, offGcSettings_) : nullptr;
+    if (!settings || !unity::IsAlive(settings)) return false;
+    bool on = true;
+    return CallValue(tarrEnabled_, settings, {}, "GameSettingsDirector.TarrEnabled", on) && !on;
+}
+
+// The game's own list of Tarr types (SceneContext.GameModel.tarrTypeGroup), nullptr if not loaded.
+Il2CppObject* Sandbox::TarrGroup() {
+    if (!groupIsMember_) return nullptr;
+    Il2CppObject* scene = nullptr;
+    bool found = false;
+    if (!CallValue(tryGetSceneContext_, nullptr, {&scene}, "SceneContextUtility.TryGetSceneContext", found) || !found ||
+        !scene || !unity::IsAlive(scene))
+        return nullptr;
+    Il2CppObject* model = unity::Field<Il2CppObject*>(scene, offScGameModel_);
+    if (!model || !unity::IsAlive(model)) return nullptr;
+    Il2CppObject* group = unity::Field<Il2CppObject*>(model, offGmTarrGroup_);
+    return IsA(group, groupClass_) && unity::IsAlive(group) ? group : nullptr;
+}
+
 // What the spawner offers: IdentifiableType assets whose prefab is an actor
 // (has an IdentifiableActor), except the player, scene objects (gordos and the
-// like), gadgets (placed through gadget mode) and liquids. Built once.
+// like), gadgets (placed through gadget mode), liquids and anything the save
+// code can't store (SaveIndex). Built once.
 bool Sandbox::EnsureSpawnables() {
     if (spawnTried_ || !spawnWhy_.empty()) return false;
+    Il2CppObject* index = SaveIndex();
+    if (!index) return false;  // not readable right now: try again on a later refresh
     spawnTried_ = true;
     const unsigned long long t0 = GetTickCount64();
     auto items = std::make_shared<std::vector<bridge::Item>>();
+    std::vector<std::string> leftOut;
+    Il2CppObject* tarrs = TarrGroup();
     size_t scanned = 0;
     for (Il2CppObject* o : unity::FindObjectsOfTypeAll(identClass_)) {
         if (sr2::core::ModuleFaulted(kModule)) break;
@@ -739,11 +907,17 @@ bool Sandbox::EnsureSpawnables() {
         if (!prefab || !unity::IsAlive(prefab)) continue;
         Il2CppObject* actor = unity::GetComponent(prefab, actorClass_);
         if (!actor || !IsA(actor, actorClass_)) continue;
+        if (!Saveable(index, o)) {
+            leftOut.push_back(unity::GetName(o));
+            continue;
+        }
         Il2CppGCHandle h = unity::NewGCHandle(o);
         if (!h) continue;
         const auto id = reinterpret_cast<uintptr_t>(o);
         spawnById_[id] = CatalogEntry{h, o};
-        items->push_back(bridge::Item{id, ItemName(o), 0, ItemIcon(o), ItemKind(o)});
+        bool tarr = false;
+        if (tarrs) CallValue(groupIsMember_, tarrs, {o}, "IdentifiableTypeGroup.IsMember", tarr);
+        items->push_back(bridge::Item{id, ItemName(o), 0, ItemIcon(o), ItemKind(o), tarr});
     }
     std::map<std::string, int> seen;
     for (const auto& it : *items) ++seen[it.name];
@@ -754,6 +928,7 @@ bool Sandbox::EnsureSpawnables() {
     spawnables_ = std::move(items);
     SR2_INFO("[{}] spawn list: {} of {} identifiable types are actors ({} ms)", kModule, spawnables_->size(), scanned,
              GetTickCount64() - t0);
+    LogLeftOut("spawn list", leftOut);
     return true;
 }
 
@@ -803,7 +978,10 @@ Il2CppObject* Sandbox::GadgetDirector() {
 // Built once; blueprint state and owned counts refresh every 2 s (RefreshRecipeState).
 bool Sandbox::EnsureRecipes() {
     if (recipesTried_ || !craftWhy_.empty()) return false;
+    Il2CppObject* index = SaveIndex();
+    if (!index) return false;  // not readable right now: try again on a later refresh
     recipesTried_ = true;
+    std::vector<std::string> leftOut;
     const unsigned long long t0 = GetTickCount64();
     struct Cat {
         Il2CppObject* obj;
@@ -834,6 +1012,10 @@ bool Sandbox::EnsureRecipes() {
         const size_t nIdent = unity::ListCount(*reinterpret_cast<void**>(costs + offCostIdent_));
         const size_t nCur = unity::ListCount(*reinterpret_cast<void**>(costs + offCostCurrency_));
         if (nIdent == 0 && nCur == 0) continue;  // not crafted at the fabricator
+        if (!Saveable(index, d)) {
+            leftOut.push_back(unity::GetName(d));
+            continue;
+        }
         bridge::Recipe r;
         r.id = reinterpret_cast<uintptr_t>(d);
         r.name = ItemName(d);
@@ -858,6 +1040,7 @@ bool Sandbox::EnsureRecipes() {
     lastRecipeState_ = 0;
     SR2_INFO("[{}] crafter: {} gadget recipes in {} fabricator categories ({} ms)", kModule, recipes_->size(),
              recipeCats_->size(), GetTickCount64() - t0);
+    LogLeftOut("crafter", leftOut);
     return true;
 }
 
@@ -930,6 +1113,7 @@ void Sandbox::Refresh() {
         if (!built) built = EnsureSpawnables();
         s.spawnables = spawnables_;
         s.spawnWhy = spawnWhy_;
+        s.tarrsOff = spawnables_ && TarrsOff();
         if (!built) EnsureRecipes();
         if (recipes_ && s.tick - lastRecipeState_ >= kRecipeStateMs) {
             lastRecipeState_ = s.tick;
@@ -1139,6 +1323,10 @@ void Sandbox::DoPutItem(const Ctx& c, int idx, uintptr_t item, int64_t value) {
         return;
     }
     const std::string name = ItemName(ident);
+    if (!Saveable(SaveIndex(), ident)) {
+        Done(false, std::format("{} not put: the game can't save it", name));
+        return;
+    }
     Il2CppObject* slot = SlotAt(c, idx);
     if (!slot || !c.ammo || idx >= kMaxSlots) {
         Done(false, std::format("{} not put: no slot {}", name, idx + 1));
@@ -1227,6 +1415,16 @@ void Sandbox::DoSpawn(const Ctx& c, uintptr_t item, int64_t count) {
         return;
     }
     const std::string name = ItemName(ident);
+    if (!Saveable(SaveIndex(), ident)) {
+        Done(false, std::format("{} not spawned: the game can't save it", name));
+        return;
+    }
+    if (spawnables_ && TarrsOff())
+        for (const bridge::Item& it : *spawnables_)
+            if (it.id == item && it.tarr) {
+                Done(false, std::format("{} not spawned: Tarrs are disabled in this save's game settings", name));
+                return;
+            }
     Il2CppObject* prefab = unity::Field<Il2CppObject*>(ident, offIdentPrefab_);
     if (!prefab || !unity::IsAlive(prefab)) {
         Done(false, std::format("{} not spawned: it has no prefab", name));
@@ -1303,6 +1501,10 @@ void Sandbox::DoCraft(uintptr_t item, int64_t count) {
         return;
     }
     const std::string name = ItemName(def);
+    if (!Saveable(SaveIndex(), def)) {
+        Done(false, std::format("{} not crafted: the game can't save it", name));
+        return;
+    }
     Il2CppObject* dir = GadgetDirector();
     if (!dir) {
         Done(false, std::format("{} not crafted: no gadget director (load a save)", name));

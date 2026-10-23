@@ -1622,15 +1622,23 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
         t.name = &it.name;
         t.icon = it.icon;
         t.accent = KindAccent(it.kind);
+        t.dimmed = it.tarr && s.tarrsOff;
         tiles.push_back(t);
         src.push_back(&it);
     }
     const item_grid::Result r = item_grid::Draw("spawn", tiles, g_spawnGrid, GridOptions(250));
     if (r.hovered >= 0) {
         const sbx::Item& it = *src[static_cast<size_t>(r.hovered)];
-        Tooltip(std::format("{}\n{}. Click to spawn {} in front of you.", it.name, KindLabel(it.kind), g_spawnCount));
+        if (it.tarr && s.tarrsOff)
+            Tooltip(std::format("{}\nTarrs are disabled in this save's game settings.", it.name));
+        else
+            Tooltip(std::format("{}\n{}. Click to spawn {} in front of you.", it.name, KindLabel(it.kind), g_spawnCount));
     }
-    if (r.clicked >= 0) SbxRequest(sbx::Op::Spawn, g_spawnCount, -1, tiles[static_cast<size_t>(r.clicked)].id);
+    if (r.clicked >= 0) {
+        const sbx::Item& it = *src[static_cast<size_t>(r.clicked)];
+        if (it.tarr && s.tarrsOff) sbx::SetStatus(it.name + " not spawned: Tarrs are disabled in this save's game settings", true);
+        else SbxRequest(sbx::Op::Spawn, g_spawnCount, -1, it.id);
+    }
     EndCard();
 }
 
