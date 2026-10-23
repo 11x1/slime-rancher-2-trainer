@@ -22,6 +22,8 @@
 // minimap applies the preview on the Unity main thread). Commits are written
 // through settings_view's Write (posted to the main thread).
 
+struct ImDrawList;
+
 namespace sr2::ui::hud_edit {
 
 enum class Element { Minimap, SpeedPanel };
@@ -67,6 +69,11 @@ void Draw(float uiScale);  // between NewFrame and Render, after the HUD content
 // hover outline, and dragging it starts edit mode with that drag. `allowed`:
 // the overlay can give the mouse to it (no key capture running).
 void Hover(float uiScale, bool allowed);
+// The help bar's keycap (monospace key name on a rounded chip with a darker
+// edge below), for key hints elsewhere in the overlay. Render thread, ImGui
+// builds only. `x` = left end, `cy` = vertical centre; returns the width.
+float DrawKeycap(ImDrawList* dl, float x, float cy, const char* key, float uiScale);
+float KeycapWidth(const char* key, float uiScale);
 // Any thread. The last Hover had an element under the mouse or a press on one:
 // the overlay keeps the mouse from the game (press, drag, release).
 bool WantsMouse();

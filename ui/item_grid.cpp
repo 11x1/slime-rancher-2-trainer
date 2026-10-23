@@ -67,6 +67,13 @@ void DrawTabFace(ImDrawList* dl, ImVec2 a, ImVec2 b, const Tab& t, bool on, floa
 
 }  // namespace
 
+int WheelStep(float wheel) {
+    const ImGuiIO& io = ImGui::GetIO();
+    if (wheel == 0.0f || (!io.KeyCtrl && !io.KeyShift)) return 0;
+    const int step = io.KeyCtrl ? 10 : 1;
+    return wheel > 0 ? step : -step;
+}
+
 bool Matches(const std::string& hay, const char* needle) {
     auto low = [](char c) { return static_cast<char>((c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c); };
     const size_t n = needle ? std::strlen(needle) : 0;
@@ -269,14 +276,20 @@ Result Draw(const char* id, const std::vector<Tile>& tiles, State& st, const Opt
             if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) res.rightClicked = i;
             else res.clicked = i;
         }
-        const bool hot = ImGui::IsItemHovered();
+        // Hover also while another item (the search box being typed in) holds the
+        // active id, so the tooltip and the wheel work without clicking the grid first.
+        const bool hot = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
         if (hot) {
             res.hovered = i;
-            if (io.KeyShift) {
-                ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);  // the grid does not scroll while Shift+wheel picks an amount
+            if (io.KeyShift || io.KeyCtrl) {
+                // Shift / Ctrl + wheel picks an amount: the grid does not scroll then (a plain wheel does).
+                ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
                 ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelX);
                 const float w = io.MouseWheel != 0.0f ? io.MouseWheel : io.MouseWheelH;
-                if (w != 0.0f) res.wheel = w;
+                if (w != 0.0f) {
+                    res.wheel = w;
+                    res.wheelStep = WheelStep(w);
+                }
             }
         }
         const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
@@ -290,7 +303,28 @@ Result Draw(const char* id, const std::vector<Tile>& tiles, State& st, const Opt
         col = (col + 1) % cols;
     }
     ImGui::PopStyleVar();
+    // Right-click on the grid but not on a tile: the caller clears its selection.
+    if (res.hovered < 0 && ImGui::IsWindowHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) res.clearSelection = true;
+    const ImGuiPayload* drag = o.dropType ? ImGui::GetDragDropPayload() : nullptr;
+    if (drag && drag->IsDataType(o.dropType)) {
+        // Something the grid accepts is being dragged: a tint and the hint over the visible area.
+        const ImVec2 wa = ImGui::GetWindowPos(), wb(wa.x + ImGui::GetWindowWidth(), wa.y + ImGui::GetWindowHeight());
+        dl->AddRectFilled(wa, wb, WithAlpha(Dark() ? P.grab : P.accent, 0.10f), 8.0f * s);
+        if (o.dropHint && *o.dropHint) {
+            ImFont* f = theme::Body();
+            const float size = theme::kSmallSize * s;
+            const ImVec2 ts = f->CalcTextSizeA(size, FLT_MAX, 0.0f, o.dropHint);
+            const ImVec2 c((wa.x + wb.x) * 0.5f, (wa.y + wb.y) * 0.5f);
+            const ImVec2 pa(c.x - ts.x * 0.5f - 10.0f * s, c.y - ts.y * 0.5f - 5.0f * s), pb(c.x + ts.x * 0.5f + 10.0f * s, c.y + ts.y * 0.5f + 5.0f * s);
+            dl->AddRectFilled(pa, pb, WithAlpha(P.win, 0.92f), (pb.y - pa.y) * 0.5f);
+            dl->AddText(f, size, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), P.text, o.dropHint);
+        }
+    }
     ImGui::EndChild();
+    if (o.dropType && ImGui::BeginDragDropTarget()) {  // the child window is the last item
+        if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(o.dropType)) res.dropped = p;
+        ImGui::EndDragDropTarget();
+    }
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();
 

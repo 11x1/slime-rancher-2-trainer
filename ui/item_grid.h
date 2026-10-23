@@ -62,19 +62,28 @@ struct Options {
     const char* button = nullptr;                        // action button after the search box (nullptr: none)
     bool buttonEnabled = true;
     const std::vector<std::string>* sections = nullptr;  // section headings (Tile::section); "" = rule only
+    const char* dropType = nullptr;  // the grid area accepts drops of this payload type (Result::dropped)
+    const char* dropHint = nullptr;  // drawn over the grid while such a payload is dragged
 };
 
 struct Result {
     int clicked = -1;       // index into `tiles` clicked this frame
     int rightClicked = -1;  // index right-clicked this frame (open a context menu)
     int hovered = -1;       // index of the hovered tile
-    float wheel = 0;        // Shift + mouse wheel over the hovered tile (notches; + = up); the grid does not scroll then
+    float wheel = 0;        // Shift / Ctrl + mouse wheel over the hovered tile (notches; + = up); the grid does not scroll then
+    int wheelStep = 0;      // that wheel as an amount step: +-1 with Shift, +-10 with Ctrl (0: no wheel). Plain wheel scrolls
     int shown = 0;          // tiles that match the search
     bool button = false;    // the action button was clicked
     bool buttonHovered = false;  // (short delay; also while disabled) for the caller's tooltip
     int hoveredTab = -1;    // tab under the mouse (the caller shows Tab::tip)
     bool tabChanged = false;
+    bool clearSelection = false;            // right-click on the grid outside the tiles (the caller clears its selection)
+    const ImGuiPayload* dropped = nullptr;  // Options::dropType payload dropped on the grid this frame
 };
+
+// Amount step of one wheel notch with the current modifiers: +-10 with Ctrl, +-1
+// with Shift, 0 with neither (a plain wheel scrolls). Slots and lists share it.
+int WheelStep(float wheel);
 
 // Case-insensitive substring match, as the search box uses it.
 bool Matches(const std::string& name, const char* needle);
