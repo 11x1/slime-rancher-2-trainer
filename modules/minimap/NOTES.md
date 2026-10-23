@@ -243,6 +243,8 @@ New log lines:
 - `minimap: fog: event record changed (save / session change) - all N areas unknown again`
 - `minimap: fog: N fog-shader images outside every FogMapElement (static fog: ...): '<name>' in '<parent>', ...` (see "Static fog")
 - WARN `minimap: fog: <field>'s event record is not GameModel.eventRecordModel after 10 s - querying it anyway`
+- `minimap: fog summary (save loaded): R/T areas revealed, U unrevealed, K unknown; static fog: S image(s) shown (as in the full map) | hidden; outside fog ...` - once per loaded save (world reset or event-record change), after the first complete query; with the fog ignored: `fog of war ignored by setting - T areas not queried, no fog drawn; static fog: S image(s) hidden; ...`.
+- Readiness re-checked 2026-10-23: a save switch goes through a scene load (`ResetWorld` -> `ResetFogReadiness`: every area unknown = fogged, readiness polled at 10 Hz again); a record swap without a scene load is caught by the identity check in `FogReadiness` (called with every 2 s evaluation once settled). New save: the record exists but holds no reveal events, so every area answers unrevealed (fogged) once ready; until then they are unknown, which is fogged too.
 
 ## Static fog: "fog_static" (verified 2026-10-23 from the prefab)
 

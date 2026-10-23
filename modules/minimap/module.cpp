@@ -560,6 +560,7 @@ private:
     bool fogFullDue_ = true, fogReadyLogged_ = false, fogFallbackLogged_ = false;
     std::string fogWaitReason_;
     int fogLastRevealed_ = -1, fogLastHidden_ = -1, fogLastUnknown_ = -1;
+    bool fogSummaryLogged_ = false;  // "fog summary (save loaded)": once per event record / world
 
     Ui ui_;
     View view_;
@@ -936,6 +937,7 @@ private:
         fogFallbackLogged_ = false;
         fogWaitReason_.clear();
         fogLastRevealed_ = fogLastHidden_ = fogLastUnknown_ = -1;
+        fogSummaryLogged_ = false;
         for (Group& f : view_.fog) f.state = -1;  // view_ is normally already gone (DestroyView)
     }
 
@@ -2341,6 +2343,7 @@ private:
                 SR2_INFO("minimap: fog: event record changed (save / session change) - all {} areas unknown again",
                          view_.fog.size());
             for (Group& f : view_.fog) f.state = -1;
+            if (fogRecord_) fogSummaryLogged_ = false;  // another save: summarise it again
             fogRecord_ = src.record;
             fogReadySince_ = -1;
             fogReadyLogged_ = false;
@@ -2383,10 +2386,11 @@ private:
         if (!view_.ok) return;
         int failures = 0;
         std::string revealedNow, fogged;
-        bool full = fogFullDue_;
+        bool full = fogFullDue_, queried = false;
         if (cfg_.respectFog && sym_.fogShouldReveal && !view_.fog.empty()) {
             FogSource src;
             if (FogReadiness(src)) {
+                queried = true;
                 fogFullDue_ = false;
                 for (Group& f : view_.fog) {
                     if (!full && f.state == 1) continue;  // reveals are permanent within one save
@@ -2418,6 +2422,25 @@ private:
                      fogged.empty() ? "" : "; fogged again: " + fogged,
                      failures ? std::format("; {} queries failed (kept fogged)", failures) : std::string(),
                      cfg_.respectFog ? "" : " - fog of war ignored by setting");
+        }
+        // One summary per loaded save (event record): after its first complete query, or at once when the
+        // fog is ignored by the setting.
+        if (!fogSummaryLogged_ && !view_.fog.empty() && ((queried && full) || !cfg_.respectFog)) {
+            fogSummaryLogged_ = true;
+            const Group& st = view_.staticFog;
+            std::string outside = view_.neg.copies > 0 ? std::format("outside fog {} image(s), mask driven by the minimap",
+                                                                      view_.neg.copies)
+                                                       : std::string("outside fog not copied");
+            if (cfg_.respectFog)
+                SR2_INFO("minimap: fog summary (save loaded): {}/{} areas revealed, {} unrevealed, {} unknown{}; static "
+                         "fog: {} image(s) {}; {}",
+                         revealed, view_.fog.size(), hidden, unknown,
+                         failures ? std::format(" ({} queries failed)", failures) : std::string(), st.gos.size(),
+                         st.vis == 1 ? "shown (as in the full map)" : "hidden", outside);
+            else
+                SR2_INFO("minimap: fog summary (save loaded): fog of war ignored by setting - {} areas not queried, "
+                         "no fog drawn; static fog: {} image(s) hidden; {}",
+                         view_.fog.size(), st.gos.size(), outside);
         }
     }
 
