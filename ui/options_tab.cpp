@@ -77,6 +77,18 @@ struct Sym {
     size_t rootItemModels = 0, rootDetailsView = 0;  // optional (empty-tab details)
     size_t rootCategories = 0, rootCategoryIndex = 0;  // optional (live refresh: which tab is shown)
     const MethodInfo* bindItemCategoryMi = nullptr;    // optional (live refresh)
+    // optional (live refresh: keep the selected row and the scroll position)
+    size_t rootAdapterView = 0;                        // OptionsUIRoot.optionsAdapterView
+    Il2CppClass* adapterView = nullptr;                // OptionsAdapterView
+    Il2CppClass* scrollArea = nullptr;                 // game's CommonControls.ScrollArea
+    size_t scrollAreaPos = 0;                          // ScrollArea._scrollPosition (world units)
+    const MethodInfo* scrollAreaScrollTo = nullptr;    // ScrollArea.ScrollTo(float, ScrollTransition)
+    Il2CppClass* scrollRect = nullptr;                 // UnityEngine.UI.ScrollRect (fallback)
+    const MethodInfo* scrollRectContent = nullptr;     // ScrollRect.get_content()
+    const MethodInfo* scrollRectStop = nullptr;        // ScrollRect.StopMovement()
+    const MethodInfo* rtGetAnchored = nullptr;         // RectTransform.get_anchoredPosition()
+    const MethodInfo* rtSetAnchored = nullptr;         // RectTransform.set_anchoredPosition(Vector2)
+    const MethodInfo* transformParent = nullptr;       // Transform.get_parent()
 
     // invoked methods
     const MethodInfo* modelCtor = nullptr;        // PresetOptionsItemModel..ctor(PresetOptionsItemDefinition)
@@ -867,32 +879,235 @@ void HkBindItemCategory(Il2CppObject* self, Il2CppObject* category, const Method
 // BindItemCategory is the game's own tab-swap path: it rebuilds the model
 // list, rebinds the paged adapter (row views are recycled through
 // HkRowBind, which re-registers our labels) and resets the details view.
+//
+// The rebind selects row 0 and the focus change scrolls the list to it. To
+// keep the user's place, the job saves the scroll offset of the list's scroll
+// container first, then re-selects the changed row (same setting key) with
+// AdapterView.SelectItem(index), the adapter's own selection path (gamepad
+// navigator position, row highlight, OnItemSelect -> details view), and puts
+// the offset back. Rows above the changed one never change (children follow
+// their parent), so the absolute offset is the right one to keep. The game's
+// focus handling may still scroll to row 0 a frame later, so the offset is
+// re-applied for a few ticks while the changed row stays selected. Nothing is
+// held across ticks except plain values: every tick looks the root up again.
 bool g_refreshQueued = false;  // main thread only
+std::string g_refreshKey;      // RowKey of the row whose change queued the refresh
+
+struct Vec2 {
+    float x = 0, y = 0;
+};
+
+struct ScrollSave {
+    bool valid = false;
+    bool area = false;  // ScrollArea (pos) or ScrollRect (content.anchoredPosition)
+    float pos = 0;
+    Vec2 anchored;
+};
+
+struct ModsView {
+    Il2CppObject* root = nullptr;
+    Il2CppObject* adapter = nullptr;  // OptionsAdapterView or nullptr
+};
+
+constexpr int kScrollReassertTicks = 6;
+int g_reassertTicks = 0;  // main thread only
+int g_reassertIndex = -1;
+ScrollSave g_reassertScroll;
+
+// The active OptionsUIRoot, only while it shows the Mods tab.
+bool FindModsView(ModsView& v) {
+    if (!S.rootCategories || !S.rootCategoryIndex || !unity::IsAlive(g_category)) return false;
+    Il2CppObject* root = unity::FindObjectOfType(S.uiRoot);  // active scene instance only
+    if (!unity::IsAlive(root) || !il::IsA(root, S.uiRoot)) return false;
+    Il2CppObject* cats = F<Il2CppObject*>(root, S.rootCategories);
+    const int32_t idx = F<int32_t>(root, S.rootCategoryIndex);
+    if (!cats || idx < 0 || static_cast<size_t>(idx) >= unity::ListCount(cats)) return false;
+    if (unity::ListAt(cats, static_cast<size_t>(idx)) != g_category) return false;
+    v.root = root;
+    v.adapter = nullptr;
+    if (S.rootAdapterView) {
+        Il2CppObject* a = F<Il2CppObject*>(root, S.rootAdapterView);
+        if (unity::IsAlive(a) && il::IsA(a, S.adapterView)) v.adapter = a;
+    }
+    return true;
+}
+
+// Per adapter class (the generic base's fields and methods, looked up on the
+// object's own class): AdapterView.container, .currentlySelectedIndex and
+// SelectItem(int).
+struct AdapterInfo {
+    Il2CppClass* klass = nullptr;
+    size_t container = 0, selected = 0;
+    const MethodInfo* selectItem = nullptr;
+};
+AdapterInfo g_adapterInfo;
+
+const AdapterInfo* AdapterInfoFor(Il2CppObject* adapter) {
+    Il2CppClass* k = il::ClassOf(adapter);
+    if (!k) return nullptr;
+    if (g_adapterInfo.klass != k) {
+        AdapterInfo a;
+        a.klass = k;
+        std::string e;
+        if (!il::FieldOffsetInHierarchy(k, "container", a.container, &e)) a.container = 0;
+        if (!il::FieldOffsetInHierarchy(k, "currentlySelectedIndex", a.selected, &e)) a.selected = 0;
+        a.selectItem = il::MethodInHierarchy(k, "SelectItem", 1, &e);
+        if (!a.selected || !a.selectItem)
+            SR2_WARN("ui: options tab: OptionsAdapterView selection API not found ({}); the selected row is not kept", e);
+        g_adapterInfo = a;
+    }
+    return &g_adapterInfo;
+}
+
+int SelectedIndex(Il2CppObject* adapter) {
+    const AdapterInfo* a = AdapterInfoFor(adapter);
+    return a && a->selected ? F<int32_t>(adapter, a->selected) : -1;
+}
+
+// Nearest ScrollArea / ScrollRect above the adapter's row container.
+Il2CppObject* FindScroller(Il2CppObject* adapter, bool& area) {
+    if (!S.transformParent || (!S.scrollArea && !S.scrollRect)) return nullptr;
+    const AdapterInfo* a = AdapterInfoFor(adapter);
+    Il2CppObject* t = a && a->container ? F<Il2CppObject*>(adapter, a->container) : nullptr;
+    if (!unity::IsAlive(t)) t = unity::TransformOf(adapter);
+    for (int depth = 0; depth < 12 && unity::IsAlive(t); ++depth) {
+        if (S.scrollArea) {
+            Il2CppObject* c = unity::GetComponent(t, S.scrollArea);
+            if (unity::IsAlive(c) && il::IsA(c, S.scrollArea)) {
+                area = true;
+                return c;
+            }
+        }
+        if (S.scrollRect) {
+            Il2CppObject* c = unity::GetComponent(t, S.scrollRect);
+            if (unity::IsAlive(c) && il::IsA(c, S.scrollRect)) {
+                area = false;
+                return c;
+            }
+        }
+        t = il::Invoke(S.transformParent, t, {});
+    }
+    return nullptr;
+}
+
+Il2CppObject* ScrollRectContent(Il2CppObject* scroller) {
+    Il2CppObject* content = il::Invoke(S.scrollRectContent, scroller, {});
+    return unity::IsAlive(content) ? content : nullptr;
+}
+
+ScrollSave SaveScroll(Il2CppObject* adapter) {
+    ScrollSave s;
+    Il2CppObject* sc = FindScroller(adapter, s.area);
+    if (!sc) return s;
+    if (s.area) {
+        s.pos = F<float>(sc, S.scrollAreaPos);
+        s.valid = std::isfinite(s.pos);
+    } else if (Il2CppObject* content = ScrollRectContent(sc)) {
+        s.valid = il::UnboxTo(il::Invoke(S.rtGetAnchored, content, {}), s.anchored);
+    }
+    static bool logged = false;
+    if (!logged && s.valid)
+        SR2_INFO("ui: options tab: Mods list scrolls with {} '{}'", s.area ? "ScrollArea" : "ScrollRect", unity::GetName(sc));
+    logged = logged || s.valid;
+    return s;
+}
+
+void RestoreScroll(Il2CppObject* adapter, const ScrollSave& s) {
+    if (!s.valid) return;
+    bool area = false;
+    Il2CppObject* sc = FindScroller(adapter, area);
+    if (!sc || area != s.area) return;
+    if (area) {
+        if (std::fabs(F<float>(sc, S.scrollAreaPos) - s.pos) < 0.5f) return;
+        float pos = s.pos;
+        int32_t instant = 0;  // ScrollTransition 0: jump (no animation); stops a running one
+        il::Invoke(S.scrollAreaScrollTo, sc, {&pos, &instant});
+        return;
+    }
+    Il2CppObject* content = ScrollRectContent(sc);
+    if (!content) return;
+    if (S.scrollRectStop) il::Invoke(S.scrollRectStop, sc, {});
+    Vec2 cur;
+    if (il::UnboxTo(il::Invoke(S.rtGetAnchored, content, {}), cur) && std::fabs(cur.x - s.anchored.x) < 0.5f &&
+        std::fabs(cur.y - s.anchored.y) < 0.5f)
+        return;
+    Vec2 v = s.anchored;
+    il::Invoke(S.rtSetAnchored, content, {&v});
+}
+
+// Index of the row with this setting key in the root's freshly bound models.
+int ModelIndexForKey(Il2CppObject* root, const std::string& key) {
+    if (!S.rootItemModels || key.empty()) return -1;
+    Il2CppObject* list = F<Il2CppObject*>(root, S.rootItemModels);
+    const size_t n = unity::ListCount(list);
+    for (size_t i = 0; i < n; ++i) {
+        const Row* r = RowForModel(static_cast<Il2CppObject*>(unity::ListAt(list, i)));
+        if (r && RowKey(r->def) == key) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+void ReassertScroll() {
+    if (Faulted() || g_reassertTicks <= 0) return;
+    Guarded("Mods tab refresh (scroll)", [&] {
+        Stage("refresh: re-apply scroll");
+        ModsView v;
+        // Stop once the tab is gone or the user moved the selection.
+        if (!FindModsView(v) || !v.adapter || SelectedIndex(v.adapter) != g_reassertIndex) {
+            g_reassertTicks = 0;
+            return;
+        }
+        RestoreScroll(v.adapter, g_reassertScroll);
+        Stage("-");
+    });
+    if (--g_reassertTicks > 0 && !Faulted()) core::main_thread::Post([] { ReassertScroll(); });
+}
 
 void RefreshModsTab() {
     g_refreshQueued = false;
+    const std::string key = std::move(g_refreshKey);
+    g_refreshKey.clear();
     if (Faulted()) return;
     Guarded("Mods tab refresh", [&] {
         Stage("refresh: find OptionsUIRoot");
-        if (!S.bindItemCategoryMi || !S.rootCategories || !S.rootCategoryIndex || !unity::IsAlive(g_category)) return;
-        Il2CppObject* root = unity::FindObjectOfType(S.uiRoot);  // active scene instance only
-        if (!unity::IsAlive(root) || !il::IsA(root, S.uiRoot)) return;
-        Stage("refresh: current category");
-        Il2CppObject* cats = F<Il2CppObject*>(root, S.rootCategories);
-        const int32_t idx = F<int32_t>(root, S.rootCategoryIndex);
-        if (!cats || idx < 0 || static_cast<size_t>(idx) >= unity::ListCount(cats)) return;
-        if (unity::ListAt(cats, static_cast<size_t>(idx)) != g_category) return;
+        if (!S.bindItemCategoryMi) return;
+        ModsView v;
+        if (!FindModsView(v)) return;
+        Stage("refresh: save scroll position");
+        const ScrollSave scroll = v.adapter ? SaveScroll(v.adapter) : ScrollSave{};
         Stage("refresh: OptionsUIRoot.BindItemCategory(Mods)");
         std::string err;
-        il::Invoke(S.bindItemCategoryMi, root, {g_category}, &err);
-        if (!err.empty()) SR2_WARN("ui: options tab: refreshing the Mods tab failed: {}", err);
+        il::Invoke(S.bindItemCategoryMi, v.root, {g_category}, &err);
+        if (!err.empty()) {
+            SR2_WARN("ui: options tab: refreshing the Mods tab failed: {}", err);
+            return;
+        }
+        if (Faulted() || !v.adapter || !unity::IsAlive(v.adapter)) return;
+        Stage("refresh: re-select the changed row");
+        const int index = ModelIndexForKey(v.root, key);
+        const AdapterInfo* a = AdapterInfoFor(v.adapter);
+        if (index > 0 && a && a->selectItem && SelectedIndex(v.adapter) != index) {
+            int32_t i = index;
+            il::Invoke(a->selectItem, v.adapter, {&i}, &err);
+            if (!err.empty()) SR2_WARN("ui: options tab: re-selecting row {} failed: {}", index, err);
+        }
+        if (Faulted()) return;
+        Stage("refresh: restore scroll position");
+        RestoreScroll(v.adapter, scroll);
+        if (scroll.valid) {
+            g_reassertScroll = scroll;
+            g_reassertIndex = SelectedIndex(v.adapter);
+            if (g_reassertTicks <= 0) core::main_thread::Post([] { ReassertScroll(); });
+            g_reassertTicks = kScrollReassertTicks;
+        }
         Stage("-");
     });
 }
 
-void ScheduleRefresh() {
-    if (g_refreshQueued || !S.bindItemCategoryMi || !S.rootCategories || !S.rootCategoryIndex) return;
-    if (!core::main_thread::Ready()) return;
+void ScheduleRefresh(const Row& changed) {
+    if (!S.bindItemCategoryMi || !S.rootCategories || !S.rootCategoryIndex) return;
+    g_refreshKey = RowKey(changed.def);  // the latest change wins if one is already queued
+    if (g_refreshQueued || !core::main_thread::Ready()) return;
     g_refreshQueued = true;
     core::main_thread::Post([] { RefreshModsTab(); });
 }
@@ -908,7 +1123,7 @@ void HkToggleApply(Il2CppObject* self, int32_t index, const MethodInfo* mi) {
         F<bool>(r.defObj, S.togDefault) = on;
         const bool was = settings::GetBool(r.def.module, r.def.key);
         Write(r.def, on ? 1.0 : 0.0);
-        if (r.isParent && was != on) ScheduleRefresh();
+        if (r.isParent && was != on) ScheduleRefresh(r);
     });
     // Game definitions always reach the original. Ours never do (even in fault
     // mode): the original would write our private, possibly null, target.
@@ -928,7 +1143,7 @@ void HkRangeApply(Il2CppObject* self, int32_t index, const MethodInfo* mi) {
         F<float>(r.defObj, S.rngDefault) = static_cast<float>(v);
         const double was = settings::Get(r.def.module, r.def.key);
         Write(r.def, v);
-        if (r.isParent && std::fabs(settings::Get(r.def.module, r.def.key) - was) > 1e-9) ScheduleRefresh();  // Enum parents
+        if (r.isParent && std::fabs(settings::Get(r.def.module, r.def.key) - was) > 1e-9) ScheduleRefresh(r);  // Enum parents
     });
     // Game definitions always reach the original. Ours never do (even in fault
     // mode): the original would write our private, possibly null, target.
@@ -1153,6 +1368,33 @@ bool ResolveAll(std::string& err) {
             S.rootCategories = S.rootCategoryIndex = 0;
             SR2_WARN("ui: options tab: live show/hide of child rows unavailable ({}); they update when the tab is "
                      "reopened", e);
+        }
+        // Keeping the selected row and the scroll position across that refresh.
+        if (S.uiRoot && il::FieldOffset(S.uiRoot, "optionsAdapterView", S.rootAdapterView, &e))
+            S.adapterView = il::Class(kAsm, kNsUiOptions, "OptionsAdapterView", &e);
+        if (!S.adapterView) {
+            S.rootAdapterView = 0;
+            SR2_WARN("ui: options tab: row selection is not kept across a child-row refresh ({})", e);
+        }
+        S.scrollArea = il::Class(kAsm, "MonomiPark.SlimeRancher.UI.Framework.CommonControls", "ScrollArea", &e);
+        if (S.scrollArea && (!il::FieldOffset(S.scrollArea, "_scrollPosition", S.scrollAreaPos, &e) ||
+                             !(S.scrollAreaScrollTo = il::Method(S.scrollArea, "ScrollTo", 2, &e))))
+            S.scrollArea = nullptr;
+        S.scrollRect = il::Class("UnityEngine.UI", "UnityEngine.UI", "ScrollRect", &e);
+        if (S.scrollRect) {
+            S.scrollRectContent = il::Method(S.scrollRect, "get_content", 0, &e);
+            S.scrollRectStop = il::Method(S.scrollRect, "StopMovement", 0, &e);
+            Il2CppClass* rt = il::Class("UnityEngine.CoreModule", "UnityEngine", "RectTransform", &e);
+            if (rt) {
+                S.rtGetAnchored = il::Method(rt, "get_anchoredPosition", 0, &e);
+                S.rtSetAnchored = il::Method(rt, "set_anchoredPosition", 1, &e);
+            }
+            if (!S.scrollRectContent || !S.rtGetAnchored || !S.rtSetAnchored) S.scrollRect = nullptr;
+        }
+        if (Il2CppClass* tr = unity::TransformClass()) S.transformParent = il::Method(tr, "get_parent", 0, &e);
+        if (!S.transformParent || (!S.scrollArea && !S.scrollRect)) {
+            S.scrollArea = S.scrollRect = nullptr;
+            SR2_WARN("ui: options tab: scroll position is not kept across a child-row refresh ({})", e);
         }
     }
 
