@@ -7,7 +7,6 @@
 | note | about |
 |---|---|
 | `hen-collector-fix2.md` | Hen Collector corner, suction, hen/rooster sliders: built, in-game check open |
-| `silo-sell.md` | 10k Sell-All price, bee-style sale notices |
 | `drone-station-dialog.md` | drone price limit as a game-UI dialog |
 | `upgrade-visuals.md` | coop, garden, incinerator props |
 | `ideas.md` | unplanned ideas and the work order |
