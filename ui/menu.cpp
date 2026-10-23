@@ -1088,13 +1088,39 @@ void DrawSidebar(const Host& h, const std::vector<Category>& cats, const ModuleV
                                 : "All changes saved to sr2mods.json");
     dl->AddCircleFilled(ImVec2(sp.x + U(4), sp.y), U(4), col);
 
+    // "dd/MM HH:mm · abc1234[-dirty]", both parts' digit ink centred on the dot.
+    // The commit is a size smaller and shrinks further (then "-dirty" -> "*")
+    // until the line fits the sidebar.
+    ImFont* bf = theme::Body();
     const char* stamp = ::sr2::core::build_info::Time();
-    const ImVec2 ts = theme::Body()->CalcTextSizeA(U(theme::kSmallSize), FLT_MAX, 0.0f, stamp);
-    const ImVec2 tp(sp.x + U(14), sp.y - U(8));
-    Text(dl, theme::Body(), theme::kSmallSize, tp, P.dim, stamp);
-    if (ts.x > 0) {
-        ImGui::SetCursorScreenPos(tp);
-        ImGui::InvisibleButton("##buildstamp", ImVec2(ts.x, std::max(ts.y, U(16))));
+    std::string commit = ::sr2::core::build_info::Commit();
+    const float x0 = sp.x + U(14), right = ImGui::GetWindowPos().x + ImGui::GetWindowWidth() - U(12);
+    auto inkMid = [&](float size) {  // y of the digits' ink centre below the line top
+        const ImFontGlyph* g = bf->GetFontBaked(U(size))->FindGlyph('0');
+        return g ? (g->Y0 + g->Y1) * 0.5f : U(size) * 0.5f;
+    };
+    const ImVec2 ts = TextSize(bf, theme::kSmallSize, stamp);
+    std::string tail;
+    float tailSize = theme::kSmallSize - 1;
+    if (!commit.empty()) {
+        for (;;) {
+            tail = std::string(" \xC2\xB7 ") + commit;
+            if (x0 + ts.x + TextSize(bf, tailSize, tail.c_str()).x <= right) break;
+            if (tailSize > theme::kSmallSize - 3) tailSize -= 1;
+            else if (const size_t d = commit.find("-dirty"); d != std::string::npos) commit.replace(d, 6, "*");
+            else break;
+        }
+    }
+    const ImVec2 tp(x0, sp.y - inkMid(theme::kSmallSize));
+    Text(dl, bf, theme::kSmallSize, tp, P.dim, stamp);
+    float lineW = ts.x;
+    if (!tail.empty()) {
+        Text(dl, bf, tailSize, ImVec2(x0 + ts.x, sp.y - inkMid(tailSize)), P.dim, tail.c_str());
+        lineW += TextSize(bf, tailSize, tail.c_str()).x;
+    }
+    if (lineW > 0) {
+        ImGui::SetCursorScreenPos(ImVec2(x0, sp.y - U(8)));
+        ImGui::InvisibleButton("##buildstamp", ImVec2(lineW, U(16)));
         std::string tip = std::string("Built ") + ::sr2::core::build_info::TimeIso();
         if (*::sr2::core::build_info::Commit()) tip += std::string("\nCommit ") + ::sr2::core::build_info::Commit();
         HoverTip(tip);
