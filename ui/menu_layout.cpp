@@ -82,7 +82,12 @@ std::vector<Category> Spec() {
     Tab general;
     general.title = "General";
     general.kind = TabKind::Cards;
-    general.columns = {{"quick_start"}, {"instant_build", "quick_travel"}};
+    general.columns = {{"quick_start", "free_placement"}, {"instant_build", "quick_travel"}};
+    general.cardHelp = {
+        {"free_placement",
+         "Gadget mode ignores its placement limits: overlap, slope, distance, jumping. The cost and stacking rules "
+         "stay, and placed gadgets are saved like any other."},
+    };
     misc.tabs.push_back(general);
     Tab sandbox;
     sandbox.title = "Sandbox";
