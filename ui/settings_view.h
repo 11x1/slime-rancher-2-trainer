@@ -16,6 +16,7 @@ namespace settings = ::sr2::core::settings;
 inline constexpr const char* kUiModule = "ui";
 inline constexpr const char* kKeyOverlayHotkey = "overlay_hotkey";
 inline constexpr const char* kKeyOverlayHint = "overlay_hint";
+inline constexpr const char* kKeyOverlayTheme = "overlay_theme";  // Enum: 0 Dark, 1 Light
 inline constexpr const char* kKeyEnabled = "enabled";
 
 struct GroupView {
