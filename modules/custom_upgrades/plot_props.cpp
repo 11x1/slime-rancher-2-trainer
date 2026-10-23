@@ -29,8 +29,9 @@
 // corners hold the terminal, the deluxe planters (+x, -z) / (-x, +z) and the scareslime (+x, +z),
 // the deposit port stands at (-5.44, -3.14). Coop: hay bales along the +z side, nests in the
 // middle of the -x / +x sides (stuffed chicken in the +x nest), pillow in the middle of the -z
-// side. Garden: a third sprinkler head in the middle of the +x side, spraying inwards like the
-// vanilla ones. Nothing has a collider, so nothing blocks chickens, crops, the vac or the player.
+// side. Garden: a third sprinkler head in the middle of the +x side (Fast Growth I or II) and a
+// fourth in the middle of the -x side (Fast Growth II; the deposit port at (-5.44, -3.14) is
+// outside the soil), spraying inwards like the vanilla ones. Nothing has a collider, so nothing blocks chickens, crops, the vac or the player.
 //
 // Holders: "sr2props_<Kind>#<generation>", a plain GameObject under the plot (identity local
 // transform), made inactive before the clones go in, activated after stripping.
@@ -111,6 +112,10 @@ const Part kNests[] = {
 const Part kSprinkler[] = {
     {Src::kPlot, kPlotGarden, nullptr, "Sprinkler/SprinklerBase", {4.38f, -0.33f, 0.0f}, kId, S(1.0f), false},
 };
+const Part kSprinkler2[] = {  // the same head mirrored onto the -x side (turned 180 deg: sprays inwards)
+    {Src::kPlot, kPlotGarden, nullptr, "Sprinkler/SprinklerBase", {-4.38f, -0.33f, 0.0f}, YawQ(1.0f, 0.0f), S(1.0f),
+     false},
+};
 const Part kGlow[] = {
     {Src::kPlot, kPlotIncinerator, nullptr, "objIncinerator/Meshes/meshIncinerator/FireTest/Glow", {0.0f, 3.55f, 0.0f},
      kId, {0.5f, 1.0f, 0.5f}, true},
@@ -130,6 +135,7 @@ const KindDef kKinds[] = {
     {kPropCoopHay, "CoopHay", kPlotCoop, kHay, std::size(kHay)},
     {kPropCoopNests, "CoopNests", kPlotCoop, kNests, std::size(kNests)},
     {kPropGardenSprinkler, "GardenSprinkler", kPlotGarden, kSprinkler, std::size(kSprinkler)},
+    {kPropGardenSprinkler2, "GardenSprinklerII", kPlotGarden, kSprinkler2, std::size(kSprinkler2)},
     {kPropIncinGlow, "IncineratorGlow", kPlotIncinerator, kGlow, std::size(kGlow)},
 };
 
