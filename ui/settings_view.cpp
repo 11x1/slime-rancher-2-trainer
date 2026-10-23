@@ -139,7 +139,7 @@ std::string PrettyModuleName(std::string_view module) {
         up = false;
     }
     // A few well-known acronyms.
-    for (const char* acr : {"Hl2", "Ui", "Hud"}) {
+    for (const char* acr : {"Hl2", "Ui", "Hud", "Dj"}) {
         std::string a = acr;
         size_t p = out.find(a);
         if (p != std::string::npos && (p + a.size() == out.size() || out[p + a.size()] == ' ') &&

@@ -20,6 +20,7 @@
 #include "menu_layout.h"
 #include "item_grid.h"
 #include "sandbox_bridge.h"
+#include "slime_dj_bridge.h"
 #include "slime_icons.h"
 #include "theme.h"
 
@@ -1765,6 +1766,293 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
     SandboxStatus(h);
 }
 
+// ------------------------------------------------------------- slime dj ----
+// Ranch > Slime DJ (module "slime_dj"). Reads only the snapshot the module copies on the main
+// thread (slime_dj_bridge.h); every change is a posted request. Left: the songs in the music
+// folder. Right: now playing (progress, controls, shuffle, volume) and the queue.
+namespace djb = ::sr2::ui::slime_dj;
+
+char g_djSearch[128] = {};
+
+void DjRequest(djb::Op op, uint64_t song = 0, uint64_t uid = 0) {
+    djb::Action a;
+    a.op = op;
+    a.song = song;
+    a.uid = uid;
+    djb::Request(a);
+}
+
+std::string Clock(double seconds) {
+    if (!(seconds > 0)) return "0:00";
+    const long long s = static_cast<long long>(seconds + 0.5);
+    if (s >= 3600) return std::format("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60);
+    return std::format("{}:{:02}", s / 60, s % 60);
+}
+
+bool ContainsCi(const std::string& hay, const std::string& needle) {
+    if (needle.empty()) return true;
+    auto low = [](char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c; };
+    return std::search(hay.begin(), hay.end(), needle.begin(), needle.end(),
+                       [&](char a, char b) { return low(a) == low(b); }) != hay.end();
+}
+
+// Small square icon button drawn by `draw(centre, colour)`; true when clicked.
+template <class F>
+bool DjIconButton(const char* id, float size, const char* tip, F&& draw) {
+    const Palette& P = theme::Colors();
+    const bool clicked = ImGui::InvisibleButton(id, ImVec2(size, size));
+    const bool hov = ImGui::IsItemHovered();
+    const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (hov) dl->AddRectFilled(a, b, ImGui::GetColorU32(P.frameHover), U(6));
+    draw(ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), ImGui::GetColorU32(hov ? P.text : P.soft));
+    HoverTip(tip);
+    return clicked;
+}
+
+void DrawPlus(ImDrawList* dl, ImVec2 c, ImU32 col) {
+    const float r = U(5.5f), th = U(2.2f);
+    dl->AddLine(ImVec2(c.x - r, c.y), ImVec2(c.x + r, c.y), col, th);
+    dl->AddLine(ImVec2(c.x, c.y - r), ImVec2(c.x, c.y + r), col, th);
+}
+
+void DrawArrow(ImDrawList* dl, ImVec2 c, ImU32 col, bool up) {
+    const float s = up ? -1.0f : 1.0f;
+    dl->PathLineTo(ImVec2(c.x - U(4.5f), c.y - s * U(2.5f)));
+    dl->PathLineTo(ImVec2(c.x, c.y + s * U(2.5f)));
+    dl->PathLineTo(ImVec2(c.x + U(4.5f), c.y - s * U(2.5f)));
+    dl->PathStroke(col, 0, U(2.2f));
+}
+
+// One list row: text on the left (clipped), `right` dim at the right edge, room for `buttons`
+// icon buttons after it. Returns true when the row itself was clicked.
+bool DjRow(const char* id, const std::string& text, const std::string& right, bool current, bool bad, float buttonsW) {
+    const Palette& P = theme::Colors();
+    const float w = ImGui::GetContentRegionAvail().x - buttonsW, h = U(30);
+    const bool clicked = ImGui::InvisibleButton(id, ImVec2(std::max(1.0f, w), h));
+    const bool hov = ImGui::IsItemHovered();
+    const ImVec2 a = ImGui::GetItemRectMin(), b(a.x + w + buttonsW, a.y + h);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (current || hov) dl->AddRectFilled(a, b, ImGui::GetColorU32(current ? P.sel : P.hover), U(8));
+    ImFont* body = theme::Body();
+    const float fs = theme::kBodySize;
+    const ImVec2 rs = TextSize(body, theme::kSmallSize, right.c_str());
+    const float ty = a.y + (h - ImGui::GetFontSize()) * 0.5f;
+    const float textMax = a.x + w - rs.x - U(18);
+    dl->PushClipRect(a, ImVec2(std::max(a.x, textMax), b.y), true);
+    const ImU32 ink = bad ? P.dim : current ? (theme::Current() == theme::Mode::Dark ? P.grab : P.accent) : P.text;
+    Text(dl, body, fs, ImVec2(a.x + U(10), ty), ImGui::GetColorU32(ink), text.c_str());
+    dl->PopClipRect();
+    Text(dl, body, theme::kSmallSize, ImVec2(a.x + w - rs.x - U(8), a.y + (h - rs.y) * 0.5f), ImGui::GetColorU32(P.dim),
+         right.c_str());
+    return clicked;
+}
+
+void DjSongs(const djb::Snapshot& s, float w, float listH) {
+    const Palette& P = theme::Colors();
+    BeginCard("dj_songs", w);
+    const float avail = ImGui::GetContentRegionAvail().x, x0 = ImGui::GetCursorPosX();
+    const size_t count = s.songs ? s.songs->size() : 0;
+    CardHeading(count ? std::format("Songs ({})", count).c_str() : "Songs", P.head);
+    ImGui::SameLine(x0 + avail - U(96));
+    if (ImGui::Button("Open folder", ImVec2(U(96), 0))) djb::OpenFolder(s.folder);
+    HoverTip("Opens " + s.folder + "\nPut .ogg, .mp3 or .wav files there (subfolders work too), then Rescan.");
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputTextWithHint("##djsearch", "Search songs...", g_djSearch, sizeof(g_djSearch));
+    const std::string needle = g_djSearch;
+
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(4), U(2)));
+    ImGui::BeginChild("##djsonglist", ImVec2(0, listH), ImGuiChildFlags_None);
+    if (!s.songs) {
+        DimText(s.scanning ? "Reading the music folder..." : "The music folder has not been read yet.");
+    } else if (s.songs->empty()) {
+        DimText("No songs yet. Put .ogg, .mp3 or .wav files in\n" + s.folder + "\nthen press Rescan (the arrow at the top right).");
+    } else {
+        const float bs = U(26);
+        int shown = 0;
+        for (const djb::Song& song : *s.songs) {
+            if (!ContainsCi(song.name, needle) && !ContainsCi(song.file, needle)) continue;
+            ++shown;
+            ImGui::PushID(static_cast<const void*>(&song));
+            const bool bad = !song.error.empty();
+            const bool current = s.hasSong && s.song == song.id;
+            const float rowY = ImGui::GetCursorPosY();
+            if (DjRow("##row", song.name, song.seconds > 0 ? Clock(song.seconds) : std::string(), current, bad, bs + U(4)) && !bad)
+                DjRequest(djb::Op::Play, song.id);
+            HoverTip(bad ? song.file + "\nNot playable: " + song.error : song.file + "\nClick to play now.");
+            ImGui::SameLine(0, U(4));
+            ImGui::SetCursorPosY(rowY + (U(30) - bs) * 0.5f);
+            ImGui::BeginDisabled(bad);
+            if (DjIconButton("##add", bs, "Add to the queue", [](ImVec2 c, ImU32 col) { DrawPlus(ImGui::GetWindowDrawList(), c, col); }))
+                DjRequest(djb::Op::Enqueue, song.id);
+            ImGui::EndDisabled();
+            ImGui::SetCursorPosY(rowY + U(30) + ImGui::GetStyle().ItemSpacing.y);
+            ImGui::PopID();
+        }
+        if (shown == 0) DimText("No song matches the search.");
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+    if (s.scanning && s.songs) DimText("Reading the music folder...");
+    EndCard();
+}
+
+void DjNowPlaying(const Host& h, const ModuleView& mv, const djb::Snapshot& s, float w) {
+    const Palette& P = theme::Colors();
+    BeginCard("dj_now", w);
+    CardHeading("Now playing", P.head);
+    {
+        FontScope f(theme::Display(), theme::kDisplaySize + 1);
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, s.hasSong ? P.text : P.dim);
+        ImGui::TextUnformatted(s.hasSong ? s.name.c_str() : "Nothing");
+        ImGui::PopStyleColor();
+        ImGui::PopTextWrapPos();
+    }
+    // progress
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const ImVec2 a = ImGui::GetCursorScreenPos();
+    const float barH = U(6);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float frac = s.duration > 0 ? static_cast<float>(std::clamp(s.position / s.duration, 0.0, 1.0)) : 0.0f;
+    dl->AddRectFilled(ImVec2(a.x, a.y + U(4)), ImVec2(a.x + avail, a.y + U(4) + barH), ImGui::GetColorU32(P.frame), barH * 0.5f);
+    if (frac > 0)
+        dl->AddRectFilled(ImVec2(a.x, a.y + U(4)), ImVec2(a.x + std::max(barH, avail * frac), a.y + U(4) + barH),
+                          ImGui::GetColorU32(P.accent), barH * 0.5f);
+    ImGui::Dummy(ImVec2(avail, barH + U(6)));
+    {
+        FontScope f(theme::Body(), theme::kSmallSize);
+        const std::string left = s.hasSong ? Clock(s.position) : std::string("-:--");
+        const std::string right = s.hasSong && s.duration > 0 ? Clock(s.duration) : std::string("-:--");
+        const float x0 = ImGui::GetCursorPosX();
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.dim), "%s", left.c_str());
+        ImGui::SameLine(x0 + avail - ImGui::CalcTextSize(right.c_str()).x);
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.dim), "%s", right.c_str());
+    }
+    // controls
+    const float sp = ImGui::GetStyle().ItemSpacing.x;
+    const ImVec2 bs(std::floor((avail - 2 * sp) / 3), U(32));
+    const bool playing = s.hasSong && !s.paused;
+    if (AccentButton(playing ? "Pause" : "Play", bs)) DjRequest(djb::Op::TogglePause);
+    HoverTip(s.hasSong ? (playing ? "Pause the song." : "Resume the song.")
+                       : "Start the queue (or a random song with Shuffle on).");
+    ImGui::SameLine();
+    if (ImGui::Button("Skip", bs)) DjRequest(djb::Op::Skip);
+    HoverTip("Next song: the queue's first, or a random one with Shuffle on.");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!s.hasSong);
+    if (ImGui::Button("Stop", bs)) DjRequest(djb::Op::Stop);
+    ImGui::EndDisabled();
+    HoverTip("Stop and unload the song. The music box plays its own tune again.");
+    if (!s.waiting.empty()) {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.warn), "%s", s.waiting.c_str());
+        ImGui::PopTextWrapPos();
+    } else if (s.hasSong && s.speakers > 0) {
+        DimText(s.speakers == 1 ? std::string("Playing from 1 music box.")
+                                : std::format("Playing from {} music boxes, in sync.", s.speakers));
+    } else if (!s.hasSong && s.boxes == 0) {
+        DimText("No music box nearby. Songs play from the corral Music Box upgrade.");
+    }
+    ImGui::Dummy(ImVec2(0, U(2)));
+    // settings of the module (shuffle, volume, vanilla tune)
+    for (const char* key : {"shuffle", "volume", "mute_vanilla"})
+        if (const settings::Def* d = FindDef(mv, key)) DrawRow(h, *d, d->label, false);
+    EndCard();
+}
+
+void DjQueue(const djb::Snapshot& s, float w, float listH) {
+    const Palette& P = theme::Colors();
+    BeginCard("dj_queue", w);
+    const float avail = ImGui::GetContentRegionAvail().x, x0 = ImGui::GetCursorPosX();
+    CardHeading(s.queue.empty() ? "Queue" : std::format("Queue ({})", s.queue.size()).c_str(), P.head);
+    ImGui::SameLine(x0 + avail - U(70));
+    ImGui::BeginDisabled(s.queue.empty());
+    if (ImGui::Button("Clear", ImVec2(U(70), 0))) DjRequest(djb::Op::ClearQueue);
+    ImGui::EndDisabled();
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(2), U(2)));
+    ImGui::BeginChild("##djqueue", ImVec2(0, listH), ImGuiChildFlags_None);
+    if (s.queue.empty()) {
+        DimText(s.shuffle ? "Empty: random songs play next (Shuffle is on). Use + on a song to queue it."
+                          : "Empty: playback stops after this song. Use + on a song to queue it.");
+    }
+    const float bs = U(24);
+    for (size_t i = 0; i < s.queue.size(); ++i) {
+        const djb::QueueEntry& q = s.queue[i];
+        ImGui::PushID(static_cast<int>(q.uid));
+        const float rowY = ImGui::GetCursorPosY();
+        DjRow("##row", std::format("{}. {}", i + 1, q.name), q.seconds > 0 ? Clock(q.seconds) : std::string(), false, false,
+              3 * (bs + U(2)) + U(2));
+        ImGui::SameLine(0, U(2));
+        ImGui::SetCursorPosY(rowY + (U(30) - bs) * 0.5f);
+        ImGui::BeginDisabled(i == 0);
+        if (DjIconButton("##up", bs, "Move up", [](ImVec2 c, ImU32 col) { DrawArrow(ImGui::GetWindowDrawList(), c, col, true); }))
+            DjRequest(djb::Op::MoveUp, 0, q.uid);
+        ImGui::EndDisabled();
+        ImGui::SameLine(0, U(2));
+        ImGui::BeginDisabled(i + 1 == s.queue.size());
+        if (DjIconButton("##down", bs, "Move down", [](ImVec2 c, ImU32 col) { DrawArrow(ImGui::GetWindowDrawList(), c, col, false); }))
+            DjRequest(djb::Op::MoveDown, 0, q.uid);
+        ImGui::EndDisabled();
+        ImGui::SameLine(0, U(2));
+        if (DjIconButton("##rm", bs, "Remove from the queue", [](ImVec2 c, ImU32 col) { DrawCross(ImGui::GetWindowDrawList(), c, col); }))
+            DjRequest(djb::Op::Remove, 0, q.uid);
+        ImGui::SetCursorPosY(rowY + U(30) + ImGui::GetStyle().ItemSpacing.y);
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+    EndCard();
+}
+
+void DjStatus(const Host& h) {
+    const djb::Status st = djb::GetStatus();
+    if (st.text.empty()) return;
+    const Palette& P = theme::Colors();
+    const bool fresh = h.nowMs - st.tick < 6000;
+    ImGui::Dummy(ImVec2(0, U(2)));
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(st.error ? P.err : fresh ? P.head : P.dim), "%s", st.text.c_str());
+    ImGui::PopTextWrapPos();
+}
+
+void DrawSlimeDjPage(const Host& h, const ModuleView& mv) {
+    const Palette& P = theme::Colors();
+    FailedBanner(mv);
+    if (!ModuleOn(mv)) {
+        BeginCard("dj_off", ImGui::GetContentRegionAvail().x);
+        CardHeading("Slime DJ", P.head);
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted("Plays your own songs from the corral Music Box: put .ogg, .mp3 or .wav files in the "
+                               "sr2mods_music folder in the game folder, pick a song or build a queue, and every music "
+                               "box nearby plays it.");
+        ImGui::PopTextWrapPos();
+        DimText("Slime DJ is off. Turn it on with the switch at the top right.");
+        EndCard();
+        return;
+    }
+    djb::MarkViewed();
+    const auto snap = djb::Get();
+    if (!snap || h.nowMs - snap->tick > 3000) {
+        OffNote("Starting the DJ booth...");
+        return;
+    }
+    const float w = ColumnWidth();
+    const float gapY = U(kGap) - ImGui::GetStyle().ItemSpacing.y;
+    DjSongs(*snap, w, U(380));
+    ImGui::SameLine(0, U(kGap));
+    ImGui::BeginGroup();
+    DjNowPlaying(h, mv, *snap, w);
+    ImGui::Dummy(ImVec2(0, gapY));
+    DjQueue(*snap, w, U(150));
+    ImGui::EndGroup();
+    DjStatus(h);
+}
+
 // ------------------------------------------------------------- settings ----
 // Key on the left, value right-aligned; a long value wraps, each line right-aligned.
 void KeyValue(const char* k, const std::string& v, ImU32 vcol, const std::string& tip = {}) {
@@ -2012,7 +2300,7 @@ struct TabState {
 
 TabState StateOf(const Tab& t, const std::vector<ModuleView>& views) {
     TabState s;
-    if (t.kind != TabKind::Module && t.kind != TabKind::Sandbox) return s;
+    if (t.kind != TabKind::Module && t.kind != TabKind::Sandbox && t.kind != TabKind::SlimeDj) return s;
     const ModuleView* mv = FindView(views, t.module);
     if (!mv) return s;
     const bool moduleOn = ModuleOn(*mv);
@@ -2115,15 +2403,18 @@ bool DrawTopBar(const Category& cat, int& ti, const std::vector<ModuleView>& vie
         rx -= ls.x + U(9);
         Text(dl, f, 15, ImVec2(rx, cy - ls.y * 0.5f), WithAlpha(P.soft, st.locked ? 0.45f : 1.0f), "Enabled");
     }
-    if (tab.kind == TabKind::Module || tab.kind == TabKind::Profiles) {
+    if (tab.kind == TabKind::Module || tab.kind == TabKind::Profiles || (tab.kind == TabKind::SlimeDj && st.on)) {
         rx -= ib + U(10);
         ImGui::SetCursorScreenPos(ImVec2(rx, cy - ib * 0.5f));
         if (IconButton("##reset", ib)) {
             if (tab.kind == TabKind::Profiles) profiles::Refresh();
+            else if (tab.kind == TabKind::SlimeDj) DjRequest(djb::Op::Rescan);
             else ResetTab(tab, views);
         }
         DrawResetIcon(dl, ImVec2(rx + ib * 0.5f, cy), ImGui::IsItemHovered() ? P.text : P.soft);
-        HoverTip(tab.kind == TabKind::Profiles ? "Rescan the profiles folder" : "Reset this tab to defaults");
+        HoverTip(tab.kind == TabKind::Profiles  ? "Rescan the profiles folder"
+                 : tab.kind == TabKind::SlimeDj ? "Rescan the music folder"
+                                                : "Reset this tab to defaults");
     }
     ImGui::SetCursorScreenPos(origin);
     ImGui::Dummy(ImVec2(barW, U(kTopH)));
@@ -2339,6 +2630,9 @@ bool Draw(const Host& h) {
             case TabKind::Settings: DrawSettingsPage(h, ui); break;
             case TabKind::Sandbox:
                 if (const ModuleView* mv = FindView(views, tab.module)) DrawSandboxPage(h, *mv);
+                break;
+            case TabKind::SlimeDj:
+                if (const ModuleView* mv = FindView(views, tab.module)) DrawSlimeDjPage(h, *mv);
                 break;
         }
         ImGui::Dummy(ImVec2(0, U(18)));

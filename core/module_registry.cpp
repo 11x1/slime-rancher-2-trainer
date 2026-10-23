@@ -20,6 +20,7 @@ std::unique_ptr<sr2::core::Module> CreateSellUpgrades();  // modules/sell_upgrad
 std::unique_ptr<sr2::core::Module> CreateCustomUpgrades();  // modules/custom_upgrades/module.cpp
 std::unique_ptr<sr2::core::Module> CreateDronePriceLimit();  // modules/drone_price_limit/module.cpp
 std::unique_ptr<sr2::core::Module> CreateSandbox();          // modules/sandbox/module.cpp
+std::unique_ptr<sr2::core::Module> CreateSlimeDj();          // modules/slime_dj/module.cpp
 }  // namespace sr2::modules
 
 namespace sr2::core {
@@ -38,6 +39,7 @@ void RegisterBuiltinModules(ModuleManager& mm) {
     mm.Register(modules::CreateCustomUpgrades());
     mm.Register(modules::CreateDronePriceLimit());
     mm.Register(modules::CreateSandbox());
+    mm.Register(modules::CreateSlimeDj());
 }
 
 }  // namespace sr2::core

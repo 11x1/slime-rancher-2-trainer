@@ -28,6 +28,12 @@ add_library(minhook STATIC
 target_include_directories(minhook PUBLIC third_party/minhook/include)
 target_compile_options(minhook PRIVATE /W3)
 
+# ----------------------------------------------------------- song codecs ----
+# stb_vorbis (third_party/stb) and dr_mp3 / dr_wav (third_party/dr_libs), compiled once in
+# modules/slime_dj/codecs.c as C with warnings off (third-party code). Plain C runtime only.
+add_library(sr2_codecs STATIC modules/slime_dj/codecs.c)
+target_compile_options(sr2_codecs PRIVATE /W0)
+
 # ------------------------------------------------------------ Dear ImGui ----
 # Vendored by the overlay owner into third_party/imgui (optional). Built as a
 # static library with warnings off (third-party code); D3D DLLs are
@@ -137,7 +143,7 @@ add_custom_target(sr2mods_build_info
   VERBATIM)
 add_dependencies(sr2mods sr2mods_build_info)
 target_include_directories(sr2mods PRIVATE "${SR2_GEN_DIR}")
-target_link_libraries(sr2mods PRIVATE minhook bcrypt delayimp)
+target_link_libraries(sr2mods PRIVATE minhook sr2_codecs bcrypt delayimp)
 
 # Every system DLL beyond kernel32/user32 is delay-loaded: the proxy is loaded
 # by UnityPlayer.dll very early, before the game initialises D3D, and must not
