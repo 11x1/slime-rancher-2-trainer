@@ -19,6 +19,13 @@
 //     (the fire particle system at (0, 3.55, 0), scale (0.75, 1.5, 0.75)) has two INACTIVE
 //     children "Glow" (scale 0.67) and "Embers" (at -0.96, turned -90 deg about x, scale 1.4 /
 //     1.2 / 1.2) that vanilla never shows. We clone and switch them on at the same place.
+//   * coop prefab "patchCoop": "Deco/decoFieldsGrass01 _Green" / "Deco/decoFieldsGrass02_Green" =
+//     the coop's own grass tufts (mesh + LODGroup + two game scripts, no collider).
+//   * corral prefab "patchCorral": "Music Box/techCorralMusicBox/MusicBox/Music" = the Music Box
+//     upgrade's speaker (Animator, a game script, capsule collider; children: bone_musicBase ->
+//     bone_musicEmmit -> "FX Music" note particles + "musicbox (1)" mesh, and the skinned
+//     "musicbox" mesh). Its chain (container turned 180 deg, inner offsets cancel) puts it on
+//     the (-x, +z) corner post, the speaker head ~0.8 m inwards at 2.5 m.
 //   * decorFireFlower (decoration gadget): child "FX Fireflower" (two ember particle systems,
 //     "Embers_01" / "Embers_02" at y 2.59 / 1.17 above the flower), set so they rise out of
 //     the incinerator's opening.
@@ -27,10 +34,26 @@
 // corners hold the plot menu terminal (-x, -z), the vitamizer (-x, +z), the vanilla elder
 // collector (+x, +z) and, by coop_world's PickCorner, the Hen Collector (the free one); garden
 // corners hold the terminal, the deluxe planters (+x, -z) / (-x, +z) and the scareslime (+x, +z),
-// the deposit port stands at (-5.44, -3.14). Coop: hay bales along the +z side, nests in the
-// middle of the -x / +x sides (stuffed chicken in the +x nest), pillow in the middle of the -z
-// side. Garden: a third sprinkler head in the middle of the +x side, spraying inwards like the
-// vanilla ones. Nothing has a collider, so nothing blocks chickens, crops, the vac or the player.
+// the deposit port stands at (-5.44, -3.14). Nothing has a collider, so nothing blocks
+// chickens, crops, the vac or the player.
+//
+// Coop: hay bales + three grass tufts (Faster Hens I / II), two nests (stuffed chicken in the
+// second), the flower pillow and two more tufts (Faster Hens II) stand on scattered "slots"
+// (CoopLayout): position, yaw and a small size variation drawn from a generator seeded by the
+// plot id (FNV-1a), so a plot always gets the same layout and two coops differ. One layout covers
+// both kinds (the Hens II slots stay put when Hens I is bought or sold). A slot keeps within
+// +-3.7 m, out of the corner squares (|x| and |z| both > 2.5: terminal, vitamizer, elder
+// collector, Hen Collector), off the vanilla nest in the middle and clear of the other slots;
+// after 64 failed draws it takes a fixed fallback spot.
+//
+// Garden: a third sprinkler head in the middle of the +x side (Fast Growth I or II) and a fourth
+// in the middle of the -x side (Fast Growth II; the deposit port at (-5.44, -3.14) is outside the
+// soil), spraying inwards like the vanilla ones.
+//
+// Corral: the second speaker goes on the (-x, -z) corner post, above the plot menu terminal
+// (which stands outside the post at ground height), head 2.5 m up and leaning inwards; the other
+// corners hold the vanilla speaker (-x, +z), the plort collector (+x, +z) and the auto-feeder
+// (+x, -z).
 //
 // Holders: "sr2props_<Kind>#<generation>", a plain GameObject under the plot (identity local
 // transform), made inactive before the clones go in, activated after stripping.
@@ -40,6 +63,9 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdint>
 #include <format>
 #include <initializer_list>
 #include <map>
@@ -63,6 +89,7 @@ using sr2::il2cpp::Resolver;
 constexpr const char* kImage = "Assembly-CSharp";
 constexpr const char* kCore = "UnityEngine.CoreModule";
 constexpr const char* kPhysics = "UnityEngine.PhysicsModule";
+constexpr int32_t kPlotCorral = 2;
 constexpr int32_t kPlotCoop = 3;
 constexpr int32_t kPlotGarden = 4;
 constexpr int32_t kPlotIncinerator = 7;
@@ -88,28 +115,60 @@ struct Part {
     Quat rot;
     Vec3 scale;
     bool activate;       // the source is inactive in its prefab: switch the clone on
+    int slot = -1;       // >= 0: coop layout slot; pos / rot are then offsets from the slot
 };
 
 constexpr Quat kId{0.0f, 0.0f, 0.0f, 1.0f};
 constexpr Quat YawQ(float s, float c) { return {0.0f, s, 0.0f, c}; }  // (sin, cos) of half the yaw
 constexpr Vec3 S(float s) { return {s, s, s}; }
 
+// Coop layout slots (CoopLayout): clearance radius and size variation per slot, and a fallback
+// spot (x, z, yaw degrees) used when no random draw fits.
+struct SlotDef {
+    float radius;
+    float scaleLo, scaleHi;
+    float fx, fz, fyaw;
+};
+constexpr SlotDef kCoopSlots[] = {
+    {0.9f, 0.9f, 1.1f, -1.3f, 3.6f, 90.0f},    // 0 hay bale       (Hens I / II)
+    {0.9f, 0.9f, 1.1f, 1.3f, 3.6f, 75.0f},     // 1 hay bale
+    {0.45f, 0.8f, 1.25f, -3.5f, 1.5f, 10.0f},  // 2 grass
+    {0.45f, 0.8f, 1.25f, 3.5f, 1.5f, 200.0f},  // 3 grass
+    {0.45f, 0.8f, 1.25f, 0.0f, -2.2f, 120.0f}, // 4 grass
+    {0.85f, 0.9f, 1.1f, -3.5f, -0.5f, 30.0f},  // 5 nest           (Hens II)
+    {0.85f, 0.9f, 1.1f, 3.5f, -0.5f, -40.0f},  // 6 nest + stuffed chicken
+    {0.8f, 0.9f, 1.1f, 0.0f, -3.6f, 0.0f},     // 7 flower pillow
+    {0.45f, 0.8f, 1.25f, -2.0f, 2.0f, 300.0f}, // 8 grass
+    {0.45f, 0.8f, 1.25f, 2.0f, -2.0f, 60.0f},  // 9 grass
+};
+constexpr size_t kCoopSlotCount = std::size(kCoopSlots);
+
 const Part kHay[] = {
-    {Src::kGadget, 0, "decorHayBales", "hayBale_2", {-1.3f, 0.0f, 3.8f}, YawQ(0.70710678f, 0.70710678f), S(0.5f), false},
-    {Src::kGadget, 0, "decorHayBales", "hayBale_0 (1)", {1.3f, 0.0f, 3.85f}, YawQ(0.60876143f, 0.79335334f), S(0.5f),
-     false},
+    {Src::kGadget, 0, "decorHayBales", "hayBale_2", {}, kId, S(0.5f), false, 0},
+    {Src::kGadget, 0, "decorHayBales", "hayBale_0 (1)", {}, kId, S(0.5f), false, 1},
+    {Src::kPlot, kPlotCoop, nullptr, "Deco/decoFieldsGrass01 _Green", {}, kId, S(0.7f), false, 2},
+    {Src::kPlot, kPlotCoop, nullptr, "Deco/decoFieldsGrass02_Green", {}, kId, S(0.6f), false, 3},
+    {Src::kPlot, kPlotCoop, nullptr, "Deco/decoFieldsGrass01 _Green", {}, kId, S(0.55f), false, 4},
 };
 const Part kNests[] = {
-    {Src::kPlot, kPlotCoop, nullptr, "Deco/nestPlain01", {-3.7f, 0.0f, 0.0f}, YawQ(0.25881905f, 0.96592583f), S(1.0f),
-     false},
-    {Src::kPlot, kPlotCoop, nullptr, "Deco/nestPlain01", {3.7f, 0.0f, 0.0f}, YawQ(-0.34202014f, 0.93969262f), S(1.0f),
-     false},
-    {Src::kToy, 0, "toyStuffedChicken", "model_stuffedChicken", {3.7f, 0.1f, 0.0f}, YawQ(-0.70710678f, 0.70710678f),
-     S(1.33f), false},
-    {Src::kGadget, 0, "decorFlowerPillowSmall", "mesh", {0.0f, 0.0f, -3.7f}, kId, S(0.7f), false},
+    {Src::kPlot, kPlotCoop, nullptr, "Deco/nestPlain01", {}, kId, S(1.0f), false, 5},
+    {Src::kPlot, kPlotCoop, nullptr, "Deco/nestPlain01", {}, kId, S(1.0f), false, 6},
+    {Src::kToy, 0, "toyStuffedChicken", "model_stuffedChicken", {0.0f, 0.1f, 0.0f}, YawQ(-0.70710678f, 0.70710678f),
+     S(1.33f), false, 6},
+    {Src::kGadget, 0, "decorFlowerPillowSmall", "mesh", {}, kId, S(0.7f), false, 7},
+    {Src::kPlot, kPlotCoop, nullptr, "Deco/decoFieldsGrass02_Green", {}, kId, S(0.6f), false, 8},
+    {Src::kPlot, kPlotCoop, nullptr, "Deco/decoFieldsGrass01 _Green", {}, kId, S(0.65f), false, 9},
 };
 const Part kSprinkler[] = {
     {Src::kPlot, kPlotGarden, nullptr, "Sprinkler/SprinklerBase", {4.38f, -0.33f, 0.0f}, kId, S(1.0f), false},
+};
+const Part kSprinkler2[] = {  // the same head mirrored onto the -x side (turned 180 deg: sprays inwards)
+    {Src::kPlot, kPlotGarden, nullptr, "Sprinkler/SprinklerBase", {-4.38f, -0.33f, 0.0f}, YawQ(1.0f, 0.0f), S(1.0f),
+     false},
+};
+const Part kMusic[] = {  // the vanilla speaker, from its (-x, +z) corner post (turned 180 deg) to (-x, -z) (90 deg)
+    {Src::kPlot, kPlotCorral, nullptr, "Music Box/techCorralMusicBox/MusicBox/Music", {-4.75f, 0.0f, -4.75f},
+     YawQ(0.70710678f, 0.70710678f), S(1.0f), false},
 };
 const Part kGlow[] = {
     {Src::kPlot, kPlotIncinerator, nullptr, "objIncinerator/Meshes/meshIncinerator/FireTest/Glow", {0.0f, 3.55f, 0.0f},
@@ -130,8 +189,73 @@ const KindDef kKinds[] = {
     {kPropCoopHay, "CoopHay", kPlotCoop, kHay, std::size(kHay)},
     {kPropCoopNests, "CoopNests", kPlotCoop, kNests, std::size(kNests)},
     {kPropGardenSprinkler, "GardenSprinkler", kPlotGarden, kSprinkler, std::size(kSprinkler)},
+    {kPropGardenSprinkler2, "GardenSprinklerII", kPlotGarden, kSprinkler2, std::size(kSprinkler2)},
     {kPropIncinGlow, "IncineratorGlow", kPlotIncinerator, kGlow, std::size(kGlow)},
+    {kPropCorralMusic, "CorralMusicII", kPlotCorral, kMusic, std::size(kMusic)},
 };
+
+// ---------------------------------------------------------------- coop layout --
+
+struct Slot {
+    Vec3 pos;
+    Quat rot;
+    float scale;
+};
+using CoopSlots = std::array<Slot, kCoopSlotCount>;
+
+Quat Mul(const Quat& a, const Quat& b) {
+    return {a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y, a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+            a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+}
+Quat YawDeg(float deg) {
+    const float half = deg * 3.14159265f / 360.0f;
+    return YawQ(std::sin(half), std::cos(half));
+}
+
+// splitmix64: small, and the same sequence on every run for the same seed.
+struct Rng {
+    uint64_t state;
+    uint64_t Next() {
+        uint64_t z = (state += 0x9E3779B97F4A7C15ull);
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        return z ^ (z >> 31);
+    }
+    float Range(float lo, float hi) { return lo + (hi - lo) * static_cast<float>(Next() >> 40) * (1.0f / 16777216.0f); }
+};
+
+// The scattered coop layout of one plot (see the header comment): the same id gives the same slots.
+CoopSlots CoopLayout(const std::string& id) {
+    uint64_t seed = 1469598103934665603ull;  // FNV-1a of the LandPlotLocation id
+    for (unsigned char c : id) {
+        seed ^= c;
+        seed *= 1099511628211ull;
+    }
+    Rng rng{seed};
+    CoopSlots out{};
+    constexpr float kHalf = 3.7f, kCorner = 2.5f, kMiddle = 1.2f;  // vanilla nest: ~1.2 m clear
+    for (size_t i = 0; i < kCoopSlotCount; ++i) {
+        const SlotDef& d = kCoopSlots[i];
+        float x = d.fx, z = d.fz, yaw = d.fyaw;
+        for (int attempt = 0; attempt < 64; ++attempt) {
+            const float cx = rng.Range(-kHalf, kHalf), cz = rng.Range(-kHalf, kHalf);
+            if (std::fabs(cx) > kCorner && std::fabs(cz) > kCorner) continue;
+            if (cx * cx + cz * cz < (kMiddle + d.radius) * (kMiddle + d.radius)) continue;
+            bool clear = true;
+            for (size_t j = 0; j < i && clear; ++j) {
+                const float dx = cx - out[j].pos.x, dz = cz - out[j].pos.z, r = d.radius + kCoopSlots[j].radius;
+                clear = dx * dx + dz * dz >= r * r;
+            }
+            if (!clear) continue;
+            x = cx;
+            z = cz;
+            yaw = rng.Range(0.0f, 360.0f);
+            break;
+        }
+        out[i] = {{x, 0.0f, z}, YawDeg(yaw), rng.Range(d.scaleLo, d.scaleHi)};
+    }
+    return out;
+}
 
 }  // namespace
 
@@ -460,6 +584,8 @@ void PlotProps::Impl::Create(Il2CppObject* plot, const KindDef& def, Il2CppObjec
         DestroyNow(holder);
         return;
     }
+    const bool scattered = std::any_of(parts.begin(), parts.end(), [](const auto& p) { return p.first->slot >= 0; });
+    const CoopSlots layout = scattered ? CoopLayout(id) : CoopSlots{};
     int built = 0;
     for (const auto& [part, src] : parts) {
         Il2CppObject* clone = unity::Instantiate(src, holderTr);
@@ -467,6 +593,13 @@ void PlotProps::Impl::Create(Il2CppObject* plot, const KindDef& def, Il2CppObjec
         Il2CppObject* tr = unity::TransformOf(clone);
         Vec3 pos = part->pos, scale = part->scale;
         Quat rot = part->rot;
+        if (part->slot >= 0 && static_cast<size_t>(part->slot) < kCoopSlotCount) {
+            // slot offsets are vertical only (the stuffed chicken sits in its nest), so no rotation
+            const Slot& sl = layout[static_cast<size_t>(part->slot)];
+            pos = {sl.pos.x + pos.x, sl.pos.y + pos.y, sl.pos.z + pos.z};
+            rot = Mul(sl.rot, rot);
+            scale = {scale.x * sl.scale, scale.y * sl.scale, scale.z * sl.scale};
+        }
         Call(trSetLocalPosition, tr, {&pos}, "Transform.set_localPosition");
         Call(trSetLocalRotation, tr, {&rot}, "Transform.set_localRotation");
         Call(trSetLocalScale, tr, {&scale}, "Transform.set_localScale");
@@ -483,7 +616,8 @@ void PlotProps::Impl::Create(Il2CppObject* plot, const KindDef& def, Il2CppObjec
         return;
     }
     unity::SetActive(holder, true);
-    SR2_INFO("[{}] {} props built on plot '{}' ({} of {} piece(s))", module, def.name, id, built, def.count);
+    SR2_INFO("[{}] {} props built on plot '{}' ({} of {} piece(s){})", module, def.name, id, built, def.count,
+             scattered ? ", scattered by plot id" : "");
 }
 
 // ---------------------------------------------------------------- api --

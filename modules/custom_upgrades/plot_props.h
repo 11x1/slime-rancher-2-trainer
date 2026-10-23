@@ -1,8 +1,8 @@
 #pragma once
 // custom_upgrades: decorative props that show an owned tier upgrade on its plot (checklist u5,
 // u6, u9, u11): hay bales in the coop (Faster Hens I), extra nests, a flower pillow and a stuffed
-// chicken (Faster Hens II), a third sprinkler in the garden (Fast Growth), glow and embers in the
-// incinerator's fire (Ash Booster).
+// chicken (Faster Hens II), a third sprinkler in the garden (Fast Growth; II adds a fourth), glow
+// and embers in the incinerator's fire (Ash Booster), a second speaker in the corral (Music Box II).
 //
 // Every prop is a clone of a vanilla model (no asset files of ours): children of decoration /
 // toy prefabs (LookupDirector._gadgetDefinitions / _toyDefinitions -> IdentifiableType.prefab,
@@ -37,6 +37,8 @@ enum PropKind : uint32_t {
     kPropCoopNests = 1u << 1,       // coop, Faster Hens II: two nests, a flower pillow, a stuffed chicken
     kPropGardenSprinkler = 1u << 2, // garden, Fast Growth I or II: a sprinkler on the free +x side
     kPropIncinGlow = 1u << 3,       // incinerator, Ash Booster: glow + embers in the fire
+    kPropGardenSprinkler2 = 1u << 4, // garden, Fast Growth II: a fourth sprinkler on the -x side
+    kPropCorralMusic = 1u << 5,      // corral, Music Box II: a second speaker on the (-x, -z) post
 };
 
 struct PropRequest {
