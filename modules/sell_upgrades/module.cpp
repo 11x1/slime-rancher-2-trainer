@@ -79,9 +79,13 @@
 //     freed by a posted job). The ConfirmDetour (vanilla purchase closures) notes an Ash
 //     Trough purchase on a plot with a record, lets the original run, then sets
 //     model.ashUnits = min(remembered, MaxUnits) and calls FillableAshSource.AddAsh(0)
-//     (clamps + moves the ash mesh). No record (never sold this session, after a reload,
-//     a demolished/rebuilt plot = new model) or module off: vanilla fill. The value stays
-//     a vanilla-producible ash amount; nothing new is saved.
+//     (clamps + moves the ash mesh). The ash is also stored per plot in custom_upgrades'
+//     per-save sidecar (api.h SetPlotValue "sell_upgrades.ash_trough", written with the next
+//     game save into that .sav file's sidecar), so a re-purchase after a reload of a save
+//     made after the sale keeps it too; the value is cleared when it is used. No record
+//     and no sidecar value (never sold, sold but not saved, custom_upgrades off) or module
+//     off: vanilla fill. Known limit: a demolished incinerator rebuilt on the same spot
+//     keeps the sidecar value. The ash stays a vanilla-producible amount.
 //   * EXCLUDED: silo STORAGE2/3/4 and STORAGE_CAPACITY_INCREASE (they change the silo's
 //     slot layout / per-slot capacity of stored items; reverting means rewriting slot
 //     data and could lose or over-fill stored items).
@@ -125,6 +129,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <format>
 #include <memory>
 #include <string>
@@ -248,6 +253,7 @@ public:
     struct AshRebuy {
         Il2CppObject* plot = nullptr;
         Il2CppObject* model = nullptr;
+        float saved = -1.0f;  // ash from the save's sidecar (custom_upgrades::PlotValue); < 0 = none
     };
     AshRebuy BeforeVanillaBuy(Il2CppObject* closure);
     void AfterVanillaBuy(const AshRebuy& r);
@@ -733,8 +739,8 @@ bool SellUpgrades::HandleAction(Il2CppObject* root, Il2CppObject* item) {
                                "can buy it again later at full price.",
                                refund, price);
             if (upg == ASH_TROUGH)
-                text += "\nBought back on this plot (before you reload), the trough keeps its current ash instead "
-                        "of coming full.";
+                text += "\nBought back on this plot, the trough keeps its current ash instead of coming full "
+                        "(also after a reload, once you have saved).";
             if (upg == DELUXE_GARDEN) text += "\nThe planted crop becomes a normal crop again (growth is kept).";
         }
     }
@@ -930,8 +936,20 @@ Il2CppObject* SellUpgrades::FindAshSource(Il2CppObject* plot) {
     return nullptr;
 }
 
+// Per-save copy of the remembered ash (custom_upgrades sidecar of the .sav file): survives a
+// reload once the game was saved after the sale.
+constexpr const char* kAshValueKey = "sell_upgrades.ash_trough";
+
+float SavedAsh(Il2CppObject* plot) {
+    const std::string v = custom_upgrades::PlotValue(plot, kAshValueKey);
+    if (v.empty()) return -1.0f;
+    char* end = nullptr;
+    const float f = std::strtof(v.c_str(), &end);
+    return (end != v.c_str() && std::isfinite(f) && f >= 0.0f) ? f : -1.0f;
+}
+
 SellUpgrades::AshRebuy SellUpgrades::BeforeVanillaBuy(Il2CppObject* closure) {
-    if (!ashRestoreOk_ || ashRecords_.empty() || !main_thread::IsMainThread()) return {};
+    if (!ashRestoreOk_ || !main_thread::IsMainThread()) return {};
     if (!IsA(closure, closureClass_)) return {};
     if (unity::Field<int32_t>(closure, offClosureUpgrade_) != ASH_TROUGH) return {};
     auto* root = unity::Field<Il2CppObject*>(closure, offClosureThis_);
@@ -939,21 +957,28 @@ SellUpgrades::AshRebuy SellUpgrades::BeforeVanillaBuy(Il2CppObject* closure) {
     Il2CppObject* plot = unity::Field<Il2CppObject*>(root, offActivator_);
     if (!IsA(plot, plotClass_) || !unity::IsAlive(plot) || HasUpgrade(plot, ASH_TROUGH)) return {};
     Il2CppObject* model = unity::Field<Il2CppObject*>(plot, offPlotModel_);
-    if (!IsA(model, modelClass_) || !ashRecords_.count(model)) return {};
-    return {plot, model};
+    if (!IsA(model, modelClass_)) return {};
+    if (ashRecords_.count(model)) return {plot, model, -1.0f};
+    const float saved = SavedAsh(plot);  // after a reload: the copy in the save's sidecar
+    if (saved < 0.0f) return {};
+    return {plot, model, saved};
 }
 
 void SellUpgrades::AfterVanillaBuy(const AshRebuy& r) {
     if (!main_thread::IsMainThread()) return;
     auto it = ashRecords_.find(r.model);
-    if (it == ashRecords_.end()) return;
+    const bool inMemory = it != ashRecords_.end();
+    if (!inMemory && r.saved < 0.0f) return;
     // Only after a completed purchase on the same plot / model (cancelled or failed: keep the record).
     if (!unity::IsAlive(r.plot) || !IsA(r.plot, plotClass_) || !HasUpgrade(r.plot, ASH_TROUGH)) return;
     if (unity::Field<Il2CppObject*>(r.plot, offPlotModel_) != r.model) return;
-    const float remembered = it->second.ash;
-    const Il2CppGCHandle h = it->second.handle;
-    ashRecords_.erase(it);
-    if (h) main_thread::Post([h] { unity::FreeGCHandle(h); });
+    const float remembered = inMemory ? it->second.ash : r.saved;
+    if (inMemory) {
+        const Il2CppGCHandle h = it->second.handle;
+        ashRecords_.erase(it);
+        if (h) main_thread::Post([h] { unity::FreeGCHandle(h); });
+    }
+    custom_upgrades::SetPlotValue(r.plot, kAshValueKey, "");  // used up (saved with the next game save)
 
     const std::string id = PlotId(r.plot);
     Il2CppObject* src = FindAshSource(r.plot);
@@ -969,9 +994,9 @@ void SellUpgrades::AfterVanillaBuy(const AshRebuy& r) {
     ash = v;
     // AddAsh works on the source's own _plotModel: refresh the mesh only if that is this model.
     if (unity::Field<Il2CppObject*>(src, offAshModel_) == r.model) addAsh_(src, 0.0f);  // clamps, moves the ash
-    SR2_INFO("[{}] Ash Trough bought back on plot '{}': ash set to {:.1f} (remembered at sale; vanilla fill {:.1f}, "
+    SR2_INFO("[{}] Ash Trough bought back on plot '{}': ash set to {:.1f} (remembered at sale{}; vanilla fill {:.1f}, "
              "max {})",
-             kModule, id, ash, vanilla, maxUnits);
+             kModule, id, ash, inMemory ? "" : ", from the save's sidecar", vanilla, maxUnits);
 }
 
 // ---------------------------------------------------------------- selling --
@@ -1019,7 +1044,11 @@ void SellUpgrades::DoSell(Il2CppObject* root, Il2CppObject* plot, Il2CppObject* 
         return;
     }
     if (upg == ASH_TROUGH) {
-        RememberAsh(model, unity::Field<float>(model, offModelAsh_));  // for a re-purchase on this plot
+        const float ash = unity::Field<float>(model, offModelAsh_);
+        RememberAsh(model, ash);  // for a re-purchase on this plot
+        if (ashRestoreOk_)        // and in the save's sidecar, for a re-purchase after a reload
+            custom_upgrades::SetPlotValue(plot, kAshValueKey,
+                                          std::format("{:.3f}", std::isfinite(ash) && ash > 0.0f ? ash : 0.0f));
         unity::Field<float>(model, offModelAsh_) = 0.0f;
     }
 

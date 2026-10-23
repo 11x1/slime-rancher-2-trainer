@@ -93,13 +93,29 @@
 //     one compare). LandPlot.AddUpgrade detour: custom ids are NEVER passed to the original
 //     (they would land in the vanilla save); buying marks ownership in the sidecar state,
 //     an action item runs its action (sell all now).
-//   * Persistence: sidecar <game folder>/sr2mods_saves/<game name>.json, keyed by
-//     LandPlotLocation._id (+ plot type). Read lazily for AutoSaveDirector.
-//     CurrentSaveGameName(); written after every AutoSaveDirector.SaveGameImpl (manual save
-//     and autosave), so unsaved purchases vanish together with the unsaved money, exactly
-//     like vanilla. AutoSaveDirector.Load / StartNewGame detours drop the in-memory state.
-//     The vanilla save never contains anything of ours: without the mod it loads unchanged
-//     (only the custom upgrades are gone).
+//   * Persistence: one sidecar per .sav file, <game folder>/sr2mods_saves/<save>.sav.json
+//     (<save> = "<GameName>_<i>", the rotation file the game wrote / loaded), keyed by
+//     LandPlotLocation._id (+ plot type), plus api.h per-plot / per-save values. The file
+//     name on save: SaveGameImpl formats "{0}_{1}" (GameName, first i whose .sav does not
+//     exist yet, so indices are REUSED and are no age order) and passes it to
+//     StorageProvider.StoreGameData -> detour on FileStorageProvider.StoreGameData (only
+//     while inside SaveGameImpl) notes it and the provider's savePath. On load:
+//     AutoSaveDirector.Load(GameSaveIdentifier {GameName, SaveName}) - SaveName is the file.
+//     Each sidecar stores GameMetadata.SaveNumber (AutoSaveDirector._currentGameMetadata,
+//     incremented by every save, read back from the file by Load): a sidecar whose number
+//     differs from the loaded file's belongs to an older file of the same name and is
+//     ignored. Read order on load: that file's sidecar -> the old per-game
+//     sr2mods_saves/<GameName>.json (migration; renamed to .json.migrated after the first
+//     per-save write) -> the sidecar of this game with the highest save number below the
+//     loaded one -> empty (logged). Read lazily (first question after the load); written
+//     after every SaveGameImpl that returned a game (manual save and autosave), so unsaved
+//     purchases vanish together with the unsaved money, exactly like vanilla; sidecars of
+//     this game whose .sav is gone (CleanupAutosaves keeps 5) are deleted then. Without the
+//     StoreGameData hook: one per-game sidecar as before. Kept in the game folder, not in
+//     the Steam Cloud save folder (see re/custom-upgrades.md 1.2). AutoSaveDirector.Load /
+//     StartNewGame detours drop the in-memory state. The vanilla save never contains
+//     anything of ours: without the mod it loads unchanged (only the custom upgrades are
+//     gone).
 //   * sell_upgrades integration (modules/custom_upgrades/api.h): owned custom upgrades
 //     can be sold back for half their price through sell_upgrades' popup.
 //
@@ -171,7 +187,8 @@ constexpr const char* kImage = "Assembly-CSharp";
 constexpr const char* kCore = "UnityEngine.CoreModule";
 constexpr const char* kPlotUiNs = "MonomiPark.SlimeRancher.UI.Plot";
 constexpr const char* kKeyPrice = "sell_all_price";
-constexpr int kSidecarFormat = 1;
+constexpr int kSidecarFormat = 2;  // 1 = one file per game (legacy), 2 = one file per .sav
+constexpr const char* kRotationSuffix = ".sav.json";  // sidecar of <save>.sav = sr2mods_saves/<save>.sav.json
 constexpr int kHideFlagsDontUnloadUnusedAsset = 32;
 
 // LandPlot.Id
@@ -344,6 +361,8 @@ struct PlotState {
     std::set<std::string> owned;  // UpgradeDef.key
     std::vector<custom_upgrades::world::HenSlot> hens;  // Hen Collector contents (per slot)
     int henKeep = custom_upgrades::world::kHenKeepDefault;  // Hen Collector keep-limit (slider)
+    std::map<std::string, std::string> values;          // api.h SetPlotValue ("<module>.<name>")
+    bool Empty() const { return owned.empty() && values.empty(); }
 };
 
 int ClampHenKeep(int64_t v) {
@@ -367,8 +386,18 @@ int HenCount(const PlotState& ps) {
 
 struct SaveState {
     bool loaded = false;
+    bool persisted = false;                    // read from / written to a sidecar file
     std::string game;                          // AutoSaveDirector.CurrentSaveGameName()
+    std::string save;                          // .sav file (without extension) this state follows
     std::map<std::string, PlotState> plots;    // LandPlotLocation._id
+    std::map<std::string, std::string> values; // api.h SetSaveValue
+    bool Empty() const { return plots.empty() && values.empty(); }
+};
+
+// What a sidecar file says about itself (format 2).
+struct SidecarMeta {
+    std::string game, save;
+    unsigned long long saveNumber = 0;  // GameMetadata.SaveNumber of the .sav it was written with
 };
 
 // One injected clone per (menu configuration, definition).
@@ -419,7 +448,12 @@ public:
     void OnAddUpgrade(Il2CppObject* plot, int32_t upg);
     void BeforeMenuUpdate(Il2CppObject* root);
     void AfterMenuUpdate(Il2CppObject* root);
+    void BeforeSave();
     void AfterSave(Il2CppObject* result);
+    void OnStoreGameData(Il2CppObject* provider, Il2CppString* fileName);
+    void OnLoad(Il2CppObject* asd, const void* identifier);
+    void AfterLoad(Il2CppObject* asd);
+    void OnNewGame();
     void ResetState(const char* why);
     void FrameCheck(float dt);
     void WorldTick();
@@ -433,6 +467,10 @@ public:
     bool RemoveCustom(Il2CppObject* plot, int32_t upg, std::string& notes);
     std::string VanillaDependentOf(Il2CppObject* plot, int32_t vanillaUpg);
     float TierMultiplier(Il2CppObject* obj, int family);
+    std::string PlotValueOf(Il2CppObject* plot, const std::string& key);
+    bool SetPlotValueOf(Il2CppObject* plot, const std::string& key, const std::string& value);
+    std::string SaveValueOf(const std::string& key);
+    bool SetSaveValueOf(const std::string& key, const std::string& value);
 
 private:
     struct TierEntry {
@@ -453,9 +491,18 @@ private:
     void SetRef(Il2CppObject* obj, size_t offset, Il2CppObject* value);
     bool EnsureLoaded();
     std::string CurrentGameName();
-    std::filesystem::path SidecarPath(const std::string& game) const;
+    std::filesystem::path SidecarDir() const { return sr2::paths::SelfDir() / "sr2mods_saves"; }
+    std::filesystem::path LegacyPath(const std::string& game) const;
+    std::filesystem::path RotationPath(const std::string& save) const;
+    bool ReadSidecarFile(const std::filesystem::path& path, SaveState& into, SidecarMeta& meta, std::string& err);
+    bool FindOlderRotation(const std::string& game, unsigned long long below, const std::string& skip,
+                           std::filesystem::path& out, SidecarMeta& meta);
     void LoadSidecar(const std::string& game);
-    bool WriteSidecar();
+    bool WriteSidecar(const std::string& save, unsigned long long saveNumber);
+    void PruneSidecars(const std::string& game, const std::string& justWritten);
+    Il2CppObject* AutoSave();
+    bool CurrentMetadata(Il2CppObject* asd, std::string& game, unsigned long long& saveNumber);
+    std::filesystem::path ProviderSavePath(Il2CppObject* provider);
     std::string PlotId(Il2CppObject* plot);
     int32_t PlotType(Il2CppObject* plot) { return unity::Field<int32_t>(plot, offPlotTypeId_); }
     bool OwnsKey(Il2CppObject* plot, const UpgradeDef& d, std::string* idOut = nullptr);
@@ -488,6 +535,14 @@ private:
     unsigned long long nameTick_ = ~0ull;
     std::string cachedGame_;
     SaveState state_;
+    // exact .sav file: the one AutoSaveDirector.Load got (identifier.SaveName) and the one
+    // SaveGameImpl handed to FileStorageProvider.StoreGameData
+    std::string pendingLoadGame_, pendingLoadSave_;
+    unsigned long long pendingLoadNumber_ = 0;  // GameMetadata.SaveNumber right after that Load
+    bool capturing_ = false;                    // inside SaveGameImpl
+    std::string capturedSave_;                  // file name StoreGameData got in this SaveGameImpl
+    std::filesystem::path savePath_;            // FileStorageProvider.savePath (the .sav folder)
+    bool loggedNoCapture_ = false;
     std::vector<std::unique_ptr<MenuInjection>> injections_;
     Il2CppObject* marketIcon_ = nullptr;
     bool marketIconTried_ = false;
@@ -509,12 +564,20 @@ public:
     Il2CppClass* linkedSiloClass_ = nullptr;
     Il2CppClass* identClass_ = nullptr;
     Il2CppClass* lsClass_ = nullptr;     // LocalizedString
+    Il2CppClass* autoSaveClass_ = nullptr;
 
     size_t offPlotTypeId_ = 0, offActivator_ = 0, offMenuConfig_ = 0;
     size_t offItemUpgrade_ = 0, offItemTitle_ = 0, offItemDesc_ = 0, offItemPrompt_ = 0, offItemCosts_ = 0,
            offItemIcon_ = 0;
     size_t offCostCurrency_ = 0, offCostAmount_ = 0, offLocationId_ = 0, offIdentIsPlort_ = 0, offIdentIcon_ = 0;
     size_t offGcAutoSave_ = 0, offGcLookup_ = 0, offScEcon_ = 0;
+    // save file identification (optional: missing -> one legacy sidecar per game, as before)
+    Il2CppClass* fileProviderClass_ = nullptr;  // FileStorageProvider
+    size_t offProviderSavePath_ = 0;            // FileStorageProvider.savePath
+    size_t offAsdProvider_ = 0;                 // AutoSaveDirector._storageProvider
+    size_t offAsdMetadata_ = 0;                 // AutoSaveDirector._currentGameMetadata (Nullable<GameMetadata>)
+    size_t offMetaGameName_ = 0, offMetaSaveNumber_ = 0;  // GameMetadata (value-type offsets)
+    bool saveIdOk_ = false;
 
     const MethodInfo* gameCtxInstMi_ = nullptr;
     const MethodInfo* sceneCtxInstMi_ = nullptr;
@@ -560,6 +623,9 @@ using MenuUpdateFn = void (*)(Il2CppObject*, const MethodInfo*);
 using SaveImplFn = Il2CppObject* (*)(Il2CppObject*, bool, Il2CppObject*, const MethodInfo*);
 using LoadFn = void (*)(Il2CppObject*, const void*, bool, Il2CppObject*, const MethodInfo*);  // struct by reference (x64)
 using NewGameFn = void (*)(Il2CppObject*, int32_t, Il2CppObject*, const MethodInfo*);
+using StoreGameFn = void (*)(Il2CppObject*, Il2CppString*, Il2CppString*, Il2CppObject*, const MethodInfo*);
+sr2::core::DetourGuard g_storeGuard{kModule, "FileStorageProvider.StoreGameData"};
+StoreGameFn g_origStore = nullptr;
 AddUpgradeFn g_origAdd = nullptr;
 MenuUpdateFn g_origMenu = nullptr;
 SaveImplFn g_origSave = nullptr;
@@ -603,19 +669,30 @@ void MenuUpdateDetour(Il2CppObject* root, const MethodInfo* mi) {
 }
 
 Il2CppObject* SaveImplDetour(Il2CppObject* self, bool ignoreDebug, Il2CppObject* modify, const MethodInfo* mi) {
+    const bool on = g_self && g_self->On();
+    if (on) g_saveGuard.Run([&] { g_self->BeforeSave(); });
     Il2CppObject* r = g_origSave(self, ignoreDebug, modify, mi);
-    if (g_self && r && g_self->On()) g_saveGuard.Run([&] { g_self->AfterSave(r); });
+    if (on && g_self->On()) g_saveGuard.Run([&] { g_self->AfterSave(r); });
     return r;
+}
+
+// SaveGameImpl picks the file name ("{GameName}_{i}", the first i whose .sav does not exist)
+// and hands it to StorageProvider.StoreGameData: we only note it.
+void StoreGameDetour(Il2CppObject* self, Il2CppString* displayName, Il2CppString* fileName, Il2CppObject* stream,
+                     const MethodInfo* mi) {
+    if (g_self && g_self->On()) g_storeGuard.Run([&] { g_self->OnStoreGameData(self, fileName); });
+    g_origStore(self, displayName, fileName, stream, mi);
 }
 
 void LoadDetour(Il2CppObject* self, const void* identifier, bool reloadAll, Il2CppObject* stream,
                 const MethodInfo* mi) {
-    if (g_self) g_loadGuard.Run([&] { g_self->ResetState("save game load"); });
+    if (g_self) g_loadGuard.Run([&] { g_self->OnLoad(self, identifier); });
     g_origLoad(self, identifier, reloadAll, stream, mi);
+    if (g_self) g_loadGuard.Run([&] { g_self->AfterLoad(self); });
 }
 
 void NewGameDetour(Il2CppObject* self, int32_t slot, Il2CppObject* settingsModel, const MethodInfo* mi) {
-    if (g_self) g_loadGuard.Run([&] { g_self->ResetState("new game"); });
+    if (g_self) g_loadGuard.Run([&] { g_self->OnNewGame(); });
     g_origNewGame(self, slot, settingsModel, mi);
 }
 
@@ -657,18 +734,61 @@ std::string CustomUpgrades::PlotId(Il2CppObject* plot) {
     return {};
 }
 
-std::string CustomUpgrades::CurrentGameName() {
-    bool ok = false;
-    Il2CppObject* gc = Invoke(gameCtxInstMi_, nullptr, {}, "GameContext.Instance", &ok);
-    if (!ok || !unity::IsAlive(gc)) return {};
-    Il2CppObject* asd = unity::Field<Il2CppObject*>(gc, offGcAutoSave_);
-    if (!unity::IsAlive(asd)) return {};
-    Il2CppObject* s = Invoke(curGameNameMi_, asd, {}, "AutoSaveDirector.CurrentSaveGameName", &ok);
-    return ok ? unity::ToUtf8(reinterpret_cast<Il2CppString*>(s)) : std::string();
+// UTF-8 (il2cpp strings) -> filesystem path without going through the ANSI code page.
+std::filesystem::path Utf8Path(const std::string& s) {
+    if (s.empty()) return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    if (n <= 0) return {};
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
+    return std::filesystem::path(w);
 }
 
-std::filesystem::path CustomUpgrades::SidecarPath(const std::string& game) const {
-    return sr2::paths::SelfDir() / "sr2mods_saves" / (SanitizeFileName(game) + ".json");
+std::wstring Widen(const std::string& ascii) { return std::wstring(ascii.begin(), ascii.end()); }
+
+bool EndsWith(const std::wstring& s, const std::wstring& suffix) {
+    return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+std::filesystem::path CustomUpgrades::LegacyPath(const std::string& game) const {
+    return SidecarDir() / (SanitizeFileName(game) + ".json");
+}
+
+std::filesystem::path CustomUpgrades::RotationPath(const std::string& save) const {
+    return SidecarDir() / (SanitizeFileName(save) + kRotationSuffix);
+}
+
+Il2CppObject* CustomUpgrades::AutoSave() {
+    bool ok = false;
+    Il2CppObject* gc = Invoke(gameCtxInstMi_, nullptr, {}, "GameContext.Instance", &ok);
+    if (!ok || !unity::IsAlive(gc)) return nullptr;
+    Il2CppObject* asd = unity::Field<Il2CppObject*>(gc, offGcAutoSave_);
+    return unity::IsAlive(asd) ? asd : nullptr;
+}
+
+bool CustomUpgrades::CurrentMetadata(Il2CppObject* asd, std::string& game, unsigned long long& saveNumber) {
+    if (!saveIdOk_ || !unity::IsAlive(asd) || !IsA(asd, autoSaveClass_)) return false;
+    // Nullable<GameMetadata>: bool hasValue at +0, the struct at +8 (SaveGameImpl 0x5D10A0 tests
+    // [asd+0x68] and writes GameName at [asd+0x70]).
+    char* nullable = reinterpret_cast<char*>(asd) + offAsdMetadata_;
+    if (!*reinterpret_cast<bool*>(nullable)) return false;
+    char* meta = nullable + 8;
+    game = unity::ToUtf8(*reinterpret_cast<Il2CppString**>(meta + offMetaGameName_));
+    saveNumber = *reinterpret_cast<unsigned long long*>(meta + offMetaSaveNumber_);
+    return true;
+}
+
+std::filesystem::path CustomUpgrades::ProviderSavePath(Il2CppObject* provider) {
+    if (!fileProviderClass_ || !provider || !IsA(provider, fileProviderClass_)) return {};
+    return Utf8Path(unity::ToUtf8(unity::Field<Il2CppString*>(provider, offProviderSavePath_)));
+}
+
+std::string CustomUpgrades::CurrentGameName() {
+    Il2CppObject* asd = AutoSave();
+    if (!asd) return {};
+    bool ok = false;
+    Il2CppObject* s = Invoke(curGameNameMi_, asd, {}, "AutoSaveDirector.CurrentSaveGameName", &ok);
+    return ok ? unity::ToUtf8(reinterpret_cast<Il2CppString*>(s)) : std::string();
 }
 
 void CustomUpgrades::ResetState(const char* why) {
@@ -682,30 +802,73 @@ void CustomUpgrades::ResetState(const char* why) {
     slider_.Destroy();  // its value callback belongs to the old state
 }
 
-void CustomUpgrades::LoadSidecar(const std::string& game) {
-    state_ = {};
-    state_.loaded = true;
-    state_.game = game;
-    Bump();
-    world_.Reset();  // world objects built before belong to another state: rebuilt from this one
-    const auto path = SidecarPath(game);
-    std::error_code ec;
-    if (!std::filesystem::exists(path, ec)) {
-        SR2_INFO("[{}] save game '{}': no sidecar yet ({})", kModule, game, path.string());
-        return;
+void CustomUpgrades::OnLoad(Il2CppObject* asd, const void* identifier) {
+    ResetState("save game load");
+    pendingLoadGame_.clear();
+    pendingLoadSave_.clear();
+    pendingLoadNumber_ = 0;
+    if (identifier) {
+        // GameSaveIdentifier { string GameName; string SaveName; } by reference (x64, 16 bytes).
+        // SaveName is the .sav file name without extension (FileStorageProvider.GetFullFilePath
+        // appends ".sav" to it).
+        auto* const* s = static_cast<Il2CppString* const*>(identifier);
+        pendingLoadGame_ = unity::ToUtf8(s[0]);
+        pendingLoadSave_ = unity::ToUtf8(s[1]);
     }
+    if (unity::IsAlive(asd) && IsA(asd, autoSaveClass_) && offAsdProvider_) {
+        auto p = ProviderSavePath(unity::Field<Il2CppObject*>(asd, offAsdProvider_));
+        if (!p.empty()) savePath_ = p;
+    }
+    SR2_INFO("[{}] loading save file '{}.sav' (game '{}')", kModule, pendingLoadSave_, pendingLoadGame_);
+}
+
+void CustomUpgrades::AfterLoad(Il2CppObject* asd) {
+    // Load sets _currentGameMetadata from the loaded file (GameMetadata(GameV11)) before it returns.
+    std::string game;
+    unsigned long long n = 0;
+    if (CurrentMetadata(asd, game, n) && game == pendingLoadGame_) pendingLoadNumber_ = n;
+}
+
+void CustomUpgrades::OnNewGame() {
+    ResetState("new game");
+    pendingLoadGame_.clear();
+    pendingLoadSave_.clear();
+    pendingLoadNumber_ = 0;
+}
+
+void CustomUpgrades::OnStoreGameData(Il2CppObject* provider, Il2CppString* fileName) {
+    if (!capturing_ || !main_thread::IsMainThread()) return;  // only the game save inside SaveGameImpl
+    capturedSave_ = unity::ToUtf8(fileName);
+    auto p = ProviderSavePath(provider);
+    if (!p.empty()) savePath_ = p;
+}
+
+bool CustomUpgrades::ReadSidecarFile(const std::filesystem::path& path, SaveState& into, SidecarMeta& meta,
+                                     std::string& err) {
     std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        err = "cannot open";
+        return false;
+    }
     std::stringstream ss;
     ss << f.rdbuf();
     sr2::json::Value root;
-    std::string err;
     if (!sr2::json::Parse(ss.str(), root, err) || !root.isObject()) {
-        SR2_WARN("[{}] sidecar {} unreadable ({}) - custom upgrades of this save start empty", kModule, path.string(),
-                 err);
-        return;
+        if (err.empty()) err = "not a JSON object";
+        return false;
     }
+    meta.game = root["game"].asString();
+    meta.save = root["save"].asString();
+    const double num = root["save_number"].asNumber(0);
+    meta.saveNumber = num > 0 ? static_cast<unsigned long long>(num) : 0;
+    auto readValues = [](const sr2::json::Value& v, std::map<std::string, std::string>& out) {
+        for (const std::string& k : v.keys()) {
+            std::string s = v[k].asString();
+            if (!k.empty() && !s.empty()) out[k] = std::move(s);
+        }
+    };
+    readValues(root["values"], into.values);
     const sr2::json::Value& plots = root["plots"];
-    int n = 0;
     for (const std::string& id : plots.keys()) {
         const sr2::json::Value& p = plots[id];
         PlotState ps;
@@ -733,13 +896,115 @@ void CustomUpgrades::LoadSidecar(const std::string& game) {
             ps.hens.clear();
             ps.henKeep = custom_upgrades::world::kHenKeepDefault;
         }
-        if (!ps.owned.empty()) {
-            n += static_cast<int>(ps.owned.size());
-            state_.plots[id] = std::move(ps);
+        readValues(p["values"], ps.values);
+        if (!ps.Empty()) into.plots[id] = std::move(ps);
+    }
+    return true;
+}
+
+bool CustomUpgrades::FindOlderRotation(const std::string& game, unsigned long long below, const std::string& skip,
+                                       std::filesystem::path& out, SidecarMeta& meta) {
+    // Newest sidecar of this game written with a lower save number than the loaded file (any,
+    // when that number is unknown). The rotation index is no age order: SaveGameImpl reuses the
+    // first free "{GameName}_{i}", so the save number inside each sidecar decides.
+    std::error_code ec;
+    const std::wstring prefix = Widen(SanitizeFileName(game) + "_");
+    const std::wstring suffix = Widen(kRotationSuffix);
+    bool found = false;
+    std::filesystem::directory_iterator it(SidecarDir(), ec), end;
+    for (int guard = 0; !ec && it != end && guard < 4096; it.increment(ec), ++guard) {
+        const std::wstring name = it->path().filename().wstring();
+        if (name.rfind(prefix, 0) != 0 || !EndsWith(name, suffix)) continue;
+        SaveState tmp;
+        SidecarMeta m;
+        std::string err;
+        if (!ReadSidecarFile(it->path(), tmp, m, err)) continue;
+        if (m.game != game || m.save.empty() || m.save == skip || m.saveNumber == 0) continue;
+        if (below && m.saveNumber >= below) continue;
+        if (!found || m.saveNumber > meta.saveNumber) {
+            found = true;
+            meta = m;
+            out = it->path();
         }
     }
-    SR2_INFO("[{}] save game '{}': sidecar loaded, {} custom upgrade(s) on {} plot(s)", kModule, game, n,
-             state_.plots.size());
+    return found;
+}
+
+void CustomUpgrades::LoadSidecar(const std::string& game) {
+    state_ = {};
+    state_.loaded = true;
+    state_.game = game;
+    Bump();
+    world_.Reset();  // world objects built before belong to another state: rebuilt from this one
+
+    // The exact .sav this game was loaded from (AutoSaveDirector.Load), if we saw it.
+    std::string save;
+    unsigned long long number = 0;
+    if (!pendingLoadSave_.empty() && pendingLoadGame_ == game) {
+        save = pendingLoadSave_;
+        number = pendingLoadNumber_;
+    }
+    state_.save = save;
+
+    std::error_code ec;
+    std::filesystem::path used;
+    std::string source;
+    auto use = [&](const std::filesystem::path& p, const std::string& what) -> bool {
+        SaveState tmp;
+        SidecarMeta m;
+        std::string err;
+        if (!ReadSidecarFile(p, tmp, m, err)) {
+            SR2_WARN("[{}] sidecar {} unreadable ({}) - skipped", kModule, p.string(), err);
+            return false;
+        }
+        state_.plots = std::move(tmp.plots);
+        state_.values = std::move(tmp.values);
+        state_.persisted = true;
+        used = p;
+        source = what;
+        return true;
+    };
+
+    bool done = false;
+    if (!save.empty()) {
+        const auto p = RotationPath(save);
+        if (std::filesystem::exists(p, ec)) {
+            SaveState tmp;
+            SidecarMeta m;
+            std::string err;
+            if (!ReadSidecarFile(p, tmp, m, err)) {
+                SR2_WARN("[{}] sidecar {} unreadable ({}) - looking for another one", kModule, p.string(), err);
+            } else if (m.save != save) {
+                SR2_WARN("[{}] sidecar {} belongs to '{}', not '{}' - ignored", kModule, p.string(), m.save, save);
+            } else if (m.saveNumber && number && m.saveNumber != number) {
+                // The game reuses rotation file names: this sidecar is from an older file of the
+                // same name (that file was replaced while the mod was off).
+                SR2_INFO("[{}] sidecar {} was written for save #{}, the loaded file is save #{} - ignored", kModule,
+                         p.string(), m.saveNumber, number);
+            } else {
+                done = use(p, "the sidecar of this save file");
+            }
+        }
+    }
+    if (!done) {
+        const auto p = LegacyPath(game);
+        if (std::filesystem::exists(p, ec)) done = use(p, "the old per-game sidecar (migration)");
+    }
+    if (!done) {
+        std::filesystem::path p;
+        SidecarMeta m;
+        if (FindOlderRotation(game, number, save, p, m))
+            done = use(p, std::format("the newest older save's sidecar ('{}', save #{})", m.save, m.saveNumber));
+    }
+    if (!done) {
+        SR2_INFO("[{}] save game '{}' (file '{}', save #{}): no sidecar yet", kModule, game, save, number);
+        return;
+    }
+    int n = 0;
+    for (const auto& [id, ps] : state_.plots) n += static_cast<int>(ps.owned.size());
+    SR2_INFO("[{}] save game '{}' (file '{}', save #{}): using {} ({}): {} custom upgrade(s) on {} plot(s), {} value(s)",
+             kModule, game, save, number, source, used.filename().string(), n, state_.plots.size(),
+             state_.values.size());
 }
 
 bool CustomUpgrades::EnsureLoaded() {
@@ -755,23 +1020,34 @@ bool CustomUpgrades::EnsureLoaded() {
     return true;
 }
 
-bool CustomUpgrades::WriteSidecar() {
+bool CustomUpgrades::WriteSidecar(const std::string& save, unsigned long long saveNumber) {
     if (!state_.loaded || state_.game.empty()) return false;
-    const auto path = SidecarPath(state_.game);
+    const bool rotation = !save.empty();
+    const auto path = rotation ? RotationPath(save) : LegacyPath(state_.game);
     std::error_code ec;
-    const bool exists = std::filesystem::exists(path, ec);
-    if (state_.plots.empty() && !exists) return true;  // nothing to persist, nothing to clear
+    // Nothing of ours in this game so far: no file (players who never buy a custom upgrade get
+    // none). Once there was one, every save gets its own, also an empty one (else loading that
+    // save would fall back to an older state).
+    if (state_.Empty() && !state_.persisted && !std::filesystem::exists(path, ec)) return true;
     std::filesystem::create_directories(path.parent_path(), ec);
 
     sr2::json::Value root = sr2::json::Value::Object();
-    root.set("format", sr2::json::Value(static_cast<double>(kSidecarFormat)));
+    root.set("format", sr2::json::Value(static_cast<double>(rotation ? kSidecarFormat : 1)));
     root.set("game", sr2::json::Value(state_.game));
+    if (rotation) {
+        root.set("save", sr2::json::Value(save));
+        root.set("save_number", sr2::json::Value(static_cast<double>(saveNumber)));
+    }
     root.set("note", sr2::json::Value(std::string(
-                         "sr2mods custom land-plot upgrades for this save game. Not read by the game; deleting it only "
+                         "sr2mods custom land-plot upgrades for this save file. Not read by the game; deleting it only "
                          "removes the custom upgrades.")));
+    if (!state_.values.empty()) {
+        sr2::json::Value& vals = root.child("values");
+        for (const auto& [k, v] : state_.values) vals.set(k, sr2::json::Value(v));
+    }
     sr2::json::Value& plots = root.child("plots");
     for (const auto& [id, ps] : state_.plots) {
-        if (ps.owned.empty()) continue;
+        if (ps.Empty()) continue;
         sr2::json::Value p = sr2::json::Value::Object();
         p.set("type", sr2::json::Value(static_cast<double>(ps.type)));
         sr2::json::Value arr = sr2::json::Value::Array();
@@ -789,6 +1065,11 @@ bool CustomUpgrades::WriteSidecar() {
         }
         if (ps.owned.count("coop_hen_collector"))
             p.set("hen_collector_keep", sr2::json::Value(static_cast<double>(ClampHenKeep(ps.henKeep))));
+        if (!ps.values.empty()) {
+            sr2::json::Value vals = sr2::json::Value::Object();
+            for (const auto& [k, v] : ps.values) vals.set(k, sr2::json::Value(v));
+            p.set("values", std::move(vals));
+        }
         plots.set(id, std::move(p));
     }
     const std::string text = sr2::json::Serialize(root);
@@ -807,7 +1088,46 @@ bool CustomUpgrades::WriteSidecar() {
         SR2_WARN("[{}] cannot replace {} (error {})", kModule, path.string(), GetLastError());
         return false;
     }
+    state_.persisted = true;
+    if (rotation) {
+        // Migration: the per-game sidecar is superseded once this game has a per-save one. Kept
+        // as *.json.migrated (never read again) instead of deleted.
+        const auto legacy = LegacyPath(state_.game);
+        if (std::filesystem::exists(legacy, ec)) {
+            auto bak = legacy;
+            bak += L".migrated";
+            if (MoveFileExW(legacy.c_str(), bak.c_str(), MOVEFILE_REPLACE_EXISTING))
+                SR2_INFO("[{}] per-game sidecar {} migrated to per-save sidecars (old file kept as {})", kModule,
+                         legacy.filename().string(), bak.filename().string());
+        }
+    }
     return true;
+}
+
+void CustomUpgrades::PruneSidecars(const std::string& game, const std::string& justWritten) {
+    // Sidecars of this game whose .sav the game has deleted (CleanupAutosaves keeps 5). Only
+    // when the save folder is known and holds the file just written (sanity check).
+    std::error_code ec;
+    if (savePath_.empty() || !std::filesystem::is_directory(savePath_, ec)) return;
+    if (!std::filesystem::exists(savePath_ / Utf8Path(justWritten + ".sav"), ec)) return;
+    const std::wstring prefix = Widen(SanitizeFileName(game) + "_");
+    const std::wstring suffix = Widen(kRotationSuffix);
+    const std::wstring keep = Widen(SanitizeFileName(justWritten));
+    std::vector<std::filesystem::path> stale;
+    std::filesystem::directory_iterator it(SidecarDir(), ec), end;
+    for (int guard = 0; !ec && it != end && guard < 4096; it.increment(ec), ++guard) {
+        const std::wstring name = it->path().filename().wstring();
+        if (name.rfind(prefix, 0) != 0 || !EndsWith(name, suffix)) continue;
+        const std::wstring stem = name.substr(0, name.size() - suffix.size());  // "<save>"
+        if (stem == keep) continue;
+        std::error_code ec2;
+        if (!std::filesystem::exists(savePath_ / (stem + L".sav"), ec2) && !ec2) stale.push_back(it->path());
+    }
+    for (const auto& p : stale) {
+        std::error_code ec2;
+        if (std::filesystem::remove(p, ec2))
+            SR2_INFO("[{}] sidecar {} removed (its save file is gone)", kModule, p.filename().string());
+    }
 }
 
 bool CustomUpgrades::OwnsKey(Il2CppObject* plot, const UpgradeDef& d, std::string* idOut) {
@@ -1391,15 +1711,45 @@ SiloSummary CustomUpgrades::Summarize(Il2CppObject* plot, bool sell, std::string
 
 // ---------------------------------------------------------------- saving --
 
-void CustomUpgrades::AfterSave(Il2CppObject* /*result*/) {
-    if (!main_thread::IsMainThread()) return;
+void CustomUpgrades::BeforeSave() {
+    capturing_ = true;
+    capturedSave_.clear();
+    // Read the sidecar of the loaded file now if nothing asked yet (SaveGameImpl is about to
+    // bump the save number the stale-file check compares with).
+    if (main_thread::IsMainThread()) EnsureLoaded();
+}
+
+void CustomUpgrades::AfterSave(Il2CppObject* result) {
+    const std::string written = capturedSave_;
+    capturing_ = false;
+    capturedSave_.clear();
+    if (!result || !main_thread::IsMainThread()) return;  // save skipped (scene loading, disabled...)
     if (!EnsureLoaded()) return;
     if (world_.Ready())  // live Hen Collector contents into the state (the tick copy may be ~1 s old)
         g_worldGuard.Run([&] {
             world_.Snapshot([&](Il2CppObject* plot, custom_upgrades::world::CoopRequest& req) { return WorldQuery(plot, req); });
         });
-    if (WriteSidecar() && !state_.plots.empty())
-        SR2_DEBUG("[{}] sidecar written for '{}' ({} plot(s))", kModule, state_.game, state_.plots.size());
+    std::string file = written;
+    if (!file.empty() && file.rfind(state_.game + "_", 0) != 0) {
+        SR2_WARN("[{}] saved file '{}' does not belong to game '{}' - writing the per-game sidecar", kModule, file,
+                 state_.game);
+        file.clear();
+    }
+    if (file.empty() && !loggedNoCapture_) {
+        loggedNoCapture_ = true;
+        SR2_WARN("[{}] the saved .sav file name was not seen - custom upgrades go to the per-game sidecar {}", kModule,
+                 LegacyPath(state_.game).filename().string());
+    }
+    std::string game;
+    unsigned long long number = 0;
+    if (!file.empty()) CurrentMetadata(AutoSave(), game, number);  // already incremented: the number of this file
+    if (!WriteSidecar(file, number)) return;
+    if (!file.empty()) {
+        state_.save = file;
+        PruneSidecars(state_.game, file);
+    }
+    SR2_DEBUG("[{}] sidecar written for '{}' file '{}' (save #{}, {} plot(s))", kModule, state_.game, file, number,
+              state_.plots.size());
 }
 
 // ---------------------------------------------------------------- api --
@@ -1434,8 +1784,11 @@ bool CustomUpgrades::RemoveCustom(Il2CppObject* plot, int32_t upg, std::string& 
     auto it = state_.plots.find(id);
     if (it == state_.plots.end()) return false;
     it->second.owned.erase(d->key);
-    if (d->id == COOP_HEN_COLLECTOR) it->second.hens.clear();  // CanSell: it was empty
-    if (it->second.owned.empty()) state_.plots.erase(it);
+    if (d->id == COOP_HEN_COLLECTOR) {
+        it->second.hens.clear();  // CanSell: it was empty
+        it->second.henKeep = custom_upgrades::world::kHenKeepDefault;
+    }
+    if (it->second.Empty()) state_.plots.erase(it);
     Bump();
     if (IsWorldUpgrade(d->id) && world_.Ready())
         world_.Remove(plot, d->id == COOP_AIR_NET, d->id == COOP_HEN_COLLECTOR);
@@ -1449,6 +1802,55 @@ std::string CustomUpgrades::VanillaDependentOf(Il2CppObject* plot, int32_t vanil
     for (const UpgradeDef& o : kDefs)
         if (!o.action && o.needs == vanillaUpg && OwnsKey(plot, o)) return o.title;
     return {};
+}
+
+// ---------------------------------------------------------------- per-save values --
+
+std::string CustomUpgrades::PlotValueOf(Il2CppObject* plot, const std::string& key) {
+    if (key.empty() || !unity::IsAlive(plot) || !IsA(plot, plotClass_) || !EnsureLoaded()) return {};
+    const std::string id = PlotId(plot);
+    auto it = id.empty() ? state_.plots.end() : state_.plots.find(id);
+    if (it == state_.plots.end() || it->second.type != PlotType(plot)) return {};  // other plot type: not this plot's
+    auto v = it->second.values.find(key);
+    return v != it->second.values.end() ? v->second : std::string();
+}
+
+bool CustomUpgrades::SetPlotValueOf(Il2CppObject* plot, const std::string& key, const std::string& value) {
+    if (key.empty() || !unity::IsAlive(plot) || !IsA(plot, plotClass_) || !EnsureLoaded()) return false;
+    const std::string id = PlotId(plot);
+    if (id.empty()) return false;
+    const int32_t type = PlotType(plot);
+    auto it = state_.plots.find(id);
+    if (it != state_.plots.end() && it->second.type != type) {
+        // Rebuilt as another plot type: everything stored for the old plot is gone.
+        state_.plots.erase(it);
+        Bump();
+        it = state_.plots.end();
+    }
+    if (value.empty()) {
+        if (it != state_.plots.end()) {
+            it->second.values.erase(key);
+            if (it->second.Empty()) state_.plots.erase(it);
+        }
+        return true;
+    }
+    PlotState& ps = state_.plots[id];
+    ps.type = type;
+    ps.values[key] = value;
+    return true;
+}
+
+std::string CustomUpgrades::SaveValueOf(const std::string& key) {
+    if (key.empty() || !EnsureLoaded()) return {};
+    auto it = state_.values.find(key);
+    return it != state_.values.end() ? it->second : std::string();
+}
+
+bool CustomUpgrades::SetSaveValueOf(const std::string& key, const std::string& value) {
+    if (key.empty() || !EnsureLoaded()) return false;
+    if (value.empty()) state_.values.erase(key);
+    else state_.values[key] = value;
+    return true;
 }
 
 // ---------------------------------------------------------------- tiers --
@@ -1557,6 +1959,7 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     Il2CppClass* transform = cls(kCore, "UnityEngine", "Transform");
     Il2CppClass* uobject = cls(kCore, "UnityEngine", "Object");
     if (!why.empty()) return ctx.Fail(why);
+    autoSaveClass_ = autoSave;
     linkedSiloClass_ = R.Class(kImage, "", "LinkedSiloStorage");  // optional (filter only)
 
     size_t offCostField = 0, offCurrencyList = 0;
@@ -1672,6 +2075,43 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         else SR2_WARN("[{}] hook PurchaseItemDetailsContentView.BindData failed ({}) - no limit slider", kModule, err);
     }
 
+    // The exact .sav file (optional; missing -> one sidecar per game as before): SaveGameImpl
+    // passes "{GameName}_{i}" to StorageProvider.StoreGameData (FileStorageProvider on Steam and
+    // standalone: <persistentDataPath>/Steam/<id>/<name>.sav), Load gets GameSaveIdentifier
+    // {GameName, SaveName}; the save number comes from AutoSaveDirector._currentGameMetadata.
+    {
+        std::string serr;
+        auto opt = [&](Il2CppClass* k, const char* f, size_t& o) -> bool {
+            if (!k) return false;
+            auto r = R.FieldOffset(k, f, &serr);
+            if (r) o = *r;
+            return r.has_value();
+        };
+        Il2CppClass* meta = R.Class(kImage, "MonomiPark.SlimeRancher", "GameMetadata", &serr);
+        saveIdOk_ = opt(autoSave, "_storageProvider", offAsdProvider_) &&
+                    opt(autoSave, "_currentGameMetadata", offAsdMetadata_) && opt(meta, "GameName", offMetaGameName_) &&
+                    opt(meta, "SaveNumber", offMetaSaveNumber_) && offMetaGameName_ >= 2 * sizeof(void*) &&
+                    offMetaSaveNumber_ >= 2 * sizeof(void*);
+        if (saveIdOk_) {  // value-type field offsets include the object header
+            offMetaGameName_ -= 2 * sizeof(void*);
+            offMetaSaveNumber_ -= 2 * sizeof(void*);
+        } else {
+            offAsdProvider_ = 0;
+            SR2_WARN("[{}] save metadata fields not found ({}) - no save-number check for per-save sidecars", kModule,
+                     serr);
+        }
+        fileProviderClass_ = R.Class(kImage, "", "FileStorageProvider", &serr);
+        if (!opt(fileProviderClass_, "savePath", offProviderSavePath_)) fileProviderClass_ = nullptr;
+        const MethodInfo* storeMi = fileProviderClass_ ? R.Method(fileProviderClass_, "StoreGameData", 3, &serr) : nullptr;
+        void* p = storeMi ? R.MethodPointer(storeMi, &serr) : nullptr;
+        if (p && ctx.HookAddress("FileStorageProvider.StoreGameData", p, reinterpret_cast<void*>(&StoreGameDetour),
+                                 reinterpret_cast<void**>(&g_origStore)))
+            report += std::format(" FileStorageProvider.StoreGameData@0x{:X}", Resolver::Rva(p));
+        else
+            SR2_WARN("[{}] FileStorageProvider.StoreGameData not hooked ({}) - one sidecar per game instead of per save "
+                     "file", kModule, serr);
+    }
+
     settings::Def d;
     d.module = kModule;
     d.key = kKeyPrice;
@@ -1684,7 +2124,7 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     d.tooltip =
         "Newbucks price of the silo 'Sell-All Button' custom upgrade (bought in the silo's own purchase menu). Once "
         "bought, the silo menu shows 'Sell All Plorts Now'. Ownership is stored next to version.dll in "
-        "sr2mods_saves\\<save>.json, never in the game's save.";
+        "sr2mods_saves\\<save file>.sav.json (one per save file), never in the game's save.";
     settings::Register(d);
 
     main_thread::AddFrameCallback(kModule, [](float dt) {
@@ -1736,6 +2176,34 @@ float Multiplier(Il2CppObject* plotOrComponent, Family family) {
     float m = 1.0f;
     if (!g_tierGuard.Run([&] { m = g_self->TierMultiplier(plotOrComponent, static_cast<int>(family)); })) return 1.0f;
     return std::isfinite(m) && m >= 1.0f && m <= 10.0f ? m : 1.0f;
+}
+
+std::string PlotValue(Il2CppObject* landPlot, const std::string& key) {
+    if (!Active() || !main_thread::IsMainThread()) return {};
+    std::string r;
+    g_hasGuard.Run([&] { r = g_self->PlotValueOf(landPlot, key); });
+    return r;
+}
+
+bool SetPlotValue(Il2CppObject* landPlot, const std::string& key, const std::string& value) {
+    if (!Active() || !main_thread::IsMainThread()) return false;
+    bool ok = false;
+    g_addGuard.Run([&] { ok = g_self->SetPlotValueOf(landPlot, key, value); });
+    return ok;
+}
+
+std::string SaveValue(const std::string& key) {
+    if (!Active() || !main_thread::IsMainThread()) return {};
+    std::string r;
+    g_hasGuard.Run([&] { r = g_self->SaveValueOf(key); });
+    return r;
+}
+
+bool SetSaveValue(const std::string& key, const std::string& value) {
+    if (!Active() || !main_thread::IsMainThread()) return false;
+    bool ok = false;
+    g_addGuard.Run([&] { ok = g_self->SetSaveValueOf(key, value); });
+    return ok;
 }
 
 }  // namespace custom_upgrades
