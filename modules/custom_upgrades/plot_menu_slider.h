@@ -8,14 +8,18 @@
 // LayoutElement, else it copies the row's RectTransform. Inside: a TextMeshPro label (font, material,
 // size and colour copied from the panel's description text) above a UnityEngine.UI.Slider
 // ("Background" / "Fill Area/Fill" / "Handle Slide Area/Handle", the standard uGUI hierarchy). The
-// game's look comes from a SliderStyle asset (MonomiPark.SlimeRancher.UI.UIStyling) applied by the
-// game's own SliderStyler component; without a loaded SliderStyle plain game-like colours are used.
+// shapes are the game's own SDFRoundedRectangle graphics (track in the panel text colour, fill and
+// handle border in the game's slider pink); without that class plain Images, styled by a loaded
+// SliderStyle asset through the game's SliderStyler when there is one.
 //
-// Input: mouse click / drag through the menu's own GraphicRaycaster (Unity's Slider). Gamepad d-pad /
-// left stick and keyboard arrows left / right step the value (with key repeat) while the slider is
-// shown, interactable and no PopupPrompt is open. The EventSystem selection a mouse drag moves onto
-// the slider is handed back to the previously selected object when the button is released, so the
-// menu's gamepad navigation keeps working. The value is read by polling (no managed delegates).
+// Input: the details panel is a nested Canvas without a GraphicRaycaster, so the root gets its own
+// Canvas (sorting order one above the panel's) + GraphicRaycaster; mouse click (jump) / drag then go
+// to Unity's Slider (navigation Mode.None: a click does not move the EventSystem selection). Gamepad
+// d-pad / left stick and keyboard arrows left / right: the menu's item grid (UniformGridView) would
+// move its selection on them, so the module detours its OnNavigate and hands left / right to Step()
+// while the slider is shown; the slider also polls pad / keys (fallback, de-duplicated per press).
+// Steps only while the slider is interactable and no PopupPrompt is open. The value is read by
+// polling (no managed delegates).
 //
 // Lifetime: Create() replaces the previous slider (one instance per PlotMenuSlider); Destroy() removes
 // it; Tick() destroys it when its GameObject died with the menu. GC handles (root, slider, label,
@@ -68,6 +72,13 @@ public:
     int Value() const;
     // Main thread, every frame (one pointer check while no slider exists).
     void Tick(float unscaledDt);
+    // Main thread, from a detour of the menu's grid navigation (UniformGridView.OnNavigate): a left
+    // (-1) / right (+1) navigation event while the slider is shown. true = the slider took it (the
+    // caller then consumes the event so the grid does not move its selection). A polled press that
+    // already stepped is not stepped again; repeats then come from the input module's events.
+    bool Step(int dir);
+    // The navigation detour is installed (only for the build log).
+    void SetNavigationSteps(bool on);
 
 private:
     struct Impl;
