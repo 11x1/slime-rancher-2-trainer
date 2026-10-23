@@ -179,7 +179,7 @@ void RegisterSettings() {
         "Cycles the zoom (x2, wraps to the minimum)");
     def("orientation", "Orientation", "View", Kind::Enum, 0, 0, 1, 1, {"North up", "Rotate with player"});
     def("arrow_style", "Player arrow", "View", Kind::Enum, 1, 0, 1, 1, {"Game marker", "Classic arrow"},
-        "The arrow grows and shrinks with the zoom (base size at 2.5x)");
+        "The arrow and the map icons grow and shrink with the zoom (base size at 2.5x)");
     def("arrow_rotation_offset", "Player arrow rotation offset (degrees)", "View", Kind::Float, 180, -180, 180, 5, {},
         "Added to the arrow's heading. 180 is correct for both arrow styles; change it only if the arrow points the "
         "wrong way");
@@ -2251,9 +2251,8 @@ private:
     void ApplyArrowStyle() {
         if (!ui_.arrowImg.Alive() || !ui_.arrowT.Alive()) return;
         bool game = UseGameArrow();
-        // Base size (13% of the minimap) at zoom 2.5x, proportional to the zoom, clamped to 0.4x..1.6x.
-        float zoomF = std::clamp(cfg_.zoom / kArrowBaseZoom, 0.4f, 1.6f);
-        float px = std::max(10.0f, ui_.size * 0.13f * zoomF);
+        // Base size (13% of the minimap) at zoom 2.5x, scaled by ZoomFactor() like the icons.
+        float px = std::max(10.0f, ui_.size * 0.13f * ZoomFactor());
         ugui::ImageSetSprite(ui_.arrowImg.get(), game ? ui_.gameArrowSprite.get() : sprArrow_.get());
         Vec2 pivot = game ? ui_.gameArrowPivot : Vec2{0.5f, 0.5f};
         float aspect = game ? ui_.gameArrowAspect : 1.0f;
@@ -2720,9 +2719,14 @@ private:
         }
     }
 
-    // icons keep their screen size and stay upright
-    static void Orient(Il2CppObject* t, float s, float rot, bool scale, bool rotate) {
-        if (scale) ugui::SetLocalScale(t, {1 / s, 1 / s, 1});
+    // Size factor of the arrow and the icons: 1 at zoom 2.5x, proportional to the zoom, clamped to
+    // 0.4x..1.6x (icons have their old fixed size at 2.5x).
+    float ZoomFactor() const { return std::clamp(cfg_.zoom / kArrowBaseZoom, 0.4f, 1.6f); }
+
+    // icons grow and shrink with the zoom like the arrow (not with the page scale) and stay upright
+    void Orient(Il2CppObject* t, float s, float rot, bool scale, bool rotate) const {
+        const float k = ZoomFactor() / s;
+        if (scale) ugui::SetLocalScale(t, {k, k, 1});
         if (rotate) ugui::SetLocalEuler(t, {0, 0, -rot});
     }
 
