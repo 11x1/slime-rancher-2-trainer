@@ -891,12 +891,10 @@ void DrawNested(const Host& h, const ModuleView& nmv) {
     }
     ImGui::Dummy(ImVec2(0, U(4)));
     FailedBanner(nmv);
-    if (!on) {  // child settings only while the module is on
-        OffNote("Turn on " + nmv.title + " to see its settings.");
-        return;
-    }
     Tab all;
+    ImGui::BeginDisabled(!on);  // grayed out and read-only while the module is off (its switch stays usable)
     DrawModuleCards(h, nmv, all, {}, {});
+    ImGui::EndDisabled();
 }
 
 // Misc > General: one card per module, the module's switch in the card header.
@@ -939,15 +937,15 @@ void DrawCardsPage(const Host& h, const Tab& tab, const std::vector<ModuleView>&
             std::vector<const GroupView*> groups;
             for (const auto& g : mv->groups) groups.push_back(&g);
             const Nesting n = BuildNesting(groups, {});
-            if (on) {  // the card shows only its header and switch while the module is off
-                for (const auto* g : groups) {
-                    const bool any = std::any_of(g->defs.begin(), g->defs.end(),
-                                                 [&](const settings::Def& d) { return RowShown(*mv, d, n, {}); });
-                    if (!any) continue;
-                    if (!g->name.empty() && groups.size() > 1) CardHeading(g->name.c_str(), P.head);
-                    DrawGroupRows(h, *mv, *g, n, {}, {});
-                }
+            ImGui::BeginDisabled(!on);  // grayed out and read-only while the module is off
+            for (const auto* g : groups) {
+                const bool any = std::any_of(g->defs.begin(), g->defs.end(),
+                                             [&](const settings::Def& d) { return RowShown(*mv, d, n, {}); });
+                if (!any) continue;
+                if (!g->name.empty() && groups.size() > 1) CardHeading(g->name.c_str(), P.head);
+                DrawGroupRows(h, *mv, *g, n, {}, {});
             }
+            ImGui::EndDisabled();
             EndCard();
             ImGui::Dummy(ImVec2(0, U(kGap) - ImGui::GetStyle().ItemSpacing.y));
             ImGui::PopID();
@@ -2044,15 +2042,12 @@ bool Draw(const Host& h) {
                 FailedBanner(*mv);
                 const TabState st = StateOf(tab, views);
                 const std::string masterLabel = !tab.masterKey.empty() && st.sw ? st.sw->label : std::string();
-                if (!st.on) {  // child settings are hidden while the tab's switch (or its module) is off
-                    if (st.locked)
-                        OffNote(tab.title + " is part of " + mv->title + ". Turn on " + mv->title +
-                                " to use it.");
-                    else
-                        OffNote(tab.title + " is off. Turn it on with the Enabled switch above to see its settings.");
-                    break;
-                }
+                // While the tab's switch (or its module) is off, its settings stay visible but grayed
+                // out and read-only; the switch in the tab bar stays usable.
+                if (st.locked) OffNote(tab.title + " is part of " + mv->title + ". Turn on " + mv->title + " to use it.");
+                ImGui::BeginDisabled(!st.on);
                 DrawModuleCards(h, *mv, tab, tab.masterKey, masterLabel);
+                ImGui::EndDisabled();
                 for (const auto& n : tab.nested)
                     if (const ModuleView* nmv = FindView(views, n)) DrawNested(h, *nmv);
                 break;
