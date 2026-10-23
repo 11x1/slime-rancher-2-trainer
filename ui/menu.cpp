@@ -1518,10 +1518,11 @@ void DrawSidebar(const Host& h, const std::vector<Category>& cats, const ModuleV
         }
     }
     const ImVec2 tp(x0, sp.y - inkMid(theme::kSmallSize));
-    Text(dl, bf, theme::kSmallSize, tp, P.dim, stamp);
+    const ImU32 stampCol = Mix(P.dim, P.side, 0.4f);  // grayer than other dim text: only a reference
+    Text(dl, bf, theme::kSmallSize, tp, stampCol, stamp);
     float lineW = ts.x;
     if (!tail.empty()) {
-        Text(dl, bf, tailSize, ImVec2(x0 + ts.x, sp.y - inkMid(tailSize)), P.dim, tail.c_str());
+        Text(dl, bf, tailSize, ImVec2(x0 + ts.x, sp.y - inkMid(tailSize)), stampCol, tail.c_str());
         lineW += TextSize(bf, tailSize, tail.c_str()).x;
     }
     if (lineW > 0) {
@@ -1542,12 +1543,7 @@ void DrawSidebar(const Host& h, const std::vector<Category>& cats, const ModuleV
             Tooltip("Copied " + copiedText);
         } else {
             copiedUntil = 0;
-            std::string tip = std::string("Built ") + ::sr2::core::build_info::TimeIso();
-            if (*::sr2::core::build_info::Commit())
-                tip += std::string("\nCommit ") + ::sr2::core::build_info::Commit() + "\nClick to copy the commit";
-            else
-                tip += "\nClick to copy the build time";
-            HoverTip(tip);
+            HoverTip(*::sr2::core::build_info::Commit() ? "Click to copy the commit" : "Click to copy the build time");
         }
     }
     ImGui::EndChild();
