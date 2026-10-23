@@ -31,6 +31,16 @@
 //   world objects (coop_world.cpp)  plot  price  what
 //   Coop Air Net                    coop   425   the corral's Air Net cloned onto the coop,
 //                                                fitted to its walls (corral Air Net: 425)
+//   Hen Collector                   coop  1000   the deluxe coop's elder collector cloned for
+//                                                adult hens / roosters: collects the adults over
+//                                                20 (keeps 2 roosters) every 6 game hours into
+//                                                2 x 100 slots; chicks never count (deluxe: 1300)
+//
+//   Hen Collector save safety: its storage is a LOCAL AmmoSlotManager (never linked to the
+//   plot's LandPlotModel, so never in the vanilla save; the vanilla elder slots would not
+//   accept hens on a mod-free load anyway); its contents are kept in the sidecar
+//   ("hen_collector": [{type, count}] per slot), copied from the live storage every tick and
+//   before every save. Selling is refused while it holds chickens (vac them out first).
 //
 //   World objects are clones of vanilla plot-prefab parts (LookupDirector.GetPlotPrefab),
 //   built / fitted / removed by a ~1 Hz tick over CoopRegion._allCoops from the sidecar
@@ -188,11 +198,12 @@ enum CustomId : int32_t {
     GARDEN_GROWTH_1 = custom_upgrades::kIdBase + 0x0030,
     GARDEN_GROWTH_2 = custom_upgrades::kIdBase + 0x0031,
     INCIN_ASH_BOOST = custom_upgrades::kIdBase + 0x0040,
-    COOP_AIR_NET = custom_upgrades::kIdBase + 0x0050,  // world object (coop_world.cpp)
+    COOP_AIR_NET = custom_upgrades::kIdBase + 0x0050,        // world object (coop_world.cpp)
+    COOP_HEN_COLLECTOR = custom_upgrades::kIdBase + 0x0051,  // world object (coop_world.cpp)
 };
 
 // Upgrades that are a world object (only offered while the world-object code is ready).
-bool IsWorldUpgrade(int32_t id) { return id == COOP_AIR_NET; }
+bool IsWorldUpgrade(int32_t id) { return id == COOP_AIR_NET || id == COOP_HEN_COLLECTOR; }
 
 struct UpgradeDef {
     int32_t id;
@@ -259,6 +270,12 @@ const UpgradeDef kDefs[] = {
      "or your vacpack stay inside, and flying things can't drop in. Like the corral net it gives way under very "
      "hard hits and repairs itself shortly after.",
      "Buy the Coop Air Net for this coop?"},
+    {COOP_HEN_COLLECTOR, "coop_hen_collector", kPlotCoop, false, 0, 1000, kNoFamily, 1.0f, kUpgDeluxeCoop,
+     "Hen Collector",
+     "A second collector like the Deluxe Coop's elder collector, but for grown hens and roosters. Whenever more "
+     "than 20 of them are in this coop, it vacuums up the extra ones every few hours (keeping at least two "
+     "roosters) and stores them: two slots of 100, vac them out of its ports. Chicks are never counted or taken.",
+     "Buy the Hen Collector for this coop?"},
 };
 
 const UpgradeDef* FindDef(int32_t id) {
@@ -313,7 +330,14 @@ std::string SanitizeFileName(const std::string& s) {
 struct PlotState {
     int32_t type = 0;
     std::set<std::string> owned;  // UpgradeDef.key
+    std::vector<custom_upgrades::world::HenSlot> hens;  // Hen Collector contents (per slot)
 };
+
+int HenCount(const PlotState& ps) {
+    int n = 0;
+    for (const auto& s : ps.hens) n += std::max(s.count, 0);
+    return n;
+}
 
 struct SaveState {
     bool loaded = false;
@@ -373,6 +397,7 @@ public:
     void ResetState(const char* why);
     void FrameCheck(float dt);
     void WorldTick();
+    bool WorldQuery(Il2CppObject* plot, custom_upgrades::world::CoopRequest& req);
 
     // api.h
     std::string CanSellCustom(Il2CppObject* plot, int32_t upg);
@@ -617,6 +642,7 @@ void CustomUpgrades::LoadSidecar(const std::string& game) {
     state_.loaded = true;
     state_.game = game;
     Bump();
+    world_.Reset();  // world objects built before belong to another state: rebuilt from this one
     const auto path = SidecarPath(game);
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) {
@@ -647,6 +673,16 @@ void CustomUpgrades::LoadSidecar(const std::string& game) {
             if (known) ps.owned.insert(key);
             else if (!key.empty()) SR2_WARN("[{}] sidecar: unknown upgrade '{}' on plot '{}' ignored", kModule, key, id);
         }
+        // Hen Collector contents: [{"type": "<IdentifiableType name>", "count": n}, ...], one per slot.
+        const sr2::json::Value& hens = p["hen_collector"];
+        for (size_t i = 0; i < hens.size() && i < 8; ++i) {
+            custom_upgrades::world::HenSlot s;
+            s.type = hens.at(i)["type"].asString();
+            s.count = static_cast<int>(std::clamp<int64_t>(hens.at(i)["count"].asInt(0), 0, 100000));
+            if (s.type.empty()) s.count = 0;
+            ps.hens.push_back(std::move(s));
+        }
+        if (!ps.owned.count("coop_hen_collector")) ps.hens.clear();
         if (!ps.owned.empty()) {
             n += static_cast<int>(ps.owned.size());
             state_.plots[id] = std::move(ps);
@@ -691,6 +727,16 @@ bool CustomUpgrades::WriteSidecar() {
         sr2::json::Value arr = sr2::json::Value::Array();
         for (const std::string& k : ps.owned) arr.push(sr2::json::Value(k));
         p.set("upgrades", std::move(arr));
+        if (HenCount(ps) > 0) {
+            sr2::json::Value hens = sr2::json::Value::Array();
+            for (const auto& s : ps.hens) {
+                sr2::json::Value h = sr2::json::Value::Object();
+                h.set("type", sr2::json::Value(s.count > 0 ? s.type : std::string()));
+                h.set("count", sr2::json::Value(static_cast<double>(std::max(s.count, 0))));
+                hens.push(std::move(h));
+            }
+            p.set("hen_collector", std::move(hens));
+        }
         plots.set(id, std::move(p));
     }
     const std::string text = sr2::json::Serialize(root);
@@ -1048,7 +1094,12 @@ void CustomUpgrades::Cleanup(const char* why) {
     if (cleaned_) return;
     cleaned_ = true;
     if (world_.Ready() && main_thread::IsMainThread()) {
-        world_.RemoveAll();
+        // Hen Collector contents go into the sidecar state first (written with the next save
+        // while the module is on again), then the clones are removed.
+        const custom_upgrades::world::QueryFn query = [&](Il2CppObject* plot, custom_upgrades::world::CoopRequest& req) {
+            return state_.loaded && WorldQuery(plot, req);
+        };
+        world_.RemoveAll(&query);
         SR2_INFO("[{}] {}: coop world objects removed", kModule, why);
     }
     int removed = 0;
@@ -1086,18 +1137,25 @@ Il2CppObject* CustomUpgrades::LookupDirector() {
     return unity::IsAlive(lookup) ? lookup : nullptr;
 }
 
+bool CustomUpgrades::WorldQuery(Il2CppObject* plot, custom_upgrades::world::CoopRequest& req) {
+    if (!unity::IsAlive(plot) || !IsA(plot, plotClass_) || PlotType(plot) != kPlotCoop) return false;
+    std::string id;
+    const UpgradeDef* net = FindDef(COOP_AIR_NET);
+    const UpgradeDef* hen = FindDef(COOP_HEN_COLLECTOR);
+    req.airNet = net && OwnsKey(plot, *net, &id);
+    req.henCollector = hen && OwnsKey(plot, *hen, &id);
+    if (id.empty()) return false;  // no save game / no LandPlotLocation id (yet): leave the plot alone
+    req.id = id;
+    auto it = state_.plots.find(id);
+    req.hens = (req.henCollector && it != state_.plots.end()) ? &it->second.hens : nullptr;
+    return true;
+}
+
 void CustomUpgrades::WorldTick() {
     if (!main_thread::IsMainThread() || !EnsureLoaded()) return;  // no save game: nothing to build
     cleaned_ = false;
-    world_.Tick(
-        [&](Il2CppObject* plot, custom_upgrades::world::CoopRequest& req) {
-            if (!unity::IsAlive(plot) || !IsA(plot, plotClass_) || PlotType(plot) != kPlotCoop) return false;
-            std::string id;
-            const UpgradeDef* net = FindDef(COOP_AIR_NET);
-            req.airNet = net && OwnsKey(plot, *net, &id);
-            return !id.empty();  // no LandPlotLocation id (yet): leave the plot alone
-        },
-        [&]() { return LookupDirector(); });
+    world_.Tick([&](Il2CppObject* plot, custom_upgrades::world::CoopRequest& req) { return WorldQuery(plot, req); },
+                [&]() { return LookupDirector(); });
 }
 
 // ---------------------------------------------------------------- buying --
@@ -1214,6 +1272,10 @@ SiloSummary CustomUpgrades::Summarize(Il2CppObject* plot, bool sell, std::string
 void CustomUpgrades::AfterSave(Il2CppObject* /*result*/) {
     if (!main_thread::IsMainThread()) return;
     if (!EnsureLoaded()) return;
+    if (world_.Ready())  // live Hen Collector contents into the state (the tick copy may be ~1 s old)
+        g_worldGuard.Run([&] {
+            world_.Snapshot([&](Il2CppObject* plot, custom_upgrades::world::CoopRequest& req) { return WorldQuery(plot, req); });
+        });
     if (WriteSidecar() && !state_.plots.empty())
         SR2_DEBUG("[{}] sidecar written for '{}' ({} plot(s))", kModule, state_.game, state_.plots.size());
 }
@@ -1223,7 +1285,19 @@ void CustomUpgrades::AfterSave(Il2CppObject* /*result*/) {
 std::string CustomUpgrades::CanSellCustom(Il2CppObject* plot, int32_t upg) {
     const UpgradeDef* d = FindDef(upg);
     if (!d || d->action) return "This can't be sold.";
-    if (!OwnsKey(plot, *d)) return "This upgrade is not owned.";
+    std::string id;
+    if (!OwnsKey(plot, *d, &id)) return "This upgrade is not owned.";
+    if (d->id == COOP_HEN_COLLECTOR) {
+        // Stored chickens are never thrown away: the player vacs them out first.
+        int stored = world_.Ready() ? world_.StoredHens(plot) : -1;
+        if (stored < 0) {
+            auto it = state_.plots.find(id);
+            stored = it != state_.plots.end() ? HenCount(it->second) : 0;
+        }
+        if (stored > 0)
+            return std::format("Empty the Hen Collector first: {} chicken{} stored. Vac them out of its ports.", stored,
+                               stored == 1 ? " is" : "s are");
+    }
     // Tiers: an owned upgrade that needs this one must be sold first.
     for (const UpgradeDef& o : kDefs)
         if (!o.action && o.needs == d->id && OwnsKey(plot, o))
@@ -1238,9 +1312,11 @@ bool CustomUpgrades::RemoveCustom(Il2CppObject* plot, int32_t upg, std::string& 
     auto it = state_.plots.find(id);
     if (it == state_.plots.end()) return false;
     it->second.owned.erase(d->key);
+    if (d->id == COOP_HEN_COLLECTOR) it->second.hens.clear();  // CanSell: it was empty
     if (it->second.owned.empty()) state_.plots.erase(it);
     Bump();
-    if (IsWorldUpgrade(d->id) && world_.Ready()) world_.Remove(plot, d->id == COOP_AIR_NET);
+    if (IsWorldUpgrade(d->id) && world_.Ready())
+        world_.Remove(plot, d->id == COOP_AIR_NET, d->id == COOP_HEN_COLLECTOR);
     notes += "custom upgrade removed (saved with the next game save)";
     SR2_INFO("[{}] {} removed from plot '{}'", kModule, d->title, id);
     return true;
@@ -1420,7 +1496,7 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     {
         std::string werr;
         if (!world_.Setup(R, kModule, werr))
-            SR2_WARN("[{}] coop world objects unavailable ({}) - the Coop Air Net is not offered", kModule, werr);
+            SR2_WARN("[{}] coop world objects unavailable ({}) - Coop Air Net and Hen Collector are not offered", kModule, werr);
     }
 
     struct H {

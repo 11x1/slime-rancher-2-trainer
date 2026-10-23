@@ -2,9 +2,9 @@
 
 Status: the framework, the silo **Sell-All Button** and the per-plot upgrade **tiers** (2b.2)
 are implemented in `modules/custom_upgrades/` + `modules/plot_upgrades/`; the **Sell button**
-(2b.1) in `modules/sell_upgrades/`; the **Coop Air Net** (2.4) as the first world object
-(`modules/custom_upgrades/coop_world.cpp`, section 1.4 as designed). All built, not yet tested in
-game. Everything else is design.
+(2b.1) in `modules/sell_upgrades/`; the **Coop Air Net** (2.4) and the **Hen Collector** (2.1)
+as world objects (`modules/custom_upgrades/coop_world.cpp`, section 1.4). All built, not yet
+tested in game. Everything else is design.
 RVAs are only for reference (GameAssembly.dll 1.3.0). The code finds everything by name.
 
 ---------------------------------------------------------------------------------------------
@@ -158,7 +158,53 @@ RVAs are only for reference (GameAssembly.dll 1.3.0). The code finds everything 
 ---------------------------------------------------------------------------------------------
 ## 2. The ideas: feasibility + plan
 
-### 2.1 Coop "Hen Wrangler" (two elder-hen-style collectors, slider limit) - FEASIBLE, medium-high effort
+### 2.1 Coop "Hen Collector" - IMPLEMENTED (`modules/custom_upgrades/coop_world.cpp`)
+
+User decision: works like the deluxe coop's elder collector, for adult hens and roosters, same
+hardcoded limit, chicks don't count, no slider / custom UI. Findings (asset bundles + disassembly):
+* The elder collector is ONE `ElderCollector` object in the COOP prefab's `Deluxe` child
+  (`DeluxeCoopUpgrader.DeluxeStuff`, inactive): `SiloStorage` (AmmoSetReference
+  `CorralPlortCollectorAmmo`, 2 slots, both `AmmoSlotDefinition "ElderCollector"`: `_slotTypeGroup`
+  ElderGroup {ElderHen, ElderRooster}, `_maxAmount` 100), `PlortCollector` (CollectionArea = whole
+  coop, CollectPeriod 6 game hours), 2 `SiloCatcher` SILO_OUTPUT_ONLY ports (slot 0 / 1), 2
+  `SiloSlotUI`, a `PlortCollectorActivator` button. The "2 collectors" are its 2 slots / ports.
+* `PlortCollector.DoCollection` (0x98B670) has no count limit: every actor in the area that the
+  storage `CouldAddToAnySlot` is sprung in and stored. The only hardcoded limit is the storage:
+  **2 slots x 100**. `AmmoSlotDefinition.IsAllowed` (0x866B40) = !blockList.Contains(id) &&
+  (group == null || group.IsMember(id)).
+* Save: `SiloStorage.Awake` -> `InitAmmo` (0x9956C0) builds a local `AmmoSlotManager` from the
+  slot definitions. Only `SetModel` (0x995920) links it to `LandPlotModel.siloAmmo[guid]`, and
+  plot children only get `InitModel` / `SetModel` from `LandPlotModel.Init` /
+  `NotifyParticipants`, which only `InstantiatePlot` calls (a new plot object).
+* Groups: MeatGroup = {Hen, Rooster, BriarHen, StonyHen, SeaHen, ThunderHen, PaintedHen,
+  CandiedHen, ElderHen, ElderRooster, UnstableMeat}; ChickGroup = the 7 chicks; ElderGroup.
+* Reproduce (hens): MaxDensityInsideCoops 58 within 10 m (DensityIds include chicks and elders),
+  4..13 game hours per chick; chicks grow in 14 game hours (9 hen : 1 rooster).
+
+As built:
+* Save safety: storing hens in the vanilla elder storage is NOT valid (mod-free load: the slots
+  are ElderGroup slots again, hens dropped by ValidateAndAdjustSlots). So the Hen Collector is a
+  clone of `Deluxe` under the coop plot (TV and button removed, turned -90 deg into the free
+  (+x,+z) corner) whose SiloStorage gets ONE session clone of the elder slot definition (same
+  `_maxAmount` 100, group MeatGroup, block list ElderGroup + UnstableMeat) in both slots before
+  activation. Its storage stays local (never linked; a tick check logs an error if it ever were),
+  contents persisted in the sidecar (`hen_collector`), output ports and slot displays work as
+  vanilla. Selling is refused while it holds chickens.
+* Collecting: the clone's `PlortCollector` is disabled (it would NRE without a LandPlotModel and
+  takes everything). Our ~1 Hz tick counts adults (MeatGroup - ElderGroup - UnstableMeat) in the
+  active CoopRegion box (`Physics.OverlapBox`, Identifiable.identType, not held by a vac); chicks
+  are never counted or taken. While more than **20** adults are in the coop and the collector's
+  period (its CollectPeriod, 6 game hours) is due, the excess is collected the vanilla way
+  (`MaybeAddResource` into the slot holding that type or an empty one, `SpawnAndPlayFX(CollectFX)`
+  at the chicken, `Destroyer.DestroyActor`, cyclone animation), keeping at least 2 roosters, until
+  the slots are full.
+* Why 20: a collector that takes every adult (the elder collector's literal behaviour) empties the
+  coop and stops breeding. 20 adults (~18 hens) produce ~2 chicks per game hour; with 14 h to grow
+  that is ~30 chicks, ~50 birds in total, under the 58 density cap where breeding stalls.
+  `kKeepAdults` / `kKeepRoosters` in coop_world.cpp.
+* Price 1000 (Deluxe Coop 1300, Plort Collector 750), icon = the Deluxe Coop item's.
+
+Original plan:
 
 * Reproduce (on hens): `ShouldReproduce` → `NearMateAndSparseEnough`: it counts `DensityIds`
   within `DensityDist` against `MaxDensity()` (`MaxDensityInsideCoops`, ×`DeluxeDensityFactor` in
