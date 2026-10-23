@@ -267,7 +267,7 @@ hardcoded limit, chicks don't count, no slider / custom UI. Findings (asset bund
 As built:
 * Save safety: storing hens in the vanilla elder storage is NOT valid (mod-free load: the slots
   are ElderGroup slots again, hens dropped by ValidateAndAdjustSlots). So the Hen Collector is a
-  clone of `Deluxe` under the coop plot (TV and button removed, placed in the free (+x,-z) corner;
+  clone of `Deluxe` under the coop plot (TV removed, button kept as the manual Activate, placed in the free (+x,-z) corner;
   the `Deluxe` container is itself turned -90 deg in the prefab, which puts the vanilla elder
   collector in (+x,+z): see `modules/custom_upgrades/NOTES.md`) whose SiloStorage gets ONE session clone of the elder slot definition (same
   `_maxAmount` 100, group MeatGroup, block list ElderGroup + UnstableMeat) in both slots before
@@ -330,7 +330,9 @@ by side in the coop's purchase menu while the owned Hen Collector is selected (f
   `INavigationHandler.OnNavigate` (0x7DB210) moves the selection on left / right: a pad press also
   selected the neighbouring item and the rebind removed the slider. custom_upgrades detours it: while
   the slider is shown, Left / Right (`NavigationEventData.MoveDirection` 0 / 2) go to
-  `PlotMenuSlider::Step` and the event is `Use(true)`d; everything else passes through. (3) Look:
+  `PlotMenuSlider::Step` and the event is `Use(true)`d; everything else passes through. (Superseded after the test of 506a4f60: the focused card's Selectable gets the move
+  first, so the detour is now on `INavigationHandler.TryHandleAsNavigation`; see
+  `modules/custom_upgrades/NOTES.md`.) (3) Look:
   the game's UI shapes are `SDFRoundedRectangle` (MonomiPark.SlimeRancher.UI.SDFUI; material from
   `Shader.Find("SDFUI/" + type)`), e.g. the scroll bars' pink handle (0.871, 0.310, 0.522). The slider
   uses them (track = panel text colour at 22 %, pink fill, white handle with a pink border).

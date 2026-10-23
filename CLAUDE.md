@@ -6,7 +6,6 @@
 
 | note | about |
 |---|---|
-| `buy-menu-cards.md` | Purchase/Sell overlap, wrong labels, hen arrows, hen Activate |
 | `silo-receipt.md` | Sell-All receipt dialog, silo space tiers |
 | `sandbox-ux.md` | shift+scroll amounts, icon tabs, right-click menu, crafter |
 | `ideas.md` | unplanned ideas |
