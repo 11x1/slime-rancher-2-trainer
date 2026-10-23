@@ -2,7 +2,9 @@
 
 Status: the framework, the silo **Sell-All Button** and the per-plot upgrade **tiers** (2b.2)
 are implemented in `modules/custom_upgrades/` + `modules/plot_upgrades/`; the **Sell button**
-(2b.1) in `modules/sell_upgrades/`. All built, not yet tested in game. Everything else is design.
+(2b.1) in `modules/sell_upgrades/`; the **Coop Air Net** (2.4) as the first world object
+(`modules/custom_upgrades/coop_world.cpp`, section 1.4 as designed). All built, not yet tested in
+game. Everything else is design.
 RVAs are only for reference (GameAssembly.dll 1.3.0). The code finds everything by name.
 
 ---------------------------------------------------------------------------------------------
@@ -103,7 +105,7 @@ RVAs are only for reference (GameAssembly.dll 1.3.0). The code finds everything 
   `custom_upgrades::CanSell` / `Remove` (api.h) instead of the HashSet/upgrader path, refunds
   half of the item's cost (fixed, rounded down), then calls `RebuildUI`.
 
-### 1.4 World objects (design, not implemented yet)
+### 1.4 World objects (implemented for the coop upgrades in `coop_world.cpp`, with a ~1 Hz tick instead of the planned ApplyUpgrades hook)
 
 * **Prefabs we can reach at runtime, no scan needed:**
   * `LookupDirector.GetIfReady()` (static), or `GameContext.Instance.LookupDirector`.
@@ -253,7 +255,29 @@ Built, not yet tested in game. Full findings are in the header comment of
   drone station menu), "fall back to silo" when a silo sink program is also set (vanilla already
   tries every relevant sink program in order, so a second silo program takes held-back plorts).
 
-### 2.4 Coop roof - FEASIBLE (visual), the function needs a decision
+### 2.4 Coop roof - IMPLEMENTED as the "Coop Air Net" (`modules/custom_upgrades/coop_world.cpp`)
+
+User decision: an air net, cloned from the corral. As built:
+* Prefab data (read from the asset bundles, `duplicateassetisolation_assets_*.bundle`): the
+  CORRAL prefab `patchCorral` has `AirNetUpgrader.AirNets = [Base Air Net, High Air Net]`. Each
+  is one `NetTrigger` (MeshRenderer + `AirNet` + BoxCollider 9.5 x 0.6 x 9.5, layer 29 = the
+  barrier layer of corral and coop walls). Base net bottom at y 3.39 (corral base barrier top
+  3.45). `AirNet`: HitForceToDestroy 100, HoursToStartRecovery 0.05, HoursToRecover 0.1.
+* COOP prefab `patchCoop`: barriers on layer 29, top y 2.0 (High Walls 2.8); `Coop Region Trigger`
+  (CoopRegion + TrackContainedIdentifiables) 9.5 x 2 x 9.5 at y 1 (High Walls 9.5 x 3.5 x 9.5).
+  Same 9.5 footprint as the corral.
+* Build: `Instantiate(Base Air Net, coopPlot.transform)`, renamed `sr2mods_CoopAirNet#<gen>`,
+  activated. Fit (every ~1 s, moved only when off by > 2 cm): net collider bottom = top of the
+  coop's active CoopRegion collider, X/Z scale + centre = the region's. Buying High Walls later
+  lifts the net at the next tick.
+* Function: whatever the vanilla net does, unchanged (the collider blocks what collides with
+  layer 29: chickens launched by slimes or the vac stay in, flying things stay out; it breaks
+  under hard hits and recovers). `TrackContainedIdentifiables.AirNets` of the coop is left empty
+  (in the corral it only feeds a slime "integrity" check).
+* Price 425 (= corral Air Net), icon = the vanilla Air Net item's icon (found in the corral menu
+  asset by a one-time scan of the loaded `PlotUpgradePurchaseItemModel`s).
+
+Original research:
 
 * Existing roofs: the **corral Solar Shield** (`SolarShieldUpgrader.Shields`, a GameObject[]
   canopy) and the **Air Net** (`AirNetUpgrader.AirNets`). Both are inactive children of the CORRAL
