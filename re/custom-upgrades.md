@@ -27,21 +27,61 @@ RVAs are only for reference (GameAssembly.dll 1.3.0). The code finds everything 
     id is **never** passed to the original, not even when the module is off or faulted. It is
     marked owned in the sidecar state, or, for an action item, the action runs.
 
-### 1.2 Persistence: a sidecar file per save game
+### 1.2 Persistence: a sidecar file per .sav file ("extended save file")
 
-* File: `<game folder>\sr2mods_saves\<game name>.json`, next to version.dll. It is keyed by
-  `LandPlotLocation._id` (the same plot id sell_upgrades logs) and stores the plot type:
-  ```json
-  { "format": 1, "game": "<name>", "plots": { "<plot id>": { "type": 5, "upgrades": ["silo_sell_all"] } } }
-  ```
+* How the game names its files (disassembly, 1.3.0):
+  * Folder: `SteamContext.GetStorageProvider` (0xB2FE60) builds a `FileStorageProvider` with
+    `savePath = Path.Combine(persistentDataPath, "Steam", <steam id>)`;
+    `FileStorageProvider.GetFullFilePath(name)` = `savePath\<name>.sav`.
+  * Save: `SaveGameImpl` (0x5D10A0) takes `_currentGameMetadata` (Nullable<GameMetadata> at
+    +0x68: hasValue +0x68, GameName +0x70, DisplayName +0x78, SaveNumber +0x80, SlotIndex +0x88),
+    stores `IncrementSaveNumber()` back, pulls the game, then loops `i = 0, 1, ...` over
+    `string.Format("{0}_{1}", GameName, i)` until `StorageProvider.HasGameData(name)` is false and
+    calls `StorageProvider.StoreGameData(DisplayName, name, stream)`. Then `CleanupAutosaves`
+    (0x5CE040) deletes every save of that game past the 5 newest (`GetSavesByGameName`, newest
+    first). So rotation indices are **reused** (files `_1.._5` exist -> the next save is `_0`, and
+    `_1` is deleted): the index is not an age order, the save number is.
+  * Load: `Load(GameSaveIdentifier, bool, Stream)` (0x5CFDC0); `GameSaveIdentifier` =
+    `{string GameName; string SaveName}` (16 bytes, by reference on x64), `SaveName` = the file
+    name without `.sav`. Load sets `_currentGameMetadata = new GameMetadata(loadedGame)` before it
+    returns, so the loaded file's save number is readable right after it.
+* What we do:
+  * Detour `FileStorageProvider.StoreGameData` (0x744BC0): while inside our `SaveGameImpl`
+    detour, note the file name (and `savePath`). After `SaveGameImpl` returns a game, write
+    `sr2mods_saves\<name>.sav.json`:
+    ```json
+    { "format": 2, "game": "<GameName>", "save": "<GameName>_<i>", "save_number": 42, "values": {},
+      "plots": { "<plot id>": { "type": 5, "upgrades": ["silo_sell_all"], "values": {} } } }
+    ```
+    keyed by `LandPlotLocation._id` (+ plot type); coop plots also carry `hen_collector`
+    (contents) and `hen_collector_keep` (slider limit) as before. Temp file + rename. Then delete this game's
+    `*.sav.json` whose `.sav` no longer exists in `savePath` (only if the file just written is
+    there).
+  * The `Load` detour notes `identifier.SaveName` (+ the save number right after the original).
+    The sidecar is read lazily, the first time a custom upgrade is asked about, in this order:
+    1. `<SaveName>.sav.json` if its `save` matches and its `save_number` equals the loaded file's
+       (a different number = a sidecar of an older file of the same name, replaced while the mod
+       was off);
+    2. the old per-game file `<GameName>.json` (format 1, migration; renamed to
+       `.json.migrated` after the first per-save write, so it is used only until then);
+    3. this game's sidecar with the highest `save_number` below the loaded file's;
+    4. nothing. The log line says which one was used.
+  * Once a game has had a sidecar, every save writes one (also an empty one), so loading that
+    save never falls back to an older state. A game that never had a custom upgrade gets no files.
+  * Without the StoreGameData hook (other storage provider, name not found) it falls back to the
+    old per-game file.
+  * Generic per-save values (`custom_upgrades::PlotValue` / `SetPlotValue` / `SaveValue` /
+    `SetSaveValue`, api.h) live in the same file. sell_upgrades stores the ash of a sold Ash
+    Trough there.
+* Why the game folder and not the Steam save folder: Steam Cloud syncs
+  `LocalLow\MonomiPark\SlimeRancher2\Steam\<id>\` (steam_autocloud.vdf). Extra files there would
+  be uploaded to the game's cloud quota and land on PCs without the mod, and unknown files in the
+  game's own save folder are a risk we don't need (the game enumerates that folder). The cost:
+  custom-upgrade state does not follow a save to another PC through the cloud (the sidecars can
+  be copied by hand; the names match the .sav files).
 * Game name: `AutoSaveDirector.CurrentSaveGameName()` (0x5CE220, returns
   `_currentGameMetadata.GameName` or ""). `AutoSaveDirector` comes from
   `GameContext.Instance.<AutoSaveDirector>k__BackingField`.
-* Read: lazily, the first time a custom upgrade is asked about in a game (at most one name lookup
-  per frame).
-* Write: after every `AutoSaveDirector.SaveGameImpl` (0x5D10A0, which manual saves and autosaves
-  both go through) that returned a game. The file is written to a temp file and then renamed over
-  the old one.
 * Reset: detours on `AutoSaveDirector.Load(GameSaveIdentifier, bool, Stream)` (0x5CFDC0; the
   struct comes in by reference on x64) and `StartNewGame(int, GameSettingsModel)` (0x5D1A70) drop
   the in-memory state. Purchases you haven't saved disappear together with the unsaved Newbucks,
@@ -49,8 +89,8 @@ RVAs are only for reference (GameAssembly.dll 1.3.0). The code finds everything 
 * Save safety: the vanilla save never holds anything of ours. Without the mod the save loads
   unchanged and only the custom upgrades are gone. Deleting the sidecar does the same.
 * Known limits:
-  * One sidecar per game, not per save file. If you load an older autosave or backup of the same
-    game, you get the newest custom-upgrade state.
+  * A save written while the mod is off has no sidecar: loading it uses the newest older one.
+  * Steam Cloud does not carry the sidecars to another PC.
   * A plot that is demolished and rebuilt as the **same** type at the same spot keeps its custom
     upgrade. When the type changes, the entry is dropped. Fix later with a hook on the demolish
     closure (`LandPlotUIRoot.<>c__DisplayClass8_0.<PromptForDemolish>b__0`).
@@ -504,7 +544,9 @@ key) would show every loaded sprite name. It isn't done automatically.
    leave the silo, the currency HUD pops up, and the log shows the sale. Non-plort items stay.
    After closing the menu, check the market price board for saturation.
 4. Save, quit to the menu, load the game: the upgrade is still owned. Check
-   `sr2mods_saves\<game>.json`. Load a different save: no upgrade there.
+   `sr2mods_saves\<game>_<i>.sav.json` (one per .sav file, the same name). Load a different save:
+   no upgrade there. Load an older autosave of the same game from before the purchase: no upgrade
+   (log: "using the sidecar of this save file").
 5. Buy, then quit without saving and reload: the upgrade is gone and the money is back.
 6. Sell it back (sell_upgrades): refund, and "Sell All Plorts Now" disappears.
 7. Remove the mod (or disable `custom_upgrades`) and load the save: the game loads normally,

@@ -4,7 +4,7 @@
 // Custom land-plot upgrade ids live in their own range (0x5352xxxx, "SR") of
 // the LandPlot.Upgrade int enum. They are NEVER written into
 // LandPlotModel.upgrades (the vanilla save): ownership is kept in a sidecar
-// file per save game (see module.cpp). LandPlot.HasUpgrade answers for them
+// file per .sav file (see module.cpp). LandPlot.HasUpgrade answers for them
 // through a detour, so the plot purchase menu greys owned custom upgrades out
 // like vanilla ones.
 //
@@ -58,5 +58,17 @@ enum class Family : int {
 // if none (or wrong plot type / module off). Cached per object (O(1) map read;
 // a miss or an expired entry takes the slow path once).
 float Multiplier(Il2CppObject* plotOrComponent, Family family);
+
+// ---- per-save values (stored in the same sidecar as the custom upgrades) ------------------
+// Main thread. Small string values that follow the exact .sav file like the upgrades do: kept
+// in memory, written with the next game save into that save's sidecar, dropped on load / new
+// game and read back from the loaded save's sidecar. Keys: "<module>.<name>". "" = not set;
+// setting "" erases. Per-plot values are keyed by the plot's LandPlotLocation id + plot type
+// (a plot rebuilt as another type loses them). They never touch the vanilla save. Return
+// "" / false when the module is off, faulted or no save game is loaded.
+std::string PlotValue(Il2CppObject* landPlot, const std::string& key);
+bool SetPlotValue(Il2CppObject* landPlot, const std::string& key, const std::string& value);
+std::string SaveValue(const std::string& key);
+bool SetSaveValue(const std::string& key, const std::string& value);
 
 }  // namespace sr2::modules::custom_upgrades
