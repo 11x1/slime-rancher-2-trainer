@@ -23,18 +23,38 @@ namespace sr2::ui::sandbox {
 
 inline constexpr const char* kModule = "sandbox";
 
+// What kind of thing an item is (from its IdentifiableType class and flags);
+// the tab uses it for the tile accent and the spawner's filter.
+enum class Kind : uint8_t { Other, Slime, Largo, Plort, Food, Animal, Toy, Resource, Liquid, Gadget };
+
 struct Item {
     uintptr_t id = 0;       // opaque (see above)
     std::string name;       // localized display name
-    uint32_t slotMask = 0;  // bit i: vacpack slot i accepts it (AmmoSlotDefinition.IsAllowed)
+    uint32_t slotMask = 0;  // bit i: vacpack slot i accepts it (AmmoSlotDefinition.IsAllowed); 0 in the spawn list
+    uint32_t icon = 0;      // ui/item_icons.h id (0 = none)
+    Kind kind = Kind::Other;
 };
 
 struct Slot {
     bool unlocked = false;
     uintptr_t item = 0;     // 0 = empty
     std::string name;       // item name ("" when empty)
+    uint32_t icon = 0;      // the item's icon (0 = none)
+    Kind kind = Kind::Other;
     int count = 0;
     int max = 0;            // AmmoSlotManager.GetSlotMaxCount
+};
+
+// A fabricator gadget recipe (a GadgetDefinition with a crafting cost).
+struct Recipe {
+    uintptr_t id = 0;       // opaque, like Item::id
+    std::string name;
+    uint32_t icon = 0;
+    int category = -1;      // index into Snapshot::recipeCategories (-1: none)
+    std::string cost;       // what the fabricator would charge, e.g. "20 x Pink Plort, 150 Newbucks"
+    bool unlocked = false;  // GadgetDirector.HasBlueprint
+    int owned = 0;          // GadgetDirector.GetItemCount (in the gadget inventory)
+    int perCraft = 1;       // 2 for gadgets the fabricator makes in pairs (GadgetDefinition.BuyInPairs)
 };
 
 struct Snapshot {
@@ -49,6 +69,11 @@ struct Snapshot {
     bool infiniteEnergy = false;  // session toggle (not saved)
     std::vector<Slot> slots;
     std::shared_ptr<const std::vector<Item>> catalog;  // items the vacpack can hold, sorted by name
+    std::shared_ptr<const std::vector<Item>> spawnables;  // items the spawner can place, sorted by name
+    std::string spawnWhy;                                 // spawner unavailable: why ("" = available)
+    std::shared_ptr<const std::vector<Recipe>> recipes;   // fabricator gadget recipes, sorted by name
+    std::shared_ptr<const std::vector<std::string>> recipeCategories;  // the fabricator's category titles
+    std::string craftWhy;                                 // crafter unavailable: why ("" = available)
 };
 
 enum class Op {
@@ -60,6 +85,8 @@ enum class Op {
     InfiniteEnergy,  // value = 0 / 1
     SetSlotCount,    // slot, value = new count (0 empties the slot)
     PutItem,         // slot, item, value = count (replaces what the slot holds)
+    Spawn,           // item (from spawnables), value = how many; placed in front of the player
+    Craft,           // item (a recipe id), value = how many crafts; added to the gadget inventory at no cost
 };
 
 struct Action {
