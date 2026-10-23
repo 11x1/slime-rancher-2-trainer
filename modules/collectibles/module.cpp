@@ -45,9 +45,10 @@
 // follow its position, opacity and visibility (hidden with the HUD, menus,
 // the full map, loads). No per-frame work besides an "is the parent still
 // ours" check; counts are recomputed once per second while shown. There is no
-// background panel: compact mode is a fixed 3-column grid of "icon X/Y" cells
-// (rows as needed, usually 2), spread over the minimap's width with the outer
-// columns flush with its edges, each cell optionally with a tiny label under
+// background panel: compact mode is a fixed grid of 3 equal-width columns
+// spanning the minimap's width (column i starts at i/3 of it), "icon X/Y" cells
+// filled in order and left-aligned, the last row partially filled from the
+// left, rows as needed (usually 2), each cell optionally with a tiny label under
 // the count ("show_labels"); list mode is one text line per category. Every
 // icon and text has a dark copy offset down-right as a drop shadow, so it
 // stays readable on bright terrain.
@@ -183,8 +184,8 @@ void RegisterSettings() {
         settings::Register(x);
     };
     def("compact", "Compact grid (icons + numbers)", "Display", 1,
-        "A grid of 3 columns under the minimap: each category's icon and count, spread over the minimap's width "
-        "(usually 2 rows). Off: one text line per category");
+        "A grid of 3 equal columns across the minimap's width: each category's icon and count, filled left to "
+        "right (rows as needed, usually 2). Off: one text line per category");
     def("show_labels", "Show labels", "Display", 1,
         "A tiny name under each count (Pods, Gordos, Doors, Nodes, Drones, Ghosts, ...)");
     settings::SetParent(kModule, "show_labels", "compact");
@@ -1482,8 +1483,7 @@ private:
         if (cfg_.compact) {
             for (Ref* t : {&ui_.listText, &ui_.listShadow})
                 if (t->Alive()) unity::SetActive(unity::GameObjectOf(t->get()), false);
-            // A fixed grid of 3 columns ("icon X/Y", label under the count), rows as needed. Column k is
-            // as wide as its widest cell; the outer columns sit flush with the minimap's edges.
+            // A fixed grid of 3 equal columns ("icon X/Y", label under the count), rows as needed.
             constexpr size_t kCols = 3;
             const bool labels = cfg_.showLabels;
             const float h = std::max(10.0f, std::round(S * 0.068f * cfg_.scale));  // icon size = count line
@@ -1533,19 +1533,18 @@ private:
                 SetVisible(false);
                 return;
             }
-            const size_t cols = std::min(kCols, items.size());
+            // Equal columns spanning the minimap: column j starts at j * S / 3. Cells fill the columns in
+            // order, left-aligned in their column; a partial last row stays left-aligned (no centring).
             const size_t nRows = (items.size() + kCols - 1) / kCols;
-            float colW[kCols] = {}, colX[kCols] = {};
-            for (size_t k = 0; k < items.size(); ++k) colW[k % kCols] = std::max(colW[k % kCols], items[k].w);
-            float total = 0;
-            for (size_t j = 0; j < cols; ++j) total += colW[j];
-            float sp = cols > 1 ? (S - total) / static_cast<float>(cols - 1) : 0.0f, x0 = 0;
-            if (cols == 1) x0 = std::round((S - total) * 0.5f);  // a single cell is centred
-            else if (sp < minColGap) {                           // wider than the minimap: centred overflow
-                sp = minColGap;
-                x0 = std::round((S - total - sp * static_cast<float>(cols - 1)) * 0.5f);
+            float widest = 0;
+            for (const Item& it : items) widest = std::max(widest, it.w);
+            float colStep = S / static_cast<float>(kCols), x0 = 0;
+            if (widest + minColGap > colStep) {  // a cell wider than a column: wider grid, centred overflow
+                colStep = widest + minColGap;
+                x0 = std::round((S - colStep * static_cast<float>(kCols) + minColGap) * 0.5f);
             }
-            for (size_t j = 0; j < cols; ++j) colX[j] = j ? colX[j - 1] + colW[j - 1] + sp : x0;
+            float colX[kCols] = {};
+            for (size_t j = 0; j < kCols; ++j) colX[j] = x0 + colStep * static_cast<float>(j);
             std::vector<bool> used(kCatCount, false);
             for (size_t k = 0; k < items.size(); ++k) {
                 const Item& it = items[k];
