@@ -30,12 +30,20 @@ std::vector<Category> Spec() {
     std::vector<Category> cats;
 
     Category ranch = Cat("ranch", "Ranch", Icon::Ranch);
-    ranch.tabs.push_back(ModuleTab("plot_upgrades"));
-    Tab sell = ModuleTab("sell_upgrades");
-    sell.help = "Sell an owned plot upgrade back for half its price: select it in the plot's purchase menu and "
-                "press the Sell button next to PURCHASED (or confirm the item). Silo storage upgrades can't be sold.";
-    ranch.tabs.push_back(sell);
-    ranch.tabs.push_back(ModuleTab("custom_upgrades"));
+    Tab ranchGeneral;
+    ranchGeneral.title = "General";
+    ranchGeneral.kind = TabKind::Cards;
+    ranchGeneral.columns = {{"custom_upgrades"}, {"plot_upgrades", "sell_upgrades"}};
+    ranchGeneral.cardHelp = {
+        {"custom_upgrades",
+         "Adds the mod's own plot upgrades (higher tiers, Coop Air Net, Hen Collector, silo Sell-All Button) to the "
+         "plots' purchase menus. Once on with a save loaded, it stays on for that save."},
+        {"plot_upgrades", "Applies the effects of the upgrade tiers bought through Custom Upgrades."},
+        {"sell_upgrades",
+         "Sell an owned plot upgrade back for half its price: select it in the plot's purchase menu and press the "
+         "Sell button next to PURCHASED (or confirm the item). Silo storage upgrades can't be sold."},
+    };
+    ranch.tabs.push_back(ranchGeneral);
     cats.push_back(ranch);
 
     Category movement = Cat("movement", "Movement", Icon::Movement);
