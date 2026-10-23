@@ -1,7 +1,7 @@
 #pragma once
-// Public entry points of the settings UI. Both are called once from the core
-// worker thread after the modules were set up. They are independent: each may
-// fail (and logs why) without affecting the other.
+// Public entry points of the UI. Each is called once from the core worker
+// thread (the settings UI after the modules were set up). They are independent:
+// each may fail (and logs why) without affecting the others.
 
 namespace sr2::ui {
 
@@ -14,5 +14,10 @@ bool StartOptionsTab();
 // (settings "ui.overlay_hotkey", default F8). Always the guaranteed way to
 // configure the mod, even if the Options-menu injection fails.
 bool StartOverlay();
+
+// "[modded]" line on the title screen (ui/modded_label.cpp). Not a setting, always on. Called
+// once from the core worker BEFORE the modules are set up, because it owns the
+// MainMenuLandingRootUI.OnEnable hook that quick_start listens to.
+bool StartModdedLabel();
 
 }  // namespace sr2::ui
