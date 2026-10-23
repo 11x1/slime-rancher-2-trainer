@@ -57,6 +57,12 @@
 //   ("hen_collector": [{type, count}] per slot), copied from the live storage every tick and
 //   before every save. Selling is refused while it holds chickens (vac them out first).
 //
+//   Tier props (plot_props.cpp): owned tiers show on their plot as pure decoration cloned from
+//   vanilla models - Faster Hens I / II: two small hay bales (decorHayBales), II adds two nests
+//   (the coop's own), a flower pillow and a stuffed chicken toy; Fast Growth I / II: a third
+//   sprinkler head (garden prefab); Ash Booster: glow + embers in the incinerator's fire. Built /
+//   removed by the same ~1 Hz world tick from the sidecar ownership.
+//
 //   World objects are clones of vanilla plot-prefab parts (LookupDirector.GetPlotPrefab),
 //   built / fitted / removed by a ~1 Hz tick over CoopRegion._allCoops from the sidecar
 //   ownership: after a load, a plot rebuild or a re-enable they come back by themselves; a
@@ -194,6 +200,7 @@
 #include "modules/custom_upgrades/api.h"
 #include "modules/custom_upgrades/coop_world.h"
 #include "modules/custom_upgrades/plot_menu_slider.h"
+#include "modules/custom_upgrades/plot_props.h"
 #include "modules/custom_upgrades/sale_notify.h"
 #include "modules/custom_upgrades/silo_world.h"
 #include "ui/mod_icons.h"
@@ -586,6 +593,8 @@ private:
     Il2CppObject* GlobalUpgradeItem(int32_t upgrade);
     custom_upgrades::world::CoopWorld world_;
     custom_upgrades::world::SiloButtons silo_;  // Sell-All Button world button
+    custom_upgrades::world::PlotProps props_;   // decorative props of owned tiers (plot_props.h)
+    std::vector<custom_upgrades::world::PropRequest> WantedProps() const;
     custom_upgrades::ui::PlotMenuSlider sliderHens_;      // Hen Collector limits, side by side (one pair
     custom_upgrades::ui::PlotMenuSlider sliderRoosters_;  // at a time; the hens slider builds the row)
     custom_upgrades::ui::SaleNotices notices_;    // Sell-All: per-plort HUD notifications
@@ -917,6 +926,7 @@ void CustomUpgrades::ResetState(const char* why) {
     tierCache_.clear();
     world_.Reset();  // clones of the previous game are destroyed (never read) at the next tick
     silo_.Reset();
+    props_.Reset();
     notices_.Clear();
     DestroySliders();  // their value callbacks belong to the old state
 }
@@ -1072,6 +1082,7 @@ void CustomUpgrades::LoadSidecar(const std::string& game) {
     Bump();
     world_.Reset();  // world objects built before belong to another state: rebuilt from this one
     silo_.Reset();
+    props_.Reset();
 
     // The exact .sav this game was loaded from (AutoSaveDirector.Load), if we saw it.
     std::string save;
@@ -1793,6 +1804,10 @@ void CustomUpgrades::Cleanup(const char* why) {
         silo_.RemoveAll();
         SR2_INFO("[{}] {}: silo sell buttons removed", kModule, why);
     }
+    if (props_.Ready() && main_thread::IsMainThread()) {
+        props_.RemoveAll();
+        SR2_INFO("[{}] {}: plot props removed", kModule, why);
+    }
     int removed = 0, restored = 0;
     for (auto& inj : injections_) {
         for (Injected& in : inj->items) {
@@ -1823,7 +1838,7 @@ void CustomUpgrades::FrameCheck(float dt) {
     if (On() && SliderActive()) g_sliderGuard.Run([&] { SliderTick(dt); });
     if (On() && silo_.Ready()) g_siloGuard.Run([&] { silo_.Frame(); });  // button message (cheap when none)
     if (On() && notices_.Ready()) g_siloGuard.Run([&] { notices_.Frame(dt); });  // queued sale notices
-    if (!On() || (!world_.Ready() && !silo_.Ready())) return;
+    if (!On() || (!world_.Ready() && !silo_.Ready() && !props_.Ready())) return;
     if (std::isfinite(dt) && dt > 0.0f) worldAccum_ += std::min(dt, 1.0f);
     if (worldAccum_ < kWorldTickSeconds) return;
     worldAccum_ = 0.0f;
@@ -1968,6 +1983,28 @@ void CustomUpgrades::WorldTick() {
             if (d && ps.type == kPlotSilo && ps.owned.count(d->key)) wanted.push_back(id);
         silo_.Tick(wanted, [&]() { return LookupDirector(); });
     }
+    if (props_.Ready() && !sr2::core::ModuleFaulted(kModule))
+        props_.Tick(WantedProps(), [&]() { return LookupDirector(); });
+}
+
+// Plots whose owned tiers have props: Faster Hens I / II (hay; II adds nests), Fast Growth I / II
+// (sprinkler), Ash Booster (fire glow). The plot type is checked again on the live plot.
+std::vector<custom_upgrades::world::PropRequest> CustomUpgrades::WantedProps() const {
+    namespace w = custom_upgrades::world;
+    auto owns = [](const PlotState& ps, int32_t id) {
+        const UpgradeDef* d = FindDef(id);
+        return d && ps.owned.count(d->key) > 0;
+    };
+    std::vector<w::PropRequest> out;
+    for (const auto& [id, ps] : state_.plots) {
+        uint32_t kinds = 0;
+        if (owns(ps, COOP_HENS_1) || owns(ps, COOP_HENS_2)) kinds |= w::kPropCoopHay;
+        if (owns(ps, COOP_HENS_2)) kinds |= w::kPropCoopNests;
+        if (owns(ps, GARDEN_GROWTH_1) || owns(ps, GARDEN_GROWTH_2)) kinds |= w::kPropGardenSprinkler;
+        if (owns(ps, INCIN_ASH_BOOST)) kinds |= w::kPropIncinGlow;
+        if (kinds) out.push_back({id, kinds});
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------- silo button --
@@ -2127,7 +2164,7 @@ void CustomUpgrades::OnAddUpgrade(Il2CppObject* plot, int32_t upg) {
     ps.type = d->plotType;
     ps.owned.insert(d->key);
     Bump();
-    if (IsWorldUpgrade(d->id) || d->id == SILO_SELL_ALL) worldAccum_ = kWorldTickSeconds;  // build it at the next frame
+    worldAccum_ = kWorldTickSeconds;  // world object / button / props: built at the next frame
     SR2_INFO("[{}] bought {} on plot '{}' (saved with the next game save)", kModule, d->title, id);
 }
 
@@ -2294,6 +2331,7 @@ bool CustomUpgrades::RemoveCustom(Il2CppObject* plot, int32_t upg, std::string& 
     if (IsWorldUpgrade(d->id) && world_.Ready())
         world_.Remove(plot, d->id == COOP_AIR_NET, d->id == COOP_HEN_COLLECTOR);
     if (d->id == SILO_SELL_ALL && silo_.Ready()) silo_.Remove(plot);
+    worldAccum_ = kWorldTickSeconds;  // props of a sold tier go at the next frame
     notes += "custom upgrade removed (saved with the next game save)";
     SR2_INFO("[{}] {} removed from plot '{}'", kModule, d->title, id);
     return true;
@@ -2673,6 +2711,15 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
             silo_ = custom_upgrades::world::SiloButtons{};  // not Ready(): no buttons are built
             g_offActCollector = 0;
             SR2_WARN("[{}] silo sell button unavailable ({}) - the Sell-All Button is not offered", kModule, serr);
+        }
+    }
+
+    // Decorative props of owned tiers (optional; missing -> the tiers work without them).
+    {
+        std::string perr;
+        if (!props_.Setup(R, kModule, perr)) {
+            props_ = custom_upgrades::world::PlotProps{};
+            SR2_WARN("[{}] plot props unavailable ({}) - tiers show no props", kModule, perr);
         }
     }
 
