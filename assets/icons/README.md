@@ -18,6 +18,9 @@ plot-upgrade icons (white outline, darker shadow band). They are embedded into t
 | `coop_air_net.png` | Coop Air Net |
 | `hen_collector.png` | Hen Collector |
 | `mods_tab.png` | the "Mods" tab of the in-game Options menu |
+| `map_node.png` | collectible tracker: map data nodes (the game has no sprite for them) |
+| `research_drone.png` | collectible tracker: research drones (no map / Slimepedia / HUD sprite in the game) |
+| `ghost_drone.png` | collectible tracker: ghostly drones (their IdentifiableType has no icon) |
 
 Tier icons share the object and carry a badge with the tier's Roman numeral (I green,
 II blue, III gold); the Ash Booster has an orange "boost" badge.

@@ -49,6 +49,11 @@
 // spread over the minimap's width (a second row only when it does not fit),
 // list mode one text line per category; every icon and text has a dark copy
 // offset down-right as a drop shadow, so it stays readable on bright terrain.
+// Icons: the game's own sprite where one exists (map marker / counter /
+// identifiable icon); map data nodes, research drones and ghostly drones have
+// none (the ghostly drone's IdentifiableType has no icon), so they use the
+// mod's own icons (assets/icons/map_node, research_drone, ghost_drone, via
+// ui/mod_icons).
 //
 // Fault policy: every game call runs under core::Try + a native-fault guard;
 // managed exceptions of single queries are contained, any native fault
@@ -79,6 +84,7 @@
 #include "core/unity.h"
 #include "modules/minimap/api.h"
 #include "modules/minimap/ugui.h"
+#include "ui/mod_icons.h"
 
 namespace sr2::modules {
 namespace {
@@ -170,8 +176,8 @@ void RegisterSettings() {
         settings::Register(x);
     };
     def("compact", "Compact row (icons + numbers)", "Display", 1,
-        "One row under the minimap: the game's map icon and the count per category, spread over the minimap's "
-        "width (wraps to a second row only when needed). Off: one text line per category");
+        "One row under the minimap: the category's icon (the game's map icon where it has one) and the count, "
+        "spread over the minimap's width (wraps to a second row only when needed). Off: one text line per category");
     def("show_completed_categories", "Show completed categories (dimmed)", "Display", 1,
         "Off: categories with everything collected are hidden");
     def("hide_totals_until_discovered", "Spoiler-free totals", "Display", 0,
@@ -1388,10 +1394,15 @@ private:
         unity::SetActive(ui_.root.get(), v);
     }
 
+    // The game's own sprite (map marker / counter / identifiable icon) when it has one, else the
+    // mod's icon for categories without any game sprite (map data nodes, research drones, ghostly
+    // drones: ComponentAcqDrone has no icon), else nullptr (text label).
     Il2CppObject* IconFor(int cat) {
         if (catIcon_[cat].Alive()) return catIcon_[cat].get();
         if (cat == kGhostDrones && ghostIcon_.Alive()) return ghostIcon_.get();
-        return nullptr;
+        const char* own = cat == kMapNodes ? "map_node" : cat == kDrones ? "research_drone"
+                        : cat == kGhostDrones ? "ghost_drone" : nullptr;
+        return own ? sr2::ui::mod_icons::Get(own) : nullptr;
     }
 
     std::string Numbers(int cat) const {
