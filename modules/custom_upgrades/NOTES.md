@@ -52,3 +52,26 @@ findings from in-game tests that are easy to get wrong again.
   Keys: d-pad / left stick / arrows for hens (`SliderInput::kPrimary`), right stick / Shift +
   arrows for roosters (`kSecondary`). The grid navigation detour offers left / right to both;
   each takes only its own (Shift held or not).
+
+## Tier props (checklist u5, u6, u9, u11)
+
+`plot_props.cpp` puts a visible prop on a plot while a tier is owned; it goes when the tier is
+sold or the module is turned off. No assets of ours: every piece is a child of a vanilla prefab,
+cloned under an inactive holder `sr2props_<Kind>#<generation>` (prefix not `sr2mods_`, which
+coop_world's scan would destroy), stripped of colliders, joints, rigidbodies and game scripts
+(MonoBehaviours outside `UnityEngine.*`), then activated. Lookups are cached and pinned.
+
+| tier | prop | source |
+|---|---|---|
+| Faster Hens I or II (u5) | two small hay bales (scale 0.5) along the +z side | decoration `decorHayBales`: `hayBale_2`, `hayBale_0 (1)` |
+| Faster Hens II (u6) | nests in the middle of the -x / +x sides, a stuffed chicken in the +x nest, a flower pillow in the middle of the -z side | coop prefab `Deco/nestPlain01` (the vanilla nest), toy `toyStuffedChicken`: `model_stuffedChicken`, decoration `decorFlowerPillowSmall`: `mesh` |
+| Fast Growth I or II (u9) | a third sprinkler head in the middle of the +x side, spraying inwards | garden prefab `Sprinkler/SprinklerBase` (vanilla heads are on the -z / +z sides) |
+| Ash Booster (u11) | glow + embers in the fire, embers rising out of the opening | incinerator prefab `.../meshIncinerator/FireTest/Glow` and `/Embers` (inactive in vanilla, switched on), decoration `decorFireFlower`: `FX Fireflower` |
+
+Gadget / toy prefabs are found by prefab name in `LookupDirector._gadgetDefinitions` /
+`_toyDefinitions` (member types, then sub-groups). A missing model is logged once
+(`plot props: model '...' not found`) and that piece is left out.
+
+Not checked in game yet: sizes and heights (hay bales, nests, pillow), whether the incinerator's
+`Glow` / `Embers` play on their own once active (they may be sub-emitters of `FireTest`) and look
+right, and that nothing of the stripped clones still logs errors.
