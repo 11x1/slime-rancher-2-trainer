@@ -7,11 +7,16 @@
 // Main thread: Register(sprite) reads the sprite's texture and rectangle once
 // and returns a small id (0 = none). The sprite and its texture are kept alive
 // with GC handles for the rest of the process (they are game assets that stay
-// loaded anyway), so the D3D11 resource stays valid while the overlay draws
-// from it. Registering the same sprite again is a map lookup.
+// loaded anyway), and the texture's D3D11 resource with our own COM reference,
+// taken right there (a GC handle keeps the managed Texture, not its GPU
+// resource). The render thread never touches Unity's raw native pointer.
+// Registering the same sprite again is a map lookup.
 //
 // Render thread: Draw(id, ...) draws the icon fitted into a rectangle. The
-// shader resource view per texture is created on first use and reused.
+// shader resource view per texture is created on first use and reused. Icons
+// are append-only: the render thread draws from its own copy of the table,
+// refreshed under a lock when the count changes; an id it does not have yet
+// draws nothing.
 
 #include <cstdint>
 

@@ -1448,12 +1448,14 @@ item_grid::Options GridOptions(float height) {
 }
 
 // Item by id from the vacpack list or the spawn list (lookup table rebuilt when a list changes).
+// The table points into the lists, so it holds them: comparing bare addresses let a rebuilt
+// list allocated where a freed one had been keep the table and its dangling pointers.
 const sbx::Item* FindItem(const sbx::Snapshot& s, uintptr_t id) {
-    static const void* builtFor[2] = {};
+    static std::shared_ptr<const std::vector<sbx::Item>> builtSpawn, builtCatalog;
     static std::map<uintptr_t, const sbx::Item*> byId;
-    if (builtFor[0] != s.spawnables.get() || builtFor[1] != s.catalog.get()) {
-        builtFor[0] = s.spawnables.get();
-        builtFor[1] = s.catalog.get();
+    if (builtSpawn != s.spawnables || builtCatalog != s.catalog) {
+        builtSpawn = s.spawnables;
+        builtCatalog = s.catalog;
         byId.clear();
         for (const auto* list : {s.spawnables.get(), s.catalog.get()})
             if (list)
@@ -2047,7 +2049,10 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
     static std::vector<int> tabCat;  // category per tab; -1 = all, -2 = materials
     tabs.clear();
     tabCat.clear();
-    tabs.push_back({0, 0, 0, "All"});
+    // The fabricator's category data is only loaded once its UI has been opened: until then
+    // there are no category tabs (the module picks them up later, see modules/sandbox/NOTES.md).
+    const bool noCats = !s.recipeCategories || s.recipeCategories->empty();
+    tabs.push_back({0, 0, 0, noCats ? "All (open the fabricator once to group the gadgets by its categories)" : "All"});
     tabCat.push_back(-1);
     if (s.recipeCategories) {
         std::vector<bool> used(s.recipeCategories->size(), false);
@@ -2057,13 +2062,24 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
             if (!used[i]) continue;
             const std::string& title = (*s.recipeCategories)[i];
             const uint32_t icon = s.recipeCategoryIcons && i < s.recipeCategoryIcons->size() ? (*s.recipeCategoryIcons)[i] : 0;
-            tabs.push_back({icon, title.empty() ? '?' : static_cast<unsigned char>(title[0]), KindAccent(sbx::Kind::Gadget), title});
+            const unsigned char first = title.empty() ? '?' : static_cast<unsigned char>(title[0]);
+            tabs.push_back({icon, first < 0x80 ? first : '?', KindAccent(sbx::Kind::Gadget), title});
             tabCat.push_back(static_cast<int>(i));
         }
     }
     if (s.materials && !s.materials->empty()) {
         tabs.push_back({s.groupIcons[sbx::kGroupResources], 'M', KindAccent(sbx::Kind::Resource), "Crafting materials (refinery)"});
         tabCat.push_back(-2);
+    }
+    // The tab list changed (categories or materials arrived): stay on the same category.
+    static std::vector<int> shownCat;
+    if (tabCat != shownCat) {
+        const int was = g_craftGrid.tab >= 0 && static_cast<size_t>(g_craftGrid.tab) < shownCat.size()
+                            ? shownCat[static_cast<size_t>(g_craftGrid.tab)]
+                            : -1;
+        const auto at = std::find(tabCat.begin(), tabCat.end(), was);
+        g_craftGrid.tab = at != tabCat.end() ? static_cast<int>(at - tabCat.begin()) : 0;
+        shownCat = tabCat;
     }
     g_craftGrid.tab = std::clamp(g_craftGrid.tab, 0, static_cast<int>(tabs.size()) - 1);
     const int cat = tabCat[static_cast<size_t>(g_craftGrid.tab)];

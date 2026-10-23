@@ -22,6 +22,7 @@
 #include "backends/imgui_impl_win32.h"
 #include "imgui.h"
 
+#include "core/guard.h"
 #include "core/hook_manager.h"
 #include "core/log.h"
 #include "core/main_thread.h"
@@ -128,8 +129,31 @@ bool Captured() {
     return !g_failed.load(std::memory_order_relaxed) && (g_open.load(std::memory_order_relaxed) || hud_edit::Active());
 }
 
-void LogSeh(const char* where, DWORD code) {
-    SR2_ERROR("ui: native exception 0x{:08X} in overlay {} - overlay disabled", code, where);
+// What the overlay's last-resort SEH guards caught: code, faulting instruction and, for an
+// access violation, the address touched, so a fault can be traced to the code (with the PDB).
+struct SehInfo {
+    DWORD code = 0;
+    void* addr = nullptr;
+    ULONG_PTR avOp = 0, avAddr = 0;  // EXCEPTION_ACCESS_VIOLATION: 0 read, 1 write, 8 execute; target
+    bool av = false;
+};
+
+int SehFilter(EXCEPTION_POINTERS* ep, SehInfo* out) {
+    const EXCEPTION_RECORD* r = ep->ExceptionRecord;
+    out->code = r->ExceptionCode;
+    out->addr = r->ExceptionAddress;
+    if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters >= 2) {
+        out->av = true;
+        out->avOp = r->ExceptionInformation[0];
+        out->avAddr = r->ExceptionInformation[1];
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+void LogSeh(const char* where, const SehInfo& i) {
+    std::string at = core::DescribeAddress(i.addr);
+    if (i.av) at += std::format(" ({} 0x{:X})", i.avOp == 1 ? "writing" : i.avOp == 8 ? "executing" : "reading", i.avAddr);
+    SR2_ERROR("ui: native exception 0x{:08X} in overlay {} at {} - overlay disabled", i.code, where, at);
 }
 
 // Left/right click can never be the hotkey (every UI click would toggle).
@@ -246,12 +270,13 @@ WndAction WndFilterCpp(UINT msg, WPARAM wp, LPARAM lp) noexcept {
 }
 
 WndAction WndFilterGuarded(UINT msg, WPARAM wp, LPARAM lp) {
+    SehInfo seh;
     __try {
         return WndFilterCpp(msg, wp, lp);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    } __except (SehFilter(GetExceptionInformation(), &seh)) {
         g_failed = true;
         g_open = false;
-        LogSeh("WndProc", GetExceptionCode());
+        LogSeh("WndProc", seh);
         return WndAction::PassToGame;
     }
 }
@@ -685,12 +710,13 @@ void OnPresentImpl(IDXGISwapChain* sc) {
 }
 
 void OnPresentGuarded(IDXGISwapChain* sc) {
+    SehInfo seh;
     __try {
         OnPresentImpl(sc);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    } __except (SehFilter(GetExceptionInformation(), &seh)) {
         g_failed = true;
         g_open = false;  // stop swallowing input immediately
-        LogSeh("Present", GetExceptionCode());
+        LogSeh("Present", seh);
     }
 }
 
@@ -718,12 +744,13 @@ HRESULT STDMETHODCALLTYPE HkPresent1(IDXGISwapChain1* sc, UINT sync, UINT flags,
 // ResizeBuffers while any back-buffer reference is alive. It only touches our
 // own COM object, never game code.
 void ReleaseRtvGuarded(IDXGISwapChain* sc) {
+    SehInfo seh;
     __try {
         if (sc && sc == g_swapChain) ReleaseRtv();
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    } __except (SehFilter(GetExceptionInformation(), &seh)) {
         g_failed = true;
         g_open = false;
-        LogSeh("ResizeBuffers", GetExceptionCode());
+        LogSeh("ResizeBuffers", seh);
     }
 }
 

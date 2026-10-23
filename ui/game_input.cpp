@@ -1,5 +1,7 @@
 #include "game_input.h"
 
+#include <windows.h>
+
 #include <atomic>
 #include <cstddef>
 #include <string>
@@ -73,9 +75,20 @@ void Resolve() {
     SR2_DEBUG("ui: input lock resolved (map {}, cursor {})", g_api.mapOk, g_api.cursorOk);
 }
 
+// While there is no InputDirector (title screen, loading) the search is retried at
+// most every kDirectorRetryMs: a FindObjectOfType on every tick cost 1-2 ms per
+// frame while the overlay was open there (perf: frame:ui.overlay, 570 frames > 2 ms).
+constexpr unsigned long long kDirectorRetryMs = 1000;
+unsigned long long g_directorTry = 0;
+
 Il2CppObject* FindDirector() {
     if (g_director && core::unity::IsAlive(g_director)) return g_director;
+    g_director = nullptr;
+    const unsigned long long now = GetTickCount64();
+    if (g_directorTry && now - g_directorTry < kDirectorRetryMs) return nullptr;
+    g_directorTry = now;
     g_director = core::unity::FindObjectOfType(g_api.inputDirector);
+    if (g_director) g_directorTry = 0;  // found: the next loss searches at once
     return g_director;
 }
 
