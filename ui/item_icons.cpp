@@ -325,7 +325,7 @@ bool Draw(ImDrawList* dl, uint32_t id, ImVec2 min, ImVec2 max, ImU32 tint) {
     if (id > g_local.size()) return false;
     const Icon& ic = g_local[id - 1];
     const View* v = ViewFor(ic.tex);
-    if (!v) return false;
+    if (!v || !(ic.aspect > 0.0f)) return false;
     const float bw = max.x - min.x, bh = max.y - min.y;
     float w = bw, h = bw / ic.aspect;
     if (h > bh) h = bh, w = bh * ic.aspect;

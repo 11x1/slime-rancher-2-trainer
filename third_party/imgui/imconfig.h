@@ -20,6 +20,13 @@
 //#define IM_ASSERT(_EXPR)  MyAssert(_EXPR)
 //#define IM_ASSERT(_EXPR)  ((void)(_EXPR))     // Disable asserts
 
+// sr2mods: the checks stay on in every build and report to the mod log (once per check,
+// ui/overlay.cpp) instead of assert(), which Release compiles out. ImGui's code after a
+// failed check carries on as it would without asserts; some of its own guards were only
+// asserts (see the "sr2mods:" notes in imgui_draw.cpp).
+void Sr2ImGuiAssertFailed(const char* expr, const char* file, int line);
+#define IM_ASSERT(_EXPR) ((_EXPR) ? (void)0 : Sr2ImGuiAssertFailed(#_EXPR, __FILE__, __LINE__))
+
 //---- Define attributes of all API symbols declarations, e.g. for DLL under Windows
 // Using Dear ImGui via a shared library is not recommended, because of function call overhead and because we don't guarantee backward nor forward ABI compatibility.
 // - Windows DLL users: heaps and globals are not shared across DLL boundaries! You will need to call SetCurrentContext() + SetAllocatorFunctions()

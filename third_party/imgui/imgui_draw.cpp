@@ -5252,11 +5252,16 @@ static ImFontGlyph* ImFontAtlasBuildSetupFontBakedEllipsis(ImFontAtlas* atlas, I
     if (dot_glyph == NULL)
         return NULL;
     ImFontAtlasRectId dot_r_id = dot_glyph->PackId; // Deep copy to avoid invalidation of glyphs and rect pointers
-    ImTextureRect* dot_r = ImFontAtlasPackGetRect(atlas, dot_r_id);
+    // sr2mods: no rectangle for the dot (not packed / discarded), or none for the "...": no baked ellipsis.
+    ImTextureRect* dot_r = dot_r_id != ImFontAtlasRectId_Invalid ? ImFontAtlasPackGetRect(atlas, dot_r_id) : NULL;
+    if (dot_r == NULL)
+        return NULL;
     const int dot_spacing = 1;
     const float dot_step = (dot_glyph->X1 - dot_glyph->X0) + dot_spacing;
 
     ImFontAtlasRectId pack_id = ImFontAtlasPackAddRect(atlas, (dot_r->w * 3 + dot_spacing * 2), dot_r->h);
+    if (pack_id == ImFontAtlasRectId_Invalid)
+        return NULL;
     ImTextureRect* r = ImFontAtlasPackGetRect(atlas, pack_id);
 
     ImFontGlyph glyph_in = {};
@@ -5936,6 +5941,12 @@ ImFontAtlasRectId ImFontAtlasPackAddRect(ImFontAtlas* atlas, int w, int h, ImFon
 {
     IM_ASSERT(w > 0 && w <= 0xFFFF);
     IM_ASSERT(h > 0 && h <= 0xFFFF);
+    // sr2mods: a real check, not only the asserts above. stb_rect_pack's skyline search
+    // (stbrp__skyline_find_best_pos) stops at its sentinel node only for a width > 0: with
+    // w + padding <= 0 it walks past the sentinel and reads through its NULL 'next' (the
+    // overlay access violation at version.dll+0x22CB2D, modules/sandbox/NOTES.md).
+    if (w <= 0 || h <= 0 || w > 0xFFFF || h > 0xFFFF || w + atlas->TexGlyphPadding <= 0)
+        return ImFontAtlasRectId_Invalid;
 
     ImFontAtlasBuilder* builder = (ImFontAtlasBuilder*)atlas->Builder;
     const int pack_padding = atlas->TexGlyphPadding;
@@ -6327,7 +6338,9 @@ static bool ImGui_ImplStbTrueType_FontBakedLoadGlyph(ImFontAtlas* atlas, ImFontC
 
     // Pack and retrieve position inside texture atlas
     // (generally based on stbtt_PackFontRangesRenderIntoRects)
-    const bool is_visible = (x0 != x1 && y0 != y1);
+    // sr2mods: x1 > x0 rather than x0 != x1: an inverted box (a negative or non-finite raster
+    // scale saturating the int conversions) is not a glyph to pack, see ImFontAtlasPackAddRect.
+    const bool is_visible = (x1 > x0 && y1 > y0);
     if (is_visible)
     {
         const int w = (x1 - x0 + oversample_h - 1);
@@ -6957,9 +6970,22 @@ ImFontBaked* ImFont::GetFontBaked(float size, float density)
     // Round font size
     // - ImGui::PushFont() will already round, but other paths calling GetFontBaked() directly also needs it (e.g. ImFontAtlasBuildPreloadAllGlyphRanges)
     size = ImGui::GetRoundedFontSize(size);
+    // sr2mods: the same range PushFont() keeps (UpdateCurrentFontSize). ImDrawList::AddText() and
+    // CalcTextSizeA() pass their size here unchecked: a NaN, infinite or >= 2^31 size rounds to
+    // INT_MIN, and a negative size makes stb_truetype return inverted glyph boxes.
+    if (!(size >= 1.0f && size <= IMGUI_FONT_SIZE_MAX))
+    {
+        IM_ASSERT(size >= 1.0f && size <= IMGUI_FONT_SIZE_MAX && "font size out of range");
+        size = (size > IMGUI_FONT_SIZE_MAX) ? IMGUI_FONT_SIZE_MAX : 1.0f;
+    }
 
     if (density < 0.0f)
         density = CurrentRasterizerDensity;
+    if (!(density > 0.0f && density <= 64.0f)) // sr2mods: it scales the raster size like `size` does
+    {
+        IM_ASSERT(density > 0.0f && density <= 64.0f && "rasterizer density out of range");
+        density = 1.0f;
+    }
     if (baked && baked->Size == size && baked->RasterizerDensity == density)
         return baked;
 
