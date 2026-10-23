@@ -27,6 +27,7 @@ struct Vec4 { float x, y, z, w; };
 struct Quat { float x, y, z, w; };
 struct Rect { float x, y, w, h; };
 struct Color { float r, g, b, a; };
+struct Mat4 { float m[16]; };  // UnityEngine.Matrix4x4: column-major, m[row + 4 * col] (= its int indexer)
 
 // A bound managed method: native pointer + its MethodInfo (passed last).
 struct Fn {
@@ -157,6 +158,15 @@ Vec3 GetPosition(Il2CppObject* t);
 Quat GetRotation(Il2CppObject* t);
 Vec3 TransformPoint(Il2CppObject* t, Vec3 p);
 Vec3 InverseTransformPoint(Il2CppObject* t, Vec3 p);
+// Transform.localToWorldMatrix / worldToLocalMatrix; false if unavailable.
+bool LocalToWorld(Il2CppObject* t, Mat4& out);
+bool WorldToLocal(Il2CppObject* t, Mat4& out);
+Mat4 Mul(const Mat4& a, const Mat4& b);  // a * b
+
+// ---- Shader globals --------------------------------------------------------------
+bool HasShaderGlobals();                          // Shader.PropertyToID + SetGlobalMatrix + the matrix getters
+int ShaderPropertyId(std::string_view name);      // Shader.PropertyToID; -1 if unavailable
+void ShaderSetGlobalMatrix(int id, const Mat4& m);  // Shader.SetGlobalMatrix(int, Matrix4x4)
 
 // ---- RectTransform -----------------------------------------------------------
 void SetAnchors(Il2CppObject* rt, Vec2 min, Vec2 max);
@@ -193,8 +203,11 @@ Il2CppObject* AddMask(Il2CppObject* go);
 Il2CppObject* AddCanvasGroup(Il2CppObject* go);
 void CanvasGroupSetAlpha(Il2CppObject* cg, float a);
 void CanvasGroupSetBlocksRaycasts(Il2CppObject* cg, bool v);
+void CanvasGroupSetIgnoreParentGroups(Il2CppObject* cg, bool v);  // no-op if unavailable
+bool HasIgnoreParentGroups();
 Il2CppObject* AddCanvas(Il2CppObject* go);  // nested canvas, isolates our rebuilds
 Il2CppObject* CanvasRoot(Il2CppObject* canvas);
+int CanvasRenderMode(Il2CppObject* canvas);  // 0 ScreenSpaceOverlay, 1 ScreenSpaceCamera, 2 WorldSpace, -1 unknown
 void CanvasSetOverlay(Il2CppObject* canvas, int sortingOrder);  // ScreenSpaceOverlay root canvas
 bool BehaviourEnabled(Il2CppObject* b);
 bool MaskShowsGraphic(Il2CppObject* mask);         // Mask.showMaskGraphic (true if unknown)
