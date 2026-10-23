@@ -62,6 +62,7 @@ constexpr int kMaxSlots = 32;  // slot mask width
 constexpr unsigned long long kRecipeStateMs = 2000;  // blueprint / owned counts in the crafter
 constexpr unsigned long long kCatRetryMs = 5000;     // look for the fabricator categories again (not loaded yet)
 constexpr int kMaxSpawn = 20;   // per click
+constexpr int kMaxDrop = 60;    // "Put in slots": most items dropped in front of the player per item
 constexpr int kMaxCraft = 99;   // per click
 constexpr float kSpawnDist = 2.5f;  // metres in front of the camera
 
@@ -173,7 +174,7 @@ private:
     bool EnsureMaterials();
     void RefreshRecipeState();
     Il2CppObject* SlotUnlockUpgrade(const Ctx& c, Il2CppObject* slot, Il2CppObject** upgradeModel, int* level = nullptr);
-    std::string RecipeCost(Il2CppObject* def);
+    std::string RecipeCost(Il2CppObject* def, std::vector<bridge::CostLine>* lines = nullptr);
     Il2CppObject* GadgetDirector();
     void Refresh();
     void TopUpEnergy();
@@ -182,7 +183,8 @@ private:
     void DoNewbucks(const Ctx& c, int64_t target, const char* how);
     void DoSlotCount(const Ctx& c, int idx, int64_t value);
     void DoPutItem(const Ctx& c, int idx, uintptr_t item, int64_t value);
-    void DoSpawn(const Ctx& c, uintptr_t item, int64_t count);
+    int DoSpawn(const Ctx& c, uintptr_t item, int64_t count, int limit = kMaxSpawn);
+    void DoStow(const Ctx& c, int sel, uintptr_t item, int64_t amount, bool replace);
     void DoCraft(uintptr_t item, int64_t count);
     void DoAddMaterial(uintptr_t item, int64_t count);
     void DoMoveSlot(const Ctx& c, int from, int to);
@@ -1251,9 +1253,21 @@ bool Sandbox::EnsureSpawnables() {
 }
 
 // "20 x Pink Plort, 150 Newbucks": the recipe's ident and currency costs as the fabricator charges them.
-std::string Sandbox::RecipeCost(Il2CppObject* def) {
+std::string Sandbox::RecipeCost(Il2CppObject* def, std::vector<bridge::CostLine>* lines) {
     std::string out;
     auto add = [&](const std::string& s) { out += (out.empty() ? "" : ", ") + s; };
+    auto line = [&](const std::string& s, Il2CppObject* type) {
+        if (!lines) return;
+        bridge::CostLine l;
+        l.text = s;
+        if (type) {
+            l.icon = ItemIcon(type);
+            l.kind = ItemKind(type);
+        } else {
+            l.currency = true;
+        }
+        lines->push_back(std::move(l));
+    };
     char* costs = reinterpret_cast<char*>(def) + offCraftCosts_;
     void* ident = *reinterpret_cast<void**>(costs + offCostIdent_);
     if (const size_t n = unity::ListCount(ident)) {
@@ -1266,7 +1280,10 @@ std::string Sandbox::RecipeCost(Il2CppObject* def) {
             char* e = data + i * identCostStride_;
             const int amount = *reinterpret_cast<int32_t*>(e + offIdentCostAmount_);
             auto* type = *reinterpret_cast<Il2CppObject**>(e + offIdentCostType_);
-            if (type && amount > 0) add(std::format("{} x {}", amount, ItemName(type)));
+            if (type && amount > 0) {
+                add(std::format("{} x {}", amount, ItemName(type)));
+                line(std::format("{} x {}", amount, ItemName(type)), type);
+            }
         }
     }
     void* cur = *reinterpret_cast<void**>(costs + offCostCurrency_);
@@ -1278,6 +1295,7 @@ std::string Sandbox::RecipeCost(Il2CppObject* def) {
         if (amount <= 0) continue;
         const bool bucks = c && IsA(c, currencyClass_) && unity::Field<int32_t>(c, offPersistenceId_) == kNewbuckPersistenceId;
         add(std::format("{} {}", Thousands(amount), bucks ? std::string("Newbucks") : c ? unity::GetName(c) : std::string("?")));
+        line(std::format("{} {}", Thousands(amount), bucks ? std::string("Newbucks") : c ? unity::GetName(c) : std::string("?")), nullptr);
     }
     return out;
 }
@@ -1376,7 +1394,7 @@ bool Sandbox::EnsureRecipes() {
         r.id = reinterpret_cast<uintptr_t>(d);
         r.name = ItemName(d);
         r.icon = ItemIcon(d);
-        r.cost = RecipeCost(d);
+        r.cost = RecipeCost(d, &r.costs);
         r.perCraft = unity::Field<bool>(d, offBuyInPairs_) ? 2 : 1;
         r.category = RecipeCategory(cats, d);
         Il2CppGCHandle h = unity::NewGCHandle(d);
@@ -1630,6 +1648,7 @@ void Sandbox::Handle(const bridge::Action& a) {
         case bridge::Op::SetSlotCount: DoSlotCount(c, a.slot, a.value); break;
         case bridge::Op::PutItem: DoPutItem(c, a.slot, a.item, a.value); break;
         case bridge::Op::Spawn: DoSpawn(c, a.item, a.value); break;
+        case bridge::Op::StowItem: DoStow(c, a.slot, a.item, a.value, a.replace); break;
         case bridge::Op::Craft:
             DoCraft(a.item, a.value);
             lastRecipeState_ = 0;  // show the new owned count at once
@@ -1795,6 +1814,101 @@ void Sandbox::DoPutItem(const Ctx& c, int idx, uintptr_t item, int64_t value) {
                 : std::format("{} not put: the game refused it for slot {}{}", name, idx + 1, replaced));
 }
 
+// "Put in slots" for one item. `amount` (<= 0: the maximum of the first slot it goes into)
+// goes into the selected slot first (emptied before only with `replace`, else used only if
+// it is empty or already holds the item), then into the other unlocked slots that accept it
+// and hold it or are empty, in order after the selected one. Other items are never removed
+// from those. What is left is dropped in front of the player through the spawner (if the
+// item is in the spawn list), at most kMaxDrop. One summary line, every step's reason logged.
+void Sandbox::DoStow(const Ctx& c, int sel, uintptr_t item, int64_t amount, bool replace) {
+    uint32_t mask = 0;
+    Il2CppObject* ident = CatalogItem(item, &mask);
+    if (!ident) {
+        Done(false, "Put in slots: the item is not in the vacpack item list (anymore)");
+        return;
+    }
+    const std::string name = ItemName(ident);
+    if (!Saveable(SaveIndex(), ident)) {
+        Done(false, std::format("Put in slots: {} not put, the game can't save it", name));
+        return;
+    }
+    const int n = c.slots ? static_cast<int>(std::min<size_t>(unity::ArrayLength(c.slots), kMaxSlots)) : 0;
+    if (!c.ammo || n == 0) {
+        Done(false, std::format("Put in slots: {} not put, no vacpack slots", name));
+        return;
+    }
+    if (sel < 0 || sel >= n) sel = 0;
+    int left = amount > 0 ? static_cast<int>(std::min<int64_t>(amount, 1'000'000)) : -1;  // -1: the first slot's maximum
+    std::string where, skipped, replaced;
+    for (int k = 0; k < n && left != 0; ++k) {
+        int idx = (sel + k) % n;
+        Il2CppObject* slot = SlotAt(c, idx);
+        if (!slot) continue;
+        if (!(mask & (1u << idx))) continue;  // the slot does not take this item
+        bool unlocked = false;
+        if (!CallValue(slotUnlocked_, slot, {}, "AmmoSlot.IsUnlocked", unlocked) || !unlocked) continue;
+        int max = 0;
+        if (!CallValue(slotMax_, c.ammo, {&idx}, "AmmoSlotManager.GetSlotMaxCount", max) || max <= 0) continue;
+        Il2CppObject* curId = unity::Field<Il2CppObject*>(slot, offSlotId_);
+        int cur = unity::Field<int32_t>(slot, offSlotCount_);
+        if (cur > 0 && curId != ident) {
+            if (k != 0 || !replace) {
+                skipped += std::format(" {}", idx + 1);
+                continue;  // holds something else: left alone
+            }
+            int sub = cur;
+            bool ok = false;
+            Call(decrement_, c.ammo, {&idx, &sub}, "AmmoSlotManager.Decrement", &ok);
+            cur = unity::Field<int32_t>(slot, offSlotCount_);
+            if (!ok || cur > 0) {
+                skipped += std::format(" {}", idx + 1);
+                continue;
+            }
+            replaced = std::format(" (replaced {} x {} in slot {})", sub, ItemName(curId), idx + 1);
+        }
+        if (cur <= 0) cur = 0;
+        if (left < 0) {  // "a slot's maximum": top this first slot up to it
+            left = max - cur;
+            if (left == 0) {
+                Done(true, std::format("Put in slots: slot {} is already full of {}", idx + 1, name));
+                return;
+            }
+        }
+        int add = std::min(left, max - cur);
+        if (add <= 0) continue;  // already full of it
+        bool overflow = false, added = false;
+        if (!CallValue(addResource_, c.ammo, {ident, &idx, &add, &overflow}, "AmmoSlotManager.MaybeAddResource", added) || !added) {
+            SR2_WARN("[{}] put in slots: the game refused {} x {} for slot {}", kModule, add, name, idx + 1);
+            continue;
+        }
+        left -= add;
+        where += std::format("{}slot {} +{}", where.empty() ? "" : ", ", idx + 1, add);
+    }
+    if (left < 0) {  // no slot took any (the amount was "a slot's maximum")
+        Done(false, std::format("Put in slots: no unlocked slot takes {} or has room for it{}", name,
+                                skipped.empty() ? std::string() : " (slots" + skipped + " hold other items)"));
+        return;
+    }
+    std::string dropped;
+    bool ok = !where.empty();
+    if (left > 0) {
+        bool spawnable = false;
+        if (spawnables_)
+            for (const bridge::Item& it : *spawnables_) spawnable = spawnable || it.id == item;
+        if (!spawnable) {
+            dropped = std::format("; {} didn't fit and can't be dropped (not in the spawn list)", left);
+        } else {
+            const int want = std::min(left, kMaxDrop);
+            const int got = DoSpawn(c, item, want, kMaxDrop);  // logs its own line
+            ok = ok || got > 0;
+            dropped = got > 0 ? std::format("; dropped {} in front of you", got) : std::format("; {} didn't fit and could not be dropped", left);
+            if (got > 0 && left > got) dropped += std::format(" ({} more didn't fit: at most {} are dropped at once)", left - got, kMaxDrop);
+        }
+    }
+    Done(ok, std::format("Put in slots: {} -> {}{}{}{}", name, where.empty() ? std::string("no slot") : where, replaced, dropped,
+                         skipped.empty() || !where.empty() ? std::string() : " (slots" + skipped + " hold other items)"));
+}
+
 bool Sandbox::GetVec3(const MethodInfo* m, Il2CppObject* obj, Vec3& out) {
     return obj && unity::IsAlive(obj) && CallValue(m, obj, {}, "Transform.get_position/forward", out);
 }
@@ -1826,50 +1940,50 @@ bool Sandbox::SpawnPose(const Ctx& c, Vec3& pos, Vec3& fwd) {
 // it shoots an item out (VacuumItem.Expel): the actor model is registered with
 // the game model in the current scene group, so the game saves it like any
 // other loose item. A short raycast keeps spawns in front of walls.
-void Sandbox::DoSpawn(const Ctx& c, uintptr_t item, int64_t count) {
+int Sandbox::DoSpawn(const Ctx& c, uintptr_t item, int64_t count, int limit) {
     if (!spawnWhy_.empty()) {
         Done(false, "Spawner unavailable: " + spawnWhy_);
-        return;
+        return 0;
     }
     Il2CppObject* ident = Lookup(spawnById_, item, identClass_);
     if (!ident) {
         Done(false, "Not spawned: the item is not in the spawn list (anymore)");
-        return;
+        return 0;
     }
     const std::string name = ItemName(ident);
     if (!Saveable(SaveIndex(), ident)) {
         Done(false, std::format("{} not spawned: the game can't save it", name));
-        return;
+        return 0;
     }
     if (spawnables_ && TarrsOff())
         for (const bridge::Item& it : *spawnables_)
             if (it.id == item && it.tarr) {
                 Done(false, std::format("{} not spawned: Tarrs are disabled in this save's game settings", name));
-                return;
+                return 0;
             }
     Il2CppObject* prefab = unity::Field<Il2CppObject*>(ident, offIdentPrefab_);
     if (!prefab || !unity::IsAlive(prefab)) {
         Done(false, std::format("{} not spawned: it has no prefab", name));
-        return;
+        return 0;
     }
     Il2CppObject* scene = nullptr;
     bool found = false;
     if (!CallValue(tryGetSceneContext_, nullptr, {&scene}, "SceneContextUtility.TryGetSceneContext", found) || !found ||
         !scene || !unity::IsAlive(scene)) {
         Done(false, std::format("{} not spawned: no scene context", name));
-        return;
+        return 0;
     }
     Il2CppObject* regions = unity::Field<Il2CppObject*>(scene, offScRegionRegistry_);
     bool ok = false;
     Il2CppObject* group = regions ? Call(currentSceneGroup_, regions, {}, "RegionRegistry.CurrentSceneGroup", &ok) : nullptr;
     if (!group || !unity::IsAlive(group)) {
         Done(false, std::format("{} not spawned: the current scene group is unknown", name));
-        return;
+        return 0;
     }
     Vec3 eye{}, fwd{};
     if (!SpawnPose(c, eye, fwd)) {
         Done(false, std::format("{} not spawned: could not read where you are looking", name));
-        return;
+        return 0;
     }
     float dist = kSpawnDist;
     if (raycast_) {
@@ -1883,8 +1997,8 @@ void Sandbox::DoSpawn(const Ctx& c, uintptr_t item, int64_t count) {
             if (std::isfinite(d)) dist = std::clamp(d - 0.6f, 0.5f, kSpawnDist);
         }
     }
-    const int n = static_cast<int>(std::clamp<int64_t>(count, 1, kMaxSpawn));
-    const int cols = std::min(n, 5);
+    const int n = static_cast<int>(std::clamp<int64_t>(count, 1, std::max(1, limit)));
+    const int cols = std::min(n, n > kMaxSpawn ? 10 : 5);  // more than a click's worth: wider rows, fewer of them
     const Vec3 right{fwd.z, 0, -fwd.x};
     Quat rot{0, 0, 0, 1};
     int spawned = 0;
@@ -1905,6 +2019,7 @@ void Sandbox::DoSpawn(const Ctx& c, uintptr_t item, int64_t count) {
     Done(spawned > 0, spawned == n   ? std::format("Spawned {} x {}", n, name)
                       : spawned > 0  ? std::format("Spawned {} of {} x {} (the game refused the rest)", spawned, n, name)
                                      : std::format("{} not spawned: the game refused it", name));
+    return spawned;
 }
 
 // Crafts `count` of a fabricator gadget at no cost: what the fabricator's

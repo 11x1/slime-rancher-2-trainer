@@ -63,6 +63,14 @@ struct Slot {
     bool unlockable = false;  // locked, and a vacpack upgrade unlocks it (Op::UnlockSlot)
 };
 
+// One line of a recipe's fabricator cost ("20 x Pink Plort" with its icon, or "150 Newbucks").
+struct CostLine {
+    std::string text;
+    uint32_t icon = 0;       // ui/item_icons.h id (0: none; currencies have none)
+    Kind kind = Kind::Other;
+    bool currency = false;
+};
+
 // A fabricator gadget recipe (a GadgetDefinition with a crafting cost), or a
 // crafting material the refinery stores (Snapshot::materials).
 struct Recipe {
@@ -71,6 +79,7 @@ struct Recipe {
     uint32_t icon = 0;
     int category = -1;      // index into Snapshot::recipeCategories (-1: none)
     std::string cost;       // what the fabricator would charge, e.g. "20 x Pink Plort, 150 Newbucks"
+    std::vector<CostLine> costs;  // the same, one entry per ident / currency cost
     bool unlocked = false;  // GadgetDirector.HasBlueprint (materials: always true)
     int owned = 0;          // GadgetDirector.GetItemCount (gadget inventory; the refinery for materials)
     int perCraft = 1;       // 2 for gadgets the fabricator makes in pairs (GadgetDefinition.BuyInPairs)
@@ -115,6 +124,9 @@ enum class Op {
     MoveSlot,        // slot = from, value = to: moves the contents (merges into the same item, else swaps)
     UnlockSlot,      // slot: applies the vacpack upgrade levels that unlock it
     AddMaterial,     // item (from materials), value = how many; added to the refinery
+    StowItem,        // slot = selected slot, item (from catalog), value = amount (<= 0: one slot's maximum), replace:
+                     // fills the selected slot (replacing its contents only if `replace`), then the slots that hold
+                     // the item or are empty; what does not fit is dropped in front of the player
 };
 
 struct Action {
@@ -122,6 +134,7 @@ struct Action {
     int slot = -1;
     int64_t value = 0;
     uintptr_t item = 0;
+    bool replace = false;  // StowItem: may empty the selected slot if it holds something else
 };
 
 struct Status {
