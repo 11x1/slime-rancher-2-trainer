@@ -18,6 +18,7 @@ std::unique_ptr<sr2::core::Module> CreateWallMarkers();   // modules/wall_marker
 std::unique_ptr<sr2::core::Module> CreatePlotUpgrades();  // modules/plot_upgrades/module.cpp
 std::unique_ptr<sr2::core::Module> CreateSellUpgrades();  // modules/sell_upgrades/module.cpp
 std::unique_ptr<sr2::core::Module> CreateCustomUpgrades();  // modules/custom_upgrades/module.cpp
+std::unique_ptr<sr2::core::Module> CreateDronePriceLimit();  // modules/drone_price_limit/module.cpp
 }  // namespace sr2::modules
 
 namespace sr2::core {
@@ -34,6 +35,7 @@ void RegisterBuiltinModules(ModuleManager& mm) {
     mm.Register(modules::CreatePlotUpgrades());
     mm.Register(modules::CreateSellUpgrades());
     mm.Register(modules::CreateCustomUpgrades());
+    mm.Register(modules::CreateDronePriceLimit());
 }
 
 }  // namespace sr2::core
