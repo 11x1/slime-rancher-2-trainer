@@ -524,33 +524,39 @@ void RenderFrame() {
     if (!g_rtv) return;
 
     ImGuiIO& io = ImGui::GetIO();
-    DrainMessages();
-    ImGui_ImplDX11_NewFrame();
-    ImGui_ImplWin32_NewFrame();
+    {
+        SR2_PERF_DETAIL("hook:ui.Present.imgui");  // CPU: input, ImGui frame, draw lists
+        DrainMessages();
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
 
-    // The back buffer can differ from the client area (scaled fullscreen);
-    // ImGui works in client coordinates, the renderer maps them onto the buffer.
-    if (io.DisplaySize.x > 0 && io.DisplaySize.y > 0 && g_bbWidth && g_bbHeight)
-        io.DisplayFramebufferScale = ImVec2(g_bbWidth / io.DisplaySize.x, g_bbHeight / io.DisplaySize.y);
-    ApplyScale(io.DisplaySize.y);
+        // The back buffer can differ from the client area (scaled fullscreen);
+        // ImGui works in client coordinates, the renderer maps them onto the buffer.
+        if (io.DisplaySize.x > 0 && io.DisplaySize.y > 0 && g_bbWidth && g_bbHeight)
+            io.DisplayFramebufferScale = ImVec2(g_bbWidth / io.DisplaySize.x, g_bbHeight / io.DisplaySize.y);
+        ApplyScale(io.DisplaySize.y);
 
-    if (open) {
-        PollMouseButtons(io);
-        io.MouseDrawCursor = !core::main_thread::Ready() || game_input::WantSoftwareCursor();
-    } else {
-        io.MouseDrawCursor = false;
+        if (open) {
+            PollMouseButtons(io);
+            io.MouseDrawCursor = !core::main_thread::Ready() || game_input::WantSoftwareCursor();
+        } else {
+            io.MouseDrawCursor = false;
+        }
+
+        ImGui::NewFrame();
+        if (hudMarkers) hud::Draw();  // foreground draw list (the module hides them while the settings window is open)
+        if (momentum) momentum_hud::Draw();
+        if (open) {
+            if (!menu::Draw(MakeHost())) overlay::SetOpen(false);
+        } else if (hint) {
+            menu::DrawHint(MakeHost());
+        }
+        ImGui::Render();
+        g_textInputActive = io.WantTextInput;
     }
 
-    ImGui::NewFrame();
-    if (hudMarkers) hud::Draw();  // foreground draw list (the module hides them while the settings window is open)
-    if (momentum) momentum_hud::Draw();
-    if (open) {
-        if (!menu::Draw(MakeHost())) overlay::SetOpen(false);
-    } else if (hint) {
-        menu::DrawHint(MakeHost());
-    }
-    ImGui::Render();
-    g_textInputActive = io.WantTextInput;
+    // D3D11 submission on the game's immediate context: a driver / GPU stall shows up here.
+    SR2_PERF_DETAIL("hook:ui.Present.d3d");
 
     ID3D11RenderTargetView* oldRtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
     ID3D11DepthStencilView* oldDsv = nullptr;
