@@ -35,8 +35,9 @@
 //   on a mod-free load the slots get the ElderGroup definitions again
 //   (AmmoSlotDefinition.IsAllowed = !blockList.Contains && group.IsMember) and
 //   ValidateAndAdjustSlots would drop them.
-//   => Our clone: Instantiate(DeluxeStuff) under the coop plot (inactive), TV and button
-//   removed, the SiloStorage's two slot definitions replaced by ONE session clone of the
+//   => Our clone: Instantiate(DeluxeStuff) under the coop plot (inactive), TV removed, the
+//   button kept as the manual Activate (its Collector nulled; the module's Activate detour sends
+//   a press to CoopWorld::Activate = the excess-only vacuum below, now), the SiloStorage's two slot definitions replaced by ONE session clone of the
 //   elder definition (same _maxAmount 100, _slotTypeGroup = MeatGroup, block list = ElderGroup
 //   members + UnstableMeat), PlortCollector disabled (it would NRE without a LandPlotModel and
 //   cannot keep a breeding stock), placed in a free corner (below). The storage gets
@@ -171,6 +172,8 @@ struct CoopWorld::Impl {
     Il2CppClass* siloStorageClass = nullptr;
     Il2CppClass* plortCollectorClass = nullptr;
     Il2CppClass* collectorActivatorClass = nullptr;
+    size_t offActCollector = 0;  // PlortCollectorActivator.Collector (optional: 0 = the button is removed)
+    bool keepButton = false;     // CoopWorld::KeepHenButton
     Il2CppClass* slotDefClass = nullptr;
     Il2CppClass* typeGroupClass = nullptr;
     Il2CppClass* identifiableClass = nullptr;
@@ -418,7 +421,9 @@ struct CoopWorld::Impl {
     bool ReadSlots(Il2CppObject* clone, std::vector<HenSlot>& out, Il2CppObject** ammoOut = nullptr,
                    Il2CppObject** storageOut = nullptr);
     void SnapshotInto(Il2CppObject* clone, CoopRequest& req);
-    void ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopRequest& req);
+    // manual: the collector's button (no warm-up, no period; `result` gets a short text for the player).
+    void ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopRequest& req, bool manual = false,
+                  std::string* result = nullptr);
     struct Census {
         int hens = 0, roosters = 0;  // adults in the coop (not held by a vac)
     };
@@ -426,6 +431,7 @@ struct CoopWorld::Impl {
     bool loggedNoHen = false;
     bool henBroken = false;  // a build failed structurally: not retried this session
     bool loggedLinked = false;
+    bool henButton = false;  // the last built clone kept its button (build log)
 };
 
 // ---------------------------------------------------------------- setup --
@@ -517,6 +523,10 @@ bool CoopWorld::Setup(Resolver& R, const char* module, std::string& why) {
     off(p->slotDefClass, "_maxAmount", p->offDefMax);
     off(p->typeGroupClass, "_memberTypes", p->offGroupMembers);
     off(p->identifiableClass, "identType", p->offIdentType);
+    if (p->collectorActivatorClass) {  // optional: without it the clone has no button (as before)
+        std::string err;
+        if (auto o = R.FieldOffset(p->collectorActivatorClass, "Collector", &err)) p->offActCollector = *o;
+    }
     p->getPlotPrefab = method(lookup, "GetPlotPrefab", 1);
     p->compInParent = byParams(component, "GetComponentInParent", {"System.Type", "System.Boolean"});
     p->compInChildren = byParams(component, "GetComponentInChildren", {"System.Type", "System.Boolean"});
@@ -1058,8 +1068,8 @@ void CoopWorld::Impl::CreateHen(Il2CppObject* plot, CoopRequest& req, Il2CppObje
         henBroken = true;
         return;
     }
-    // Keep only the collector branch (drops the deluxe TV), and drop its button (it would start
-    // the disabled vanilla collector).
+    henButton = false;
+    // Keep only the collector branch (drops the deluxe TV).
     Il2CppObject* storageTr = unity::TransformOf(storage);
     for (Il2CppObject* child : ChildTransforms(root)) {
         bool keep = child == storageTr;
@@ -1071,11 +1081,23 @@ void CoopWorld::Impl::CreateHen(Il2CppObject* plot, CoopRequest& req, Il2CppObje
         }
         if (!keep) DestroyNow(unity::GameObjectOf(child));
     }
+    // The collector's button (PlortCollectorActivator + TechUIInteractable, "press E"): kept as the
+    // Hen Collector's manual Activate (user request), with its Collector set to null. Vanilla
+    // Activate would call Collector.StartCollection, i.e. a DoCollection of every adult; the module's
+    // Activate detour never runs the original for a null Collector and hands the press to
+    // CoopWorld::Activate instead (the same excess-only vacuum as the tick). Without the field
+    // offset the button is removed as before.
     if (Il2CppObject* act = InChildren(root, collectorActivatorClass, true)) {
-        Il2CppObject* actTr = unity::TransformOf(act);
-        Il2CppObject* parent = Call(trGetParent, actTr, {}, "Transform.get_parent", &ok);
-        Il2CppObject* doomed = (ok && unity::IsAlive(parent) && parent != storageTr && parent != root) ? parent : actTr;
-        DestroyNow(unity::GameObjectOf(doomed));
+        if (offActCollector && keepButton) {
+            unity::Field<Il2CppObject*>(act, offActCollector) = nullptr;  // null store: no write barrier needed
+            henButton = true;
+        } else {
+            Il2CppObject* actTr = unity::TransformOf(act);
+            Il2CppObject* parent = Call(trGetParent, actTr, {}, "Transform.get_parent", &ok);
+            Il2CppObject* doomed =
+                (ok && unity::IsAlive(parent) && parent != storageTr && parent != root) ? parent : actTr;
+            DestroyNow(unity::GameObjectOf(doomed));
+        }
     }
     // Storage: our slot definition in every slot (local AmmoSlotManager built by Awake).
     void* defs = unity::Field<void*>(storage, offStorageDefs);
@@ -1120,8 +1142,9 @@ void CoopWorld::Impl::CreateHen(Il2CppObject* plot, CoopRequest& req, Il2CppObje
     if (req.hens)
         for (const HenSlot& s : *req.hens) stored += std::max(s.count, 0);
     timers[req.id] = PlotTimer{};
-    SR2_INFO("[{}] hen collector built on plot '{}' ({} slot(s) x {}, {} chicken(s) restored, {})", module, req.id, nDefs,
-             henMax, stored, vac ? "vacuum: the elder collector's own suction" : "no vacuum: stored directly");
+    SR2_INFO("[{}] hen collector built on plot '{}' ({} slot(s) x {}, {} chicken(s) restored, {}, {})", module, req.id,
+             nDefs, henMax, stored, vac ? "vacuum: the elder collector's own suction" : "no vacuum: stored directly",
+             henButton ? "Activate button kept" : "no Activate button");
 }
 
 bool CoopWorld::Impl::SetupVacuum(Resolver& R) {
@@ -1429,7 +1452,11 @@ int CoopWorld::Impl::Collect(Il2CppObject* pc, Il2CppObject* ammo, const CoopInf
     return collected;
 }
 
-void CoopWorld::Impl::ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopRequest& req) {
+void CoopWorld::Impl::ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopRequest& req, bool manual,
+                               std::string* result) {
+    auto say = [&](std::string text) {
+        if (result) *result = std::move(text);
+    };
     Il2CppObject* storage = nullptr;
     Il2CppObject* ammo = nullptr;
     std::vector<HenSlot> live;
@@ -1452,20 +1479,30 @@ void CoopWorld::Impl::ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopReque
     if (!vac && unity::IsAlive(anim)) Call(animSetBool, anim, {&cyclone, &flag}, "Animator.SetBool");
 
     PlotTimer& t = timers[req.id];
-    if (++t.age < kWarmupTicks) return;
+    if (!manual && ++t.age < kWarmupTicks) return;
     if (!t.diagLogged) {
         t.diagLogged = true;
         LogPlacement(c.plot, clone, "in the world");  // isVisible now reflects the cameras
     }
     Il2CppObject* timeDir = unity::Field<Il2CppObject*>(pc, offPcTimeDir);
-    if (!timeDir || PendingJoints(pc) > 0) return;  // chickens still on their way in
+    if (!timeDir) return;
+    if (PendingJoints(pc) > 0) {  // chickens still on their way in
+        say("Already collecting");
+        return;
+    }
     bool ok = false;
-    if (t.next > 0.0 && !Value<bool>(Call(hasReached, timeDir, {&t.next}, "TimeDirector.HasReached", &ok))) return;
+    if (!manual && t.next > 0.0 && !Value<bool>(Call(hasReached, timeDir, {&t.next}, "TimeDirector.HasReached", &ok)))
+        return;
     Census in;
     const int keepHens = std::clamp(req.keepHens, kHenKeepHensMin, kHenKeepHensMax);
     const int keepRoosters = std::clamp(req.keepRoosters, kHenKeepRoostersMin, kHenKeepRoostersMax);
     const int n = Collect(pc, ammo, c, keepHens, keepRoosters, in);
-    if (in.hens <= keepHens && in.roosters <= keepRoosters) return;  // nothing over the limits: check again next tick
+    if (in.hens <= keepHens && in.roosters <= keepRoosters) {  // nothing over the limits: check again next tick
+        say(std::format("Nothing to collect (keeps {} hens / {} roosters)", keepHens, keepRoosters));
+        return;
+    }
+    if (n > 0) say(std::format("Collecting {} chicken{}", n, n == 1 ? "" : "s"));
+    else say("The Hen Collector is full");
     float period = unity::Field<float>(pc, offPcPeriod);
     if (!std::isfinite(period) || period <= 0.0f) period = 6.0f;
     t.next = Value<double>(Call(hoursFromNow, timeDir, {&period}, "TimeDirector.HoursFromNow", &ok));
@@ -1474,9 +1511,10 @@ void CoopWorld::Impl::ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopReque
         if (unity::IsAlive(anim)) Call(animSetBool, anim, {&cyclone, &flag}, "Animator.SetBool");
         if (req.hens) ReadSlots(clone, *req.hens);
     }
-    SR2_INFO("[{}] hen collector on plot '{}': {} hen(s) / {} rooster(s) in the coop (keeps {} / {}), {} {}; next in "
+    SR2_INFO("[{}] hen collector on plot '{}'{}: {} hen(s) / {} rooster(s) in the coop (keeps {} / {}), {} {}; next in "
              "{:.1f} game hours",
-             module, req.id, in.hens, in.roosters, keepHens, keepRoosters, vac ? "vacuuming" : "stored directly", n, period);
+             module, req.id, manual ? " (Activate button)" : "", in.hens, in.roosters, keepHens, keepRoosters,
+             vac ? "vacuuming" : "stored directly", n, period);
 }
 
 // ---------------------------------------------------------------- api --
@@ -1511,6 +1549,48 @@ void CoopWorld::Tick(const QueryFn& query, const LookupFn& lookup) {
         } else if (have.hen) p.ServeHen(have.hen, c, req);
         if (sr2::core::ModuleFaulted(p.module)) return;
     }
+}
+
+void CoopWorld::KeepHenButton(bool on) {
+    if (impl_) impl_->keepButton = on;
+}
+
+Il2CppObject* CoopWorld::HenButtonPlot(Il2CppObject* activator) {
+    if (!ready_ || !impl_) return nullptr;
+    Impl& p = *impl_;
+    if (!p.offActCollector || !p.keepButton || !unity::IsAlive(activator) || !p.IsA(activator, p.collectorActivatorClass)) return nullptr;
+    if (unity::Field<Il2CppObject*>(activator, p.offActCollector) != nullptr) return nullptr;  // vanilla button
+    Il2CppObject* plot = p.InParent(activator, p.plotClass);
+    if (!plot || unity::Field<int32_t>(plot, p.offPlotType) != kPlotCoop) return nullptr;
+    Impl::Children have = p.Scan(plot, generation_, false);
+    if (!have.hen) return nullptr;
+    // Ours only if the button sits inside this plot's current Hen Collector clone.
+    Il2CppObject* henTr = unity::TransformOf(have.hen);
+    bool ok = false;
+    Il2CppObject* t = unity::TransformOf(activator);
+    for (int depth = 0; unity::IsAlive(t) && depth < 16; ++depth) {
+        if (t == henTr) return plot;
+        t = p.Call(p.trGetParent, t, {}, "Transform.get_parent", &ok);
+        if (!ok) break;
+    }
+    return nullptr;
+}
+
+std::string CoopWorld::Activate(Il2CppObject* plot, const QueryFn& query) {
+    const std::string fail = "The Hen Collector can't collect right now";
+    if (!ready_ || !impl_ || !unity::IsAlive(plot)) return fail;
+    Impl& p = *impl_;
+    Impl::Children have = p.Scan(plot, generation_, false);
+    if (!have.hen) return fail;
+    for (const Impl::CoopInfo& c : p.Coops()) {
+        if (c.plot != plot) continue;
+        CoopRequest req;
+        if (!query(plot, req) || !req.henCollector) return "No Hen Collector here";
+        std::string message;
+        p.ServeHen(have.hen, c, req, true, &message);
+        return message.empty() ? fail : message;
+    }
+    return fail;
 }
 
 void CoopWorld::Snapshot(const QueryFn& query) {

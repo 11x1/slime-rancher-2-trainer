@@ -66,6 +66,16 @@ public:
     // Main thread, ~1 Hz: create missing clones, refit them, run the Hen Collectors, copy their
     // contents into the requests, remove unwanted / stale clones.
     void Tick(const QueryFn& query, const LookupFn& lookup);
+    // Setup (worker thread): keep the elder collector's button on new clones as the Activate button
+    // (only while the module's PlortCollectorActivator.Activate detour exists; default off).
+    void KeepHenButton(bool on);
+    // Main thread, PlortCollectorActivator.Activate detour: the coop plot whose current Hen Collector
+    // clone holds `activator` (a button with a null Collector), else nullptr.
+    Il2CppObject* HenButtonPlot(Il2CppObject* activator);
+    // Main thread: the Hen Collector's Activate button was pressed. The excess chickens are vacuumed
+    // in now (the tick's path without the warm-up and the collection period; the period restarts).
+    // Returns a short text for the player ("Collecting 3 chickens", "Nothing to collect ...").
+    std::string Activate(Il2CppObject* plot, const QueryFn& query);
     // Main thread: copy the live Hen Collector contents into the requests (before a save).
     void Snapshot(const QueryFn& query);
     // Main thread: remove our clones from every coop (module disabled / faulted). With a query,

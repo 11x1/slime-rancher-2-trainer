@@ -53,6 +53,57 @@ findings from in-game tests that are easy to get wrong again.
   arrows for roosters (`kSecondary`). The grid navigation detour offers left / right to both;
   each takes only its own (Shift held or not).
 
+### Activate button (checklist hc3)
+
+- The clone keeps the vanilla elder collector's press button (`PlortCollectorActivator` +
+  `TechUIInteractable`, inside the collector branch, so it stands next to the collector in the
+  turned corner) with its `Collector` set to null. The module's `PlortCollectorActivator.Activate`
+  detour never runs the original for a null Collector (vanilla would `StartCollection` = a
+  DoCollection of every adult) and hands the press to `CoopWorld::Activate`: the tick's excess-only
+  vacuum at once (no warm-up, no period wait; the 6 h period restarts). Button animation, press cue
+  and 0.4 s rate limit through `SiloButtons::Press`; a short text above the button ("Collecting N
+  chickens", "Nothing to collect (keeps H hens / R roosters)", "The Hen Collector is full",
+  "Already collecting"). Log: `hen collector on plot '...' (Activate button): ...`.
+- The button is kept only while that detour is installed (`CoopWorld::KeepHenButton`); the build line
+  says `Activate button kept` / `no Activate button`.
+
+### Slider keys (fix after the test of build 506a4f60)
+
+- The arrows still moved the menu selection: `FocusManager.NavigateInDirection` hands a move to every
+  `IMoveHandler` between the focused card and the spatial target through
+  `INavigationHandler.TryHandleAsNavigation` (0x79C940), and the focused card's own Selectable comes
+  first, so the old `UniformGridView.OnNavigate` detour never ran (no "taken from the menu's grid
+  navigation" line in the log). The detour is now on `TryHandleAsNavigation`; right after each call
+  NavigateInDirection checks the event's `used` flag (used -> no SetFocus). `NavigateInDirection`
+  itself is hooked by drone_price_limit (one hook per address).
+
+## Buy menu cards (fixes after the test of build 506a4f60)
+
+- **Purchase / Sell overlap.** The buttons size themselves: the prefab `TextButton_NoneSelectable`
+  (UnityPy, `duplicateassetisolation_assets__54b00e46...bundle`) has the game's own layout
+  (`LayoutManager`, `HorizontalLayout`, `EncapsulateChildren` -> `SetSizeWithCurrentAnchors` in
+  LateUpdate; the label has `ResizeToPreferred`), so the old half-width split was overwritten and the
+  buttons grew back to full width. Now (sell_upgrades `PlaceButtons`) only pivots / positions are
+  set: owned card -> PURCHASED hidden, Sell alone in its place; tier card -> Purchase pivot x 1 left
+  of the old centre, Sell pivot x 0 right of it (16 px gap), re-centred for a few ticks once the
+  layout has given them their widths. Applies to every plot menu.
+- **Sell also bought the next tier.** The prefab's `InputEventButton` performs the menu's submit on
+  pointer down / up (before the Button click reaches the Press detour): on a tier card that opened
+  the purchase prompt of the shown tier and the same click confirmed it (log: "sold Music Box" and
+  "bought Music Box II" 4 ms apart). Disabled on our clone; its submit-key icon (`InputEventDisplay`
+  under "Icon Background") is hidden too. The popup-confirm guard from feature/plot-props-2 stays as a
+  backstop.
+- **Stale card label** ("High Walls" on the Music Box card). The clones' texts were registered only
+  in the post hook of `UpdateMenuItemAvailabilityAndHidden` / `RebuildUI`. With the menu open,
+  RebuildUI's original rebinds the cards, so a card placed by the pre hook for the first time this
+  session (Music Box II taking over the Music Box card right after its purchase) ran
+  `LocalizeStringEvent.UpdateString` with no override yet and showed its template's text (the corral
+  clones' template is `Walls Upgrade`). Texts are now registered in the pre hook too.
+
+Not checked in game yet: all of the above (layout and centring, the hidden icon, that selling no longer
+buys, the label, the slider keys on keyboard and pad, the Activate button's position, prompt and
+animation).
+
 ## Selling with gamepad / keyboard
 
 The plot menu's alt action (the Info / Pedia button) sells the selected card's sellable upgrade:

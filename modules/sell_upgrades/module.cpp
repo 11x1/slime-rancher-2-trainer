@@ -112,10 +112,12 @@
 //     A copy of that category's own detailsButton prefab (the game's Purchase button) is
 //     instantiated as a sibling in the same container, labelled "Sell +N" (its
 //     LocalizeStringEvent is disabled, the TMP text set). The container has no LayoutGroup
-//     (log: "MainActionButtonContainer (LayoutGroup no)"), so the vanilla view's rect is split:
-//     PURCHASED / Purchase keeps the left half, Sell takes the right half (RectTransform
-//     sizeDelta / anchoredPosition; with a LayoutGroup that would be left to it). Without the
-//     RectTransform accessors there is no Sell button next to Purchase. An upgrade that can't
+//     (log: "MainActionButtonContainer (LayoutGroup no)"). On an owned card the PURCHASED view
+//     is hidden and Sell stands alone in its place; on a tier card Purchase and Sell stand side
+//     by side (PlaceButtons: pivots / anchoredPosition only; the buttons size themselves through
+//     the game's own LayoutManager, which overwrote the old half-width split - build 506a4f60
+//     showed them overlapping). Without the RectTransform accessors there is no Sell button next
+//     to Purchase. An upgrade that can't
 //     be sold for a passing reason ("holds food", "sell Music Box II first") gets the button
 //     non-interactable (Selectable.set_interactable(false): the prefab's own disabled look,
 //     skipped by navigation; label alpha halved on top) labelled with that reason; permanent
@@ -313,7 +315,9 @@ private:
     bool SetLabel(Il2CppObject* lse, const std::string& text);
     bool SellNow(Il2CppObject* root, Il2CppObject* priceItem, int32_t upg, const char* via);
     void DoSell(Il2CppObject* root, Il2CppObject* plot, Il2CppObject* item, int32_t upg);
-    bool SideBySide(Il2CppObject* vanillaView, Il2CppObject* ourView);
+    bool PlaceButtons(Il2CppObject* vanillaView, Il2CppObject* ourView, bool alone);
+    void ScheduleCentre(unsigned gen, int ticksLeft);
+    void CentrePair();
     Vec2 GetVec(const MethodInfo* m, Il2CppObject* rt, const char* what, bool& ok);
     void SetVec(const MethodInfo* m, Il2CppObject* rt, Vec2 v, const char* what, bool& ok);
     int RevertVisuals(Il2CppObject* plot, int32_t upg, std::string& notes);
@@ -359,6 +363,13 @@ private:
     Il2CppObject* btnItem_ = nullptr;    // the menu item whose price the refund uses (menu asset)
     int32_t btnUpgrade_ = 0;             // the owned upgrade it sells
     Il2CppGCHandle btnHandle_ = nullptr;
+    // Purchase + Sell pair (main thread only): the vanilla Purchase view's RectTransform (handle
+    // held), the pair's centre and a generation that stops stale CentrePair jobs.
+    static constexpr float kPairGap = 16.0f;
+    Il2CppObject* pairVanilla_ = nullptr;
+    Il2CppGCHandle pairVanillaHandle_ = nullptr;
+    float pairCentre_ = 0.0f;
+    unsigned pairGen_ = 0;
     // our alt-action "Sell +N" prompt (main thread only)
     Il2CppObject* altGo_ = nullptr;         // GameObject (handle held)
     Il2CppObject* altItem_ = nullptr;       // the selected card's menu item (pointer compare)
@@ -431,6 +442,8 @@ public:
     size_t offTextLabelLse_ = 0, offTextLabelTmp_ = 0;  // TextLabel._stringEvent / _textElement
     bool altOk_ = false;
     Il2CppClass* layoutGroupClass_ = nullptr;  // UnityEngine.UI.LayoutGroup (optional)
+    Il2CppClass* inputEventButtonClass_ = nullptr;   // InputEventButton (optional)
+    Il2CppClass* inputEventDisplayClass_ = nullptr;  // InputEventDisplay (optional)
     Bound<void(Il2CppObject*)> objectDestroy_;  // UnityEngine.Object.Destroy(Object)
     // RectTransform (optional: side-by-side layout of PURCHASED / Purchase and our Sell button)
     Il2CppClass* rtClass_ = nullptr;
@@ -848,6 +861,12 @@ void SellUpgrades::DestroySellButton() {
         btnHandle_ = nullptr;
         main_thread::Post([h] { unity::FreeGCHandle(h); });
     }
+    ++pairGen_;
+    pairVanilla_ = nullptr;
+    if (Il2CppGCHandle h = pairVanillaHandle_) {
+        pairVanillaHandle_ = nullptr;
+        main_thread::Post([h] { unity::FreeGCHandle(h); });
+    }
 }
 
 Vec2 SellUpgrades::GetVec(const MethodInfo* m, Il2CppObject* rt, const char* what, bool& ok) {
@@ -867,11 +886,20 @@ void SellUpgrades::SetVec(const MethodInfo* m, Il2CppObject* rt, Vec2 v, const c
     ok = good;
 }
 
-// The action container has no LayoutGroup (PURCHASED / Purchase fill it alone): split the vanilla
-// button's rect in two halves, the vanilla one keeps the left half, ours (same anchors / pivot)
-// takes the right one. Works for fixed and stretched anchors alike (sizeDelta / anchoredPosition
-// shift the edges by the same amount). The vanilla view is a fresh instance per bind.
-bool SellUpgrades::SideBySide(Il2CppObject* vanillaView, Il2CppObject* ourView) {
+// The action container has no LayoutGroup (PURCHASED / Purchase fill it alone). The buttons size
+// themselves: the game's own layout (LayoutManager.LateUpdate: HorizontalLayout +
+// EncapsulateChildren on the button root, ResizeToPreferred on its label; prefab
+// TextButton_NoneSelectable, read from the asset bundle) sets each root's width from its label, so
+// a sizeDelta we write is overwritten at the next LateUpdate (build 506a4f60: the halves grew back
+// to full width and Purchase ran under Sell). So we never size, we only place:
+//   * alone (owned card, nothing left to buy): the vanilla PURCHASED view is hidden and ours takes
+//     its anchors and centre;
+//   * pair (tier card: Purchase + Sell): both keep the vanilla anchors; the vanilla view gets
+//     pivot x 1 and ours pivot x 0, both at the old centre -/+ gap / 2, so each grows away from the
+//     middle and they can't overlap whatever their widths. CentrePair then shifts the pair so it is
+//     centred on the old centre once the layout has given them their real widths (posted, a few
+//     ticks).
+bool SellUpgrades::PlaceButtons(Il2CppObject* vanillaView, Il2CppObject* ourView, bool alone) {
     if (!layoutOk_ || !unity::IsAlive(vanillaView) || !unity::IsAlive(ourView)) return false;
     Il2CppObject* a = getTransform_(vanillaView);
     Il2CppObject* b = getTransform_(ourView);
@@ -883,29 +911,72 @@ bool SellUpgrades::SideBySide(Il2CppObject* vanillaView, Il2CppObject* ourView) 
     const Vec2 amin = GetVec(rtGetAnchorMin_, a, "RectTransform.get_anchorMin", ok);
     const Vec2 amax = GetVec(rtGetAnchorMax_, a, "RectTransform.get_anchorMax", ok);
     const Vec2 pivot = GetVec(rtGetPivot_, a, "RectTransform.get_pivot", ok);
-    const Vec2 size = GetVec(rtGetSize_, a, "RectTransform.get_sizeDelta", ok);
     const Vec2 pos = GetVec(rtGetPos_, a, "RectTransform.get_anchoredPosition", ok);
-    if (!ok || !std::isfinite(r.width) || !(r.width > 20.0f) || r.width > 10000.0f || !std::isfinite(pivot.x))
+    if (!ok || !std::isfinite(r.width) || r.width < 0.0f || r.width > 10000.0f || !std::isfinite(pivot.x) ||
+        !std::isfinite(pos.x))
         return false;
-    const float gap = std::clamp(r.width * 0.04f, 4.0f, 16.0f);
-    const float half = (r.width - gap) * 0.5f;
-    const Vec2 halfSize{size.x + (half - r.width), size.y};
-    const Vec2 left{pos.x - pivot.x * (r.width - half), pos.y};
-    const Vec2 right{pos.x - pivot.x * r.width + half + gap + pivot.x * half, pos.y};
     SetVec(rtSetAnchorMin_, b, amin, "RectTransform.set_anchorMin", ok);
     SetVec(rtSetAnchorMax_, b, amax, "RectTransform.set_anchorMax", ok);
-    SetVec(rtSetPivot_, b, pivot, "RectTransform.set_pivot", ok);
-    SetVec(rtSetSize_, b, halfSize, "RectTransform.set_sizeDelta", ok);
-    SetVec(rtSetPos_, b, right, "RectTransform.set_anchoredPosition", ok);
-    SetVec(rtSetSize_, a, halfSize, "RectTransform.set_sizeDelta", ok);
-    SetVec(rtSetPos_, a, left, "RectTransform.set_anchoredPosition", ok);
+    // Centre of the vanilla rect, in the anchored-position frame.
+    const float centre = pos.x + (0.5f - pivot.x) * r.width;
+    if (alone) {
+        SetVec(rtSetPivot_, b, Vec2{0.5f, pivot.y}, "RectTransform.set_pivot", ok);
+        SetVec(rtSetPos_, b, Vec2{centre, pos.y}, "RectTransform.set_anchoredPosition", ok);
+        if (ok) SetActive(GameObjectOf(vanillaView), false);  // ListUI destroys it on the next bind
+    } else {
+        SetVec(rtSetPivot_, a, Vec2{1.0f, pivot.y}, "RectTransform.set_pivot", ok);
+        SetVec(rtSetPos_, a, Vec2{centre - kPairGap * 0.5f, pos.y}, "RectTransform.set_anchoredPosition", ok);
+        SetVec(rtSetPivot_, b, Vec2{0.0f, pivot.y}, "RectTransform.set_pivot", ok);
+        SetVec(rtSetPos_, b, Vec2{centre + kPairGap * 0.5f, pos.y}, "RectTransform.set_anchoredPosition", ok);
+        if (ok) {
+            pairVanillaHandle_ = unity::NewGCHandle(a);
+            if (pairVanillaHandle_) {
+                pairVanilla_ = a;
+                pairCentre_ = centre;
+                ScheduleCentre(++pairGen_, 12);
+            }
+        }
+    }
     if (!loggedLayout_) {
         loggedLayout_ = true;
         SR2_INFO("[{}] sell button layout: vanilla rect {:.0f} x {:.0f} (anchors {:.2f},{:.2f}-{:.2f},{:.2f}, pivot "
-                 "{:.2f}) split into two {:.0f} wide halves, gap {:.0f}{}",
-                 kModule, r.width, r.height, amin.x, amin.y, amax.x, amax.y, pivot.x, half, gap, ok ? "" : " - FAILED");
+                 "{:.2f}, centre x {:.0f}) - {}{}",
+                 kModule, r.width, r.height, amin.x, amin.y, amax.x, amax.y, pivot.x, centre,
+                 alone ? "Sell alone (PURCHASED hidden)" : "Purchase left, Sell right", ok ? "" : " - FAILED");
     }
     return ok;
+}
+
+void SellUpgrades::ScheduleCentre(unsigned gen, int ticksLeft) {
+    main_thread::Post([this, gen, ticksLeft] {
+        if (gen != pairGen_ || !On()) return;
+        CentrePair();
+        if (ticksLeft > 1) ScheduleCentre(gen, ticksLeft - 1);
+    });
+}
+
+// Shift Purchase (pivot x 1) and Sell (pivot x 0) so the pair is centred on the old centre, with the
+// widths the game's layout has given them by now. Posted job (main thread), our pair only.
+void SellUpgrades::CentrePair() {
+    Il2CppObject* a = pairVanilla_;
+    Il2CppObject* b = btnGo_ && unity::IsAlive(btnGo_) ? unity::TransformOf(btnGo_) : nullptr;
+    if (!a || !unity::IsAlive(a) || !unity::IsAlive(b) || !IsA(a, rtClass_) || !IsA(b, rtClass_)) return;
+    bool ok = false;
+    Il2CppObject* ra = Invoke(rtGetRect_, a, {}, "RectTransform.get_rect", &ok);
+    if (!ok || !ra) return;
+    const float wa = reinterpret_cast<Rect*>(reinterpret_cast<char*>(ra) + 2 * sizeof(void*))->width;
+    Il2CppObject* rb = Invoke(rtGetRect_, b, {}, "RectTransform.get_rect", &ok);
+    if (!ok || !rb) return;
+    const float wb = reinterpret_cast<Rect*>(reinterpret_cast<char*>(rb) + 2 * sizeof(void*))->width;
+    if (!std::isfinite(wa) || !std::isfinite(wb) || wa < 0.0f || wb < 0.0f || wa > 10000.0f || wb > 10000.0f) return;
+    const float shift = (wa - wb) * 0.5f;
+    const Vec2 pa = GetVec(rtGetPos_, a, "RectTransform.get_anchoredPosition", ok);
+    const Vec2 pb = GetVec(rtGetPos_, b, "RectTransform.get_anchoredPosition", ok);
+    if (!ok) return;
+    const float xa = pairCentre_ - kPairGap * 0.5f + shift;
+    const float xb = pairCentre_ + kPairGap * 0.5f + shift;
+    if (std::fabs(pa.x - xa) > 0.5f) SetVec(rtSetPos_, a, Vec2{xa, pa.y}, "RectTransform.set_anchoredPosition", ok);
+    if (std::fabs(pb.x - xb) > 0.5f) SetVec(rtSetPos_, b, Vec2{xb, pb.y}, "RectTransform.set_anchoredPosition", ok);
 }
 
 // Short reasons that go away by themselves or by selling something else first ("holds food",
@@ -966,11 +1037,38 @@ void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
     Il2CppObject* btnView = unity::GetComponent(go, moreViewClass_);
     Il2CppObject* button = btnView ? unity::Field<Il2CppObject*>(btnView, offMoreButton_) : nullptr;
     btnButton_ = unity::IsAlive(button) ? button : nullptr;
+    // The prefab (TextButton_NoneSelectable) carries an InputEventButton: on pointer down / up it
+    // performs its InputEvent (the menu's submit) itself, before the Button's click reaches our
+    // Press detour. On a tier card that submit opened the purchase prompt of the shown tier, and
+    // the same click confirmed it (selling Music Box / Fast Growth I bought tier II in the same
+    // frame). Disabled, it gets no pointer events (EventSystem skips disabled behaviours); the
+    // Button's own click still sells. Its InputEventDisplay shows the submit key, which on this
+    // button would buy, not sell: hidden with its "Icon Background" (the alt-action prompt
+    // carries the key for selling).
+    Il2CppObject* goT = unity::TransformOf(go);  // Component calls below go through the transform
+    if (inputEventButtonClass_ && unity::IsAlive(goT)) {
+        Il2CppObject* ieb = getComponent_(goT, Type(inputEventButtonClass_));
+        if (unity::IsAlive(ieb) && IsA(ieb, inputEventButtonClass_)) setEnabled_(ieb, false);
+    }
+    if (inputEventDisplayClass_ && unity::IsAlive(goT)) {
+        Il2CppObject* disp = getComponentInChildren_(goT, Type(inputEventDisplayClass_), true);
+        Il2CppObject* dt = unity::IsAlive(disp) && IsA(disp, inputEventDisplayClass_) ? getTransform_(disp) : nullptr;
+        Il2CppObject* iconBg = unity::IsAlive(dt) ? getParent_(dt) : nullptr;
+        // Only the icon's own holder (a direct child of the button root), never the root itself.
+        if (unity::IsAlive(iconBg) && iconBg != goT && getParent_(iconBg) == goT) SetActive(GameObjectOf(iconBg), false);
+    }
 
-    // Side by side with PURCHASED / Purchase: by the container's LayoutGroup if it has one, else
-    // by splitting the slot. A Sell button that would cover the Purchase button is not shown.
+    // Owned card (PURCHASED variant): Sell alone, PURCHASED hidden (user feedback). Tier card
+    // (Purchase variant): side by side, by the container's LayoutGroup if it has one, else by
+    // PlaceButtons. A Sell button that would cover the Purchase button is not shown.
     const bool layoutGroup = layoutGroupClass_ && unity::GetComponent(parent, layoutGroupClass_) != nullptr;
-    const bool placed = layoutGroup || SideBySide(view, btnView);
+    bool placed = false;
+    if (layoutGroup) {
+        placed = true;
+        if (!purchaseVariant) SetActive(GameObjectOf(view), false);
+    } else {
+        placed = PlaceButtons(view, btnView, !purchaseVariant);
+    }
     if (!placed && purchaseVariant) {
         DestroySellButton();
         return;
@@ -1670,6 +1768,10 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
             bind(tmpSetAlpha_, method(tmpClass_, "set_alpha", 1, false), false);
         }
         layoutGroupClass_ = R.Class("UnityEngine.UI", "UnityEngine.UI", "LayoutGroup");  // optional
+        // Optional: the cloned Purchase prefab's submit wiring (see AfterMoreBind).
+        inputEventButtonClass_ = R.Class(kImage, "MonomiPark.SlimeRancher.Input", "InputEventButton");
+        inputEventDisplayClass_ =
+            R.Class(kImage, "MonomiPark.SlimeRancher.UI.Framework.CommonControls", "InputEventDisplay");
         // Optional: side-by-side layout (missing -> no Sell button next to Purchase; on owned
         // items it covers the PURCHASED slot as before).
         if (why.empty()) {

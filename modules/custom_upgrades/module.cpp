@@ -482,6 +482,7 @@ public:
     void OnAddUpgrade(Il2CppObject* plot, int32_t upg);
     void BeforeMenuUpdate(Il2CppObject* root);
     void AfterMenuUpdate(Il2CppObject* root);
+    void RegisterTexts(Il2CppObject* plot, const MenuInjection& inj);
     bool IsPlotMenu(Il2CppObject* root) const { return IsA(root, rootClass_); }
     void BeforeSave();
     void AfterSave(Il2CppObject* result);
@@ -494,6 +495,7 @@ public:
     void GateTick();
     void WorldTick();
     bool OnSiloButton(Il2CppObject* activator);
+    bool OnHenButton(Il2CppObject* activator);
     SiloSummary SellAllNow(Il2CppObject* plot, const std::string& id, const char* via, bool fromMenu);
     bool WorldQuery(Il2CppObject* plot, custom_upgrades::world::CoopRequest& req);
     void AfterDetailsBind(Il2CppObject* view, Il2CppObject* vm);
@@ -600,6 +602,8 @@ private:
     // Grid navigation (gamepad / keyboard left / right for the slider): NavigationEventData
     Il2CppClass* navEventClass_ = nullptr;
     const MethodInfo* navMoveDirMi_ = nullptr;  // NavigationEventData.get_MoveDirection
+    Il2CppObject* lastNavEvt_ = nullptr;        // last move the sliders took (identity only)
+    unsigned long long lastNavTick_ = ~0ull;
     const MethodInfo* navUseMi_ = nullptr;      // NavigationEventData.Use(bool didNavigate)
     Il2CppObject* menuRoot_ = nullptr;            // last updated LandPlotUIRoot (handle held)
     Il2CppGCHandle menuRootHandle_ = nullptr;
@@ -696,9 +700,10 @@ using ActivateFn = void (*)(Il2CppObject*, const MethodInfo*);
 ActivateFn g_origActivate = nullptr;
 size_t g_offActCollector = 0;  // PlortCollectorActivator.Collector
 
-// Our silo button clones have Collector == null (silo_world.cpp): the original would only NRE on
-// them, so it never runs for them - also not while the module is off / faulted. Vanilla buttons
-// (Collector set) always go to the original.
+// Our button clones (the silo's Sell-All button, silo_world.cpp, and the Hen Collector's Activate
+// button, coop_world.cpp) have Collector == null: the original would only NRE on them, so it never
+// runs for them - also not while the module is off / faulted. Vanilla buttons (Collector set)
+// always go to the original.
 void ActivateDetour(Il2CppObject* self, const MethodInfo* mi) {
     if (!self || !g_offActCollector || unity::Field<Il2CppObject*>(self, g_offActCollector) != nullptr) {
         g_origActivate(self, mi);
@@ -733,20 +738,26 @@ void DetailsBindDetour(Il2CppObject* view, Il2CppObject* vm, const MethodInfo* m
     if (g_self && view && g_self->On()) g_detailsGuard.Run([&] { g_self->AfterDetailsBind(view, vm); });
 }
 
-// UniformGridView.INavigationHandler.OnNavigate(NavigationEventData): the item grid of the plot menu
-// (GridArea / GenericGridItemViewHolder) moves its selection on left / right, so a pad / arrow press
-// for the slider also selected the neighbouring item (and the slider vanished with the rebind). While
-// the Hen Collector limit slider is shown those two directions step the slider instead (event used,
-// the grid keeps the item selected). Up / down and everything else pass through unchanged.
-using GridNavFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
-GridNavFn g_origGridNav = nullptr;
-sr2::core::DetourGuard g_gridNavGuard{kModule, "UniformGridView.OnNavigate"};
+// static INavigationHandler.TryHandleAsNavigation(IMoveHandler, NavigationEventData) (0x79C940): the
+// one place where FocusManager.NavigateInDirection (pad d-pad / stick, arrow keys) hands a move to the
+// handlers between the focused object and the spatial target: an INavigationHandler gets OnNavigate,
+// any other IMoveHandler (the focused card's Selectable) OnMove. Right after each call it checks the
+// event's `used` flag: used -> NotifySuccessfulNavigation and no SetFocus. A pad / arrow press for
+// the slider used to select the neighbouring card (the slider vanished with the rebind). The first
+// fix detoured UniformGridView.OnNavigate, but the focused card's own Selectable is asked first and
+// moved the selection, so that detour never ran (test of 506a4f60: no "taken from the menu's grid
+// navigation" line). While the Hen Collector sliders are shown, left / right step the slider instead
+// and the event is used; every other direction and every other menu pass through (one flag check).
+// FocusManager.NavigateInDirection itself is drone_price_limit's (one hook per address).
+using MenuNavFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+MenuNavFn g_origMenuNav = nullptr;
+sr2::core::DetourGuard g_menuNavGuard{kModule, "INavigationHandler.TryHandleAsNavigation"};
 
-void GridNavDetour(Il2CppObject* grid, Il2CppObject* evt, const MethodInfo* mi) {
+void MenuNavDetour(Il2CppObject* handler, Il2CppObject* evt, const MethodInfo* mi) {
     bool taken = false;
     if (g_self && evt && g_self->On() && g_self->SliderActive())
-        g_gridNavGuard.Run([&] { taken = g_self->OnGridNavigate(evt); });
-    if (!taken) g_origGridNav(grid, evt, mi);
+        g_menuNavGuard.Run([&] { taken = g_self->OnGridNavigate(evt); });
+    if (!taken) g_origMenuNav(handler, evt, mi);
 }
 
 bool HasUpgradeDetour(Il2CppObject* plot, int32_t upg, const MethodInfo* mi) {
@@ -1734,6 +1745,31 @@ void CustomUpgrades::BeforeMenuUpdate(Il2CppObject* root) {
                                       : ListCall(inj->list, "Add", in.item);
         }
     }
+    // Texts now, before the original runs: with the menu open, RebuildUI's original rebinds the
+    // cards (RefreshAndAdvance) and so runs LocalizeStringEvent.UpdateString for a card that was
+    // just placed (a tier taking over a vanilla card after its purchase). With the texts only
+    // registered in the post hook, a clone shown for the first time this session showed its
+    // template's text ("High Walls" on the Music Box card, test of 506a4f60) until the next bind.
+    if (sink) RegisterTexts(plot, *inj);
+}
+
+void CustomUpgrades::RegisterTexts(Il2CppObject* plot, const MenuInjection& inj) {
+    for (const Injected& in : inj.items) {
+        if (!in.inList) continue;
+        const UpgradeDef& d = *in.def;
+        if (d.id == COOP_HEN_COLLECTOR) {
+            // This coop's keep-limits (defaults until bought / set).
+            int hens = custom_upgrades::world::kHenKeepHensDefault, roosters = custom_upgrades::world::kHenKeepRoostersDefault;
+            const std::string id = PlotId(plot);
+            if (auto it = state_.plots.find(id); !id.empty() && it != state_.plots.end()) {
+                hens = ClampKeepHens(it->second.henKeepHens);
+                roosters = ClampKeepRoosters(it->second.henKeepRoosters);
+            }
+            SetTexts(in, d.title, HenDescription(hens, roosters), d.prompt);
+        } else {
+            SetTexts(in, d.title, d.description, d.prompt);
+        }
+    }
 }
 
 void CustomUpgrades::RestoreVanilla(MenuInjection& inj) {
@@ -1763,22 +1799,7 @@ void CustomUpgrades::AfterMenuUpdate(Il2CppObject* root) {
     for (auto& p : injections_)
         if (p->config == config) inj = p.get();
     if (!inj || inj->failed) return;
-    for (const Injected& in : inj->items) {
-        if (!in.inList) continue;
-        const UpgradeDef& d = *in.def;
-        if (d.id == COOP_HEN_COLLECTOR) {
-            // This coop's keep-limits (defaults until bought / set).
-            int hens = custom_upgrades::world::kHenKeepHensDefault, roosters = custom_upgrades::world::kHenKeepRoostersDefault;
-            const std::string id = PlotId(plot);
-            if (auto it = state_.plots.find(id); !id.empty() && it != state_.plots.end()) {
-                hens = ClampKeepHens(it->second.henKeepHens);
-                roosters = ClampKeepRoosters(it->second.henKeepRoosters);
-            }
-            SetTexts(in, d.title, HenDescription(hens, roosters), d.prompt);
-        } else {
-            SetTexts(in, d.title, d.description, d.prompt);
-        }
-    }
+    RegisterTexts(plot, *inj);  // again: the original may have changed what the pre hook read
 }
 
 void CustomUpgrades::Cleanup(const char* why) {
@@ -2025,7 +2046,9 @@ SiloSummary CustomUpgrades::SellAllNow(Il2CppObject* plot, const std::string& id
 }
 
 bool CustomUpgrades::OnSiloButton(Il2CppObject* activator) {
-    if (!main_thread::IsMainThread() || !silo_.IsOurs(activator)) return false;
+    if (!main_thread::IsMainThread()) return false;
+    if (OnHenButton(activator)) return true;
+    if (!silo_.IsOurs(activator)) return false;
     if (!On()) return true;  // swallowed (the button is removed with the next frame)
     Il2CppObject* plot = silo_.OwnerPlot(activator);
     if (!plot || !silo_.Press(activator)) return true;  // no silo / pressed again within 0.4 s
@@ -2043,6 +2066,24 @@ bool CustomUpgrades::OnSiloButton(Il2CppObject* activator) {
     else if (!s.noticed)  // fallback: no HUD notices (the currency popup comes from TrySell showUi)
         silo_.Message(activator, std::format("Sold {} plort{} for {} Newbucks", s.plorts, s.plorts == 1 ? "" : "s", s.value),
                       true);
+    return true;
+}
+
+// The Hen Collector's own button (the elder collector's, kept on the clone with a null Collector,
+// coop_world.cpp): collects the excess chickens now, like the vanilla collector buttons. Button
+// animation, press cue and the 0.4 s rate limit as on the silo button (SiloButtons::Press works on
+// any PlortCollectorActivator); the result as a short text above the button.
+bool CustomUpgrades::OnHenButton(Il2CppObject* activator) {
+    if (!world_.Ready()) return false;
+    Il2CppObject* plot = world_.HenButtonPlot(activator);
+    if (!plot) return false;
+    if (!On()) return true;  // swallowed (the clone is removed with the next world tick)
+    if (silo_.Ready() && !silo_.Press(activator)) return true;  // pressed again within 0.4 s
+    const custom_upgrades::world::QueryFn query = [&](Il2CppObject* p, custom_upgrades::world::CoopRequest& req) {
+        return state_.loaded && WorldQuery(p, req);
+    };
+    const std::string text = world_.Activate(plot, query);
+    if (silo_.Ready()) silo_.Message(activator, text, text.rfind("Collecting", 0) == 0);
     return true;
 }
 
@@ -2131,9 +2172,14 @@ bool CustomUpgrades::OnGridNavigate(Il2CppObject* evt) {
     if (!ok) return false;
     constexpr int32_t kMoveLeft = 0, kMoveRight = 2;  // UnityEngine.EventSystems.MoveDirection
     if (dir != kMoveLeft && dir != kMoveRight) return false;
+    // The same event again in this frame (another handler of the same move): swallowed, not stepped.
+    const unsigned long long tick = main_thread::TickCount();
+    if (evt == lastNavEvt_ && tick == lastNavTick_) return true;
     // Each slider takes only its own keys (Shift held: the roosters one).
     const int step = dir == kMoveRight ? 1 : -1;
     if (!sliderHens_.Step(step) && !sliderRoosters_.Step(step)) return false;
+    lastNavEvt_ = evt;  // identity only
+    lastNavTick_ = tick;
     bool didNavigate = true;  // nobody else (late navigation handlers) acts on it
     Invoke(navUseMi_, evt, {&didNavigate}, "NavigationEventData.Use", &ok);
     return true;
@@ -2662,23 +2708,21 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         // Pad / arrow left / right for the slider without moving the menu grid's selection (optional:
         // without it the slider polls the pad / keyboard itself).
         constexpr const char* kFocusNs = "MonomiPark.SlimeRancher.UI.Framework.Interaction.Focus";
-        Il2CppClass* grid = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Framework.CommonControls", "UniformGridView", &err);
+        Il2CppClass* navHandler = R.Class(kImage, kFocusNs, "INavigationHandler", &err);
         navEventClass_ = R.Class(kImage, kFocusNs, "NavigationEventData", &err);
         navMoveDirMi_ = navEventClass_ ? R.Method(navEventClass_, "get_MoveDirection", 0, &err) : nullptr;
         navUseMi_ = navEventClass_ ? R.Method(navEventClass_, "Use", 1, &err) : nullptr;
-        const MethodInfo* navMi =
-            grid ? R.Method(grid, "MonomiPark.SlimeRancher.UI.Framework.Interaction.Focus.INavigationHandler.OnNavigate", 1, &err)
-                 : nullptr;
+        const MethodInfo* navMi = navHandler ? R.Method(navHandler, "TryHandleAsNavigation", 2, &err) : nullptr;
         void* np = (navMi && navMoveDirMi_ && navUseMi_) ? R.MethodPointer(navMi, &err) : nullptr;
-        if (np && ctx.HookAddress("UniformGridView.OnNavigate", np, reinterpret_cast<void*>(&GridNavDetour),
-                                  reinterpret_cast<void**>(&g_origGridNav))) {
+        if (np && ctx.HookAddress("INavigationHandler.TryHandleAsNavigation", np, reinterpret_cast<void*>(&MenuNavDetour),
+                                  reinterpret_cast<void**>(&g_origMenuNav))) {
             sliderHens_.SetNavigationSteps(true);
             sliderRoosters_.SetNavigationSteps(true);
-            report += std::format(" UniformGridView.OnNavigate@0x{:X}", Resolver::Rva(np));
+            report += std::format(" INavigationHandler.TryHandleAsNavigation@0x{:X}", Resolver::Rva(np));
         } else {
             navEventClass_ = nullptr;
-            SR2_WARN("[{}] UniformGridView.OnNavigate not hooked ({}) - the slider polls pad / arrows itself (the menu "
-                     "grid may also move)", kModule, err.empty() ? "not found" : err);
+            SR2_WARN("[{}] INavigationHandler.TryHandleAsNavigation not hooked ({}) - the slider polls pad / arrows "
+                     "itself (the menu selection may also move)", kModule, err.empty() ? "not found" : err);
         }
     }
 
@@ -2704,6 +2748,8 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
             if (ok) report += std::format(" PlortCollectorActivator.Activate@0x{:X}", Resolver::Rva(p));
             else serr = "hook failed";
         }
+        // The Hen Collector keeps its button only with this detour (a null Collector would NRE in vanilla).
+        world_.KeepHenButton(ok);
         if (!ok) {
             silo_ = custom_upgrades::world::SiloButtons{};  // not Ready(): no buttons are built
             g_offActCollector = 0;
