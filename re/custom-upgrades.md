@@ -1,7 +1,8 @@
 # Custom land-plot upgrades: research + design (SR2 1.3.0, Steam, Unity 6000.0.73f1)
 
-Status: the framework and the first upgrade (silo **Sell-All Button**) are implemented in
-`modules/custom_upgrades/` (built, not yet tested in game). Everything else here is design.
+Status: the framework, the silo **Sell-All Button** and the per-plot upgrade **tiers** (2b.2)
+are implemented in `modules/custom_upgrades/` + `modules/plot_upgrades/`; the **Sell button**
+(2b.1) in `modules/sell_upgrades/`. All built, not yet tested in game. Everything else is design.
 RVAs are only for reference (GameAssembly.dll 1.3.0). The code finds everything by name.
 
 ---------------------------------------------------------------------------------------------
@@ -272,7 +273,22 @@ Built, not yet tested in game. Full findings are in the header comment of
   actually toggles (`SolarShield` components inside Shields).
 
 ---------------------------------------------------------------------------------------------
-## 2b. User feedback (design, not implemented yet)
+## 2b. User feedback (IMPLEMENTED, differs from the plan below)
+
+* **2b.1 as built:** not the alt-action route. Disassembly showed the PURCHASED text is the
+  category's `detailsInfo` prefab (a label-only twin of the Purchase button, label =
+  `item._infoButtonLabel`) that `ListUI.CreateDetailsMoreButton` instantiates into
+  `mainActionButtonContainer` for unavailable items; the alt (Info) button comes from
+  `category.altDetailsButton` and only exists with a Pedia entry. sell_upgrades now clones the
+  category's own `detailsButton` prefab (the game's Purchase button) next to it, labelled
+  "Sell +N" / "Can't sell", from a `DetailsMoreButtonView.BindData` detour (non-generic; the
+  ListUI methods are shared generic code without a name-resolvable pointer). Click:
+  `UnityEngine.UI.Button.Press` detour (pointer compare) -> sell popup; gamepad A on the
+  selected item -> OnAction -> same popup. Details in the sell_upgrades header.
+* **2b.2 as built:** prices/multipliers as proposed below, ids `0x5352_0010..0040`, effects in
+  plot_upgrades via `custom_upgrades::Multiplier(obj, family)`; music box per MusicBoxRegion
+  (`_currentEmotions` membership), coop per CoopRegion collider bounds. The global sliders were
+  removed. See `modules/plot_upgrades/NOTES.md`.
 
 ### 2b.1 sell_upgrades: a visible SELL button on owned entries
 
