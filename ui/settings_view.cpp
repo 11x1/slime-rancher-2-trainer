@@ -66,6 +66,19 @@ void RegisterUiSettings() {
         hint.step = 1;
         hint.tooltip = "Shows a short \"press <hotkey> for mod settings\" note when the game starts.";
         settings::Register(hint);
+
+        settings::Def theme;
+        theme.module = kUiModule;
+        theme.key = kKeyOverlayTheme;
+        theme.label = "Overlay theme";
+        theme.kind = settings::Kind::Enum;
+        theme.def = 0;
+        theme.min = 0;
+        theme.max = 1;
+        theme.step = 1;
+        theme.options = {"Dark", "Light"};
+        theme.tooltip = "Colours of the sr2mods overlay. Also switchable at the bottom of the overlay's sidebar.";
+        settings::Register(theme);
     });
 }
 

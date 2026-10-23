@@ -31,8 +31,11 @@
 #include "core/version_guard.h"
 #include "game_input.h"
 #include "hud.h"
+#include "menu.h"
 #include "momentum_hud.h"
 #include "settings_view.h"
+#include "slime_icons.h"
+#include "theme.h"
 
 #ifndef SR2MODS_VERSION
 #define SR2MODS_VERSION "dev"
@@ -77,6 +80,10 @@ WNDPROC g_origWndProc = nullptr;
 std::mutex g_rtvMutex;  // Present vs ResizeBuffers (normally the same thread)
 float g_appliedScale = 0.0f;
 unsigned long long g_initTick = 0;
+// Copy of the back buffer for the theme peel (menu::WantSnapshot), render thread only.
+ID3D11Texture2D* g_snapTex = nullptr;
+ID3D11ShaderResourceView* g_snapSrv = nullptr;
+D3D11_TEXTURE2D_DESC g_snapDesc{};
 thread_local bool t_inHook = false;
 
 // ---------------------------------------------------------------- state ----
@@ -89,11 +96,6 @@ bool g_wasOpen = false;
 bool g_softCursor = false;
 bool g_textInputActive = false;  // ImGui text field had focus last frame (render thread)
 
-// Profiles section (render thread only).
-std::string g_profSel;       // selected profile in the combo
-char g_profName[64] = {};    // "Save as" / "Rename" name field
-char g_profDesc[256] = {};   // "Save as" description field
-std::string g_profPopupMsg;  // error shown inside the open popup
 
 // Window messages are queued on the window thread and replayed into ImGui on
 // the render thread, so ImGui is only ever touched from one thread and the
@@ -298,18 +300,56 @@ void PollMouseButtons(ImGuiIO& io) {
     io.AddMouseButtonEvent(2, KeyDown(VK_MBUTTON));
 }
 
+// Style for the current height and the Dark/Light setting (theme.cpp).
 void ApplyScale(float clientHeight) {
-    float s = std::clamp(clientHeight / 1080.0f, 1.0f, 3.0f);
-    if (std::fabs(s - g_appliedScale) < 0.01f) return;
-    g_appliedScale = s;
-    ImGuiStyle& style = ImGui::GetStyle();
-    style = ImGuiStyle();
-    ImGui::StyleColorsDark(&style);
-    style.WindowRounding = 6.0f;
-    style.FrameRounding = 4.0f;
-    style.GrabRounding = 4.0f;
-    style.ScaleAllSizes(s);
-    style.FontScaleDpi = s;
+    g_appliedScale = std::clamp(clientHeight / 1080.0f, 1.0f, 3.0f);
+    menu::SyncTheme(g_appliedScale);
+}
+
+// The frame just rendered (old theme) as a texture for the theme peel.
+// Invalid if the copy is not possible (multisampled back buffer, no memory).
+ImTextureID SnapshotBackBuffer() {
+    ID3D11Texture2D* bb = nullptr;
+    if (FAILED(g_swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&bb))) || !bb)
+        return ImTextureID_Invalid;
+    D3D11_TEXTURE2D_DESC d{};
+    bb->GetDesc(&d);
+    if (d.SampleDesc.Count != 1) {
+        bb->Release();
+        return ImTextureID_Invalid;
+    }
+    if (!g_snapTex || d.Width != g_snapDesc.Width || d.Height != g_snapDesc.Height || d.Format != g_snapDesc.Format) {
+        if (g_snapSrv) g_snapSrv->Release();
+        if (g_snapTex) g_snapTex->Release();
+        g_snapSrv = nullptr;
+        g_snapTex = nullptr;
+        D3D11_TEXTURE2D_DESC nd = d;
+        nd.MipLevels = 1;
+        nd.ArraySize = 1;
+        nd.Usage = D3D11_USAGE_DEFAULT;
+        nd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        nd.CPUAccessFlags = 0;
+        nd.MiscFlags = 0;
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = d.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS   ? DXGI_FORMAT_R8G8B8A8_UNORM
+                    : d.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS ? DXGI_FORMAT_B8G8R8A8_UNORM
+                    : d.Format == DXGI_FORMAT_R10G10B10A2_TYPELESS ? DXGI_FORMAT_R10G10B10A2_UNORM
+                                                                   : d.Format;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels = 1;
+        if (FAILED(g_device->CreateTexture2D(&nd, nullptr, &g_snapTex)) ||
+            FAILED(g_device->CreateShaderResourceView(g_snapTex, &sd, &g_snapSrv))) {
+            if (g_snapTex) g_snapTex->Release();
+            g_snapTex = nullptr;
+            g_snapSrv = nullptr;
+            bb->Release();
+            return ImTextureID_Invalid;
+        }
+        g_snapDesc = d;
+    }
+    g_context->CopyResource(g_snapTex, bb);
+    bb->Release();
+    return static_cast<ImTextureID>(reinterpret_cast<intptr_t>(g_snapSrv));
 }
 
 void CreateRtv() {
@@ -362,12 +402,11 @@ bool InitImGui(IDXGISwapChain* sc) {
     io.LogFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NoMouseCursorChange;
 
-    // Prefer Segoe UI over the built-in bitmap-style font if available.
+    // Embedded Nunito / Fredoka; Segoe UI fills in characters outside their subset.
     char winDir[MAX_PATH] = {};
-    if (GetWindowsDirectoryA(winDir, MAX_PATH) > 0) {
-        std::string font = std::string(winDir) + "\\Fonts\\segoeui.ttf";
-        if (GetFileAttributesA(font.c_str()) != INVALID_FILE_ATTRIBUTES) io.Fonts->AddFontFromFileTTF(font.c_str(), 17.0f);
-    }
+    std::string fallback;
+    if (GetWindowsDirectoryA(winDir, MAX_PATH) > 0) fallback = std::string(winDir) + "\\Fonts\\segoeui.ttf";
+    theme::LoadFonts(io, fallback.c_str());
 
     if (!ImGui_ImplWin32_Init(g_hwnd)) {
         SR2_ERROR("ui: overlay: ImGui_ImplWin32_Init failed");
@@ -379,6 +418,7 @@ bool InitImGui(IDXGISwapChain* sc) {
     }
     // IME positioning would call into the window from the render thread.
     ImGui::GetPlatformIO().Platform_SetImeDataFn = nullptr;
+    slime_icons::Init(g_device);
 
     RECT rc{};
     GetClientRect(g_hwnd, &rc);
@@ -399,135 +439,7 @@ bool InitImGui(IDXGISwapChain* sc) {
 }
 
 // ------------------------------------------------------------------ UI ----
-void HelpTooltip(const std::string& tip) {
-    if (tip.empty()) return;
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", tip.c_str());
-}
-
-void DrawDef(const settings::Def& d, bool moduleEnabled) {
-    ImGui::PushID(d.key.c_str());
-    const double cur = Read(d);
-    ImGui::BeginDisabled(!moduleEnabled);
-    switch (d.kind) {
-        case settings::Kind::Bool: {
-            bool v = cur >= 0.5;
-            if (ImGui::Checkbox(d.label.c_str(), &v)) Write(d, v ? 1.0 : 0.0);
-            break;
-        }
-        case settings::Kind::Float: {
-            float v = static_cast<float>(cur);
-            char fmt[16];
-            std::snprintf(fmt, sizeof(fmt), "%%.%df", StepDecimals(d.step));
-            if (ImGui::SliderFloat(d.label.c_str(), &v, static_cast<float>(d.min), static_cast<float>(d.max), fmt)) {
-                double snapped = Snap(d, v);
-                if (std::fabs(snapped - cur) > 1e-9) Write(d, snapped);
-            }
-            break;
-        }
-        case settings::Kind::Int: {
-            int v = static_cast<int>(std::lround(cur));
-            if (ImGui::SliderInt(d.label.c_str(), &v, static_cast<int>(std::lround(d.min)), static_cast<int>(std::lround(d.max)))) {
-                double snapped = Snap(d, v);
-                if (std::fabs(snapped - cur) > 1e-9) Write(d, snapped);
-            }
-            break;
-        }
-        case settings::Kind::Enum: {
-            int idx = static_cast<int>(std::lround(cur));
-            std::string preview = FormatValue(d, cur);
-            if (ImGui::BeginCombo(d.label.c_str(), preview.c_str())) {
-                for (int i = 0; i < static_cast<int>(d.options.size()); ++i) {
-                    bool sel = i == idx;
-                    if (ImGui::Selectable(d.options[static_cast<size_t>(i)].c_str(), sel)) Write(d, i);
-                    if (sel) ImGui::SetItemDefaultFocus();
-                }
-                ImGui::EndCombo();
-            }
-            break;
-        }
-        case settings::Kind::Key: {
-            const bool capturing = g_captureState.load() == 1 && g_captureDef.module == d.module && g_captureDef.key == d.key;
-            std::string text = capturing ? std::string("Press a key or mouse 3/4/5...")
-                                         : KeyName(static_cast<int>(std::lround(cur)));
-            text += "###keybtn";
-            if (ImGui::Button(text.c_str(), ImVec2(ImGui::CalcItemWidth(), 0)) && !capturing) StartCapture(d);
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip(capturing ? "Esc cancels, Backspace/Delete clears the bind."
-                                            : "Click, then press a key or mouse button 3/4/5.");
-            ImGui::SameLine(0, ImGui::GetStyle().ItemInnerSpacing.x);
-            ImGui::TextUnformatted(d.label.c_str());
-            break;
-        }
-    }
-    ImGui::EndDisabled();
-    HelpTooltip(d.tooltip);
-    ImGui::PopID();
-}
-
-void DrawModule(const ModuleView& mv) {
-    ImGui::PushID(mv.module.c_str());
-    if (ImGui::CollapsingHeader(mv.title.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Indent();
-        bool failed = false;
-        std::string status = ModuleStatus(mv.module, &failed);
-        if (mv.module == kUiModule) {
-            ImGui::TextDisabled("Overlay: %s", OverlayStatus().c_str());
-            ImGui::TextDisabled("Options menu tab: %s", OptionsTabStatus().c_str());
-        } else if (!status.empty()) {
-            if (failed)
-                ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "Status: %s", status.c_str());
-            else
-                ImGui::TextDisabled("Status: %s", status.c_str());
-        }
-
-        bool moduleEnabled = true;
-        if (mv.hasEnabled && mv.module != kUiModule) {
-            bool en = Read(mv.enabled) >= 0.5;
-            ImGui::PushID("enabled");
-            if (ImGui::Checkbox(mv.enabled.label.empty() ? "Enabled" : mv.enabled.label.c_str(), &en))
-                Write(mv.enabled, en ? 1.0 : 0.0);
-            ImGui::PopID();
-            HelpTooltip(mv.enabled.tooltip);
-            moduleEnabled = Read(mv.enabled) >= 0.5;
-        }
-
-        for (const auto& g : mv.groups) {
-            if (!g.name.empty()) ImGui::SeparatorText(g.name.c_str());
-            ImGui::PushID(g.name.c_str());
-            for (const auto& d : g.defs) DrawDef(d, moduleEnabled);
-            ImGui::PopID();
-        }
-
-        if (ImGui::SmallButton("Reset to defaults")) {
-            for (const auto& g : mv.groups)
-                for (const auto& d : g.defs) Write(d, d.def);
-        }
-        ImGui::Unindent();
-        ImGui::Spacing();
-    }
-    ImGui::PopID();
-}
-
-// ------------------------------------------------------------ profiles ----
 namespace profiles = ::sr2::core::profiles;
-
-bool SameName(const std::string& a, const std::string& b) {
-    return a.size() == b.size() && _stricmp(a.c_str(), b.c_str()) == 0;
-}
-
-const profiles::Info* FindProfile(const std::vector<profiles::Info>& list, const std::string& name) {
-    for (const auto& i : list)
-        if (SameName(i.name, name)) return &i;
-    return nullptr;
-}
-
-// Name fields only accept what SanitizeName keeps.
-int ProfileNameFilter(ImGuiInputTextCallbackData* data) {
-    const ImWchar c = data->EventChar;
-    const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ' ' || c == '-' ||
-                    c == '_';
-    return ok ? 0 : 1;
-}
 
 // Explorer on the profiles folder. ShellExecuteW runs on a short-lived thread,
 // so a slow shell never stalls the game's render thread (shell32 is
@@ -561,286 +473,21 @@ void OpenProfilesFolder() {
         delete dir;
 }
 
-void CopyToBuf(char* buf, size_t size, const std::string& s) {
-    size_t n = std::min(s.size(), size - 1);
-    std::memcpy(buf, s.data(), n);
-    buf[n] = 0;
+bool IsCapturing(const settings::Def& d) {
+    return g_captureState.load() == 1 && g_captureDef.module == d.module && g_captureDef.key == d.key;
 }
 
-bool PopupCancelled() { return ImGui::IsKeyPressed(ImGuiKey_Escape, false); }
-
-const ImVec4 kColWarn(1.0f, 0.8f, 0.2f, 1.0f);
-const ImVec4 kColErr(1.0f, 0.45f, 0.35f, 1.0f);
-
-void DrawProfiles() {
-    if (!ImGui::CollapsingHeader("Profiles", ImGuiTreeNodeFlags_DefaultOpen)) return;
-    ImGui::PushID("profiles");
-    ImGui::Indent();
-
-    const auto list = profiles::List();
-    const std::string active = profiles::ActiveProfile();
-    const profiles::Info* activeInfo = active.empty() ? nullptr : FindProfile(list, active);
-    const bool modified = activeInfo && profiles::IsModified();
-
-    if (active.empty())
-        ImGui::TextDisabled("Active profile: none");
-    else if (!activeInfo)
-        ImGui::TextColored(kColWarn, "Active profile: %s (file missing)", active.c_str());
-    else if (modified)
-        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f), "Active profile: %s (modified)", activeInfo->name.c_str());
-    else
-        ImGui::Text("Active profile: %s", activeInfo->name.c_str());
-
-    // Keep the selection on an existing profile (default: the active one).
-    if (const profiles::Info* found = FindProfile(list, g_profSel))
-        g_profSel = found->name;
-    else
-        g_profSel = activeInfo ? activeInfo->name : (list.empty() ? std::string() : list.front().name);
-    const profiles::Info* sel = FindProfile(list, g_profSel);
-
-    auto labelOf = [&](const profiles::Info& i) {
-        std::string l = i.name;
-        if (activeInfo && SameName(i.name, activeInfo->name)) l += modified ? "  [active, modified]" : "  [active]";
-        if (!i.valid) l += "  [broken]";
-        return l;
-    };
-
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
-    const std::string preview = sel ? labelOf(*sel) : std::string("(no profiles)");
-    if (ImGui::BeginCombo("##profile", preview.c_str())) {
-        for (const auto& i : list) {
-            const bool isSel = sel && SameName(i.name, sel->name);
-            std::string item = labelOf(i) + "##" + i.name;
-            if (ImGui::Selectable(item.c_str(), isSel)) g_profSel = i.name;
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-                if (!i.valid)
-                    ImGui::SetTooltip("Broken file: %s", i.error.c_str());
-                else if (!i.description.empty())
-                    ImGui::SetTooltip("%s", i.description.c_str());
-            }
-            if (isSel) ImGui::SetItemDefaultFocus();
-        }
-        ImGui::EndCombo();
-    }
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!sel || !sel->valid);
-    if (ImGui::Button("Load") && sel) profiles::Load(sel->name);
-    ImGui::EndDisabled();
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("Apply every value of the selected profile (values it lacks reset to their defaults).");
-
-    if (sel) {
-        ImGui::PushTextWrapPos(0.0f);
-        if (!sel->valid)
-            ImGui::TextColored(kColErr, "Broken file: %s", sel->error.c_str());
-        else if (!sel->description.empty())
-            ImGui::TextDisabled("%s", sel->description.c_str());
-        ImGui::PopTextWrapPos();
-    } else {
-        ImGui::TextDisabled("No profiles yet - use \"Save as...\" to create one.");
-    }
-
-    ImGui::BeginDisabled(active.empty());
-    if (ImGui::Button("Save")) ImGui::OpenPopup("Save profile?");
-    ImGui::EndDisabled();
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("Overwrite the active profile with the current settings.");
-    ImGui::SameLine();
-    if (ImGui::Button("Save as...")) {
-        g_profName[0] = 0;
-        g_profDesc[0] = 0;
-        g_profPopupMsg.clear();
-        ImGui::OpenPopup("Save profile as");
-    }
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!sel);
-    if (ImGui::Button("Rename") && sel) {
-        CopyToBuf(g_profName, sizeof(g_profName), profiles::SanitizeName(sel->name));
-        g_profPopupMsg.clear();
-        ImGui::OpenPopup("Rename profile");
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Delete") && sel) ImGui::OpenPopup("Delete profile?");
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    if (ImGui::Button("Open profiles folder")) OpenProfilesFolder();
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
-        ImGui::SetTooltip("Profiles are .json files: share one by copying its file. Put shared files in this folder;\n"
-                          "the list refreshes every time the overlay opens.");
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Refresh")) profiles::Refresh();
-
-    unsigned long long tick = 0;
-    const std::string status = profiles::Status(&tick);
-    if (!status.empty()) {
-        ImGui::PushTextWrapPos(0.0f);
-        if (GetTickCount64() - tick < 4000)
-            ImGui::TextColored(ImVec4(0.55f, 0.85f, 1.0f, 1.0f), "%s", status.c_str());
-        else
-            ImGui::TextDisabled("%s", status.c_str());
-        ImGui::PopTextWrapPos();
-    }
-
-    // ---- popups (same ID stack as the OpenPopup calls above) ----
-    const ImGuiWindowFlags popupFlags = ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings;
-    const float fieldW = 320.0f * (g_appliedScale > 0 ? g_appliedScale : 1.0f);
-
-    if (ImGui::BeginPopupModal("Save profile?", nullptr, popupFlags)) {
-        ImGui::Text("Overwrite profile '%s' with the current settings?", active.c_str());
-        if (ImGui::Button("Save")) {
-            if (!active.empty())
-                profiles::SaveCurrentAs(active, activeInfo ? activeInfo->description : std::string(), true);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel") || PopupCancelled()) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-
-    if (ImGui::BeginPopupModal("Save profile as", nullptr, popupFlags)) {
-        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-        ImGui::SetNextItemWidth(fieldW);
-        const bool enter = ImGui::InputText("Name", g_profName, sizeof(g_profName),
-                                            ImGuiInputTextFlags_CallbackCharFilter | ImGuiInputTextFlags_EnterReturnsTrue,
-                                            &ProfileNameFilter);
-        ImGui::SetNextItemWidth(fieldW);
-        ImGui::InputText("Description (optional)", g_profDesc, sizeof(g_profDesc));
-        const std::string name = profiles::SanitizeName(g_profName);
-        const profiles::Info* existing = name.empty() ? nullptr : FindProfile(list, name);
-        if (name.empty())
-            ImGui::TextDisabled("Letters, digits, space, - and _ (max 40).");
-        else if (existing)
-            ImGui::TextColored(kColWarn, "'%s' exists and will be overwritten.", existing->name.c_str());
-        else
-            ImGui::TextDisabled("File: profiles\\%s.json", name.c_str());
-        if (!g_profPopupMsg.empty()) ImGui::TextColored(kColErr, "%s", g_profPopupMsg.c_str());
-        ImGui::BeginDisabled(name.empty());
-        // Replacing a file needs the explicit "Overwrite" click; Enter never confirms it.
-        const bool doSave = ImGui::Button(existing ? "Overwrite" : "Save") || (enter && !existing && !name.empty());
-        ImGui::EndDisabled();
-        if (doSave) {
-            auto r = profiles::SaveCurrentAs(name, g_profDesc, existing != nullptr);
-            if (r.ok()) {
-                g_profSel = r.name;
-                ImGui::CloseCurrentPopup();
-            } else {
-                g_profPopupMsg = r.message;
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel") || PopupCancelled()) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-
-    if (ImGui::BeginPopupModal("Rename profile", nullptr, popupFlags)) {
-        ImGui::Text("Rename '%s' to:", g_profSel.c_str());
-        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-        ImGui::SetNextItemWidth(fieldW);
-        const bool enter = ImGui::InputText("##newname", g_profName, sizeof(g_profName),
-                                            ImGuiInputTextFlags_CallbackCharFilter | ImGuiInputTextFlags_EnterReturnsTrue,
-                                            &ProfileNameFilter);
-        const std::string name = profiles::SanitizeName(g_profName);
-        const profiles::Info* existing = name.empty() ? nullptr : FindProfile(list, name);
-        const bool clash = existing && !SameName(existing->name, g_profSel);
-        if (name.empty())
-            ImGui::TextDisabled("Letters, digits, space, - and _ (max 40).");
-        else if (clash)
-            ImGui::TextColored(kColWarn, "'%s' exists and will be overwritten.", existing->name.c_str());
-        if (!g_profPopupMsg.empty()) ImGui::TextColored(kColErr, "%s", g_profPopupMsg.c_str());
-        ImGui::BeginDisabled(name.empty() || g_profSel.empty());
-        const bool doRename = ImGui::Button(clash ? "Overwrite" : "Rename") || (enter && !clash && !name.empty());
-        ImGui::EndDisabled();
-        if (doRename && !g_profSel.empty()) {
-            auto r = profiles::Rename(g_profSel, name, clash);
-            if (r.ok()) {
-                g_profSel = r.name;
-                ImGui::CloseCurrentPopup();
-            } else {
-                g_profPopupMsg = r.message;
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel") || PopupCancelled()) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-
-    if (ImGui::BeginPopupModal("Delete profile?", nullptr, popupFlags)) {
-        ImGui::Text("Delete profile '%s'? Its file is removed.", g_profSel.c_str());
-        if (ImGui::Button("Delete")) {
-            if (!g_profSel.empty()) profiles::Delete(g_profSel);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel") || PopupCancelled()) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-
-    ImGui::Unindent();
-    ImGui::Spacing();
-    ImGui::PopID();
-}
-
-void DrawOverlayWindow() {
-    const float s = g_appliedScale > 0 ? g_appliedScale : 1.0f;
-    ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y * 0.5f),
-                            ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(560.0f * s, 620.0f * s), ImGuiCond_FirstUseEver);
-    bool open = true;
-    std::string title = "sr2mods " SR2MODS_VERSION " - mod settings###sr2mods";
-    if (ImGui::Begin(title.c_str(), &open, ImGuiWindowFlags_NoCollapse)) {
-        ImGui::TextDisabled("%s closes this window. Changes apply immediately and are saved to sr2mods.json.",
-                            KeyName(HotkeyVk()).c_str());
-        if (core::version_guard::Mismatch()) {
-            ImGui::PushTextWrapPos(0.0f);
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Version warning: %s",
-                               core::version_guard::Status().c_str());
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
-                               "This game build differs from the one the mod was made for; some modules may be disabled.");
-            ImGui::PopTextWrapPos();
-        } else {
-            ImGui::TextDisabled("%s", core::version_guard::Status().c_str());
-        }
-        ImGui::Separator();
-
-        const float footer = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
-        if (ImGui::BeginChild("##settings", ImVec2(0, -footer))) {
-            ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.5f);
-            DrawProfiles();
-            auto views = BuildModuleViews();
-            if (views.empty()) ImGui::TextDisabled("No settings registered.");
-            for (const auto& mv : views) DrawModule(mv);
-            ImGui::PopItemWidth();
-        }
-        ImGui::EndChild();
-
-        ImGui::Separator();
-        unsigned long long last = LastWriteTick();
-        if (last == 0)
-            ImGui::TextDisabled("No changes");
-        else if (GetTickCount64() - last < 1500)
-            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f), "Saving...");
-        else
-            ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1.0f), "Saved");
-        ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize("Close").x - ImGui::GetStyle().FramePadding.x * 2);
-        if (ImGui::Button("Close")) open = false;
-    }
-    ImGui::End();
-    if (!open) overlay::SetOpen(false);
-}
-
-void DrawHint() {
-    const float s = g_appliedScale > 0 ? g_appliedScale : 1.0f;
-    ImGui::SetNextWindowPos(ImVec2(12.0f * s, 12.0f * s), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.6f);
-    const ImGuiWindowFlags f = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
-                               ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
-    if (ImGui::Begin("##sr2mods_hint", nullptr, f)) {
-        ImGui::Text("sr2mods: press %s for mod settings", KeyName(HotkeyVk()).c_str());
-        if (core::version_guard::Mismatch())
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Version warning: %s", core::version_guard::Status().c_str());
-    }
-    ImGui::End();
+menu::Host MakeHost() {
+    menu::Host h;
+    h.scale = g_appliedScale > 0 ? g_appliedScale : 1.0f;
+    h.nowMs = GetTickCount64();
+    h.hotkeyName = KeyName(HotkeyVk());
+    h.versionMismatch = core::version_guard::Mismatch();
+    h.versionStatus = core::version_guard::Status();
+    h.startCapture = &StartCapture;
+    h.isCapturing = &IsCapturing;
+    h.openProfilesFolder = &OpenProfilesFolder;
+    return h;
 }
 
 bool HintVisible() {
@@ -858,7 +505,10 @@ void RenderFrame() {
         g_captureState = 0;
         FlushNow();
     }
-    if (!g_wasOpen && open) profiles::Refresh();  // users may have dropped shared files in
+    if (!g_wasOpen && open) {
+        profiles::Refresh();  // users may have dropped shared files in
+        menu::OnOpened();     // next slime for the logo
+    }
     g_wasOpen = open;
 
     const bool hint = !open && HintVisible();
@@ -894,10 +544,11 @@ void RenderFrame() {
     ImGui::NewFrame();
     if (hudMarkers) hud::Draw();  // foreground draw list (the module hides them while the settings window is open)
     if (momentum) momentum_hud::Draw();
-    if (open)
-        DrawOverlayWindow();
-    else if (hint)
-        DrawHint();
+    if (open) {
+        if (!menu::Draw(MakeHost())) overlay::SetOpen(false);
+    } else if (hint) {
+        menu::DrawHint(MakeHost());
+    }
     ImGui::Render();
     g_textInputActive = io.WantTextInput;
 
@@ -906,6 +557,8 @@ void RenderFrame() {
     g_context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, oldRtv, &oldDsv);
     g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    // Theme switched this frame: keep it (still the old look) for the peel.
+    if (menu::WantSnapshot()) menu::StartPeel(SnapshotBackBuffer());
     g_context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, oldRtv, oldDsv);
     for (auto* r : oldRtv)
         if (r) r->Release();
