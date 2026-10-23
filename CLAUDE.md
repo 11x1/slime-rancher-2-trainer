@@ -6,7 +6,6 @@
 
 | note | about |
 |---|---|
-| `spawner-save-fix.md` | spawned Glitch Tarr breaks saving |
 | `buy-menu-cards.md` | Purchase/Sell overlap, wrong labels, hen arrows, hen Activate |
 | `silo-receipt.md` | Sell-All receipt dialog, silo space tiers |
 | `plot-props-2.md` | second speaker, random hay/nests, sprinkler fixes |
