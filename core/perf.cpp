@@ -26,6 +26,7 @@ struct SlotData {
     char name[kNameLen] = {};
     std::atomic<int64_t> calls{0}, total{0}, max{0}, slow{0};
     std::atomic<int64_t> lastWarn{0}, suppressed{0};
+    std::atomic<int64_t> frame{0};  // ticks since the last dispatcher tick (hitch attribution)
 };
 
 std::atomic<bool> g_enabled{false};
@@ -104,6 +105,28 @@ void Summary(int64_t now) {
     g_t.gcWindowStart = gc;
 }
 
+// " (top: a 40.12, b 3.20)": the owners with the most time in this frame (> 0.5 ms, up to 4).
+// Render-thread owners (hook:ui.Present*) overlap the main thread's frame, they are not inside it.
+std::string TopOwners(const int64_t* perSlot, int n) {
+    const int64_t minTicks = g_freq / 2000;  // 0.5 ms
+    int top[4] = {-1, -1, -1, -1};
+    for (int i = 0; i < n; ++i) {
+        if (perSlot[i] < minTicks) continue;
+        for (int k = 0; k < 4; ++k) {
+            if (top[k] < 0 || perSlot[i] > perSlot[top[k]]) {
+                for (int m = 3; m > k; --m) top[m] = top[m - 1];
+                top[k] = i;
+                break;
+            }
+        }
+    }
+    if (top[0] < 0) return {};
+    std::string s = " (top:";
+    for (int k = 0; k < 4 && top[k] >= 0; ++k)
+        s += std::format("{} {} {:.2f}", k ? "," : "", g_slots[top[k]].name, Ms(perSlot[top[k]]));
+    return s + ")";
+}
+
 }  // namespace
 
 void Init(bool enabled) {
@@ -156,7 +179,7 @@ int Slot(std::string_view owner) {
     return n;
 }
 
-void Add(int slot, int64_t ticks) {
+void Add(int slot, int64_t ticks, bool detail) {
     if (slot < 0 || slot >= kMaxSlots || ticks < 0) return;
     SlotData& s = g_slots[slot];
     s.calls.fetch_add(1, std::memory_order_relaxed);
@@ -164,7 +187,8 @@ void Add(int slot, int64_t ticks) {
     int64_t m = s.max.load(std::memory_order_relaxed);
     while (ticks > m && !s.max.compare_exchange_weak(m, ticks, std::memory_order_relaxed)) {
     }
-    g_frameWork.fetch_add(ticks, std::memory_order_relaxed);
+    s.frame.fetch_add(ticks, std::memory_order_relaxed);
+    if (!detail) g_frameWork.fetch_add(ticks, std::memory_order_relaxed);
     if (ticks <= g_warnTicks) return;
     s.slow.fetch_add(1, std::memory_order_relaxed);
     LARGE_INTEGER c;
@@ -183,6 +207,10 @@ void OnTick() {
     if (!Enabled()) return;
     const int64_t now = Now();
     const int64_t work = g_frameWork.exchange(0, std::memory_order_relaxed);
+    // Per-owner time of this frame (read and cleared every tick, formatted only on a hitch).
+    int64_t perSlot[kMaxSlots];
+    const int nSlots = g_slotCount.load(std::memory_order_acquire);
+    for (int i = 0; i < nSlots; ++i) perSlot[i] = g_slots[i].frame.exchange(0, std::memory_order_relaxed);
     const int32_t gc = GcCount();
     const int32_t gcDelta = (gc >= 0 && g_t.gcLast >= 0) ? gc - g_t.gcLast : 0;
     if (gc >= 0) g_t.gcLast = gc;
@@ -210,8 +238,8 @@ void OnTick() {
             g_t.lastHitchLog = now;
             const int more = g_t.hitchesSuppressed;
             g_t.hitchesSuppressed = 0;
-            SR2_WARN("perf: frame hitch {:.1f} ms (avg {:.1f} ms) at frame {} | mod work in it {:.2f} ms | GC {}{}", ftMs,
-                     g_t.emaMs, main_thread::TickCount(), Ms(work),
+            SR2_WARN("perf: frame hitch {:.1f} ms (avg {:.1f} ms) at frame {} | mod work in it {:.2f} ms{} | GC {}{}",
+                     ftMs, g_t.emaMs, main_thread::TickCount(), Ms(work), TopOwners(perSlot, nSlots),
                      gcDelta > 0 ? std::format("+{} collection(s) in this frame", gcDelta) : std::string("none"),
                      more ? std::format(" | {} more hitch(es) not logged", more) : std::string());
         } else {
