@@ -9,7 +9,7 @@ The UI registers three settings of its own under module `ui`:
 | key | kind | default | label |
 |---|---|---|---|
 | `overlay_hotkey` | Key | `VK_F8` | "Overlay hotkey" |
-| `overlay_hint` | Bool | on | "Show overlay hint at startup" (shows a note for 10 s after the first frame) |
+| `overlay_hint` | Bool | on | "Show overlay hint at startup" (shows "Press F8 for mod settings" top left for 10 s after the first frame) |
 | `overlay_theme` | Enum | Dark | "Overlay theme": Dark or Light (also the Dark/Light tabs at the bottom of the overlay's sidebar) |
 
 The UI never draws an automatic `ui.enabled` toggle, because turning the UI off would lock you out of it.
@@ -29,6 +29,7 @@ The UI never draws an automatic `ui.enabled` toggle, because turning the UI off 
 | `options_tab.cpp/.h` | "Mods" category in the game's Options menu |
 | `mod_icons.cpp/.h` | the mod's own icons (`assets/icons/`, embedded as `mod_icons_data.inc`) as Unity sprites: stb_image decode, `Texture2D` + `Sprite.Create`, cached and pinned; used by the Mods tab and the custom plot upgrades, with the game's sprite as fallback |
 | `settings_view.cpp/.h` | shared helpers (see above) |
+| `quick_start_hint.cpp/.h` | "Hold Shift to stay in the main menu" note: `quick_start` publishes its pending auto-continue (and countdown) from the main thread through atomics; `menu::DrawHint` stacks it under the hotkey note. Shown whenever auto-continue is pending, independent of `overlay_hint`; after a Shift cancel it says "Staying in the main menu" for 2.5 s |
 | `il2cpp_util.cpp/.h` | by-name IL2CPP helpers: invoke, unbox, object_new, GC handles |
 | `../third_party/stb/` | `stb_image.h` v2.30 (nothings/stb, MIT / public domain), PNG decoder only, compiled into `mod_icons.cpp` |
 | `../third_party/imgui/` | Dear ImGui **v1.93.0** (official ocornut/imgui release tag, 2026-10-14). Only the core files, the dx11 and win32 backends, and `LICENSE.txt` are vendored, unmodified. |

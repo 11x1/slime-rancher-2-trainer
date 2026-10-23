@@ -87,6 +87,7 @@ Caveat: anything the game does in the background during the logos (for example p
   After `auto_continue_delay` it checks `ButtonBehaviorConditionUtility.HasContinueGame()`. If that is true, it calls `InvokeBehavior()` on the `ContinueGameBehaviorModel` found in `_models` (or `_subListModels`) that has a `GameDataSummary`.
 - **Submenu fallback**: if Continue lives in a submenu that was never opened, its model does not exist. The module then makes the same calls `InvokeBehavior` makes: `AutoSaveDirector.BeginLoad(GetSaveToContinue().SaveIdentifier, null)`.
 - **Once per process**: it only fires at the first main menu of the launch. If `auto_continue` is off then, it stays off until the next launch. It cancels if Shift is held while the game window is in front, or if a scene load starts from the menu before it fires (the player acted). It gives up if the menu never becomes ready within 120 s.
+- **Overlay note**: while it is pending, the overlay shows "Hold Shift to stay in the main menu" top left (with "Continuing in N s" once the menu is ready), and "Staying in the main menu" for 2.5 s after a Shift cancel. The frame callback publishes the state through `ui/quick_start_hint.h` (atomics only; the render thread makes no game calls).
 
 **Safety**
 - All logic in the four detours and the frame callback runs inside `DetourGuard`s. A native fault marks the module faulted for the session: hooks are disabled and the detours become pure pass-through. A native fault reported by `runtime_invoke` does the same (`MarkModuleFaulted`).

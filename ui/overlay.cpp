@@ -33,6 +33,7 @@
 #include "hud.h"
 #include "menu.h"
 #include "momentum_hud.h"
+#include "quick_start_hint.h"
 #include "settings_view.h"
 #include "slime_icons.h"
 #include "theme.h"
@@ -583,7 +584,9 @@ void RenderFrame() {
     }
     g_wasOpen = open;
 
-    const bool hint = !open && HintVisible();
+    const bool menuHint = !open && HintVisible();
+    const quick_start_hint::View quick = open ? quick_start_hint::View{} : quick_start_hint::Get();
+    const bool hint = menuHint || quick.phase != quick_start_hint::Phase::Hidden;
     const bool hudMarkers = hud::HasContent();  // world markers published by modules (wall_markers)
     const bool momentum = momentum_hud::HasContent();  // hl2_movement speed readout
     if (!open && !hint && !hudMarkers && !momentum) {
@@ -627,7 +630,11 @@ void RenderFrame() {
         if (open) {
             if (!menu::Draw(MakeHost())) overlay::SetOpen(false);
         } else if (hint) {
-            menu::DrawHint(MakeHost());
+            menu::Host h = MakeHost();
+            h.menuHint = menuHint;
+            h.quickHint = static_cast<int>(quick.phase);  // Hidden 0, Pending 1, Staying 2
+            h.quickSeconds = quick.secondsLeft;
+            menu::DrawHint(h);
         }
         ImGui::Render();
         g_textInputActive = io.WantTextInput;

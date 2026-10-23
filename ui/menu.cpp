@@ -1474,7 +1474,6 @@ bool Draw(const Host& h) {
 void DrawHint(const Host& h) {
     g_scale = h.scale;
     const Palette& P = theme::Colors();
-    ImGui::SetNextWindowPos(ImVec2(U(16), U(16)), ImGuiCond_Always);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, P.pill);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, U(12));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
@@ -1482,17 +1481,45 @@ void DrawHint(const Host& h) {
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, U(4)));
     const ImGuiWindowFlags f = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
                                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
-    if (ImGui::Begin("##sr2mods_hint", nullptr, f)) {
-        const ImVec4 key = ImGui::ColorConvertU32ToFloat4(theme::Current() == theme::Mode::Dark ? P.grab : P.accent);
-        ImGui::TextUnformatted("sr2mods: press ");
-        ImGui::SameLine(0, 0);
-        ImGui::TextColored(key, "%s", h.hotkeyName.c_str());
-        ImGui::SameLine(0, 0);
-        ImGui::TextUnformatted(" for mod settings");
-        if (h.versionMismatch)
-            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.warn), "Version warning: %s", h.versionStatus.c_str());
+    const ImVec4 key = ImGui::ColorConvertU32ToFloat4(theme::Current() == theme::Mode::Dark ? P.grab : P.accent);
+    float y = U(16);  // pills stack downwards
+    auto next = [&y] {
+        y = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y + U(8);
+    };
+    if (h.menuHint) {
+        ImGui::SetNextWindowPos(ImVec2(U(16), y), ImGuiCond_Always);
+        if (ImGui::Begin("##sr2mods_hint", nullptr, f)) {
+            ImGui::TextUnformatted("Press ");
+            ImGui::SameLine(0, 0);
+            ImGui::TextColored(key, "%s", h.hotkeyName.c_str());
+            ImGui::SameLine(0, 0);
+            ImGui::TextUnformatted(" for mod settings");
+            if (h.versionMismatch)
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.warn), "Version warning: %s", h.versionStatus.c_str());
+            next();
+        }
+        ImGui::End();
     }
-    ImGui::End();
+    if (h.quickHint != 0) {
+        ImGui::SetNextWindowPos(ImVec2(U(16), y), ImGuiCond_Always);
+        if (ImGui::Begin("##sr2mods_quick_hint", nullptr, f)) {
+            if (h.quickHint == 2) {
+                ImGui::TextUnformatted("Staying in the main menu");
+            } else {
+                ImGui::TextUnformatted("Hold ");
+                ImGui::SameLine(0, 0);
+                ImGui::TextColored(key, "Shift");
+                ImGui::SameLine(0, 0);
+                ImGui::TextUnformatted(" to stay in the main menu");
+                const ImVec4 dim = ImGui::ColorConvertU32ToFloat4(P.soft);
+                if (h.quickSeconds >= 0)
+                    ImGui::TextColored(dim, "Continuing in %.1f s", h.quickSeconds);
+                else
+                    ImGui::TextColored(dim, "Continuing to your last save");
+            }
+        }
+        ImGui::End();
+    }
     ImGui::PopStyleVar(4);
     ImGui::PopStyleColor();
 }

@@ -19,6 +19,11 @@ struct Host {
     std::string hotkeyName;            // "F8"
     bool versionMismatch = false;      // core::version_guard (kept out of here: it needs <windows.h>)
     std::string versionStatus;
+    // Startup notes (DrawHint): the "press <hotkey>" note, and quick_start's auto-continue
+    // note (0 none, 1 "Hold Shift..." pending, 2 "Staying in the main menu").
+    bool menuHint = false;
+    int quickHint = 0;
+    float quickSeconds = -1;           // countdown of the pending auto-continue, < 0 = unknown
     // Key capture (overlay polls the keyboard): start, and whether `d` is being captured.
     void (*startCapture)(const settings::Def& d) = nullptr;
     bool (*isCapturing)(const settings::Def& d) = nullptr;
@@ -35,7 +40,8 @@ void OnOpened();
 // Draws the window. Returns false once the user closed it.
 bool Draw(const Host& host);
 
-// The "press F8 for mod settings" note shown at startup.
+// The startup notes, stacked top left: "Press F8 for mod settings" and, while
+// quick_start's auto-continue is pending, "Hold Shift to stay in the main menu".
 void DrawHint(const Host& host);
 
 // Theme peel: switching Dark/Light peels the old look off the window. The
