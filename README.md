@@ -66,6 +66,20 @@ deploy.bat                     # deploy dist\Release\version.dll
 
 Nothing else is written into the game folder. Exit code 0 means success.
 
+### Auto-deploy on merge into develop
+
+`githooks/post-merge` runs `deploy.ps1 -Build` after every local merge into `develop`, fast-forward pulls included (not after rebases or checkouts). Enable it once per checkout:
+
+```powershell
+.\githooks\install.ps1           # git config core.hooksPath githooks (local config, not committed)
+.\githooks\install.ps1 -Remove   # turn it off again
+```
+
+- It runs only when the current branch is `develop` and only in the main checkout, never in a linked worktree.
+- It never fails the merge. If the game is running, the build fails or anything else goes wrong, it prints a one-line warning and exits 0. Run `.\deploy.ps1 -Build` by hand afterwards.
+- Its output is appended to `dist\deploy-hook.log`, with a timestamp and the merge commit.
+- To skip it, set `SR2MODS_NO_DEPLOY=1` for one merge, or run `git config sr2mods.autodeploy false` to turn it off for the checkout.
+
 To install by hand instead, back up your saves and copy two files from `dist\Release\` into the game folder, next to `SlimeRancher2.exe`:
 
 - `version.dll`

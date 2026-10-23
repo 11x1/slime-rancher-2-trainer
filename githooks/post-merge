@@ -1,0 +1,52 @@
+#!/bin/sh
+# post-merge: after a local merge (or fast-forward pull) into develop, build and
+# deploy the mod into the game folder with deploy.ps1 -Build.
+#
+# Installed by githooks/install.ps1 (git config core.hooksPath githooks).
+# Opt out: SR2MODS_NO_DEPLOY=1, or git config sr2mods.autodeploy false.
+# Never fails the merge: problems are printed as a one-line warning, exit 0.
+# Output is appended to dist/deploy-hook.log.
+
+[ "$SR2MODS_NO_DEPLOY" = "1" ] && exit 0
+[ "$(git config --bool sr2mods.autodeploy 2>/dev/null)" = "false" ] && exit 0
+
+# Only on develop ...
+branch=$(git symbolic-ref --short -q HEAD 2>/dev/null)
+[ "$branch" = "develop" ] || exit 0
+
+# ... and only in the main checkout, never in a linked worktree (agent worktrees).
+gitdir=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null)
+common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+[ -n "$gitdir" ] && [ "$gitdir" = "$common" ] || exit 0
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+log="$root/dist/deploy-hook.log"
+rcfile="$root/dist/.deploy-hook.rc"
+mkdir -p "$root/dist" 2>/dev/null
+commit=$(git log -1 --format='%h %s' 2>/dev/null)
+
+echo "sr2mods: merge into develop - running deploy.ps1 -Build (log: dist/deploy-hook.log)"
+{
+  echo ""
+  echo "==== $(date '+%Y-%m-%d %H:%M:%S') post-merge on develop: $commit"
+} >> "$log" 2>/dev/null
+
+if ! command -v powershell.exe >/dev/null 2>&1; then
+  echo "sr2mods: WARNING: powershell.exe not found - auto-deploy skipped" | tee -a "$log"
+  exit 0
+fi
+
+echo 1 > "$rcfile"
+{
+  powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$root/deploy.ps1" -Build
+  echo $? > "$rcfile"
+} 2>&1 | tee -a "$log"
+rc=$(cat "$rcfile" 2>/dev/null)
+rm -f "$rcfile"
+
+if [ "$rc" = "0" ]; then
+  echo "==== deploy OK" >> "$log"
+else
+  echo "sr2mods: WARNING: auto-deploy failed (exit $rc) - the merge itself is fine; see dist/deploy-hook.log, rerun deploy.ps1 -Build" | tee -a "$log"
+fi
+exit 0
