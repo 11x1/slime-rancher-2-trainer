@@ -6,7 +6,7 @@
 
 | note | about |
 |---|---|
-| `hen-collector-fix2.md` | Hen Collector invisible, suction, hen/rooster sliders |
+| `hen-collector-fix2.md` | Hen Collector corner, suction, hen/rooster sliders: built, in-game check open |
 | `silo-sell.md` | 10k Sell-All price, bee-style sale notices |
 | `drone-station-dialog.md` | drone price limit as a game-UI dialog |
 | `ui-polish.md` | F8 and HUD polish list |
