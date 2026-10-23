@@ -905,7 +905,7 @@ private:
     void TickImpl(float dt) {
         if (cfgDirty_.exchange(false)) cfg_ = LoadCfg();
         const bool viewed = bridge::WantsSnapshot();
-        FindBuses(dt);
+        if (cur_) FindBuses(dt);  // nothing to look up while idle
         boxScan_ -= dt;
         if ((cur_ || viewed) && boxScan_ <= 0) {
             boxScan_ = kBoxScanInterval;
