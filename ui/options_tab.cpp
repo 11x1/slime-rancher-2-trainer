@@ -97,6 +97,9 @@ struct Sym {
     const MethodInfo* fmSetFocus = nullptr;  // FocusManager.SetFocus(GameObject, InteractionCause) (static)
     size_t rowModel = 0;                     // OptionsItemViewHolder._model
     size_t rowButton = 0;                    // ButtonViewHolder<T>.button
+    // optional (a click on a toggle row toggles it)
+    const MethodInfo* rowNext = nullptr;     // OptionsItemViewHolder.NextSetting()
+    const MethodInfo* rowPrev = nullptr;     // OptionsItemViewHolder.PreviousSetting()
     // optional (our rows never leave "unsaved" selections behind)
     const MethodInfo* modelHasUnsaved = nullptr;  // PresetOptionsItemModel.HasUnsavedSelection()
     const MethodInfo* modelGetTemp = nullptr;     // PresetOptionsItemModel.get_TempPresetIndex()
@@ -127,6 +130,7 @@ struct Sym {
     void* updateString = nullptr;
     void* tabBind = nullptr;
     void* bindItemCategory = nullptr;  // optional
+    void* rowActivate = nullptr;       // optional: OptionsItemViewHolder.Activate()
 };
 Sym S;
 
@@ -147,6 +151,8 @@ using UpdateStringFn = void (*)(Il2CppObject*, Il2CppString*, const MethodInfo*)
 UpdateStringFn o_updateString = nullptr;
 BindFn o_tabBind = nullptr;
 BindFn o_bindItemCategory = nullptr;  // (OptionsUIRoot*, OptionsItemCategory*)
+using ActivateFn = void (*)(Il2CppObject*, const MethodInfo*);
+ActivateFn o_rowActivate = nullptr;
 
 std::atomic<bool> g_active{false};
 
@@ -1420,6 +1426,34 @@ void HkRowBind(Il2CppObject* self, Il2CppObject* data, const MethodInfo* mi) {
     });
 }
 
+// A click on a row (or Submit on it) calls OptionsItemViewHolder.Activate(),
+// which only does something for "activatable" controls; a toggle row's preset
+// selector is not one, so the click did nothing. For our toggle rows it now
+// steps the selector to the other value with the row's own NextSetting /
+// PreviousSetting, the same path as the arrows (SelectValue -> apply
+// immediately -> HkToggleApply). Game rows are untouched.
+void HkRowActivate(Il2CppObject* self, const MethodInfo* mi) {
+    o_rowActivate(self, mi);  // a no-op for preset selectors (no activatable control)
+    if (Faulted()) return;
+    Guarded("OptionsItemViewHolder.Activate", [&] {
+        if (!S.rowModel || !S.rowNext || !S.rowPrev) return;
+        const Row* cr = RowForModel(F<Il2CppObject*>(self, S.rowModel));
+        if (!cr || !cr->toggle) return;
+        Row& r = g_rows[g_rowByDef[cr->defObj]];
+        const int onIndex = ToggleTrueIndex(r);
+        const bool on = settings::GetBool(r.def.module, r.def.key);
+        const int cur = on ? onIndex : 1 - onIndex, target = on ? 1 - onIndex : onIndex;
+        Stage("row click toggle", &r);
+        il::Invoke(target > cur ? S.rowNext : S.rowPrev, self, {});
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            SR2_INFO("ui: options tab: a row click toggled {}.{} (OptionsItemViewHolder.Activate)", r.def.module,
+                     r.def.key);
+        }
+    });
+}
+
 void HkDetailsBind(Il2CppObject* self, Il2CppObject* data, const MethodInfo* mi) {
     if (Faulted()) return o_detailsBind(self, data, mi);
     Guarded("OptionsDetailsView.BindData/pre", [&] {
@@ -1669,6 +1703,16 @@ bool ResolveAll(std::string& err) {
         if (!S.rowHolder || !il::FieldOffsetInHierarchy(S.rowHolder, "_model", S.rowModel, &e) ||
             !il::FieldOffsetInHierarchy(S.rowHolder, "button", S.rowButton, &e))
             S.rowModel = S.rowButton = 0;
+        if (S.rowHolder && S.rowModel) {
+            S.rowNext = il::Method(S.rowHolder, "NextSetting", 0, &e);
+            S.rowPrev = il::Method(S.rowHolder, "PreviousSetting", 0, &e);
+            if (const MethodInfo* m = il::Method(S.rowHolder, "Activate", 0, &e)) S.rowActivate = il::MethodPointer(m, &e);
+        }
+        if (!S.rowNext || !S.rowPrev || !S.rowActivate) {
+            S.rowNext = S.rowPrev = nullptr;
+            S.rowActivate = nullptr;
+            SR2_WARN("ui: options tab: a click on a toggle row does not toggle it ({})", e);
+        }
         if (!S.fmGetFocus || !S.fmSetFocus || !S.rowModel || !S.transformParent) {
             S.fmGetFocus = S.fmSetFocus = nullptr;
             SR2_WARN("ui: options tab: UI focus is not moved off rebuilt row controls on a child-row refresh ({})", e);
@@ -1798,6 +1842,21 @@ bool StartOptionsTab() {
             !hm.Enable("ui.options_bind_item_category", &e)) {
             hm.Remove("ui.options_bind_item_category");
             SR2_WARN("ui: options tab: optional hook BindItemCategory failed: {}", e);
+        }
+    }
+
+    if (S.rowActivate) {
+        std::string e;
+        bool folded = false;
+        for (void* t : {S.bindCategories, S.getItems, S.toggleApply, S.rangeApply, S.rowBind, S.detailsBind,
+                        S.selectorChanged, S.tabBind, S.updateString, S.bindItemCategory})
+            folded |= t == S.rowActivate;
+        if (folded || !hm.Create(kUiModule, "ui.options_row_activate", S.rowActivate,
+                                 reinterpret_cast<void*>(&HkRowActivate), reinterpret_cast<void**>(&o_rowActivate), &e) ||
+            !hm.Enable("ui.options_row_activate", &e)) {
+            if (!folded) hm.Remove("ui.options_row_activate");
+            SR2_WARN("ui: options tab: optional hook OptionsItemViewHolder.Activate failed: {}",
+                     folded ? std::string("shares an address with another hook") : e);
         }
     }
 

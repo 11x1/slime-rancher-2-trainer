@@ -435,8 +435,23 @@ void DrawRow(const Host& h, const settings::Def& d, const std::string& label, bo
     const float ctlW = isBool ? U(kSwitchW) : std::min(U(kCtlW), std::floor(avail * 0.5f));
     const float x0 = ImGui::GetCursorPosX();
 
+    // A switch row is clickable as a whole (label and the gap included): an
+    // invisible button under it, sized like the row last frame. AllowOverlap
+    // lets the switch drawn on top keep its own hover and click.
+    bool rowClicked = false, rowHovered = false;
+    const ImVec2 rowStart = ImGui::GetCursorScreenPos();
+    ImGuiStorage* st = ImGui::GetStateStorage();
+    const ImGuiID rowHId = ImGui::GetID("##rowh");
+    if (isBool) {
+        const float rowH = std::max(ImGui::GetFrameHeight(), st->GetFloat(rowHId, 0.0f));
+        ImGui::SetNextItemAllowOverlap();
+        rowClicked = ImGui::InvisibleButton("##row", ImVec2(std::max(1.0f, avail), rowH));
+        rowHovered = ImGui::IsItemHovered();
+        ImGui::SetCursorScreenPos(rowStart);
+    }
+
     ImU32 col = nested ? P.soft : P.text;
-    if (isBool && cur < 0.5) col = P.dim;
+    if (isBool && cur < 0.5) col = rowHovered ? P.soft : P.dim;
     ImGui::AlignTextToFramePadding();
     ImGui::PushTextWrapPos(x0 + avail - ctlW - U(12));
     ImGui::PushStyleColor(ImGuiCol_Text, col);
@@ -444,11 +459,13 @@ void DrawRow(const Host& h, const settings::Def& d, const std::string& label, bo
     ImGui::PopStyleColor();
     ImGui::PopTextWrapPos();
     HoverTip(d.tooltip);
+    const float labelBottom = ImGui::GetItemRectMax().y;
     ImGui::SameLine(x0 + avail - ctlW);
     switch (d.kind) {
         case settings::Kind::Bool:
-            if (Switch("##b", cur >= 0.5)) Write(d, cur >= 0.5 ? 0.0 : 1.0);
+            if (Switch("##b", cur >= 0.5) || rowClicked) Write(d, cur >= 0.5 ? 0.0 : 1.0);
             HoverTip(d.tooltip);
+            st->SetFloat(rowHId, std::max(labelBottom, ImGui::GetItemRectMax().y) - rowStart.y);
             break;
         case settings::Kind::Float:
         case settings::Kind::Int: SliderDef(d, cur, ctlW); break;
