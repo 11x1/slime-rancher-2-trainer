@@ -96,6 +96,10 @@ struct Sym {
     const MethodInfo* fmSetFocus = nullptr;  // FocusManager.SetFocus(GameObject, InteractionCause) (static)
     size_t rowModel = 0;                     // OptionsItemViewHolder._model
     size_t rowButton = 0;                    // ButtonViewHolder<T>.button
+    // optional (our rows never leave "unsaved" selections behind)
+    const MethodInfo* modelHasUnsaved = nullptr;  // PresetOptionsItemModel.HasUnsavedSelection()
+    const MethodInfo* modelGetTemp = nullptr;     // PresetOptionsItemModel.get_TempPresetIndex()
+    const MethodInfo* modelSetCurrent = nullptr;  // PresetOptionsItemModel.set_CurrentPresetIndex(int)
 
     // invoked methods
     const MethodInfo* modelCtor = nullptr;        // PresetOptionsItemModel..ctor(PresetOptionsItemDefinition)
@@ -1307,6 +1311,55 @@ void RefreshModsTab() {
     });
 }
 
+// ---- no "unsaved" Mods rows ----
+// A row's value is written (and saved to sr2mods.json) the moment it
+// changes: _applyImmediately -> set_TempPresetIndex -> ApplyTemporaryValue
+// -> our ApplyPresetSelection hook. The model still compares its temp index
+// with the saved preset key (HasUnsavedSelection: CurrentPresetIndex !=
+// _tempPresetIndex; only SaveSelectedValue moves the key), so closing the
+// menu or leaving the tab went through OptionsUIRoot.SaveOrRevert: a
+// "save or revert" prompt for values that are already saved, whose Revert
+// wrote the old values back (and queued a rebind) while the menu closed.
+// After each change of one of our rows, a posted job marks the selections
+// of our models in the shown root as saved (set_CurrentPresetIndex(temp),
+// what SaveSelectedValue does after applying). Game rows are not touched.
+bool g_commitQueued = false;  // main thread only
+
+void CommitModsSelections() {
+    g_commitQueued = false;
+    if (Faulted() || !S.modelSetCurrent) return;
+    Guarded("Mods tab commit", [&] {
+        Stage("commit: find OptionsUIRoot");
+        ModsView v;
+        if (!FindModsView(v)) return;
+        Stage("commit: mark selections saved");
+        Il2CppObject* list = F<Il2CppObject*>(v.root, S.rootItemModels);
+        const size_t n = unity::ListCount(list);
+        size_t marked = 0;
+        for (size_t i = 0; i < n && !Faulted(); ++i) {
+            auto* m = static_cast<Il2CppObject*>(unity::ListAt(list, i));
+            if (!RowForModel(m) || !il::IsA(m, S.presetModel)) continue;
+            bool unsaved = false;
+            if (!il::UnboxTo(il::Invoke(S.modelHasUnsaved, m, {}), unsaved) || !unsaved) continue;
+            int32_t temp = -1;
+            if (!il::UnboxTo(il::Invoke(S.modelGetTemp, m, {}), temp) || temp < 0) continue;
+            std::string err;
+            il::Invoke(S.modelSetCurrent, m, {&temp}, &err);
+            if (err.empty()) ++marked;
+        }
+        static bool logged = false;
+        if (marked && !logged) SR2_INFO("ui: options tab: Mods row changes marked as saved (no save/revert prompt)");
+        logged = logged || marked;
+        Stage("-");
+    });
+}
+
+void ScheduleCommit() {
+    if (!S.modelSetCurrent || g_commitQueued || !core::main_thread::Ready()) return;
+    g_commitQueued = true;
+    core::main_thread::Post([] { CommitModsSelections(); });
+}
+
 void ScheduleRefresh(const Row& changed) {
     if (!S.bindItemCategoryMi || !S.rootCategories || !S.rootCategoryIndex) return;
     g_refreshKey = RowKey(changed.def);  // the latest change wins if one is already queued
@@ -1326,6 +1379,7 @@ void HkToggleApply(Il2CppObject* self, int32_t index, const MethodInfo* mi) {
         F<bool>(r.defObj, S.togDefault) = on;
         const bool was = settings::GetBool(r.def.module, r.def.key);
         Write(r.def, on ? 1.0 : 0.0);
+        ScheduleCommit();
         if (r.isParent && was != on) ScheduleRefresh(r);
     });
     // Game definitions always reach the original. Ours never do (even in fault
@@ -1346,6 +1400,7 @@ void HkRangeApply(Il2CppObject* self, int32_t index, const MethodInfo* mi) {
         F<float>(r.defObj, S.rngDefault) = static_cast<float>(v);
         const double was = settings::Get(r.def.module, r.def.key);
         Write(r.def, v);
+        ScheduleCommit();
         if (r.isParent && std::fabs(settings::Get(r.def.module, r.def.key) - was) > 1e-9) ScheduleRefresh(r);  // Enum parents
     });
     // Game definitions always reach the original. Ours never do (even in fault
@@ -1614,6 +1669,16 @@ bool ResolveAll(std::string& err) {
         if (!S.fmGetFocus || !S.fmSetFocus || !S.rowModel || !S.transformParent) {
             S.fmGetFocus = S.fmSetFocus = nullptr;
             SR2_WARN("ui: options tab: UI focus is not moved off rebuilt row controls on a child-row refresh ({})", e);
+        }
+        // Marking our rows' selections as saved (see CommitModsSelections).
+        if (S.presetModel) {
+            S.modelHasUnsaved = il::Method(S.presetModel, "HasUnsavedSelection", 0, &e);
+            S.modelGetTemp = il::Method(S.presetModel, "get_TempPresetIndex", 0, &e);
+            S.modelSetCurrent = il::Method(S.presetModel, "set_CurrentPresetIndex", 1, &e);
+        }
+        if (!S.modelHasUnsaved || !S.modelGetTemp || !S.modelSetCurrent || !S.rootItemModels) {
+            S.modelHasUnsaved = S.modelGetTemp = S.modelSetCurrent = nullptr;
+            SR2_WARN("ui: options tab: Mods rows may ask to save or revert when the menu closes ({})", e);
         }
     }
 
