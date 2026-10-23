@@ -96,6 +96,7 @@ constexpr float kPreloadInterval = 10.0f;     // re-assert the map UI preload (i
 constexpr float kPreloadWait = 30.0f;         // no asset scan while the preload is still loading (up to this)
 constexpr const char* kPreloadRequester = "SR2Mods.Minimap.PagePreload";  // HashSet<object> key (string equality)
 constexpr float kArrowBaseZoom = 2.5f;        // the arrow has its base size at this zoom
+constexpr float kIconBaseZoom = 1.0f;         // the map icons have their base size at this zoom (the default)
 constexpr float kRoundBorder = 52;            // 9-slice border (px) of the 128 px rounded-square mask / frame
 constexpr int kMarkerQueriesPerTick = 8;      // CanBeShown queries per 10 Hz tick (round robin)
 constexpr int kMarkerMaxFailures = 3;
@@ -179,7 +180,7 @@ void RegisterSettings() {
         "Cycles the zoom (x2, wraps to the minimum)");
     def("orientation", "Orientation", "View", Kind::Enum, 0, 0, 1, 1, {"North up", "Rotate with player"});
     def("arrow_style", "Player arrow", "View", Kind::Enum, 1, 0, 1, 1, {"Game marker", "Classic arrow"},
-        "The arrow and the map icons grow and shrink with the zoom (base size at 2.5x)");
+        "The arrow and the map icons grow and shrink with the zoom");
     def("arrow_rotation_offset", "Player arrow rotation offset", "View", Kind::Float, 180, -180, 180, 5, {},
         "Added to the arrow's heading. 180 is correct for both arrow styles; change it only if the arrow points the "
         "wrong way");
@@ -2256,8 +2257,8 @@ private:
     void ApplyArrowStyle() {
         if (!ui_.arrowImg.Alive() || !ui_.arrowT.Alive()) return;
         bool game = UseGameArrow();
-        // Base size (13% of the minimap) at zoom 2.5x, scaled by ZoomFactor() like the icons.
-        float px = std::max(10.0f, ui_.size * 0.13f * ZoomFactor());
+        // Base size (13% of the minimap) at zoom 2.5x, proportional to the zoom, clamped to 0.4x..1.6x.
+        float px = std::max(10.0f, ui_.size * 0.13f * ArrowZoomFactor());
         ugui::ImageSetSprite(ui_.arrowImg.get(), game ? ui_.gameArrowSprite.get() : sprArrow_.get());
         Vec2 pivot = game ? ui_.gameArrowPivot : Vec2{0.5f, 0.5f};
         float aspect = game ? ui_.gameArrowAspect : 1.0f;
@@ -2724,13 +2725,16 @@ private:
         }
     }
 
-    // Size factor of the arrow and the icons: 1 at zoom 2.5x, proportional to the zoom, clamped to
-    // 0.4x..1.6x (icons have their old fixed size at 2.5x).
-    float ZoomFactor() const { return std::clamp(cfg_.zoom / kArrowBaseZoom, 0.4f, 1.6f); }
+    // Size factor of the arrow: 1 at zoom 2.5x, proportional to the zoom, clamped to 0.4x..1.6x.
+    float ArrowZoomFactor() const { return std::clamp(cfg_.zoom / kArrowBaseZoom, 0.4f, 1.6f); }
 
-    // icons grow and shrink with the zoom like the arrow (not with the page scale) and stay upright
+    // Size factor of the icons: 1 at the default zoom 1x (their old fixed size), proportional to the
+    // zoom like the arrow, clamped to 0.6x..1.75x so they neither vanish at 0.5x nor get huge at 4x.
+    float IconZoomFactor() const { return std::clamp(cfg_.zoom / kIconBaseZoom, 0.6f, 1.75f); }
+
+    // icons grow and shrink with the zoom (not with the page scale) and stay upright
     void Orient(Il2CppObject* t, float s, float rot, bool scale, bool rotate) const {
-        const float k = ZoomFactor() / s;
+        const float k = IconZoomFactor() / s;
         if (scale) ugui::SetLocalScale(t, {k, k, 1});
         if (rotate) ugui::SetLocalEuler(t, {0, 0, -rot});
     }

@@ -112,7 +112,7 @@ The arrow follows `PlayerMapMarker.Rotate` (0x7332A0): `z = -(eulerY + _rotation
 - The arrow never moves: the page moves (and in rotate mode turns) under it.
 - `arrowZ = rot - yaw + styleBase + arrow_rotation_offset`; styleBase = `-_rotationOffset` for the game marker, `+180` for the classic arrow (its texture points up, the game's marker sprite was observed 180 deg off), so the default offset 180 is right for both styles.
 - Rotate-with-player mode: the Rotator turns by `+yaw` (rot == yaw), so the arrow points up.
-- Icons are counter-rotated and counter-scaled, so they stay upright and do not grow with the page scale. Like the arrow, their screen size follows the zoom: 8.5 % of the minimap times `clamp(zoom / 2.5, 0.4, 1.6)` (`ZoomFactor()`), so at 2.5x they keep their old fixed size.
+- Icons are counter-rotated and counter-scaled, so they stay upright and do not grow with the page scale. Like the arrow, their screen size is proportional to the zoom, but with their own base: 8.5 % of the minimap times `clamp(zoom / 1.0, 0.6, 1.75)` (`IconZoomFactor()`, `kIconBaseZoom`), so at the default zoom 1x they keep their old fixed size (5.1 % at 0.5x, 14.9 % from 1.75x up). The first version reused the arrow factor `clamp(zoom / 2.5, 0.4, 1.6)`, which made them 40 % of their old size at the default zoom.
 
 ## Object sources (no periodic scene scans)
 
@@ -390,7 +390,7 @@ All settings apply live.
 | `zoom` | float | 0.5–4; 1.0 ≈ 160 m |
 | `zoom_key` | key | `]`; ×2, wraps to 0.5 |
 | `orientation` | enum | north up / rotate with player |
-| `arrow_style` | enum | game marker / classic arrow (default: classic). Size = 13% of the minimap x clamp(zoom / 2.5, 0.4, 1.6), both styles; the icons use the same factor |
+| `arrow_style` | enum | game marker / classic arrow (default: classic). Size = 13% of the minimap x clamp(zoom / 2.5, 0.4, 1.6), both styles. The icons scale in the same proportion but are at their old size at 1x: clamp(zoom, 0.6, 1.75) |
 | `arrow_rotation_offset` | float | 180; -180..180 (degrees added to the arrow heading) |
 | `show_altitude` | bool | OFF: the "Alt N m" label at the bottom of the minimap in the Grey Labyrinth (hidden, and its text re-set when shown again) |
 | `icon_teleporters` (Icons) | bool | on |
