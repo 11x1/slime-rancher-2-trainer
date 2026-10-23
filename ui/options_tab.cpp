@@ -14,6 +14,7 @@
 
 #include "core/hook_manager.h"
 #include "core/log.h"
+#include "core/main_thread.h"
 #include "core/resolver.h"
 #include "core/settings.h"
 #include "core/text_override.h"
@@ -74,6 +75,8 @@ struct Sym {
     size_t rowLabel = 0, detailsHeader = 0, detailsDetails = 0, selectorText = 0, selectorModel = 0;
     size_t tabTitleEvent = 0, tabTitleText = 0, vmTitle = 0;
     size_t rootItemModels = 0, rootDetailsView = 0;  // optional (empty-tab details)
+    size_t rootCategories = 0, rootCategoryIndex = 0;  // optional (live refresh: which tab is shown)
+    const MethodInfo* bindItemCategoryMi = nullptr;    // optional (live refresh)
 
     // invoked methods
     const MethodInfo* modelCtor = nullptr;        // PresetOptionsItemModel..ctor(PresetOptionsItemDefinition)
@@ -131,6 +134,8 @@ struct Row {
     std::string label;
     bool toggle = false;
     bool indented = false;
+    bool isParent = false;           // other rows' visibility depends on it (Def::parent, or the module's "enabled")
+    bool shown = true;               // in the model list built last (settings::Visible at that time)
     Il2CppObject* defObj = nullptr;  // our cloned definition (GC handle held)
     Il2CppObject* target = nullptr;  // private ScriptedBool / ScriptedFloat (may be null)
     int trueIndex = -1;              // toggles: preset index meaning "on" (lazy)
@@ -422,6 +427,20 @@ void RebuildRows() {
                 if (!hasMaster) label = mv.title + ": " + label;
                 if (!g.name.empty()) label = g.name + " - " + label;
                 add(d, std::move(label), hasMaster);
+            }
+    }
+    // Rows whose value decides whether other rows are listed: a change to one
+    // rebinds the tab (ScheduleRefresh). Only rows actually present count, so
+    // e.g. Autobhop does not refresh for its overlay-only key row.
+    for (Row& p : g_rows) {
+        if (p.def.key == kKeyEnabled) {
+            p.isParent = true;
+            continue;
+        }
+        for (const Row& c : g_rows)
+            if (c.def.module == p.def.module && c.def.parent == p.def.key) {
+                p.isParent = true;
+                break;
             }
     }
 }
@@ -744,17 +763,32 @@ Il2CppObject* BuildModels() {
     // No GC handles in this path: the models are stored into a managed array
     // as soon as they exist. The array pointer lives in a volatile stack slot,
     // which the conservative GC scans, so models stay alive until returned.
+    // Child rows (settings::Def::parent, module "enabled") are left out while
+    // their parent does not allow them. Hidden rows keep their definition and
+    // their g_rowByDef entry, so an Apply or a recycled view that still refers
+    // to one is recognised as ours. Never an empty list: if nothing would be
+    // shown (cannot happen while master rows exist), everything is.
+    size_t want = 0;
+    for (Row& r : g_rows) {
+        r.shown = settings::Visible(r.def.module, r.def.key);
+        if (r.shown) ++want;
+    }
+    if (want == 0) {
+        for (Row& r : g_rows) r.shown = true;
+        want = g_rows.size();
+    }
     Stage("GetItems: il2cpp_array_new(OptionsItemModel, rows)");
-    Il2CppObject* full = NewArray(S.itemModel, g_rows.size());
+    Il2CppObject* full = NewArray(S.itemModel, want);
     if (!full) {
-        SR2_WARN("ui: options tab: il2cpp_array_new({}) failed", g_rows.size());
+        SR2_WARN("ui: options tab: il2cpp_array_new({}) failed", want);
         return nullptr;
     }
     Il2CppObject* volatile keepAlive = full;
     std::vector<Il2CppObject*> models;
-    models.reserve(g_rows.size());
+    models.reserve(want);
     size_t failed = 0;
     for (auto& r : g_rows) {
+        if (!r.shown) continue;
         Il2CppObject* m = CreateModelGuarded(r);
         if (Faulted()) return nullptr;  // stop immediately; caller passes through
         if (!m) {
@@ -766,7 +800,7 @@ Il2CppObject* BuildModels() {
         models.push_back(m);
     }
     Il2CppObject* arr = full;
-    if (models.size() != g_rows.size()) {  // some rows skipped: exact-size array, no null entries
+    if (models.size() != want) {  // some rows failed: exact-size array, no null entries
         Stage("GetItems: il2cpp_array_new(OptionsItemModel, built)");
         arr = NewArray(S.itemModel, models.size());
         if (arr) {
@@ -824,6 +858,45 @@ void HkBindItemCategory(Il2CppObject* self, Il2CppObject* category, const Method
     });
 }
 
+// ---- live show/hide of child rows ----
+// A row other rows depend on (Row::isParent) changed: rebind the Mods tab so
+// GetOptionsItemsForCategory (HkGetItems) returns the new set of rows. Runs
+// as a posted main-thread job, i.e. after the selector / Apply call stack
+// that changed the value has returned, and only if the Mods tab is still the
+// one the open OptionsUIRoot shows (otherwise the next swap to it rebinds).
+// BindItemCategory is the game's own tab-swap path: it rebuilds the model
+// list, rebinds the paged adapter (row views are recycled through
+// HkRowBind, which re-registers our labels) and resets the details view.
+bool g_refreshQueued = false;  // main thread only
+
+void RefreshModsTab() {
+    g_refreshQueued = false;
+    if (Faulted()) return;
+    Guarded("Mods tab refresh", [&] {
+        Stage("refresh: find OptionsUIRoot");
+        if (!S.bindItemCategoryMi || !S.rootCategories || !S.rootCategoryIndex || !unity::IsAlive(g_category)) return;
+        Il2CppObject* root = unity::FindObjectOfType(S.uiRoot);  // active scene instance only
+        if (!unity::IsAlive(root) || !il::IsA(root, S.uiRoot)) return;
+        Stage("refresh: current category");
+        Il2CppObject* cats = F<Il2CppObject*>(root, S.rootCategories);
+        const int32_t idx = F<int32_t>(root, S.rootCategoryIndex);
+        if (!cats || idx < 0 || static_cast<size_t>(idx) >= unity::ListCount(cats)) return;
+        if (unity::ListAt(cats, static_cast<size_t>(idx)) != g_category) return;
+        Stage("refresh: OptionsUIRoot.BindItemCategory(Mods)");
+        std::string err;
+        il::Invoke(S.bindItemCategoryMi, root, {g_category}, &err);
+        if (!err.empty()) SR2_WARN("ui: options tab: refreshing the Mods tab failed: {}", err);
+        Stage("-");
+    });
+}
+
+void ScheduleRefresh() {
+    if (g_refreshQueued || !S.bindItemCategoryMi || !S.rootCategories || !S.rootCategoryIndex) return;
+    if (!core::main_thread::Ready()) return;
+    g_refreshQueued = true;
+    core::main_thread::Post([] { RefreshModsTab(); });
+}
+
 void HkToggleApply(Il2CppObject* self, int32_t index, const MethodInfo* mi) {
     bool ours = false;
     Guarded("Toggle.ApplyPresetSelection", [&] {
@@ -833,7 +906,9 @@ void HkToggleApply(Il2CppObject* self, int32_t index, const MethodInfo* mi) {
         Row& r = g_rows[it->second];
         const bool on = index == ToggleTrueIndex(r);
         F<bool>(r.defObj, S.togDefault) = on;
+        const bool was = settings::GetBool(r.def.module, r.def.key);
         Write(r.def, on ? 1.0 : 0.0);
+        if (r.isParent && was != on) ScheduleRefresh();
     });
     // Game definitions always reach the original. Ours never do (even in fault
     // mode): the original would write our private, possibly null, target.
@@ -851,7 +926,9 @@ void HkRangeApply(Il2CppObject* self, int32_t index, const MethodInfo* mi) {
         RangeValue(r, index, v);
         v = Snap(r.def, v);
         F<float>(r.defObj, S.rngDefault) = static_cast<float>(v);
+        const double was = settings::Get(r.def.module, r.def.key);
         Write(r.def, v);
+        if (r.isParent && std::fabs(settings::Get(r.def.module, r.def.key) - was) > 1e-9) ScheduleRefresh();  // Enum parents
     });
     // Game definitions always reach the original. Ours never do (even in fault
     // mode): the original would write our private, possibly null, target.
@@ -1064,9 +1141,19 @@ bool ResolveAll(std::string& err) {
             il::FieldOffset(about, "_icon", S.aboutIcon, &e);
         if (S.uiRoot && il::FieldOffset(S.uiRoot, "optionsItemModels", S.rootItemModels, &e) &&
             il::FieldOffset(S.uiRoot, "optionsDetailsView", S.rootDetailsView, &e)) {
-            if (const MethodInfo* m = il::Method(S.uiRoot, "BindItemCategory", 1, &e)) S.bindItemCategory = il::MethodPointer(m, &e);
+            if (const MethodInfo* m = il::Method(S.uiRoot, "BindItemCategory", 1, &e)) {
+                S.bindItemCategory = il::MethodPointer(m, &e);
+                if (S.bindItemCategory) S.bindItemCategoryMi = m;
+            }
         }
         if (!S.bindItemCategory) SR2_WARN("ui: options tab: empty-tab details text unavailable ({})", e);
+        // Live refresh of child rows (Def::parent): which tab the root shows.
+        if (!S.uiRoot || !il::FieldOffset(S.uiRoot, "categories", S.rootCategories, &e) ||
+            !il::FieldOffset(S.uiRoot, "currentCategoryIndex", S.rootCategoryIndex, &e)) {
+            S.rootCategories = S.rootCategoryIndex = 0;
+            SR2_WARN("ui: options tab: live show/hide of child rows unavailable ({}); they update when the tab is "
+                     "reopened", e);
+        }
     }
 
     S.modelCtor = r.M(S.presetModel, ".ctor", 1);

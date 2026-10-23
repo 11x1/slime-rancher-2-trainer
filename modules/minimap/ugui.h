@@ -218,6 +218,9 @@ Il2CppObject* AddTmpText(Il2CppObject* go);
 void TmpSetText(Il2CppObject* t, std::string_view utf8);
 void TmpSetFontSize(Il2CppObject* t, float size);
 void TmpSetCenter(Il2CppObject* t);
+void TmpSetAlignment(Il2CppObject* t, int alignment);  // TMPro.TextAlignmentOptions (513 Left, 514 Center)
+// Width the current text needs at the current font size (TMP_Text.preferredWidth); -1 if unavailable.
+float TmpPreferredWidth(Il2CppObject* t);
 void TmpSetColor(Il2CppObject* t, Color c);
 void TmpCopyFont(Il2CppObject* dst, Il2CppObject* srcText);
 

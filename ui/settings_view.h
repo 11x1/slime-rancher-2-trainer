@@ -39,6 +39,15 @@ void RegisterUiSettings();
 // group. The "enabled" def is split out into ModuleView::enabled.
 std::vector<ModuleView> BuildModuleViews();
 
+// A def of the module by key (the "enabled" def included); nullptr if none.
+const settings::Def* FindDef(const ModuleView& mv, std::string_view key);
+// settings::Visible on the values the UI shows (pending writes included):
+// the Def::parent chain allows `d` and, unless `d` is "enabled", the module
+// is on. Used by both UIs to hide child settings.
+bool Visible(const ModuleView& mv, const settings::Def& d);
+// Only the Def::parent chain (no module "enabled" check).
+bool ParentChainAllows(const ModuleView& mv, const settings::Def& d);
+
 // "spawn_scaling" -> "Spawn Scaling", "ui" -> "UI / Overlay".
 std::string PrettyModuleName(std::string_view module);
 

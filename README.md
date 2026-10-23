@@ -90,6 +90,7 @@ Modules register their settings with `sr2::core::settings::Register` (`core/sett
 - A value is written only if it was already in the file or was changed at runtime, so later changes to a module's defaults still take effect.
 - The write is atomic (`sr2mods.json.tmp`, then rename).
 - Every module automatically gets an `enabled` setting (label "Enabled", default `Module::DefaultEnabled()`). Toggling it calls `ModuleManager::SetEnabled`. A module that was disabled at startup runs `Setup()` the first time it is enabled.
+- A setting can name a visibility parent in the same module (`Def::parent`, optional `parentValue` for an Enum index or 0 = "while off"; `settings::SetParent` sets it after registering). Both UIs hide it while the parent does not allow it, and hide every setting of a module except `enabled` while the module is off. `settings::Visible(module, key)` applies the rule.
 
 ### Profiles
 

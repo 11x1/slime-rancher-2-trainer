@@ -424,6 +424,7 @@ bool QuickStart::Setup(sr2::core::ModuleContext& ctx) {
             "save). Hold Shift while the game starts to cancel it for that launch.");
         reg(kAutoContinueDelay, "Auto-continue delay (s)", Kind::Float, 0.5, 0.0, 5.0, 0.1,
             "How long the main menu stays interactive before auto-continue fires.");
+        settings::SetParent(kModule, kAutoContinueDelay, kAutoContinue);  // shown while auto-continue is on
     }
 
     // A fault in Frame() marks the module faulted (logged by the guard); exceptions are logged and skipped.
