@@ -649,6 +649,15 @@ void RenderFrame() {
 
         if (open || editing) {
             PollMouseButtons(io);
+            // The Win32 backend reads Shift / Ctrl with GetKeyState, whose state is per
+            // thread and is not kept for this render thread (the window's messages are
+            // read on the game's thread), so io.KeyShift / KeyCtrl could be stale until
+            // some other input refreshed them (Sandbox grids: Shift+wheel did nothing
+            // until the grid was clicked). The async state is the real one.
+            if (ForegroundIsGame()) {
+                io.AddKeyEvent(ImGuiMod_Shift, KeyDown(VK_SHIFT));
+                io.AddKeyEvent(ImGuiMod_Ctrl, KeyDown(VK_CONTROL));
+            }
             io.MouseDrawCursor = !core::main_thread::Ready() || game_input::WantSoftwareCursor();
         } else {
             io.MouseDrawCursor = false;
