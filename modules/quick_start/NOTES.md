@@ -7,7 +7,6 @@ This module shortens the time from launch to playing. It is native only and reso
 | `skip_intro` | on | Makes the Monomi Park logo, the warning screen and the game logo end after one frame each. Answers the "press any key" prompt automatically. Scene loading is never skipped. |
 | `auto_continue` | off | Once per launch, when the main menu is ready, does what the **Continue** button does (loads the most recent save). Holding **Shift** while the game window is in front, at any point before it fires, cancels it for that launch. The cancel is logged. |
 | `auto_continue_delay` | 0.5 s (0-5) | How long the main menu stays interactive before auto-continue fires. |
-| _(no setting)_ | | While the module is on, the title screen shows a **`[modded]`** line at the bottom left, where `support.slimerancher.com` was; the support URL moves up one row. See "[modded] label" below. |
 | `skip_new_game_intro` | on | When a new save starts, ends the story intro (the text frames shown before the player gets control) right away through the game's own end-of-intro path. The main quest, tutorials and camera are set up exactly as after a watched intro. |
 
 ## Boot flow (game 1.3.0, from the dump and a disassembly of `re/input/GameAssembly.dll`)
@@ -80,7 +79,7 @@ Caveat: anything the game does in the background during the logos (for example p
 - **Pass-through hook `StandaloneEngagementPrompt.OnInteract` (1 arg)**: only records that a key press happened, so the prompt is never answered twice when the player is quicker.
 
 **auto_continue**
-- **Post-hook `MainMenuLandingRootUI.OnEnable`**: marks "menu seen".
+- **`MainMenuLandingRootUI.OnEnable`**: marks "menu seen". The hook itself belongs to the always-on `[modded]` title-screen label (`ui/modded_label.cpp`, see `ui/NOTES.md`), because MinHook allows one hook per target. `Setup` registers a listener with `modded_label::SetMenuEnableListener`; the label's post-hook calls it after the original, and the listener runs inside this module's `DetourGuard`. If that hook is not installed, auto_continue is unavailable (logged).
 - **Frame callback (every 0.1 s)**: the menu counts as ready when all of these hold:
   - `SceneLoader` is not loading
   - `MainMenuLandingRootUI` is alive and active in the hierarchy
@@ -106,15 +105,9 @@ What the module does:
 - **Replace hook `IntroSequenceUIRoot.StartFrame` (1 arg)**: on the first call per instance it calls `EndSequence()` through `runtime_invoke` instead of the original. At that point the intro music has been queued (so `EndSequence` dequeues it), no frame tween exists and input is still off, so the next-frame input does nothing. The game's own end path then runs unchanged, including everything `OnDestroy` sets. If `EndSequence` throws, the original `StartFrame` runs and the intro plays as usual; a native fault marks the module faulted (detours become pass-through).
 - What the player sees: black, about 0.1 s of the intro camera view while the black screen fades, a fade to black (at most 0.5 s), then the game's own fade from black into gameplay.
 
-**[modded] label** (`modded_label.cpp`)
-- Main menu prefab (the `scriptableobjectlookupdata_assets_all` bundle, read with UnityPy): `MainMenu` (has `MainMenuLandingRootUI`) > `MenuContent_OverscanAdjustment` > `LayoutGroup_Left (Labels)` (a `VerticalLayoutGroup`, child alignment LowerLeft, spacing 7) with the children `SwitchUserButton`, `Version Label`, `SupportLabel`. `SupportLabel` is a TMP text (19.2 pt, grey-brown, "support.slimerancher.com") with a `LocalizeStringEvent` and a `LocalizeFontEvent`.
-- **Post-hook `MainMenuLandingRootUI.OnEnable`** (installed when auto_continue or the label resolves) only takes a GC handle to the menu. The next frame does one `Transform.Find("MenuContent_OverscanAdjustment/LayoutGroup_Left (Labels)/SupportLabel")` from it and `Instantiate`s the label into the same column. A new child goes last, so the layout puts the clone on the bottom row and moves the URL up one row. The clone is named `sr2mods_ModdedLabel`, its `LocalizeStringEvent` is disabled (it would write the URL back), the `LocalizeFontEvent` stays (the font follows the language like the original), and the text is set to `[modded]` and re-set for 10 frames.
-- The clone dies with the menu (scene change). The frame callback then only frees the handles. Turning the module off destroys the clone (posted to the main thread). Turning it on makes one `FindObjectOfType(MainMenuLandingRootUI)` for a menu that is already up. Re-enabling the menu (back from a submenu) does nothing while the clone is alive.
-- Log: `modded label: "[modded]" added ...` once; a missing piece is logged once and leaves the title screen as it is.
-
 **Safety**
 - All logic in the detours and the frame callback runs inside `DetourGuard`s. A native fault marks the module faulted for the session: hooks are disabled and the detours become pure pass-through. A native fault reported by `runtime_invoke` does the same (`MarkModuleFaulted`).
-- Objects are re-found with `FindObjectOfType` when needed and checked with `IsA` + `IsAlive` (+ `activeInHierarchy`). A cached object pointer is only compared, never dereferenced later. The only GC handles are the [modded] label's (the menu until the next frame, the clone and its text while they live).
+- Objects are re-found with `FindObjectOfType` when needed and checked with `IsA` + `IsAlive` (+ `activeInHierarchy`). A cached object pointer is only compared, never dereferenced later. The module holds no GC handles.
 
 ## Names resolved (Assembly-CSharp)
 
@@ -127,7 +120,7 @@ What the module does:
 - `MonomiPark.SlimeRancher.UI.MainMenu.StandaloneEngagementPrompt`: `OnInteract` (1 arg)
 - `MonomiPark.SlimeRancher.SceneManagement.SceneLoader`: field `<IsSceneLoadInProgress>k__BackingField`
 - `MonomiPark.SlimeRancher.UI.MainMenu.MainMenuLandingRootUI`
-  - method: `OnEnable()`
+  - method: `OnEnable()` (hooked by `ui/modded_label.cpp`)
   - fields: `_models`, `_subListModels` (optional)
 - `MonomiPark.SlimeRancher.UI.MainMenu.Model.ContinueGameBehaviorModel`: class check only
 - `MonomiPark.SlimeRancher.UI.MainMenu.Model.LoadGameBehaviorModel`
@@ -140,8 +133,6 @@ What the module does:
 - fallback (optional):
   - `MonomiPark.SlimeRancher.AutoSaveDirector`: `GetSaveToContinue()`, `BeginLoad` (2 args)
   - `MonomiPark.SlimeRancher.Persist.Summary`: `get_SaveIdentifier()`
-
-The [modded] label also uses `TMPro.TMP_Text.set_text`, `UnityEngine.Localization.Components.LocalizeStringEvent` (class), `Transform.Find(string)`, `Object.Destroy(Object)` and `Behaviour.set_enabled`; if one is missing, only the label is off.
 
 If the skip_intro, auto_continue or skip_new_game_intro set fails to resolve, only that feature is switched off (logged). If all three fail, the module fails.
 

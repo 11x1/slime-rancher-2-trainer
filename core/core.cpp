@@ -31,10 +31,11 @@
 #define SR2MODS_BUILD "Release"
 #endif
 
-// Provided by the UI owners (ui/options_tab.cpp, ui/overlay.cpp).
+// Provided by the UI owners (ui/options_tab.cpp, ui/overlay.cpp, ui/modded_label.cpp).
 namespace sr2::ui {
 bool StartOptionsTab();
 bool StartOverlay();
+bool StartModdedLabel();
 }  // namespace sr2::ui
 
 namespace sr2::core {
@@ -220,6 +221,10 @@ void Run() {
         std::string err;
         if (!main_thread::Install(&err))
             SR2_ERROR("main thread dispatcher unavailable: {} (main_thread::Post / frame callbacks will never run)", err);
+
+        // "[modded]" title-screen label: always on, no module. Before SetupAll: it owns the
+        // MainMenuLandingRootUI.OnEnable hook that quick_start registers a listener on.
+        if (gcOk) StartUi("modded label", &sr2::ui::StartModdedLabel);
 
         auto& mm = ModuleManager::Get();
         RegisterBuiltinModules(mm);

@@ -2,6 +2,8 @@
 
 The settings UI has two independent parts. `core/core.cpp` calls `sr2::ui::StartOptionsTab()` and then `sr2::ui::StartOverlay()` on the worker thread, after the modules are set up. Either one can fail on its own; the failing one logs the reason and returns `false`. The overlay is the guaranteed way to change settings.
 
+Before the modules are set up, `core.cpp` also calls `sr2::ui::StartModdedLabel()`: the `[modded]` line on the title screen, which is always on (see "[modded] title-screen label" below).
+
 Both parts draw whatever is registered in `core::settings`, grouped by module (in registration order) and then by `Def::group`. Neither hardcodes any module's settings. Values are written only with `settings::Set`, never into the game's save or options file. `settings_view.cpp` holds the code both parts share: grouping, snapping to `Def::step`, formatting, key names, module status lines, and the "Saved" bookkeeping.
 
 The UI registers three settings of its own under module `ui`:
@@ -18,7 +20,8 @@ The UI never draws an automatic `ui.enabled` toggle, because turning the UI off 
 
 | file | purpose |
 |---|---|
-| `ui.h` | `StartOptionsTab()` and `StartOverlay()` |
+| `ui.h` | `StartOptionsTab()`, `StartOverlay()` and `StartModdedLabel()` |
+| `modded_label.cpp/.h` | the always-on `[modded]` line on the title screen; owns the `MainMenuLandingRootUI.OnEnable` hook and passes the event on to one listener (`quick_start`) |
 | `overlay.cpp/.h` | Dear ImGui on the D3D11 swap chain: hooks, input, key capture, back-buffer snapshot |
 | `menu.cpp/.h` | the overlay window: sidebar, tabs, setting cards, Profiles and Settings pages, theme peel (no Win32/D3D) |
 | `menu_layout.cpp/.h` | which category and tab each module is on, nested options, short dropdown labels and descriptions |
@@ -281,6 +284,28 @@ One side effect: after a fault, a game row whose view previously showed one of o
 | Main-thread tick (`game_input`) | stops on `il::AnyFault()` |
 
 I deliberately did **not** adopt `core::DetourGuard` for these. On a fault it disables the module's hooks at the next tick. For the options tab, removing the `GetOptionsItemsForCategory` interception while a Mods tab is bound would bring back the empty-list ArgumentOutOfRange. All ui hooks are also registered under HookManager module `"ui"`, so a tab fault would unhook the overlay too. The ui fault mode is equivalent otherwise: the logic is skipped and the original is called.
+
+## [modded] title-screen label (`modded_label.cpp`)
+
+Whenever the mod is loaded, the title screen shows a **`[modded]`** line at the bottom left, where `support.slimerancher.com` was; the support URL moves up one row. It is not a module: no setting, no overlay tab, it cannot be turned off, and no module has to be on for it. (Until feature/small-polish-2 it was part of `quick_start` and only showed while that module was on.)
+
+**Start.** `StartModdedLabel()` runs on the worker thread before `ModuleManager::SetupAll` (skipped only when the core GC handle self-test failed). It resolves the label's names, then installs and enables the post-hook `ui.main_menu_on_enable` on `MainMenuLandingRootUI.OnEnable` (HookManager module `"ui"`, never switched off). The hook goes in even if the label's names did not resolve, because it also serves the listener. When the label resolved, it adds the frame callback `ui.modded_label` and posts one `FindObjectOfType(MainMenuLandingRootUI)` for a menu that is already up.
+
+**Prefab.** Main menu prefab (the `scriptableobjectlookupdata_assets_all` bundle, read with UnityPy): `MainMenu` (has `MainMenuLandingRootUI`) > `MenuContent_OverscanAdjustment` > `LayoutGroup_Left (Labels)` (a `VerticalLayoutGroup`, child alignment LowerLeft, spacing 7) with the children `SwitchUserButton`, `Version Label`, `SupportLabel`. `SupportLabel` is a TMP text (19.2 pt, grey-brown, "support.slimerancher.com") with a `LocalizeStringEvent` and a `LocalizeFontEvent`.
+
+**One lookup per menu.**
+- The post-hook only takes a GC handle to the menu (class check + `IsAlive`, main thread only).
+- The next frame does one `Transform.Find("MenuContent_OverscanAdjustment/LayoutGroup_Left (Labels)/SupportLabel")` from it and `Instantiate`s the label into the same column. A new child goes last, so the layout puts the clone on the bottom row and moves the URL up one row.
+- The clone is named `sr2mods_ModdedLabel`. Its `LocalizeStringEvent` is disabled (it would write the URL back); the `LocalizeFontEvent` stays, so the font follows the language like the original. The text is set to `[modded]` and re-set for 10 frames.
+- The clone dies with the menu (scene change); the frame callback then only frees the handles. Re-enabling the menu (back from a submenu) does nothing while the clone is alive, so there is never a second one. No per-frame scans.
+
+**Shared hook.** MinHook allows one hook per target, so `quick_start`'s auto_continue does not hook `MainMenuLandingRootUI.OnEnable` itself: it calls `modded_label::SetMenuEnableListener` in its `Setup` (which returns whether the hook is installed). The detour runs the original, then the label's logic, then the listener. The listener runs outside the label's guard and wraps its own logic in `quick_start`'s `DetourGuard`, so with `quick_start` off the label still works, and a fault in either one does not stop the other.
+
+**Safety.** The label's logic (hook and frame callback) runs inside `DetourGuard`s with the fault name `modded_label`, which owns no hooks. A native fault, or a native exception from `runtime_invoke`, turns only the label off for the session; the hook keeps passing through and calling the listener. GC handles: the menu until the next frame, the clone and its text while they live; freed on the main thread outside hooks.
+
+**Names.** `MainMenuLandingRootUI` (class + `OnEnable()`), `TMPro.TMP_Text.set_text`, `UnityEngine.Localization.Components.LocalizeStringEvent` (class), `Transform.Find(string)`, `Object.Destroy(Object)`, `Behaviour.set_enabled`. If one is missing, only the label is off (logged once as `ui: modded label: unavailable: ...`).
+
+**Log.** `ui: modded label: "[modded]" added below the support URL ...` once per launch; a missing piece of the prefab is logged once and leaves the title screen as it is.
 
 ## Build
 
