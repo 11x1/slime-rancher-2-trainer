@@ -437,7 +437,8 @@ Original research:
   `mainActionButtonContainer` for unavailable items; the alt (Info) button comes from
   `category.altDetailsButton` and only exists with a Pedia entry. sell_upgrades now clones the
   category's own `detailsButton` prefab (the game's Purchase button) next to it, labelled
-  "Sell +N" / "Can't sell", from a `DetailsMoreButtonView.BindData` detour (non-generic; the
+  "Sell +N", or, for an upgrade that can't be sold, non-interactable (`Selectable.set_interactable(false)`,
+  dimmed label) as "Can't sell: <short reason>" with no popup (user feedback), from a `DetailsMoreButtonView.BindData` detour (non-generic; the
   ListUI methods are shared generic code without a name-resolvable pointer). Click:
   `UnityEngine.UI.Button.Press` detour (pointer compare) -> sell popup; gamepad A on the
   selected item -> OnAction -> same popup. Details in the sell_upgrades header.

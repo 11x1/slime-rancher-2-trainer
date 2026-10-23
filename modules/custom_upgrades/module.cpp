@@ -468,7 +468,7 @@ public:
     bool SliderActive() const { return slider_.Active(); }
 
     // api.h
-    std::string CanSellCustom(Il2CppObject* plot, int32_t upg);
+    std::string CanSellCustom(Il2CppObject* plot, int32_t upg, std::string* brief);
     bool RemoveCustom(Il2CppObject* plot, int32_t upg, std::string& notes);
     std::string VanillaDependentOf(Il2CppObject* plot, int32_t vanillaUpg);
     float TierMultiplier(Il2CppObject* obj, int family);
@@ -1935,11 +1935,15 @@ void CustomUpgrades::AfterSave(Il2CppObject* result) {
 
 // ---------------------------------------------------------------- api --
 
-std::string CustomUpgrades::CanSellCustom(Il2CppObject* plot, int32_t upg) {
+std::string CustomUpgrades::CanSellCustom(Il2CppObject* plot, int32_t upg, std::string* brief) {
+    auto no = [brief](std::string why, std::string shortWhy) {
+        if (brief) *brief = std::move(shortWhy);
+        return why;
+    };
     const UpgradeDef* d = FindDef(upg);
-    if (!d || d->action) return "This can't be sold.";
+    if (!d || d->action) return no("This can't be sold.", "not sellable");
     std::string id;
-    if (!OwnsKey(plot, *d, &id)) return "This upgrade is not owned.";
+    if (!OwnsKey(plot, *d, &id)) return no("This upgrade is not owned.", "not owned");
     if (d->id == COOP_HEN_COLLECTOR) {
         // Stored chickens are never thrown away: the player vacs them out first.
         int stored = world_.Ready() ? world_.StoredHens(plot) : -1;
@@ -1948,13 +1952,15 @@ std::string CustomUpgrades::CanSellCustom(Il2CppObject* plot, int32_t upg) {
             stored = it != state_.plots.end() ? HenCount(it->second) : 0;
         }
         if (stored > 0)
-            return std::format("Empty the Hen Collector first: {} chicken{} stored. Vac them out of its ports.", stored,
-                               stored == 1 ? " is" : "s are");
+            return no(std::format("Empty the Hen Collector first: {} chicken{} stored. Vac them out of its ports.",
+                                  stored, stored == 1 ? " is" : "s are"),
+                      "holds chickens");
     }
     // Tiers: an owned upgrade that needs this one must be sold first.
     for (const UpgradeDef& o : kDefs)
         if (!o.action && o.needs == d->id && OwnsKey(plot, o))
-            return std::format("Sell '{}' first - it needs this upgrade.", o.title);
+            return no(std::format("Sell '{}' first - it needs this upgrade.", o.title),
+                      std::format("sell {} first", o.title));
     return {};
 }
 
@@ -2355,10 +2361,17 @@ std::string Name(int32_t upgrade) {
     return d ? d->title : "custom upgrade";
 }
 
-std::string CanSell(Il2CppObject* landPlot, int32_t upgrade) {
-    if (!Active() || !main_thread::IsMainThread()) return "Custom upgrades are not available right now.";
+std::string CanSell(Il2CppObject* landPlot, int32_t upgrade, std::string* brief) {
+    if (brief) brief->clear();
+    if (!Active() || !main_thread::IsMainThread()) {
+        if (brief) *brief = "unavailable";
+        return "Custom upgrades are not available right now.";
+    }
     std::string r;
-    if (!g_hasGuard.Run([&] { r = g_self->CanSellCustom(landPlot, upgrade); })) return "Custom upgrades failed.";
+    if (!g_hasGuard.Run([&] { r = g_self->CanSellCustom(landPlot, upgrade, brief); })) {
+        if (brief) *brief = "unavailable";
+        return "Custom upgrades failed.";
+    }
     return r;
 }
 
