@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -920,15 +921,64 @@ int g_reassertTicks = 0;  // main thread only
 int g_reassertIndex = -1;
 ScrollSave g_reassertScroll;
 
-// The active OptionsUIRoot, only while it shows the Mods tab.
-bool FindModsView(ModsView& v) {
-    if (!S.rootCategories || !S.rootCategoryIndex || !unity::IsAlive(g_category)) return false;
-    Il2CppObject* root = unity::FindObjectOfType(S.uiRoot);  // active scene instance only
+// True if this OptionsUIRoot shows the Mods tab: its current category is ours,
+// or (fallback) the row models it bound last are ours, i.e. the last
+// BindItemCategory it ran was for the Mods category. The fallback matters
+// because a refresh is only ever queued by a change made in one of our rows,
+// so the root that holds our models is the one on screen.
+bool ShowsMods(Il2CppObject* root) {
     if (!unity::IsAlive(root) || !il::IsA(root, S.uiRoot)) return false;
     Il2CppObject* cats = F<Il2CppObject*>(root, S.rootCategories);
     const int32_t idx = F<int32_t>(root, S.rootCategoryIndex);
-    if (!cats || idx < 0 || static_cast<size_t>(idx) >= unity::ListCount(cats)) return false;
-    if (unity::ListAt(cats, static_cast<size_t>(idx)) != g_category) return false;
+    if (cats && idx >= 0 && static_cast<size_t>(idx) < unity::ListCount(cats) &&
+        unity::ListAt(cats, static_cast<size_t>(idx)) == g_category)
+        return true;
+    if (!S.rootItemModels) return false;
+    Il2CppObject* models = F<Il2CppObject*>(root, S.rootItemModels);
+    return unity::ListCount(models) > 0 && RowForModel(static_cast<Il2CppObject*>(unity::ListAt(models, 0))) != nullptr;
+}
+
+// One line per loaded OptionsUIRoot, for the log when no root shows the Mods tab.
+std::string DescribeRoots() {
+    std::string s;
+    const auto all = unity::FindObjectsOfTypeAll(S.uiRoot);
+    for (Il2CppObject* r : all) {
+        if (!unity::IsAlive(r) || !il::IsA(r, S.uiRoot)) continue;
+        Il2CppObject* go = unity::GameObjectOf(r);
+        Il2CppObject* cats = F<Il2CppObject*>(r, S.rootCategories);
+        const int32_t idx = F<int32_t>(r, S.rootCategoryIndex);
+        const size_t n = unity::ListCount(cats);
+        auto* cur = (idx >= 0 && static_cast<size_t>(idx) < n) ? static_cast<Il2CppObject*>(unity::ListAt(cats, idx)) : nullptr;
+        Il2CppObject* models = S.rootItemModels ? F<Il2CppObject*>(r, S.rootItemModels) : nullptr;
+        const size_t nm = unity::ListCount(models);
+        const bool oursModels = nm > 0 && RowForModel(static_cast<Il2CppObject*>(unity::ListAt(models, 0))) != nullptr;
+        s += std::format("{}['{}' active {}, tab {}/{} {}, {} models{}]", s.empty() ? "" : ", ", unity::GetName(go),
+                         go && unity::ActiveInHierarchy(go), idx, n,
+                         cur == g_category ? "= Mods" : (cur ? "'" + unity::GetName(cur) + "'" : std::string("-")), nm,
+                         oursModels ? " (ours)" : "");
+    }
+    return s.empty() ? "no OptionsUIRoot loaded" : s;
+}
+
+// The OptionsUIRoot that shows the Mods tab (see ShowsMods). The first active
+// instance is tried first; if that is another one (the game can keep more
+// than one Options root loaded), every loaded instance whose GameObject is
+// active is checked. Nothing is kept: each call looks the root up again.
+bool FindModsView(ModsView& v) {
+    if (!S.rootCategories || !S.rootCategoryIndex || !unity::IsAlive(g_category)) return false;
+    Il2CppObject* first = unity::FindObjectOfType(S.uiRoot);  // active scene instance only
+    Il2CppObject* root = ShowsMods(first) ? first : nullptr;
+    if (!root) {
+        for (Il2CppObject* r : unity::FindObjectsOfTypeAll(S.uiRoot)) {  // also prefab assets: active check
+            if (r == first || !ShowsMods(r)) continue;
+            Il2CppObject* go = unity::GameObjectOf(r);
+            if (go && unity::ActiveInHierarchy(go)) {
+                root = r;
+                break;
+            }
+        }
+    }
+    if (!root) return false;
     v.root = root;
     v.adapter = nullptr;
     if (S.rootAdapterView) {
@@ -1078,7 +1128,16 @@ void RefreshModsTab() {
         Stage("refresh: find OptionsUIRoot");
         if (!S.bindItemCategoryMi) return;
         ModsView v;
-        if (!FindModsView(v)) return;
+        std::string shown = key;
+        std::replace(shown.begin(), shown.end(), '\x1f', '.');
+        if (!FindModsView(v)) {
+            static int warned = 0;
+            if (warned++ < 5)
+                SR2_WARN("ui: options tab: {} changed but no Options menu shows the Mods tab; rows update when the tab "
+                         "is reopened ({})",
+                         shown, DescribeRoots());
+            return;
+        }
         Stage("refresh: save scroll position");
         const ScrollSave scroll = v.adapter ? SaveScroll(v.adapter) : ScrollSave{};
         Stage("refresh: OptionsUIRoot.BindItemCategory(Mods)");
@@ -1087,6 +1146,14 @@ void RefreshModsTab() {
         if (!err.empty()) {
             SR2_WARN("ui: options tab: refreshing the Mods tab failed: {}", err);
             return;
+        }
+        {
+            static int logged = 0;
+            size_t shownRows = 0;
+            for (const Row& r : g_rows) shownRows += r.shown ? 1 : 0;
+            if (logged++ < 10)
+                SR2_INFO("ui: options tab: Mods tab rebound after {} changed ({} of {} rows listed)", shown, shownRows,
+                         g_rows.size());
         }
         if (Faulted() || !v.adapter || !unity::IsAlive(v.adapter)) return;
         Stage("refresh: re-select the changed row");
