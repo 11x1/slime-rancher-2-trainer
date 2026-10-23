@@ -91,6 +91,11 @@ struct Sym {
     const MethodInfo* rtGetAnchored = nullptr;         // RectTransform.get_anchoredPosition()
     const MethodInfo* rtSetAnchored = nullptr;         // RectTransform.set_anchoredPosition(Vector2)
     const MethodInfo* transformParent = nullptr;       // Transform.get_parent()
+    // optional (live refresh: keep the game's UI focus on a live row)
+    const MethodInfo* fmGetFocus = nullptr;  // FocusManager.get_CurrentFocus() (static)
+    const MethodInfo* fmSetFocus = nullptr;  // FocusManager.SetFocus(GameObject, InteractionCause) (static)
+    size_t rowModel = 0;                     // OptionsItemViewHolder._model
+    size_t rowButton = 0;                    // ButtonViewHolder<T>.button
 
     // invoked methods
     const MethodInfo* modelCtor = nullptr;        // PresetOptionsItemModel..ctor(PresetOptionsItemDefinition)
@@ -916,10 +921,11 @@ struct ModsView {
     Il2CppObject* adapter = nullptr;  // OptionsAdapterView or nullptr
 };
 
-constexpr int kScrollReassertTicks = 6;
-int g_reassertTicks = 0;  // main thread only
-int g_reassertIndex = -1;
-ScrollSave g_reassertScroll;
+constexpr int kSettleTicks = 6;
+int g_settleTicks = 0;  // main thread only
+int g_settleIndex = -1;
+ScrollSave g_settleScroll;
+bool g_settleFocus = false;  // keep the UI focus on a live row while settling
 
 // True if this OptionsUIRoot shows the Mods tab: its current category is ours,
 // or (fallback) the row models it bound last are ours, i.e. the last
@@ -993,7 +999,7 @@ bool FindModsView(ModsView& v) {
 // SelectItem(int).
 struct AdapterInfo {
     Il2CppClass* klass = nullptr;
-    size_t container = 0, selected = 0;
+    size_t container = 0, selected = 0, viewHolders = 0;
     const MethodInfo* selectItem = nullptr;
 };
 AdapterInfo g_adapterInfo;
@@ -1007,6 +1013,7 @@ const AdapterInfo* AdapterInfoFor(Il2CppObject* adapter) {
         std::string e;
         if (!il::FieldOffsetInHierarchy(k, "container", a.container, &e)) a.container = 0;
         if (!il::FieldOffsetInHierarchy(k, "currentlySelectedIndex", a.selected, &e)) a.selected = 0;
+        if (!il::FieldOffsetInHierarchy(k, "viewHolders", a.viewHolders, &e)) a.viewHolders = 0;
         a.selectItem = il::MethodInHierarchy(k, "SelectItem", 1, &e);
         if (!a.selected || !a.selectItem)
             SR2_WARN("ui: options tab: OptionsAdapterView selection API not found ({}); the selected row is not kept", e);
@@ -1103,20 +1110,125 @@ int ModelIndexForKey(Il2CppObject* root, const std::string& key) {
     return -1;
 }
 
-void ReassertScroll() {
-    if (Faulted() || g_reassertTicks <= 0) return;
-    Guarded("Mods tab refresh (scroll)", [&] {
-        Stage("refresh: re-apply scroll");
+// ---- UI focus across the rebind ----
+// The game sends Cancel (Escape, gamepad B) to the GameObject that
+// FocusManager has focused and on up its parents
+// (FocusManager.SendCancelActionToFocus -> SRExecuteEvents.ExecuteCancelHierarchy),
+// and only while that object is alive: OptionsUIRoot.OnCancel -> Close is
+// reached only while the focus is somewhere inside the Options screen.
+// Clicking a row's value arrows focuses that row's control. The rebind
+// rebinds every row view, and OptionsItemViewHolder.BindData destroys the
+// old control (Destroyer.Destroy) and creates a new one, so the focus was
+// left on a destroyed object and Back did nothing until the game restarted.
+// A vanilla tab swap never hits this because the focus is then on the tab
+// strip. So when the focus is inside the row list (or already dead), the
+// refresh moves it to the changed row's own button, which is only rebound,
+// never destroyed, and checks it again while settling.
+Il2CppObject* CurrentFocus() {
+    return S.fmGetFocus ? il::Invoke(S.fmGetFocus, nullptr, {}) : nullptr;  // may be a destroyed (Unity-null) object
+}
+
+// True if `obj` (GameObject or Component) is `ancestor` or below it.
+// Compared by native object (m_CachedPtr), not by managed wrapper.
+bool IsUnder(Il2CppObject* obj, Il2CppObject* ancestor) {
+    void* want = unity::IsAlive(ancestor) ? CachedPtr(unity::TransformOf(ancestor)) : nullptr;
+    if (!want || !unity::IsAlive(obj)) return false;
+    Il2CppObject* t = unity::TransformOf(obj);
+    for (int depth = 0; depth < 32 && unity::IsAlive(t); ++depth) {
+        if (CachedPtr(t) == want) return true;
+        t = il::Invoke(S.transformParent, t, {});
+    }
+    return false;
+}
+
+// The live GameObjects that show `model` in the adapter: the row's button
+// (`button`, may be null) and the row view itself (`row`).
+bool RowFocusTargets(Il2CppObject* adapter, Il2CppObject* model, Il2CppObject*& button, Il2CppObject*& row) {
+    button = row = nullptr;
+    const AdapterInfo* a = AdapterInfoFor(adapter);
+    if (!a || !a->viewHolders || !S.rowModel || !model) return false;
+    Il2CppObject* list = F<Il2CppObject*>(adapter, a->viewHolders);
+    const size_t n = unity::ListCount(list);
+    for (size_t i = 0; i < n; ++i) {
+        auto* vh = static_cast<Il2CppObject*>(unity::ListAt(list, i));
+        if (!unity::IsAlive(vh) || !il::IsA(vh, S.rowHolder) || F<Il2CppObject*>(vh, S.rowModel) != model) continue;
+        Il2CppObject* go = unity::GameObjectOf(vh);
+        if (!go || !unity::ActiveInHierarchy(go)) continue;
+        row = go;
+        Il2CppObject* b = S.rowButton ? F<Il2CppObject*>(vh, S.rowButton) : nullptr;
+        if (unity::IsAlive(b)) {
+            Il2CppObject* bgo = unity::GameObjectOf(b);
+            if (bgo && bgo != go && unity::ActiveInHierarchy(bgo)) button = bgo;
+        }
+        return true;
+    }
+    return false;
+}
+
+// The focus cannot take Cancel: destroyed, or a deactivated object inside
+// this Options screen (a recycled row view).
+bool FocusLost(const ModsView& v) {
+    Il2CppObject* f = CurrentFocus();
+    if (!unity::IsAlive(f)) return true;
+    return !unity::ActiveInHierarchy(f) && IsUnder(f, v.root);
+}
+
+// Focus the selected row (FocusManager.SetFocus(GameObject, PROGRAMMATIC)).
+bool FocusSelectedRow(const ModsView& v) {
+    if (!S.fmSetFocus || !v.adapter || !S.rootItemModels) return false;
+    const int idx = SelectedIndex(v.adapter);
+    Il2CppObject* models = F<Il2CppObject*>(v.root, S.rootItemModels);
+    if (idx < 0 || static_cast<size_t>(idx) >= unity::ListCount(models)) return false;
+    Il2CppObject *button = nullptr, *row = nullptr;
+    if (!RowFocusTargets(v.adapter, static_cast<Il2CppObject*>(unity::ListAt(models, idx)), button, row)) return false;
+    // SetFocus may refuse an object that is not focusable (it returns what
+    // it focused): the button first, then the row view.
+    for (Il2CppObject* target : {button, row}) {
+        if (!target) continue;
+        int32_t cause = 0;  // InteractionCause.PROGRAMMATIC
+        std::string err;
+        il::Invoke(S.fmSetFocus, nullptr, {target, &cause}, &err);
+        if (Faulted()) return false;
+        if (!err.empty()) {
+            static int warned = 0;
+            if (warned++ < 3) SR2_WARN("ui: options tab: moving the UI focus to row {} failed: {}", idx, err);
+            continue;
+        }
+        Il2CppObject* now = CurrentFocus();
+        if (!unity::IsAlive(now) || !unity::ActiveInHierarchy(now) || !IsUnder(now, v.root)) continue;
+        static bool logged = false;
+        if (!logged)
+            SR2_INFO("ui: options tab: UI focus put on the changed row ('{}'); its old value control is rebuilt",
+                     unity::GetName(now));
+        logged = true;
+        return true;
+    }
+    static int warned = 0;
+    if (warned++ < 3) SR2_WARN("ui: options tab: the UI focus could not be put on row {}", idx);
+    return false;
+}
+
+// After a refresh: for a few ticks re-apply the scroll offset (while the
+// changed row stays selected) and keep the UI focus usable. Every tick looks
+// the root up again; nothing is held across ticks but plain values.
+void SettleAfterRefresh() {
+    if (Faulted() || g_settleTicks <= 0) return;
+    Guarded("Mods tab refresh (settle)", [&] {
+        Stage("refresh: settle");
         ModsView v;
-        // Stop once the tab is gone or the user moved the selection.
-        if (!FindModsView(v) || !v.adapter || SelectedIndex(v.adapter) != g_reassertIndex) {
-            g_reassertTicks = 0;
+        if (!FindModsView(v) || !v.adapter) {  // the tab or the menu is gone
+            g_settleTicks = 0;
             return;
         }
-        RestoreScroll(v.adapter, g_reassertScroll);
+        if (SelectedIndex(v.adapter) != g_settleIndex) g_settleScroll.valid = false;  // the user moved on
+        if (g_settleScroll.valid) RestoreScroll(v.adapter, g_settleScroll);
+        if (g_settleFocus && FocusLost(v)) {
+            Stage("refresh: settle (UI focus)");
+            if (FocusSelectedRow(v)) SR2_INFO("ui: options tab: UI focus was lost after the Mods tab refresh; restored");
+        }
         Stage("-");
     });
-    if (--g_reassertTicks > 0 && !Faulted()) core::main_thread::Post([] { ReassertScroll(); });
+    if (--g_settleTicks > 0 && !Faulted()) core::main_thread::Post([] { SettleAfterRefresh(); });
 }
 
 void RefreshModsTab() {
@@ -1140,6 +1252,16 @@ void RefreshModsTab() {
         }
         Stage("refresh: save scroll position");
         const ScrollSave scroll = v.adapter ? SaveScroll(v.adapter) : ScrollSave{};
+        // Focus inside the row list (on a control the rebind destroys) or
+        // already gone: it is put on the changed row after the rebind.
+        Stage("refresh: check UI focus");
+        bool keepFocus = false;
+        if (S.fmGetFocus && v.adapter) {
+            Il2CppObject* f = CurrentFocus();
+            const AdapterInfo* a = AdapterInfoFor(v.adapter);
+            Il2CppObject* container = a && a->container ? F<Il2CppObject*>(v.adapter, a->container) : nullptr;
+            keepFocus = !unity::IsAlive(f) || IsUnder(f, v.adapter) || IsUnder(f, container);
+        }
         Stage("refresh: OptionsUIRoot.BindItemCategory(Mods)");
         std::string err;
         il::Invoke(S.bindItemCategoryMi, v.root, {g_category}, &err);
@@ -1165,13 +1287,21 @@ void RefreshModsTab() {
             if (!err.empty()) SR2_WARN("ui: options tab: re-selecting row {} failed: {}", index, err);
         }
         if (Faulted()) return;
+        if (keepFocus) {
+            Stage("refresh: move UI focus to the changed row");
+            FocusSelectedRow(v);
+            if (Faulted()) return;
+        }
         Stage("refresh: restore scroll position");
         RestoreScroll(v.adapter, scroll);
-        if (scroll.valid) {
-            g_reassertScroll = scroll;
-            g_reassertIndex = SelectedIndex(v.adapter);
-            if (g_reassertTicks <= 0) core::main_thread::Post([] { ReassertScroll(); });
-            g_reassertTicks = kScrollReassertTicks;
+        // The old row controls are destroyed at the end of this frame and the
+        // focus change may scroll a frame later: settle for a few ticks.
+        if (scroll.valid || keepFocus) {
+            g_settleScroll = scroll;
+            g_settleIndex = SelectedIndex(v.adapter);
+            g_settleFocus = keepFocus;
+            if (g_settleTicks <= 0) core::main_thread::Post([] { SettleAfterRefresh(); });
+            g_settleTicks = kSettleTicks;
         }
         Stage("-");
     });
@@ -1468,6 +1598,22 @@ bool ResolveAll(std::string& err) {
         if (!S.transformParent || (!S.scrollArea && !S.scrollRect)) {
             S.scrollArea = S.scrollRect = nullptr;
             SR2_WARN("ui: options tab: scroll position is not kept across a child-row refresh ({})", e);
+        }
+        // The game's UI focus (Back / Escape / gamepad B go to the focused
+        // object) must not be left on a row control the rebind destroys.
+        if (Il2CppClass* fm = il::Class(kAsm, "MonomiPark.SlimeRancher.UI.Framework.Interaction.Focus", "FocusManager", &e)) {
+            auto& res = il2cpp::Resolver::Get();
+            S.fmGetFocus = res.MethodByParams(fm, "get_CurrentFocus", {}, &e);
+            S.fmSetFocus = res.MethodByParams(
+                fm, "SetFocus", {"UnityEngine.GameObject", "MonomiPark.SlimeRancher.UI.Framework.Interaction.InteractionCause"},
+                &e);
+        }
+        if (!S.rowHolder || !il::FieldOffsetInHierarchy(S.rowHolder, "_model", S.rowModel, &e) ||
+            !il::FieldOffsetInHierarchy(S.rowHolder, "button", S.rowButton, &e))
+            S.rowModel = S.rowButton = 0;
+        if (!S.fmGetFocus || !S.fmSetFocus || !S.rowModel || !S.transformParent) {
+            S.fmGetFocus = S.fmSetFocus = nullptr;
+            SR2_WARN("ui: options tab: UI focus is not moved off rebuilt row controls on a child-row refresh ({})", e);
         }
     }
 
