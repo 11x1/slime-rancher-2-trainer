@@ -469,6 +469,7 @@ public:
     void AfterDetailsBind(Il2CppObject* view, Il2CppObject* vm);
     void SliderTick(float dt);
     bool SliderActive() const { return slider_.Active(); }
+    bool OnGridNavigate(Il2CppObject* evt);
 
     // api.h
     std::string CanSellCustom(Il2CppObject* plot, int32_t upg, std::string* brief);
@@ -542,6 +543,10 @@ private:
     custom_upgrades::world::SiloButtons silo_;  // Sell-All Button world button
     custom_upgrades::ui::PlotMenuSlider slider_;  // Hen Collector limit (one at a time)
     custom_upgrades::ui::SaleNotices notices_;    // Sell-All: per-plort HUD notifications
+    // Grid navigation (gamepad / keyboard left / right for the slider): NavigationEventData
+    Il2CppClass* navEventClass_ = nullptr;
+    const MethodInfo* navMoveDirMi_ = nullptr;  // NavigationEventData.get_MoveDirection
+    const MethodInfo* navUseMi_ = nullptr;      // NavigationEventData.Use(bool didNavigate)
     Il2CppObject* menuRoot_ = nullptr;            // last updated LandPlotUIRoot (handle held)
     Il2CppGCHandle menuRootHandle_ = nullptr;
     void TrackMenuRoot(Il2CppObject* root);
@@ -668,6 +673,22 @@ void DetailsBindDetour(Il2CppObject* view, Il2CppObject* vm, const MethodInfo* m
     g_origDetailsBind(view, vm, mi);
     // Every list menu's details panel binds here: one flag check for the others.
     if (g_self && view && g_self->On()) g_detailsGuard.Run([&] { g_self->AfterDetailsBind(view, vm); });
+}
+
+// UniformGridView.INavigationHandler.OnNavigate(NavigationEventData): the item grid of the plot menu
+// (GridArea / GenericGridItemViewHolder) moves its selection on left / right, so a pad / arrow press
+// for the slider also selected the neighbouring item (and the slider vanished with the rebind). While
+// the Hen Collector limit slider is shown those two directions step the slider instead (event used,
+// the grid keeps the item selected). Up / down and everything else pass through unchanged.
+using GridNavFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+GridNavFn g_origGridNav = nullptr;
+sr2::core::DetourGuard g_gridNavGuard{kModule, "UniformGridView.OnNavigate"};
+
+void GridNavDetour(Il2CppObject* grid, Il2CppObject* evt, const MethodInfo* mi) {
+    bool taken = false;
+    if (g_self && evt && g_self->On() && g_self->SliderActive())
+        g_gridNavGuard.Run([&] { taken = g_self->OnGridNavigate(evt); });
+    if (!taken) g_origGridNav(grid, evt, mi);
 }
 
 bool HasUpgradeDetour(Il2CppObject* plot, int32_t upg, const MethodInfo* mi) {
@@ -1801,6 +1822,19 @@ void CustomUpgrades::SliderTick(float dt) {
     slider_.Tick(dt);
 }
 
+bool CustomUpgrades::OnGridNavigate(Il2CppObject* evt) {
+    if (!main_thread::IsMainThread() || !navEventClass_ || !IsA(evt, navEventClass_)) return false;
+    bool ok = false;
+    const int32_t dir = Unbox<int32_t>(Invoke(navMoveDirMi_, evt, {}, "NavigationEventData.get_MoveDirection", &ok), -1);
+    if (!ok) return false;
+    constexpr int32_t kMoveLeft = 0, kMoveRight = 2;  // UnityEngine.EventSystems.MoveDirection
+    if (dir != kMoveLeft && dir != kMoveRight) return false;
+    if (!slider_.Step(dir == kMoveRight ? 1 : -1)) return false;
+    bool didNavigate = true;  // nobody else (late navigation handlers) acts on it
+    Invoke(navUseMi_, evt, {&didNavigate}, "NavigationEventData.Use", &ok);
+    return true;
+}
+
 // ---------------------------------------------------------------- buying --
 
 void CustomUpgrades::OnAddUpgrade(Il2CppObject* plot, int32_t upg) {
@@ -2281,6 +2315,26 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
                                  reinterpret_cast<void**>(&g_origDetailsBind)))
             report += std::format(" PurchaseItemDetailsContentView.BindData@0x{:X}", Resolver::Rva(p));
         else SR2_WARN("[{}] hook PurchaseItemDetailsContentView.BindData failed ({}) - no limit slider", kModule, err);
+        // Pad / arrow left / right for the slider without moving the menu grid's selection (optional:
+        // without it the slider polls the pad / keyboard itself).
+        constexpr const char* kFocusNs = "MonomiPark.SlimeRancher.UI.Framework.Interaction.Focus";
+        Il2CppClass* grid = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Framework.CommonControls", "UniformGridView", &err);
+        navEventClass_ = R.Class(kImage, kFocusNs, "NavigationEventData", &err);
+        navMoveDirMi_ = navEventClass_ ? R.Method(navEventClass_, "get_MoveDirection", 0, &err) : nullptr;
+        navUseMi_ = navEventClass_ ? R.Method(navEventClass_, "Use", 1, &err) : nullptr;
+        const MethodInfo* navMi =
+            grid ? R.Method(grid, "MonomiPark.SlimeRancher.UI.Framework.Interaction.Focus.INavigationHandler.OnNavigate", 1, &err)
+                 : nullptr;
+        void* np = (navMi && navMoveDirMi_ && navUseMi_) ? R.MethodPointer(navMi, &err) : nullptr;
+        if (np && ctx.HookAddress("UniformGridView.OnNavigate", np, reinterpret_cast<void*>(&GridNavDetour),
+                                  reinterpret_cast<void**>(&g_origGridNav))) {
+            slider_.SetNavigationSteps(true);
+            report += std::format(" UniformGridView.OnNavigate@0x{:X}", Resolver::Rva(np));
+        } else {
+            navEventClass_ = nullptr;
+            SR2_WARN("[{}] UniformGridView.OnNavigate not hooked ({}) - the slider polls pad / arrows itself (the menu "
+                     "grid may also move)", kModule, err.empty() ? "not found" : err);
+        }
     }
 
     // Sell-All HUD notices (optional; missing -> the world button's text says what was sold).

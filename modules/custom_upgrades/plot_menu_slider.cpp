@@ -54,6 +54,7 @@ constexpr float kGap = 6.0f;
 constexpr float kTotalHeight = kLabelHeight + kGap + kBarHeight;
 constexpr float kRepeatDelay = 0.40f;  // seconds before a held direction repeats
 constexpr float kRepeatRate = 0.07f;   // seconds between repeats
+constexpr uint64_t kSamePressMs = 150; // a navigation event and our poll this close belong to one press
 constexpr int kImageSliced = 1;
 constexpr int kTmpAlignLeft = 513;     // TMPro.TextAlignmentOptions.Left
 constexpr int kFindExcludeInactive = 0;
@@ -83,6 +84,9 @@ struct PlotMenuSlider::Impl {
     Il2CppClass* styleClass = nullptr;   // SliderStyle (optional)
     Il2CppClass* stylerClass = nullptr;  // SliderStyler (optional)
     Il2CppClass* popupClass = nullptr;   // PopupPrompt (optional: input blocker)
+    Il2CppClass* canvasClass = nullptr;  // UnityEngine.Canvas
+    Il2CppClass* raycasterClass = nullptr;  // UnityEngine.UI.GraphicRaycaster
+    Il2CppClass* sdfRectClass = nullptr;    // SDFRoundedRectangle (optional: the game's UI shapes)
     size_t offDetailsText = 0, offCraftCost = 0, offStylerStyle = 0;
 
     // methods (all through Resolver::Invoke)
@@ -112,6 +116,10 @@ struct PlotMenuSlider::Impl {
                     *tmpSetMat = nullptr, *tmpGetSize = nullptr, *tmpSetSize = nullptr, *tmpGetColor = nullptr,
                     *tmpSetColor = nullptr, *tmpSetAlign = nullptr, *tmpSetWrap = nullptr;
     const MethodInfo* findAny = nullptr;          // Object.FindAnyObjectByType(Type, FindObjectsInactive)
+    const MethodInfo* compInParent = nullptr;     // Component.GetComponentInParent(Type, bool)
+    const MethodInfo* cvGetOrder = nullptr, *cvSetOrder = nullptr, *cvGetLayer = nullptr, *cvSetLayer = nullptr,
+                    *cvSetOverride = nullptr;
+    const MethodInfo* sdfSetRadius = nullptr, *sdfSetBorder = nullptr, *sdfSetBorderColor = nullptr;
     // EventSystem (optional: selection hand-back)
     const MethodInfo* esCurrent = nullptr, *esGetSelected = nullptr, *esSetSelected = nullptr;
     // Input System (optional: gamepad / keyboard steps)
@@ -135,6 +143,8 @@ struct PlotMenuSlider::Impl {
     Il2CppObject* slider = nullptr;   // UnityEngine.UI.Slider
     Il2CppObject* sliderGo = nullptr; // its GameObject
     Il2CppObject* label = nullptr;    // TMP_Text (may be null)
+    Color labelColor{0.259f, 0.310f, 0.451f, 1.0f};  // the panel's description colour (game default)
+    bool externalSteps = false;       // left / right come from the menu's navigation (Step), not polling
     std::vector<Il2CppGCHandle> handles;
     SliderSpec spec;
     int value = 0;
@@ -142,6 +152,11 @@ struct PlotMenuSlider::Impl {
     int heldDir = 0;
     int blockedDir = 0;  // direction held since a press was refused (popup / not interactable)
     float heldTime = 0.0f, nextRepeat = 0.0f;
+    // steps from the menu's navigation events (Step): the polled press they belong to is not stepped twice
+    bool navDriven = false;            // the held press is stepped by navigation events (no poll repeats)
+    int lastNavDir = 0;
+    uint64_t lastNavMs = 0, lastPollStepMs = 0;
+    bool loggedNav = false, loggedBlocked = false;
     // EventSystem selection to hand back after a mouse drag
     Il2CppObject* prevSel = nullptr;
     Il2CppGCHandle prevSelHandle = nullptr;
@@ -233,6 +248,24 @@ struct PlotMenuSlider::Impl {
         }
         return img;
     }
+    // The game's own UI shape (SDFRoundedRectangle: makes its SDF material from Shader.Find("SDFUI/...")),
+    // else a plain Image.
+    Il2CppObject* AddShape(Il2CppObject* go, Color c, float radius, float border = 0.0f, Color borderColor = {}) {
+        if (sdfRectClass) {
+            if (Il2CppObject* g = AddComponent(go, sdfRectClass, "AddComponent(SDFRoundedRectangle)")) {
+                Call(gfxSetColor, g, {&c}, "Graphic.set_color");
+                if (sdfSetRadius) Call(sdfSetRadius, g, {&radius}, "SDFRoundedRectangle.SetCornerRadius");
+                if (border > 0.0f && sdfSetBorder && sdfSetBorderColor) {
+                    Call(sdfSetBorder, g, {&border}, "SDFGraphic.set_BorderSize");
+                    Call(sdfSetBorderColor, g, {&borderColor}, "SDFGraphic.set_BorderColor");
+                }
+                return g;
+            }
+        }
+        return AddImage(go, c, false);
+    }
+    static uint64_t NowMs() { return GetTickCount64(); }
+    bool InputBlocked();
     bool Pressed(const MethodInfo* getControl, Il2CppObject* device) {
         if (!device || !getControl) return false;
         bool ok = false;
@@ -279,6 +312,7 @@ struct PlotMenuSlider::Impl {
         });
         ForgetSelection();
         heldDir = blockedDir = 0;
+        navDriven = false;
         spec = {};
     }
 };
@@ -329,6 +363,7 @@ bool PlotMenuSlider::Setup(Resolver& R, const char* module, std::string& why) {
 
     p->goClass = cls(kCore, "UnityEngine", "GameObject");
     Il2CppClass* transform = cls(kCore, "UnityEngine", "Transform");
+    Il2CppClass* component = cls(kCore, "UnityEngine", "Component");
     p->rtClass = cls(kCore, "UnityEngine", "RectTransform");
     Il2CppClass* uobject = cls(kCore, "UnityEngine", "Object");
     p->imageClass = cls(kUi, "UnityEngine.UI", "Image");
@@ -404,6 +439,34 @@ bool PlotMenuSlider::Setup(Resolver& R, const char* module, std::string& why) {
         p->tmpSetWrap = R.Method(p->tmpTextClass, "set_textWrappingMode", 1, &err);
         p->findAny = byParams(uobject, "FindAnyObjectByType", {"System.Type", "UnityEngine.FindObjectsInactive"}, false);
         p->popupClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Popup", "PopupPrompt", &err);
+        // Pointer input: the details panel (PurchaseItemDetailsContent) is a nested Canvas WITHOUT a
+        // GraphicRaycaster, so the menu's raycaster never sees graphics below it. Our root gets its
+        // own Canvas (sorted just above the panel's) + GraphicRaycaster.
+        p->canvasClass = R.Class("UnityEngine.UIModule", "UnityEngine", "Canvas", &err);
+        p->raycasterClass = R.Class(kUi, "UnityEngine.UI", "GraphicRaycaster", &err);
+        p->compInParent = byParams(component, "GetComponentInParent", {"System.Type", "System.Boolean"}, false);
+        if (p->canvasClass) {
+            p->cvGetOrder = R.Method(p->canvasClass, "get_sortingOrder", 0, &err);
+            p->cvSetOrder = R.Method(p->canvasClass, "set_sortingOrder", 1, &err);
+            p->cvGetLayer = R.Method(p->canvasClass, "get_sortingLayerID", 0, &err);
+            p->cvSetLayer = R.Method(p->canvasClass, "set_sortingLayerID", 1, &err);
+            p->cvSetOverride = R.Method(p->canvasClass, "set_overrideSorting", 1, &err);
+        }
+        if (!p->canvasClass || !p->raycasterClass || !p->compInParent || !p->cvGetOrder || !p->cvSetOrder ||
+            !p->cvGetLayer || !p->cvSetLayer || !p->cvSetOverride) {
+            p->raycasterClass = nullptr;
+            report += " own raycaster: NOT available (mouse may not reach the slider);";
+        }
+        // The game's UI shapes (rounded rectangles drawn with an SDF shader).
+        p->sdfRectClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.SDFUI", "SDFRoundedRectangle", &err);
+        if (p->sdfRectClass) {
+            p->sdfSetRadius = R.MethodByParams(p->sdfRectClass, "SetCornerRadius", {"System.Single"}, &err);
+            Il2CppClass* sdf = parentOf(p->sdfRectClass);  // SDFGraphic
+            p->sdfSetBorder = sdf ? R.Method(sdf, "set_BorderSize", 1, &err) : nullptr;
+            p->sdfSetBorderColor = sdf ? R.Method(sdf, "set_BorderColor", 1, &err) : nullptr;
+            if (!p->sdfSetRadius) p->sdfRectClass = nullptr;
+        }
+        if (!p->sdfRectClass) report += " SDF shapes: NOT available (plain images);";
         p->styleClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.UIStyling", "SliderStyle", &err);
         p->stylerClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.UIStyling", "SliderStyler", &err);
         if (p->stylerClass) {
@@ -540,6 +603,28 @@ bool PlotMenuSlider::Create(Il2CppObject* contentView, const SliderSpec& specIn)
         p.Rect(rootRt, {0, 0}, {1, 0}, {0.5f, 0}, {0, 16}, {-32, kTotalHeight});
     }
     if (p.Faulted()) return fail("faulted");
+    // Pointer input: own Canvas + GraphicRaycaster (the panel's nested Canvas has no raycaster, so
+    // nothing below it is ever hit). Sorted one above the panel's canvas so our hits win over the
+    // menu's own graphics behind it.
+    bool raycaster = false;
+    if (p.raycasterClass) {
+        bool inactive = true;
+        Il2CppObject* parentCanvas =
+            p.Call(p.compInParent, parentTr, {unity::TypeOf(p.canvasClass), &inactive}, "GetComponentInParent(Canvas)", &ok);
+        if (!ok || !unity::IsAlive(parentCanvas) || !p.IsA(parentCanvas, p.canvasClass)) parentCanvas = nullptr;
+        Il2CppObject* canvas = p.AddComponent(root, p.canvasClass, "AddComponent(Canvas)");
+        if (canvas) {
+            int32_t order = parentCanvas ? p.Unbox<int32_t>(p.Call(p.cvGetOrder, parentCanvas, {}, "Canvas.get_sortingOrder")) : 0;
+            int32_t sortLayer = parentCanvas ? p.Unbox<int32_t>(p.Call(p.cvGetLayer, parentCanvas, {}, "Canvas.get_sortingLayerID")) : 0;
+            bool over = true;
+            ++order;
+            p.Call(p.cvSetOverride, canvas, {&over}, "Canvas.set_overrideSorting");
+            p.Call(p.cvSetLayer, canvas, {&sortLayer}, "Canvas.set_sortingLayerID");
+            p.Call(p.cvSetOrder, canvas, {&order}, "Canvas.set_sortingOrder");
+            raycaster = p.AddComponent(root, p.raycasterClass, "AddComponent(GraphicRaycaster)") != nullptr;
+        }
+    }
+    if (p.Faulted()) return fail("faulted");
 
     // ---- label ----
     Il2CppObject* labelGo = p.NewUi("Label", rootRt, layer);
@@ -552,7 +637,7 @@ bool PlotMenuSlider::Create(Il2CppObject* contentView, const SliderSpec& specIn)
             Il2CppObject* lse = unity::Field<Il2CppObject*>(contentView, p.offDetailsText);
             Il2CppObject* src = unity::IsAlive(lse) ? unity::GetComponent(lse, p.tmpTextClass) : nullptr;
             float size = 26.0f;
-            Color col{1, 1, 1, 1};
+            Color col = p.labelColor;
             if (src) {
                 if (Il2CppObject* font = p.Call(p.tmpGetFont, src, {}, "TMP_Text.get_font"); unity::IsAlive(font))
                     p.Call(p.tmpSetFont, tmp, {font}, "TMP_Text.set_font");
@@ -562,6 +647,7 @@ bool PlotMenuSlider::Create(Il2CppObject* contentView, const SliderSpec& specIn)
                 if (std::isfinite(s) && s >= 10.0f && s <= 80.0f) size = s;
                 col = p.Unbox<Color>(p.Call(p.tmpGetColor, src, {}, "TMP_Text.get_color"), col);
             }
+            p.labelColor = col;
             p.Call(p.tmpSetSize, tmp, {&size}, "TMP_Text.set_fontSize");
             p.Call(p.tmpSetColor, tmp, {&col}, "TMP_Text.set_color");
             int32_t align = kTmpAlignLeft, noWrap = 0;
@@ -590,10 +676,19 @@ bool PlotMenuSlider::Create(Il2CppObject* contentView, const SliderSpec& specIn)
     p.Rect(unity::TransformOf(fillGo), {0, 0}, {0, 1}, {0.5f, 0.5f}, {0, 0}, {12, 0});
     p.Rect(unity::TransformOf(handleArea), {0, 0}, {1, 1}, {0.5f, 0.5f}, {0, 0}, {-28, 0});
     p.Rect(unity::TransformOf(handleGo), {0, 0}, {0, 1}, {0.5f, 0.5f}, {0, 0}, {28, 0});
-    // Plain game-like colours first (a SliderStyle overrides what it sets).
-    Il2CppObject* bgImg = p.AddImage(bgGo, Color{0.10f, 0.07f, 0.16f, 0.85f}, true);
-    Il2CppObject* fillImg = p.AddImage(fillGo, Color{0.98f, 0.45f, 0.64f, 1.0f}, true);
-    Il2CppObject* handleImg = p.AddImage(handleGo, Color{1.0f, 1.0f, 1.0f, 1.0f}, false);
+    // Hit area: the whole bar (the track is only half its height); alpha 1/255, so it is drawn (a
+    // CanvasRenderer may cull fully transparent meshes, and undrawn graphics are never raycast).
+    if (Il2CppObject* hit = p.AddImage(sGo, Color{1.0f, 1.0f, 1.0f, 1.0f / 255.0f}, false); !hit)
+        return fail("hit area Image failed");
+    // The game's look: SDF rounded shapes in the menu's colours (the panel text colour for the track,
+    // the game's slider pink (scroll bars) for fill and handle border); a SliderStyle, when one is
+    // loaded and the shapes are plain Images, overrides what it sets.
+    const Color text = p.labelColor;
+    const Color pink{0.871f, 0.310f, 0.522f, 1.0f};
+    const bool sdf = p.sdfRectClass != nullptr;
+    Il2CppObject* bgImg = p.AddShape(bgGo, Color{text.r, text.g, text.b, 0.22f}, kBarHeight * 0.25f);
+    Il2CppObject* fillImg = p.AddShape(fillGo, pink, kBarHeight * 0.25f);
+    Il2CppObject* handleImg = p.AddShape(handleGo, Color{1.0f, 1.0f, 1.0f, 1.0f}, kBarHeight * 0.5f, 3.0f, pink);
     if (!bgImg || !fillImg || !handleImg) return fail("Image components failed");
 
     Il2CppObject* slider = p.AddComponent(sGo, p.sliderClass, "AddComponent(Slider)");
@@ -618,7 +713,7 @@ bool PlotMenuSlider::Create(Il2CppObject* contentView, const SliderSpec& specIn)
     }
     // Game look: SliderStyler + a loaded SliderStyle (applied by its OnEnable when we activate).
     bool styled = false;
-    if (Il2CppObject* style = p.SliderStyle()) {
+    if (Il2CppObject* style = sdf ? nullptr : p.SliderStyle()) {  // SliderStyler expects Images
         if (Il2CppObject* styler = p.AddComponent(sGo, p.stylerClass, "AddComponent(SliderStyler)")) {
             void** slot = reinterpret_cast<void**>(reinterpret_cast<char*>(styler) + p.offStylerStyle);
             if (p.wbarrier) p.wbarrier(styler, slot, style);
@@ -631,10 +726,13 @@ bool PlotMenuSlider::Create(Il2CppObject* contentView, const SliderSpec& specIn)
     p.SetSliderValue(p.value);  // after OnEnable (handle / fill placement)
     if (!p.loggedBuild) {
         p.loggedBuild = true;
-        SR2_INFO("[{}] slider '{}' built under '{}' ({}; {}), range {}..{} step {}, value {}", p.module, p.spec.name,
-                 unity::GetName(unity::GameObjectOf(parentTr)),
+        SR2_INFO("[{}] slider '{}' built under '{}' ({}; {}; {}; {}), range {}..{} step {}, value {}", p.module,
+                 p.spec.name, unity::GetName(unity::GameObjectOf(parentTr)),
                  layout ? "LayoutGroup: inserted after the cost row" : craftTr ? "cost row slot copied" : "panel bottom",
-                 styled ? "game SliderStyle" : "plain colours", p.spec.min, p.spec.max, p.spec.step, p.value);
+                 sdf ? "game SDF shapes" : styled ? "game SliderStyle" : "plain colours",
+                 raycaster ? "own Canvas + GraphicRaycaster" : "NO own raycaster",
+                 p.externalSteps ? "left / right from the menu's navigation" : "left / right polled", p.spec.min,
+                 p.spec.max, p.spec.step, p.value);
     }
     return true;
 }
@@ -688,6 +786,54 @@ int PlotMenuSlider::Impl::InputDirection() {
     return dir;
 }
 
+bool PlotMenuSlider::Impl::InputBlocked() {
+    bool ok = false;
+    const bool interactable = Unbox<bool>(Call(selInteractable, slider, {}, "Selectable.IsInteractable", &ok), true);
+    Il2CppObject* found = nullptr;
+    if (findAny && popupClass) {
+        int32_t mode = kFindExcludeInactive;
+        found = Call(findAny, nullptr, {unity::TypeOf(popupClass), &mode}, "FindAnyObjectByType", &ok);
+        if (!ok || !unity::IsAlive(found)) found = nullptr;
+    }
+    if (interactable && !found) return false;
+    if (!loggedBlocked) {
+        loggedBlocked = true;
+        SR2_INFO("[{}] slider '{}': left / right ignored ({})", module, spec.name,
+                 !interactable ? std::string("slider not interactable")
+                               : "PopupPrompt '" + unity::GetName(unity::GameObjectOf(found)) + "' is active");
+    }
+    return true;
+}
+
+bool PlotMenuSlider::Step(int dir) {
+    if (!impl_ || !impl_->root || dir == 0 || !main_thread::IsMainThread()) return false;
+    Impl& p = *impl_;
+    if (p.Faulted() || !unity::IsAlive(p.root) || !unity::IsAlive(p.slider) || !unity::ActiveInHierarchy(p.root))
+        return false;
+    if (p.InputBlocked()) return false;
+    dir = dir > 0 ? 1 : -1;
+    const uint64_t now = Impl::NowMs();
+    const bool samePress = p.heldDir == dir;
+    const bool pollStepped = samePress && !p.navDriven && now - p.lastPollStepMs < kSamePressMs;
+    if (samePress) p.navDriven = true;  // the input module repeats it from now on, not our poll
+    p.lastNavDir = dir;
+    p.lastNavMs = now;
+    if (!p.loggedNav) {
+        p.loggedNav = true;
+        SR2_INFO("[{}] slider '{}': left / right taken from the menu's grid navigation", p.module, p.spec.name);
+    }
+    if (!pollStepped) {
+        const int v = p.Snap(p.value + dir * p.spec.step);
+        p.SetSliderValue(v);
+        p.Apply(v, true);
+    }
+    return true;
+}
+
+void PlotMenuSlider::SetNavigationSteps(bool on) {
+    if (impl_) impl_->externalSteps = on;
+}
+
 void PlotMenuSlider::Tick(float dt) {
     if (!impl_ || !impl_->root || !main_thread::IsMainThread()) return;
     Impl& p = *impl_;
@@ -732,29 +878,24 @@ void PlotMenuSlider::Tick(float dt) {
     int dir = sliderSelected ? 0 : p.InputDirection();
     if (dir == 0 || dir != p.blockedDir) p.blockedDir = 0;
     if (dir != 0 && dir == p.blockedDir) dir = 0;  // held since it was refused: no re-check per frame
-    if (dir != 0 && dir != p.heldDir) {            // checked once per new press, not per frame
-        bool ok = false;
-        const bool interactable = p.Unbox<bool>(p.Call(p.selInteractable, p.slider, {}, "Selectable.IsInteractable", &ok), true);
-        bool popup = false;
-        if (p.findAny && p.popupClass) {
-            int32_t mode = kFindExcludeInactive;
-            Il2CppObject* found = p.Call(p.findAny, nullptr, {unity::TypeOf(p.popupClass), &mode}, "FindAnyObjectByType", &ok);
-            popup = ok && unity::IsAlive(found);
-        }
-        if (!interactable || popup) {
-            p.blockedDir = dir;
-            dir = 0;
-        }
+    if (dir != 0 && dir != p.heldDir && p.InputBlocked()) {  // checked once per new press, not per frame
+        p.blockedDir = dir;
+        dir = 0;
     }
     int steps = 0;
+    const uint64_t now = Impl::NowMs();
     if (dir == 0) {
         p.heldDir = 0;
+        p.navDriven = false;
     } else if (dir != p.heldDir) {
         p.heldDir = dir;
         p.heldTime = 0.0f;
         p.nextRepeat = kRepeatDelay;
-        steps = 1;
-    } else {
+        // Already stepped by the menu's navigation event for this press (Step)? Then it drives it.
+        p.navDriven = p.lastNavDir == dir && now - p.lastNavMs < kSamePressMs;
+        steps = p.navDriven ? 0 : 1;
+        if (steps) p.lastPollStepMs = now;
+    } else if (!p.navDriven) {
         p.heldTime += dt;
         while (p.heldTime >= p.nextRepeat && steps < 8) {
             ++steps;

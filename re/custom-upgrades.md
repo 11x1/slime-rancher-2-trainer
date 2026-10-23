@@ -235,6 +235,14 @@ As built:
   (+x,+z) corner) whose SiloStorage gets ONE session clone of the elder slot definition (same
   `_maxAmount` 100, group MeatGroup, block list ElderGroup + UnstableMeat) in both slots before
   activation. Its storage stays local (never linked; a tick check logs an error if it ever were),
+  but it needs an `AmmoModel` of its own: `SiloStorage.InitAmmo` only builds the AmmoSlotManager,
+  whose slots live in its AmmoModel (+0x18), set only via `SiloStorage.SetModel(LandPlotModel)` ->
+  `LandPlotModel.GetAmmoSet` (vanilla: `new AmmoModel(null)`) -> `AmmoSlotManager.SetModel` (Resets
+  it to the definitions). Without it every slot call NREs (first in-game test: `StorageSlotUI.Start`
+  / `Update` every frame, `AmmoSlotManager.get_Slots` in our tick). So CreateHen calls `InitAmmo`,
+  then `SetModel(new AmmoModel(null))` while the clone is still inactive. A one-shot log line
+  ("hen collector placement") gives the clone's world position, renderer count and visibility at
+  build and ~5 s later.
   contents persisted in the sidecar (`hen_collector`), output ports and slot displays work as
   vanilla. Selling is refused while it holds chickens.
 * Collecting: the clone's `PlortCollector` is disabled (it would NRE without a LandPlotModel and
@@ -274,6 +282,19 @@ Hen Collector is selected.
   repeat), checked to be interactable and without an active `PopupPrompt` (one
   `FindAnyObjectByType` per new press). A mouse drag's EventSystem selection is handed back to the
   previously selected object on release.
+* First in-game test: shown but not changeable. (1) `PurchaseItemDetailsContent` carries its own
+  nested `Canvas` and no `GraphicRaycaster` (prefab data), and uGUI raycasts a graphic only through
+  a raycaster on its nearest canvas: nothing below the panel is ever hit. The slider root now gets
+  a `Canvas` (overrideSorting, order = panel canvas + 1, same sorting layer) + `GraphicRaycaster`,
+  plus a full-size alpha-1/255 hit Image on the bar. (2) The plot menu's items are a
+  `UniformGridView` (GridArea / GenericGridItemViewHolder), whose
+  `INavigationHandler.OnNavigate` (0x7DB210) moves the selection on left / right: a pad press also
+  selected the neighbouring item and the rebind removed the slider. custom_upgrades detours it: while
+  the slider is shown, Left / Right (`NavigationEventData.MoveDirection` 0 / 2) go to
+  `PlotMenuSlider::Step` and the event is `Use(true)`d; everything else passes through. (3) Look:
+  the game's UI shapes are `SDFRoundedRectangle` (MonomiPark.SlimeRancher.UI.SDFUI; material from
+  `Shader.Find("SDFUI/" + type)`), e.g. the scroll bars' pink handle (0.871, 0.310, 0.522). The slider
+  uses them (track = panel text colour at 22 %, pink fill, white handle with a pink border).
 * Save: sidecar per plot `"hen_collector_keep": n` (written while the Hen Collector is owned,
   saved with the next game save like ownership), read live through `CoopRequest.keepAdults`. The
   menu description shows the coop's current limit.
