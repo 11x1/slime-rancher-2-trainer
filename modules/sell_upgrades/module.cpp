@@ -1,5 +1,5 @@
-// sell_upgrades: sell owned ranch land-plot upgrades back for a fraction of their price
-// (default 50 %), from inside the game's own plot purchase menu (SR2 1.3.0).
+// sell_upgrades: sell owned ranch land-plot upgrades back for half their price (fixed,
+// floor(0.5 x price)), from inside the game's own plot purchase menu (SR2 1.3.0).
 //
 // ---------------------------------------------------------------- research --
 // (Cpp2IL dump + capstone disassembly of GameAssembly.dll 1.3.0; RVAs for reference)
@@ -63,16 +63,25 @@
 //     empty) bound to <PromptForUpgrade>b__0, exactly like the game builds it. Detour on
 //     b__0: if it is our pending closure, the sale runs instead. If the module is off /
 //     faulted, the original b__0 runs and does nothing (Upgrade() aborts: already owned).
-//   * Sale (main thread): re-validate, refund = floor(fraction x each currency cost) via
+//   * Sale (main thread): re-validate, refund = floor(0.5 x each currency cost) via
 //     PlayerState.AddCurrency, model.upgrades.Remove(u), revert the upgrader exactly
 //     (table above, inverted), ApplyUpgrades(empty set, false) to refresh trackers +
 //     RanchMetadata like vanilla does after a change, RebuildUI() to refresh the menu.
 //     The upgrade can be bought again at full price through the vanilla flow.
 //   * Side state: AUTO-FEEDER is refused while it still holds food (no item loss). ASH
 //     TROUGH: refused while the incinerator plort collector (which needs it) is owned;
-//     selling empties the trough (model.ashUnits = 0; a re-purchase refills it as in
-//     vanilla). DELUXE GARDEN: the planted crop is replanted as the normal variant with
-//     the game's own replant calls (growth kept).
+//     selling empties the trough (model.ashUnits = 0). DELUXE GARDEN: the planted crop is
+//     replanted as the normal variant with the game's own replant calls (growth kept).
+//   * Ash Trough re-purchase (sell + rebuy exploit): vanilla OnInitialPurchase sets
+//     model.ashUnits = FillableAshSource.StartingUnits (a full trough), which made a
+//     sell + rebuy a half-price refill. At the sale the trough's ash is remembered per
+//     LandPlotModel (in memory; strong GC handle on the model so the key can't be reused,
+//     freed by a posted job). The ConfirmDetour (vanilla purchase closures) notes an Ash
+//     Trough purchase on a plot with a record, lets the original run, then sets
+//     model.ashUnits = min(remembered, MaxUnits) and calls FillableAshSource.AddAsh(0)
+//     (clamps + moves the ash mesh). No record (never sold this session, after a reload,
+//     a demolished/rebuilt plot = new model) or module off: vanilla fill. The value stays
+//     a vanilla-producible ash amount; nothing new is saved.
 //   * EXCLUDED: silo STORAGE2/3/4 and STORAGE_CAPACITY_INCREASE (they change the silo's
 //     slot layout / per-slot capacity of stored items; reverting means rewriting slot
 //     data and could lose or over-fill stored items).
@@ -107,9 +116,9 @@
 // Fault policy: every detour runs its logic inside a DetourGuard (native fault -> module
 // faulted, detours pass-through). Objects are class- and IsAlive-checked; runtime_invoke
 // native faults mark the module faulted (never used as control flow). The closure /
-// delegate are referenced by the popup (we only compare the address). Two GC handles
-// (open menu root, our sell button), freed only from posted main-thread jobs. No scans,
-// nothing per frame.
+// delegate are referenced by the popup (we only compare the address). GC handles (open
+// menu root, our sell button, one per remembered ash trough model) are freed only from
+// posted main-thread jobs. No scans, nothing per frame.
 
 #include <windows.h>
 
@@ -127,7 +136,6 @@
 #include "core/log.h"
 #include "core/main_thread.h"
 #include "core/module.h"
-#include "core/settings.h"
 #include "core/unity.h"
 #include "modules/custom_upgrades/api.h"
 
@@ -135,7 +143,6 @@ namespace sr2::modules {
 namespace {
 
 namespace unity = sr2::core::unity;
-namespace settings = sr2::core::settings;
 namespace main_thread = sr2::core::main_thread;
 using sr2::il2cpp::api;
 using sr2::il2cpp::Resolver;
@@ -145,7 +152,6 @@ constexpr const char* kImage = "Assembly-CSharp";
 constexpr const char* kCore = "UnityEngine.CoreModule";
 constexpr const char* kDataNs = "MonomiPark.SlimeRancher.DataModel";
 constexpr const char* kPlotUiNs = "MonomiPark.SlimeRancher.UI.Plot";
-constexpr const char* kKeyFraction = "refund_fraction";
 
 // LandPlot.Upgrade
 enum Upg : int32_t {
@@ -211,7 +217,6 @@ struct Bound<R(A...)> {
 struct PendingPrompt {
     Il2CppObject* closure = nullptr;  // identity only (kept alive by the popup's delegate)
     bool sell = false;                // false = info popup (OK does nothing)
-    float fraction = 0.5f;            // the fraction shown in the popup
     int32_t upgrade = 0;
 };
 
@@ -238,6 +243,15 @@ public:
     bool OnSellButton(Il2CppObject* button);
     Il2CppObject* SellButton() const { return btnButton_; }  // pointer compare only
 
+    // Ash Trough re-purchase: a vanilla purchase closure about to buy ASH_TROUGH on a plot
+    // whose ash was remembered at its sale (else plot == nullptr).
+    struct AshRebuy {
+        Il2CppObject* plot = nullptr;
+        Il2CppObject* model = nullptr;
+    };
+    AshRebuy BeforeVanillaBuy(Il2CppObject* closure);
+    void AfterVanillaBuy(const AshRebuy& r);
+
 private:
     struct Refund {
         Il2CppObject* currency = nullptr;
@@ -245,13 +259,11 @@ private:
         int32_t amount = 0;
     };
 
-    float Fraction() const;
     std::string CanSell(Il2CppObject* plot, int32_t upg);
-    bool Price(Il2CppObject* item, float fraction, std::vector<Refund>& out, int32_t& price, int32_t& refund);
-    bool OpenPrompt(Il2CppObject* root, Il2CppObject* item, int32_t upg, bool sell, const std::string& text,
-                    float fraction);
+    bool Price(Il2CppObject* item, std::vector<Refund>& out, int32_t& price, int32_t& refund);
+    bool OpenPrompt(Il2CppObject* root, Il2CppObject* item, int32_t upg, bool sell, const std::string& text);
     bool SetLabel(Il2CppObject* lse, const std::string& text);
-    void DoSell(Il2CppObject* root, Il2CppObject* plot, Il2CppObject* item, int32_t upg, float fraction);
+    void DoSell(Il2CppObject* root, Il2CppObject* plot, Il2CppObject* item, int32_t upg);
     int RevertVisuals(Il2CppObject* plot, int32_t upg, std::string& notes);
     bool ReplantNormalCrop(Il2CppObject* plot, std::string& notes);
     int CountUpgraders(Il2CppObject* plot, int32_t upg);
@@ -286,6 +298,14 @@ private:
     Il2CppObject* btnItem_ = nullptr;    // the owned item it sells (menu asset)
     Il2CppGCHandle btnHandle_ = nullptr;
     std::unordered_map<Il2CppClass*, size_t> offCategories_, offItems_, offDetailsButton_;
+    // ash in a sold Ash Trough, per LandPlotModel (main thread only; handle keeps the key alive)
+    struct AshRecord {
+        Il2CppGCHandle handle = nullptr;
+        float ash = 0.0f;
+    };
+    std::unordered_map<Il2CppObject*, AshRecord> ashRecords_;
+    void RememberAsh(Il2CppObject* model, float ash);
+    Il2CppObject* FindAshSource(Il2CppObject* plot);
 
 public:
     // ---- resolved (Setup, worker thread) ----
@@ -304,6 +324,11 @@ public:
     Il2CppClass* locationClass_ = nullptr;    // LandPlotLocation
     Il2CppClass* spawnResClass_ = nullptr;    // SpawnResource
     Il2CppClass* catcherClass_ = nullptr;     // GardenCatcher
+    Il2CppClass* ashSourceClass_ = nullptr;   // FillableAshSource (optional: ash restore)
+    size_t offAshMax_ = 0;                    // FillableAshSource.MaxUnits
+    size_t offAshModel_ = 0;                  // FillableAshSource._plotModel
+    Bound<void(Il2CppObject*, float)> addAsh_;  // FillableAshSource.AddAsh(float)
+    bool ashRestoreOk_ = false;
 
     struct UpgraderInfo {
         Il2CppClass* klass = nullptr;
@@ -431,17 +456,18 @@ void OnActionDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo* mi
 
 void ConfirmDetour(Il2CppObject* closure, const MethodInfo* mi) {
     bool handled = false;
-    if (g_self && closure && g_self->On()) g_confirmGuard.Run([&] { handled = g_self->HandleConfirm(closure); });
-    if (!handled) g_origConfirm(closure, mi);
+    SellUpgrades::AshRebuy rebuy;
+    if (g_self && closure && g_self->On())
+        g_confirmGuard.Run([&] {
+            handled = g_self->HandleConfirm(closure);
+            if (!handled) rebuy = g_self->BeforeVanillaBuy(closure);
+        });
+    if (handled) return;
+    g_origConfirm(closure, mi);
+    if (rebuy.plot && g_self && g_self->On()) g_confirmGuard.Run([&] { g_self->AfterVanillaBuy(rebuy); });
 }
 
 // ---------------------------------------------------------------- helpers --
-
-float SellUpgrades::Fraction() const {
-    float f = settings::GetFloat(kModule, kKeyFraction);
-    if (!std::isfinite(f)) f = 0.5f;
-    return f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
-}
 
 Il2CppObject* SellUpgrades::Invoke(const MethodInfo* m, void* obj, std::initializer_list<void*> args,
                                    const char* what, bool* ok) {
@@ -522,8 +548,8 @@ std::string SellUpgrades::PlotId(Il2CppObject* plot) {
     return id.empty() ? std::string("?") : id;
 }
 
-bool SellUpgrades::Price(Il2CppObject* item, float fraction, std::vector<Refund>& out, int32_t& price,
-                         int32_t& refund) {
+// The refund is always half the price, rounded down (per currency).
+bool SellUpgrades::Price(Il2CppObject* item, std::vector<Refund>& out, int32_t& price, int32_t& refund) {
     out.clear();
     price = refund = 0;
     void* list = unity::Field<void*>(item, offItemCosts_);
@@ -537,7 +563,7 @@ bool SellUpgrades::Price(Il2CppObject* item, float fraction, std::vector<Refund>
         r.currency = unity::Field<Il2CppObject*>(e, offCostCurrency_);
         r.price = unity::Field<int32_t>(e, offCostAmount_);
         if (!r.currency || r.price <= 0 || r.price > 100000000) continue;
-        r.amount = static_cast<int32_t>(std::floor(static_cast<double>(r.price) * fraction + 1e-6));
+        r.amount = r.price / 2;  // price > 0: integer division = floor(0.5 x price)
         price += r.price;
         refund += r.amount;
         out.push_back(r);
@@ -624,7 +650,7 @@ bool SellUpgrades::SetLabel(Il2CppObject* lse, const std::string& text) {
 }
 
 bool SellUpgrades::OpenPrompt(Il2CppObject* root, Il2CppObject* item, int32_t upg, bool sell,
-                              const std::string& text, float fraction) {
+                              const std::string& text) {
     // UITemplates labels (fallback texts if our override would fail).
     bool ok = false;
     Il2CppObject* gameCtx = Invoke(gameCtxInstMi_, nullptr, {}, "GameContext.Instance", &ok);
@@ -648,7 +674,6 @@ bool SellUpgrades::OpenPrompt(Il2CppObject* root, Il2CppObject* item, int32_t up
     pending_ = {};
     pending_.closure = closure;
     pending_.sell = sell;
-    pending_.fraction = fraction;
     pending_.upgrade = upg;
 
     Il2CppObject* popup = Invoke(openPopupMi_, root, {title, message, nullptr, posLabel, negLabel, action, nullptr},
@@ -696,27 +721,28 @@ bool SellUpgrades::HandleAction(Il2CppObject* root, Il2CppObject* item) {
     // the prefab's own submit routing).
     if (pending_.closure && promptTick_ == main_thread::TickCount()) return true;
 
-    const float fraction = Fraction();
     std::string reason = CanSell(plot, upg);
     std::string text;
     if (reason.empty()) {
         std::vector<Refund> refunds;
         int32_t price = 0, refund = 0;
-        if (!Price(item, fraction, refunds, price, refund)) {
+        if (!Price(item, refunds, price, refund)) {
             reason = "This upgrade can't be sold (unexpected price data).";
         } else {
-            text = std::format("Sell this upgrade for {} Newbucks?\nYou get {}% of its {} Newbucks price back and can "
-                               "buy it again later at full price.",
-                               refund, static_cast<int>(std::lround(fraction * 100.0f)), price);
-            if (upg == ASH_TROUGH) text += "\nThe ash in the trough is lost.";
+            text = std::format("Sell this upgrade for {} Newbucks?\nYou get half of its {} Newbucks price back and "
+                               "can buy it again later at full price.",
+                               refund, price);
+            if (upg == ASH_TROUGH)
+                text += "\nBought back on this plot (before you reload), the trough keeps its current ash instead "
+                        "of coming full.";
             if (upg == DELUXE_GARDEN) text += "\nThe planted crop becomes a normal crop again (growth is kept).";
         }
     }
     if (!reason.empty()) {
         SR2_INFO("[{}] sell refused: plot '{}', {}: {}", kModule, PlotId(plot), UpgName(upg), reason);
-        return OpenPrompt(root, item, upg, false, reason, fraction);
+        return OpenPrompt(root, item, upg, false, reason);
     }
-    return OpenPrompt(root, item, upg, true, text, fraction);
+    return OpenPrompt(root, item, upg, true, text);
 }
 
 bool SellUpgrades::HandleConfirm(Il2CppObject* closure) {
@@ -735,7 +761,7 @@ bool SellUpgrades::HandleConfirm(Il2CppObject* closure) {
     Il2CppObject* plot = unity::Field<Il2CppObject*>(root, offActivator_);
     if (!IsA(plot, plotClass_) || !unity::IsAlive(plot)) return true;
     if (unity::Field<int32_t>(item, offItemUpgrade_) != upg || !HasUpgrade(plot, upg)) return true;
-    DoSell(root, plot, item, upg, p.fraction);
+    DoSell(root, plot, item, upg);
     return true;
 }
 
@@ -848,7 +874,7 @@ void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
     std::vector<Refund> refunds;
     int32_t price = 0, refund = 0;
     std::string text;
-    if (reason.empty() && Price(item, Fraction(), refunds, price, refund)) text = std::format("Sell +{}", refund);
+    if (reason.empty() && Price(item, refunds, price, refund)) text = std::format("Sell +{}", refund);
     else text = "Can't sell";
     if (!layout) text = "Owned - " + text;
     bool labelled = btnView && SetLabel(unity::Field<Il2CppObject*>(btnView, offMoreLabel_), text);
@@ -875,9 +901,82 @@ bool SellUpgrades::OnSellButton(Il2CppObject* button) {
     return HandleAction(root_, btnItem_);
 }
 
+// ---------------------------------------------------------------- ash trough re-purchase --
+
+void SellUpgrades::RememberAsh(Il2CppObject* model, float ash) {
+    if (!ashRestoreOk_ || !model) return;
+    if (!std::isfinite(ash) || ash < 0.0f) ash = 0.0f;
+    auto it = ashRecords_.find(model);
+    if (it != ashRecords_.end()) {
+        it->second.ash = ash;
+        return;
+    }
+    Il2CppGCHandle h = unity::NewGCHandle(model);
+    if (!h) return;  // no record: a re-purchase fills the trough as in vanilla
+    ashRecords_.emplace(model, AshRecord{h, ash});
+}
+
+Il2CppObject* SellUpgrades::FindAshSource(Il2CppObject* plot) {
+    if (!ash_.klass) return nullptr;
+    Il2CppArray* arr = getComponents_(plot, Type(upgraderClass_));
+    for (size_t i = 0, c = unity::ArrayLength(arr); i < c; ++i) {
+        auto* comp = static_cast<Il2CppObject*>(unity::ArrayAt(arr, i));
+        if (!unity::IsAlive(comp) || !IsA(comp, ash_.klass)) continue;
+        Il2CppObject* go = unity::Field<Il2CppObject*>(comp, ash_.off1);  // AshTroughUpgrader.AshTrough
+        if (!unity::IsAlive(go)) continue;
+        Il2CppObject* src = unity::GetComponent(go, ashSourceClass_);
+        if (unity::IsAlive(src) && IsA(src, ashSourceClass_)) return src;
+    }
+    return nullptr;
+}
+
+SellUpgrades::AshRebuy SellUpgrades::BeforeVanillaBuy(Il2CppObject* closure) {
+    if (!ashRestoreOk_ || ashRecords_.empty() || !main_thread::IsMainThread()) return {};
+    if (!IsA(closure, closureClass_)) return {};
+    if (unity::Field<int32_t>(closure, offClosureUpgrade_) != ASH_TROUGH) return {};
+    auto* root = unity::Field<Il2CppObject*>(closure, offClosureThis_);
+    if (!IsA(root, rootClass_) || !unity::IsAlive(root)) return {};
+    Il2CppObject* plot = unity::Field<Il2CppObject*>(root, offActivator_);
+    if (!IsA(plot, plotClass_) || !unity::IsAlive(plot) || HasUpgrade(plot, ASH_TROUGH)) return {};
+    Il2CppObject* model = unity::Field<Il2CppObject*>(plot, offPlotModel_);
+    if (!IsA(model, modelClass_) || !ashRecords_.count(model)) return {};
+    return {plot, model};
+}
+
+void SellUpgrades::AfterVanillaBuy(const AshRebuy& r) {
+    if (!main_thread::IsMainThread()) return;
+    auto it = ashRecords_.find(r.model);
+    if (it == ashRecords_.end()) return;
+    // Only after a completed purchase on the same plot / model (cancelled or failed: keep the record).
+    if (!unity::IsAlive(r.plot) || !IsA(r.plot, plotClass_) || !HasUpgrade(r.plot, ASH_TROUGH)) return;
+    if (unity::Field<Il2CppObject*>(r.plot, offPlotModel_) != r.model) return;
+    const float remembered = it->second.ash;
+    const Il2CppGCHandle h = it->second.handle;
+    ashRecords_.erase(it);
+    if (h) main_thread::Post([h] { unity::FreeGCHandle(h); });
+
+    const std::string id = PlotId(r.plot);
+    Il2CppObject* src = FindAshSource(r.plot);
+    if (!src) {
+        SR2_WARN("[{}] Ash Trough bought back on plot '{}': trough not found, vanilla fill kept", kModule, id);
+        return;
+    }
+    const int32_t maxUnits = unity::Field<int32_t>(src, offAshMax_);
+    float& ash = unity::Field<float>(r.model, offModelAsh_);
+    const float vanilla = ash;
+    float v = remembered;
+    if (maxUnits >= 0 && v > static_cast<float>(maxUnits)) v = static_cast<float>(maxUnits);
+    ash = v;
+    // AddAsh works on the source's own _plotModel: refresh the mesh only if that is this model.
+    if (unity::Field<Il2CppObject*>(src, offAshModel_) == r.model) addAsh_(src, 0.0f);  // clamps, moves the ash
+    SR2_INFO("[{}] Ash Trough bought back on plot '{}': ash set to {:.1f} (remembered at sale; vanilla fill {:.1f}, "
+             "max {})",
+             kModule, id, ash, vanilla, maxUnits);
+}
+
 // ---------------------------------------------------------------- selling --
 
-void SellUpgrades::DoSell(Il2CppObject* root, Il2CppObject* plot, Il2CppObject* item, int32_t upg, float fraction) {
+void SellUpgrades::DoSell(Il2CppObject* root, Il2CppObject* plot, Il2CppObject* item, int32_t upg) {
     const std::string id = PlotId(plot);
     std::string reason = CanSell(plot, upg);  // re-check (state may have changed while the popup was open)
     if (!reason.empty()) {
@@ -890,7 +989,7 @@ void SellUpgrades::DoSell(Il2CppObject* root, Il2CppObject* plot, Il2CppObject* 
     if (!set) return;
     std::vector<Refund> refunds;
     int32_t price = 0, refund = 0;
-    if (!Price(item, fraction, refunds, price, refund)) return;
+    if (!Price(item, refunds, price, refund)) return;
     Il2CppObject* player = nullptr;
     if (!tryGetPlayerState_(&player) || !unity::IsAlive(player)) {
         SR2_WARN("[{}] sale cancelled: PlayerState not available", kModule);
@@ -908,8 +1007,8 @@ void SellUpgrades::DoSell(Il2CppObject* root, Il2CppObject* plot, Il2CppObject* 
             if (r.amount > 0) addCurrency_(player, r.currency, r.amount, true, nullptr);
         bool rebuilt = false;
         Invoke(rebuildMi_, root, {}, "ListUIRoot.RebuildUI", &rebuilt);
-        SR2_INFO("[{}] sold {} (custom) on plot '{}': refund {} of price {} ({:.0f}%); {}", kModule, UpgName(upg), id,
-                 refund, price, fraction * 100.0f, notes);
+        SR2_INFO("[{}] sold {} (custom) on plot '{}': refund {} of price {}; {}", kModule, UpgName(upg), id, refund,
+                 price, notes);
         return;
     }
 
@@ -919,7 +1018,10 @@ void SellUpgrades::DoSell(Il2CppObject* root, Il2CppObject* plot, Il2CppObject* 
         SR2_WARN("[{}] sale cancelled: could not remove {} from plot '{}'", kModule, UpgName(upg), id);
         return;
     }
-    if (upg == ASH_TROUGH) unity::Field<float>(model, offModelAsh_) = 0.0f;
+    if (upg == ASH_TROUGH) {
+        RememberAsh(model, unity::Field<float>(model, offModelAsh_));  // for a re-purchase on this plot
+        unity::Field<float>(model, offModelAsh_) = 0.0f;
+    }
 
     // 2) refund
     for (const Refund& r : refunds)
@@ -936,9 +1038,8 @@ void SellUpgrades::DoSell(Il2CppObject* root, Il2CppObject* plot, Il2CppObject* 
     bool ok = false;
     Invoke(rebuildMi_, root, {}, "ListUIRoot.RebuildUI", &ok);
 
-    SR2_INFO("[{}] sold {} (Upgrade {}) on plot '{}': refund {} of price {} ({:.0f}%), {} upgrader(s) reverted{}{}",
-             kModule, UpgName(upg), upg, id, refund, price, fraction * 100.0f, reverted, notes.empty() ? "" : "; ",
-             notes);
+    SR2_INFO("[{}] sold {} (Upgrade {}) on plot '{}': refund {} of price {}, {} upgrader(s) reverted{}{}", kModule,
+             UpgName(upg), upg, id, refund, price, reverted, notes.empty() ? "" : "; ", notes);
 }
 
 bool SellUpgrades::ReplantNormalCrop(Il2CppObject* plot, std::string& notes) {
@@ -1264,6 +1365,19 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         why = saved;
     }
 
+    // Optional: Ash Trough re-purchase keeps the ash it was sold with (missing -> vanilla refill).
+    {
+        std::string saved = why, err;
+        ashSourceClass_ = R.Class(kImage, "", "FillableAshSource");
+        auto oMax = ashSourceClass_ ? R.FieldOffset(ashSourceClass_, "MaxUnits", &err) : std::nullopt;
+        auto oModel = ashSourceClass_ ? R.FieldOffset(ashSourceClass_, "_plotModel", &err) : std::nullopt;
+        if (oMax) offAshMax_ = *oMax;
+        if (oModel) offAshModel_ = *oModel;
+        ashRestoreOk_ = ashSourceClass_ && oMax && oModel && ash_.klass && offModelAsh_ &&
+                        bind(addAsh_, method(ashSourceClass_, "AddAsh", 1, false), false);
+        why = saved;
+    }
+
     // ---- sell button (optional: missing pieces only disable the button) ----
     const MethodInfo* setActivatorMi = nullptr;
     const MethodInfo* moreBindMi = nullptr;
@@ -1331,29 +1445,13 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
                  buttonWhy);
     }
 
-    // ---- settings ----
-    settings::Def d;
-    d.module = kModule;
-    d.key = kKeyFraction;
-    d.label = "Refund fraction";
-    d.kind = settings::Kind::Float;
-    d.def = 0.5;
-    d.min = 0.0;
-    d.max = 1.0;
-    d.step = 0.05;
-    d.tooltip =
-        "Share of an upgrade's price paid back when you sell it (0.5 = half). Select an owned upgrade in a plot's "
-        "purchase menu and press the Sell button next to PURCHASED (or confirm the item) to get the sell prompt. "
-        "Silo storage upgrades can't be sold.";
-    settings::Register(d);
-
     g_self = this;
     SR2_INFO("[{}] setup ok: OnAction RVA 0x{:X}, <PromptForUpgrade>b__0 RVA 0x{:X}; offsets item._upgrade +0x{:X}, "
-             "costs +0x{:X}, LandPlot._model +0x{:X}, model.upgrades +0x{:X}; deluxe-garden replant {}; refund "
-             "fraction {:.2f}{}{}",
+             "costs +0x{:X}, LandPlot._model +0x{:X}, model.upgrades +0x{:X}; deluxe-garden replant {}; ash-trough "
+             "rebuy keeps ash: {}; refund fixed at 50%{}{}",
              kModule, Resolver::Rva(onActionPtr), Resolver::Rva(confirmPtr), offItemUpgrade_, offItemCosts_,
              offPlotModel_, offModelUpgrades_, replantOk_ ? "available" : "NOT available (DELUXE_GARDEN unsellable)",
-             Fraction(), upgraderReport.empty() ? "" : "; upgraders unavailable:", upgraderReport);
+             ashRestoreOk_ ? "yes" : "NO (vanilla refill)", upgraderReport.empty() ? "" : "; upgraders unavailable:", upgraderReport);
     if (!wbarrier_) SR2_WARN("[{}] il2cpp_gc_wbarrier_set_field not exported; closure fields stored directly", kModule);
     return true;
 }

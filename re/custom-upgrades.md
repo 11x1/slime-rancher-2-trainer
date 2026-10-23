@@ -101,7 +101,7 @@ RVAs are only for reference (GameAssembly.dll 1.3.0). The code finds everything 
   are gone.
 * sell_upgrades integration: owned custom items go through sell_upgrades' sell popup. It calls
   `custom_upgrades::CanSell` / `Remove` (api.h) instead of the HashSet/upgrader path, refunds
-  `refund_fraction` of the item's cost, then calls `RebuildUI`.
+  half of the item's cost (fixed, rounded down), then calls `RebuildUI`.
 
 ### 1.4 World objects (design, not implemented yet)
 
