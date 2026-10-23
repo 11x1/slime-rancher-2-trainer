@@ -124,6 +124,8 @@ Modules register their settings with `sr2::core::settings::Register` (`core/sett
 - The write is atomic (`sr2mods.json.tmp`, then rename).
 - Every module automatically gets an `enabled` setting (label "Enabled", default `Module::DefaultEnabled()`). Toggling it calls `ModuleManager::SetEnabled`. A module that was disabled at startup runs `Setup()` the first time it is enabled.
 - A setting can name a visibility parent in the same module (`Def::parent`, optional `parentValue` for an Enum index or 0 = "while off"; `settings::SetParent` sets it after registering). Both UIs hide it while the parent does not allow it, and hide every setting of a module except `enabled` while the module is off. `settings::Visible(module, key)` applies the rule.
+- A setting can also list "any of these on" parents (`Def::anyOf`, or `settings::SetAnyParent` after registering): it shows only while at least one of them is on and itself shown. Spawn Scaling uses it for the "Per resource (advanced)" multipliers (any source in advanced mode) and for the ore amount multiplier and its cap (any source applied).
+- Float/Int settings can carry a display unit (`Def::unit`, e.g. "%", " m", "x"), a text for 0 (`Def::zeroText`, e.g. "auto") and a display scale (`Def::displayScale`); `settings::SetDisplay` sets them after registering. They change only what the UIs show.
 
 ### Profiles
 

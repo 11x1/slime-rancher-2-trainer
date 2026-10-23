@@ -470,7 +470,9 @@ void RebuildRows() {
             continue;
         }
         for (const Row& c : g_rows)
-            if (c.def.module == p.def.module && c.def.parent == p.def.key) {
+            if (c.def.module == p.def.module &&
+                (c.def.parent == p.def.key ||
+                 std::find(c.def.anyOf.begin(), c.def.anyOf.end(), p.def.key) != c.def.anyOf.end())) {
                 p.isParent = true;
                 break;
             }

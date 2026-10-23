@@ -1281,6 +1281,12 @@ bool SpawnScaling::Setup(sr2::core::ModuleContext& ctx) {
         settings::SetParent(kModule, AdvancedKey(s), ApplyKey(s));
     }
     if (paceOk_) settings::SetParent(kModule, kKeepHarvestTime, ApplyKey(kSrcNodes));
+    {  // the global amount and its cap only matter while some source is scaled
+        std::vector<std::string> applied;
+        for (int s = 0; s < kSrcCount; ++s) applied.push_back(ApplyKey(s));
+        settings::SetAnyParent(kModule, kOreAmount, applied);
+        settings::SetAnyParent(kModule, kYieldCap, applied);
+    }
     // Units after the slider values (UI only).
     for (const char* k : {kSpawnRate, kMaxNodes, kRespawn, kOreAmount}) settings::SetDisplay(kModule, k, "x");
     settings::SetDisplay(kModule, kHardCap, "", "auto");
@@ -1832,6 +1838,9 @@ void SpawnScaling::FlushPendingResources() {
         d.max = 10.0;
         d.step = 0.1;
         d.unit = "x";
+        // Shown only while some source uses the per-resource multipliers (its "advanced" switch on and
+        // shown, i.e. that source applied); unregistered sources are skipped by the rule.
+        for (int s = 0; s < kSrcCount; ++s) d.anyOf.push_back(AdvancedKey(s));
         d.tooltip = std::format(
             "Amount multiplier for {}, used INSTEAD of the global ore amount multiplier by every source set to "
             "'advanced (per resource)'.{}{}",
