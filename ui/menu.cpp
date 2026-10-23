@@ -39,7 +39,7 @@ float g_scale = 1.0f;
 float U(float v) { return v * g_scale; }
 
 // ---------------------------------------------------------------- state ----
-std::string g_cat = "movement";
+std::string g_cat = "ranch";
 std::map<std::string, int> g_tab;  // selected tab per category
 std::string g_lastPage;            // category/tab drawn last frame (scroll reset on change)
 ImVec2 g_winMin, g_winMax;         // window rect of the last frame
