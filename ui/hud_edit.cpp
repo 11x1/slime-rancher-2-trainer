@@ -415,6 +415,15 @@ Placement Shown(Element e) {
 
 }  // namespace
 
+float DrawKeycap(ImDrawList* dl, float x, float cy, const char* key, float uiScale) {
+    return KeyChip(dl, ImVec2(x, cy), key, Metrics(uiScale), 1.0f);
+}
+
+float KeycapWidth(const char* key, float uiScale) {
+    const Metrics bm(uiScale);
+    return std::round(TextSz(theme::Mono(), bm.fsKey, key).x + bm.chipX * 2);
+}
+
 void Begin(Element e) { Start(e); }
 
 void Cancel() {

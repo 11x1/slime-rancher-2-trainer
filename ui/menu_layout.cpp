@@ -93,8 +93,6 @@ std::vector<Category> Spec() {
     sandbox.title = "Sandbox";
     sandbox.kind = TabKind::Sandbox;
     sandbox.module = "sandbox";
-    sandbox.help = "Edit your Newbucks, health, energy and vacpack. Turning it on asks for confirmation first: "
-                   "the edits change your save.";
     misc.tabs.push_back(sandbox);
     cats.push_back(misc);
 
