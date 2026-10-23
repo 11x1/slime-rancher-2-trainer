@@ -28,6 +28,17 @@
 //   after ~900 frames (covers plot rebuilds / reused addresses). A miss resolves the
 //   plot once (GetComponentInParent(LandPlot) + LandPlotLocation id), no per-call work.
 //
+//   world objects (coop_world.cpp)  plot  price  what
+//   Coop Air Net                    coop   425   the corral's Air Net cloned onto the coop,
+//                                                fitted to its walls (corral Air Net: 425)
+//
+//   World objects are clones of vanilla plot-prefab parts (LookupDirector.GetPlotPrefab),
+//   built / fitted / removed by a ~1 Hz tick over CoopRegion._allCoops from the sidecar
+//   ownership: after a load, a plot rebuild or a re-enable they come back by themselves; a
+//   sale or disabling the module removes them. They are never in the vanilla save. The icon
+//   comes from the vanilla item of another plot menu when this menu has none (one-time
+//   FindObjectsOfTypeAll of the menu items, the first time such an icon is needed).
+//
 // Design + research notes: re/custom-upgrades.md. Summary (RVAs for reference only, all
 // lookups are by name):
 //
@@ -122,6 +133,7 @@
 #include "core/text_override.h"
 #include "core/unity.h"
 #include "modules/custom_upgrades/api.h"
+#include "modules/custom_upgrades/coop_world.h"
 
 namespace sr2::modules {
 namespace {
@@ -151,11 +163,13 @@ constexpr int32_t kPlotIncinerator = 7;
 constexpr int32_t kUpgMusicBox = 2;
 constexpr int32_t kUpgSprinkler = 7;
 constexpr int32_t kUpgFeeder = 9;
+constexpr int32_t kUpgAirNet = 11;
 constexpr int32_t kUpgPlortCollector = 12;
 constexpr int32_t kUpgAshTrough = 14;
 constexpr int32_t kUpgDeluxeCoop = 17;
 constexpr int32_t kUpgStorageCapacity = 20;  // template preference
 constexpr unsigned long long kTierCacheFrames = 900;
+constexpr float kWorldTickSeconds = 1.0f;  // coop world objects: create / fit / remove
 
 using custom_upgrades::Family;
 constexpr int kFamilies = static_cast<int>(Family::kCount);
@@ -174,7 +188,11 @@ enum CustomId : int32_t {
     GARDEN_GROWTH_1 = custom_upgrades::kIdBase + 0x0030,
     GARDEN_GROWTH_2 = custom_upgrades::kIdBase + 0x0031,
     INCIN_ASH_BOOST = custom_upgrades::kIdBase + 0x0040,
+    COOP_AIR_NET = custom_upgrades::kIdBase + 0x0050,  // world object (coop_world.cpp)
 };
+
+// Upgrades that are a world object (only offered while the world-object code is ready).
+bool IsWorldUpgrade(int32_t id) { return id == COOP_AIR_NET; }
 
 struct UpgradeDef {
     int32_t id;
@@ -235,6 +253,12 @@ const UpgradeDef kDefs[] = {
      "This incinerator puts twice as much ash into its Ash Trough per incinerated food (the trough's capacity is "
      "unchanged).",
      "Buy the Ash Booster for this incinerator?"},
+    // ---- world objects ----
+    {COOP_AIR_NET, "coop_air_net", kPlotCoop, false, 0, 425, kNoFamily, 1.0f, kUpgAirNet, "Coop Air Net",
+     "Stretches a corral Air Net over this coop, right on top of its walls. Chickens that get launched by slimes "
+     "or your vacpack stay inside, and flying things can't drop in. Like the corral net it gives way under very "
+     "hard hits and repairs itself shortly after.",
+     "Buy the Coop Air Net for this coop?"},
 };
 
 const UpgradeDef* FindDef(int32_t id) {
@@ -347,7 +371,8 @@ public:
     void AfterMenuUpdate(Il2CppObject* root);
     void AfterSave(Il2CppObject* result);
     void ResetState(const char* why);
-    void FrameCheck();
+    void FrameCheck(float dt);
+    void WorldTick();
 
     // api.h
     std::string CanSellCustom(Il2CppObject* plot, int32_t upg);
@@ -396,6 +421,12 @@ private:
 
     std::atomic<bool> enabled_{false};
     bool cleaned_ = false;
+    float worldAccum_ = 0.0f;
+    Il2CppObject* LookupDirector();
+    std::map<int32_t, Il2CppObject*> globalUpgItems_;  // vanilla upgrade -> menu item of any plot menu (icons)
+    bool globalUpgItemsTried_ = false;
+    Il2CppObject* GlobalUpgradeItem(int32_t upgrade);
+    custom_upgrades::world::CoopWorld world_;
     unsigned long long nameTick_ = ~0ull;
     std::string cachedGame_;
     SaveState state_;
@@ -461,6 +492,7 @@ sr2::core::DetourGuard g_addGuard{kModule, "LandPlot.AddUpgrade"};
 sr2::core::DetourGuard g_menuGuard{kModule, "LandPlotUIRoot.UpdateMenuItemAvailabilityAndHidden"};
 sr2::core::DetourGuard g_saveGuard{kModule, "AutoSaveDirector.SaveGameImpl"};
 sr2::core::DetourGuard g_loadGuard{kModule, "AutoSaveDirector.Load/StartNewGame"};
+sr2::core::DetourGuard g_worldGuard{kModule, "custom_upgrades.CoopWorld"};
 
 using AddUpgradeFn = void (*)(Il2CppObject*, int32_t, const MethodInfo*);
 using MenuUpdateFn = void (*)(Il2CppObject*, const MethodInfo*);
@@ -577,6 +609,7 @@ void CustomUpgrades::ResetState(const char* why) {
     state_ = {};
     Bump();
     tierCache_.clear();
+    world_.Reset();  // clones of the previous game are destroyed (never read) at the next tick
 }
 
 void CustomUpgrades::LoadSidecar(const std::string& game) {
@@ -707,6 +740,7 @@ bool CustomUpgrades::Owns(Il2CppObject* plot, int32_t upg) {
 
 bool CustomUpgrades::Visible(Il2CppObject* plot, const UpgradeDef& d) {
     if (PlotType(plot) != d.plotType) return false;
+    if (IsWorldUpgrade(d.id) && !world_.Ready()) return false;
     if (!d.needs) return true;
     if (!custom_upgrades::IsCustomUpgrade(d.needs)) return VanillaOwned(plot, d.needs);  // vanilla prerequisite
     const UpgradeDef* r = FindDef(d.needs);
@@ -879,6 +913,8 @@ bool CustomUpgrades::BuildInjection(MenuInjection& inj, int32_t plotType) {
         if (d.iconFrom) {
             auto vit = vanilla.find(d.iconFrom);
             if (vit != vanilla.end()) iconSrc = vit->second;
+            else if ((iconSrc = GlobalUpgradeItem(d.iconFrom)) != nullptr)
+                SR2_INFO("[{}] {}: icon taken from '{}' (another plot's menu)", kModule, d.title, unity::GetName(iconSrc));
             else SR2_INFO("[{}] {}: vanilla upgrade {} not in this menu - generic icon", kModule, d.title, d.iconFrom);
         }
         in.item = CloneItem(tpl, d, iconSrc, in.costEntry);
@@ -890,6 +926,23 @@ bool CustomUpgrades::BuildInjection(MenuInjection& inj, int32_t plotType) {
     SR2_INFO("[{}] plot type {}: {} custom item(s) cloned from '{}' (upgrade {})", kModule, plotType, inj.items.size(),
              unity::GetName(tpl), unity::Field<int32_t>(tpl, offItemUpgrade_));
     return !inj.items.empty();
+}
+
+Il2CppObject* CustomUpgrades::GlobalUpgradeItem(int32_t upgrade) {
+    // One-time scan (first menu build that needs an icon from another plot's menu, e.g. the corral
+    // Air Net icon for the coop): every loaded PlotUpgradePurchaseItemModel asset.
+    if (!globalUpgItemsTried_) {
+        globalUpgItemsTried_ = true;
+        for (Il2CppObject* item : unity::FindObjectsOfTypeAll(upgItemClass_)) {
+            if (!unity::IsAlive(item) || !IsA(item, upgItemClass_)) continue;
+            const int32_t u = unity::Field<int32_t>(item, offItemUpgrade_);
+            if (custom_upgrades::IsCustomUpgrade(u) || unity::GetName(item).rfind("sr2mods_", 0) == 0) continue;
+            if (!unity::IsAlive(unity::Field<Il2CppObject*>(item, offItemIcon_))) continue;
+            if (globalUpgItems_.emplace(u, item).second) unity::NewGCHandle(item);  // pinned (a few, never freed)
+        }
+    }
+    auto it = globalUpgItems_.find(upgrade);
+    return it != globalUpgItems_.end() && unity::IsAlive(it->second) ? it->second : nullptr;
 }
 
 MenuInjection* CustomUpgrades::InjectionFor(Il2CppObject* config) {
@@ -994,6 +1047,10 @@ void CustomUpgrades::AfterMenuUpdate(Il2CppObject* root) {
 void CustomUpgrades::Cleanup(const char* why) {
     if (cleaned_) return;
     cleaned_ = true;
+    if (world_.Ready() && main_thread::IsMainThread()) {
+        world_.RemoveAll();
+        SR2_INFO("[{}] {}: coop world objects removed", kModule, why);
+    }
     int removed = 0;
     for (auto& inj : injections_) {
         for (Injected& in : inj->items) {
@@ -1010,8 +1067,37 @@ void CustomUpgrades::Cleanup(const char* why) {
     if (removed) SR2_INFO("[{}] {}: {} custom menu item(s) removed", kModule, why, removed);
 }
 
-void CustomUpgrades::FrameCheck() {
-    if (!cleaned_ && !injections_.empty() && sr2::core::ModuleFaulted(kModule)) Cleanup("module faulted");
+void CustomUpgrades::FrameCheck(float dt) {
+    if (sr2::core::ModuleFaulted(kModule)) {
+        if (!cleaned_) Cleanup("module faulted");
+        return;
+    }
+    if (!On() || !world_.Ready()) return;
+    if (std::isfinite(dt) && dt > 0.0f) worldAccum_ += std::min(dt, 1.0f);
+    if (worldAccum_ < kWorldTickSeconds) return;
+    worldAccum_ = 0.0f;
+    g_worldGuard.Run([&] { WorldTick(); });
+}
+
+Il2CppObject* CustomUpgrades::LookupDirector() {
+    bool ok = false;
+    Il2CppObject* gc = Invoke(gameCtxInstMi_, nullptr, {}, "GameContext.Instance", &ok);
+    Il2CppObject* lookup = (ok && unity::IsAlive(gc)) ? unity::Field<Il2CppObject*>(gc, offGcLookup_) : nullptr;
+    return unity::IsAlive(lookup) ? lookup : nullptr;
+}
+
+void CustomUpgrades::WorldTick() {
+    if (!main_thread::IsMainThread() || !EnsureLoaded()) return;  // no save game: nothing to build
+    cleaned_ = false;
+    world_.Tick(
+        [&](Il2CppObject* plot, custom_upgrades::world::CoopRequest& req) {
+            if (!unity::IsAlive(plot) || !IsA(plot, plotClass_) || PlotType(plot) != kPlotCoop) return false;
+            std::string id;
+            const UpgradeDef* net = FindDef(COOP_AIR_NET);
+            req.airNet = net && OwnsKey(plot, *net, &id);
+            return !id.empty();  // no LandPlotLocation id (yet): leave the plot alone
+        },
+        [&]() { return LookupDirector(); });
 }
 
 // ---------------------------------------------------------------- buying --
@@ -1052,6 +1138,7 @@ void CustomUpgrades::OnAddUpgrade(Il2CppObject* plot, int32_t upg) {
     ps.type = d->plotType;
     ps.owned.insert(d->key);
     Bump();
+    if (IsWorldUpgrade(d->id)) worldAccum_ = kWorldTickSeconds;  // build it at the next frame
     SR2_INFO("[{}] bought {} on plot '{}' (saved with the next game save)", kModule, d->title, id);
 }
 
@@ -1153,6 +1240,7 @@ bool CustomUpgrades::RemoveCustom(Il2CppObject* plot, int32_t upg, std::string& 
     it->second.owned.erase(d->key);
     if (it->second.owned.empty()) state_.plots.erase(it);
     Bump();
+    if (IsWorldUpgrade(d->id) && world_.Ready()) world_.Remove(plot, d->id == COOP_AIR_NET);
     notes += "custom upgrade removed (saved with the next game save)";
     SR2_INFO("[{}] {} removed from plot '{}'", kModule, d->title, id);
     return true;
@@ -1329,6 +1417,12 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         marketLinkMi_ = lookup ? R.Method(lookup, "get_MarketLink", 0, &err) : nullptr;  // optional icon
     }
 
+    {
+        std::string werr;
+        if (!world_.Setup(R, kModule, werr))
+            SR2_WARN("[{}] coop world objects unavailable ({}) - the Coop Air Net is not offered", kModule, werr);
+    }
+
     struct H {
         const char* name;
         const MethodInfo* mi;
@@ -1370,8 +1464,8 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         "sr2mods_saves\\<save>.json, never in the game's save.";
     settings::Register(d);
 
-    main_thread::AddFrameCallback(kModule, [](float) {
-        if (g_self) g_self->FrameCheck();
+    main_thread::AddFrameCallback(kModule, [](float dt) {
+        if (g_self) g_self->FrameCheck(dt);
     });
 
     g_self = this;
