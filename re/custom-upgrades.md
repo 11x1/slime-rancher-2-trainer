@@ -25,7 +25,7 @@ RVAs are only for reference (GameAssembly.dll 1.3.0). The code finds everything 
     costs one compare.
   * `LandPlot.AddUpgrade(Upgrade)` (0x988750: `model.upgrades.Add` + `ApplyUpgrades`). A custom
     id is **never** passed to the original, not even when the module is off or faulted. It is
-    marked owned in the sidecar state, or, for an action item, the action runs.
+    marked owned in the sidecar state.
 
 ### 1.2 Persistence: a sidecar file per .sav file ("extended save file")
 
@@ -112,7 +112,15 @@ RVAs are only for reference (GameAssembly.dll 1.3.0). The code finds everything 
 * `ListUIRoot.CreateUI` first calls the virtual `UpdateMenuItemAvailabilityAndHidden`. The
   LandPlotUIRoot override is at 0x6E8150 and calls `UpdateAvailability(Activator)` /
   `UpdateHidden(Activator)` on every item. Only then does CreateUI build the list views.
-  `SetActivator` and `Upgrade()` both end in `RebuildUI` → `CreateUI`.
+  `SetActivator` and `Upgrade()` both end in `RebuildUI`, but `ListUIRoot.RebuildUI` (0x11AFB30,
+  shared generic body) only calls `CreateUI` while the menu has no swapper yet (first open). With
+  the menu open it calls `IListViewSwapper.RefreshAndAdvance` → `ListUI.itemAdapter` refresh,
+  which re-runs the fetch closure `ListUI.<ShowMenu>b__6` (it maps
+  `menuConfiguration.Categories[i].Items` through the mapper, live). So after a purchase or sale
+  the item lists are re-read, but `UpdateMenuItemAvailabilityAndHidden` does NOT run: vanilla items
+  don't need it (their availability is a live `Func`), ours did (a new tier only showed after
+  reopening, checklist u10). custom_upgrades therefore also hooks `RebuildUI` (pre: list update,
+  post: texts; other menus: one class check).
 * **Hook (pre):** for each menu configuration that has an upgrade item, our items are cloned once
   per session with `Object.Instantiate(<vanilla PlotUpgradePurchaseItemModel>)`. Unity
   serialization deep-copies the LocalizedStrings and the cost list. The clone is checked to have
@@ -126,9 +134,14 @@ RVAs are only for reference (GameAssembly.dll 1.3.0). The code finds everything 
     holds it
   
   Items are added to or removed from the category list depending on the activator plot: its type,
-  plus a prerequisite (the action item only shows while the upgrade is owned).
-* **Hook (post):** refreshes dynamic texts, such as the plort count and value shown on "Sell All
-  Plorts Now".
+  plus a prerequisite. The list is shared by all plots of a type, so each update starts from the
+  vanilla list (our items out, vanilla items we took out back at their index) and then places
+  this plot's cards: one card per tier chain (`Shown`); a tier on a vanilla upgrade (Music Box II,
+  Ash Booster) replaces that vanilla item at its index once it is owned (the vanilla item is
+  pinned by a GC handle while out of the list and put back for other plots and on cleanup);
+  `after` places an item right behind a vanilla one (Fast Growth after the Sprinkler);
+  everything else is appended. `List.Insert` / `IndexOf` / `Remove` via runtime_invoke.
+* **Hook (post):** refreshes dynamic texts (the Hen Collector's limit).
 * Availability: vanilla's `IsAvailable = () => !plot.HasUpgrade(_upgrade)` goes through our
   HasUpgrade detour, so an owned custom upgrade is greyed out like a vanilla one.
   `PlotUpgradePurchaseItemModel.UpdateHidden` only gives STORAGE3/4 and the incinerator collector
@@ -148,9 +161,11 @@ RVAs are only for reference (GameAssembly.dll 1.3.0). The code finds everything 
   On a fault, a per-frame flag check does the same within one frame. Their price is also locked to
   int.MaxValue, so a menu that is already open can't buy them through vanilla code once our hooks
   are gone.
-* sell_upgrades integration: owned custom items go through sell_upgrades' sell popup. It calls
-  `custom_upgrades::CanSell` / `Remove` (api.h) instead of the HashSet/upgrader path, refunds
-  half of the item's cost (fixed, rounded down), then calls `RebuildUI`.
+* sell_upgrades integration: owned custom items are sold with sell_upgrades' Sell button (no
+  popup). It calls `custom_upgrades::CanSell` / `Remove` (api.h) instead of the HashSet/upgrader
+  path, refunds half of the item's cost (fixed, rounded down), then calls `RebuildUI`. On a tier
+  card that shows the next tier, `custom_upgrades::ChainSellTarget` names the owned tier below it
+  (custom, or the vanilla upgrade whose card the tier took over) and the item that prices it.
 
 ### 1.4 World objects (implemented for the coop upgrades in `coop_world.cpp`, with a ~1 Hz tick instead of the planned ApplyUpgrades hook)
 
@@ -349,11 +364,11 @@ Original plan:
   `IdentifiableType.IsPlort` types with a market value are sold. Order per slot: TrySell first,
   then Decrement, so you never lose plorts without being paid.
 * Implemented flow:
-  1. Buy "Sell-All Button" in the silo menu (setting `sell_all_price`, default 1000).
-  2. The silo menu then shows "Sell All Plorts Now" (price 0). Its description shows the plort
-     count and the estimated value. The vanilla confirm popup comes up and the sale runs
-     (HUD currency notification from the game, log line with every type × count @ price). If the
-     market is closed, it says so and nothing is sold.
+  1. Buy "Sell-All Button" in the silo menu (setting `sell_all_price`, default 1000). It is
+     only offered when the world button below can be built.
+  2. The button on the silo sells (HUD notices per plort type, log line with every type × count
+     @ price). If the market is closed, it says so and nothing is sold. The former "Sell All
+     Plorts Now" menu action (an action item, id 0x53520002) was retired (checklist u12).
   3. The upgrade can be sold back with sell_upgrades.
 * World button (`modules/custom_upgrades/silo_world.cpp`, built, not yet tested in game): while
   the upgrade is owned, the corral Plort Collector's press button (`PlortCollectorUpgrader.Collector`
@@ -465,12 +480,17 @@ Original research:
   `mainActionButtonContainer` for unavailable items; the alt (Info) button comes from
   `category.altDetailsButton` and only exists with a Pedia entry. sell_upgrades now clones the
   category's own `detailsButton` prefab (the game's Purchase button) next to it, labelled
-  "Sell +N", or, for an upgrade that can't be sold, non-interactable (`Selectable.set_interactable(false)`,
-  dimmed label) as "Can't sell: <short reason>" with no popup (user feedback), from a `DetailsMoreButtonView.BindData` detour (non-generic; the
-  ListUI methods are shared generic code without a name-resolvable pointer). Click:
-  `UnityEngine.UI.Button.Press` detour (pointer compare) -> sell popup; gamepad A on the
-  selected item -> OnAction -> same popup. Details in the sell_upgrades header.
-* **2b.2 as built:** prices/multipliers as proposed below, ids `0x5352_0010..0040`, effects in
+  "Sell +N", from a `DetailsMoreButtonView.BindData` detour (non-generic; the ListUI methods are
+  shared generic code without a name-resolvable pointer). `MainActionButtonContainer` has no
+  LayoutGroup, so the vanilla view's rect is split in halves (PURCHASED / Purchase left, Sell
+  right). On a tier card showing the next tier, Buy and Sell stand side by side. A press sells
+  at once (no popup); confirming an owned item does nothing. A passing reason ("holds food")
+  shows as a disabled button, a permanent one ("silo storage") as no button. The prefab
+  (`TextButton_NoneSelectable`) is not reachable by gamepad navigation, so selling is mouse-only.
+  Details in the sell_upgrades header.
+* **2b.2 as built:** prices/multipliers as proposed below, ids `0x5352_0013..0040` (Plort
+  Collector II / III and Auto-Feeder II, `0x5352_0010..0012`, were retired), one menu card per
+  chain (section 1.3), effects in
   plot_upgrades via `custom_upgrades::Multiplier(obj, family)`; music box per MusicBoxRegion
   (`_currentEmotions` membership), coop per CoopRegion collider bounds. The global sliders were
   removed. See `modules/plot_upgrades/NOTES.md`.
@@ -590,15 +610,14 @@ key) would show every loaded sprite name. It isn't done automatically.
 2. Silo menu: "Sell-All Button" with the Market Link icon and the price from the setting, and
    correct title, description and popup texts (not the storage upgrade's text). Buy it; Newbucks
    are deducted and the item turns greyed (owned).
-3. "Sell All Plorts Now" appears. Its description shows the count and the value. Confirm: plorts
-   leave the silo, the currency HUD pops up, and the log shows the sale. Non-plort items stay.
-   After closing the menu, check the market price board for saturation.
+3. Press the button on the silo: plorts leave the silo, the sale notices pop up, and the log
+   shows the sale. Non-plort items stay. Check the market price board for saturation.
 4. Save, quit to the menu, load the game: the upgrade is still owned. Check
    `sr2mods_saves\<game>_<i>.sav.json` (one per .sav file, the same name). Load a different save:
    no upgrade there. Load an older autosave of the same game from before the purchase: no upgrade
    (log: "using the sidecar of this save file").
 5. Buy, then quit without saving and reload: the upgrade is gone and the money is back.
-6. Sell it back (sell_upgrades): refund, and "Sell All Plorts Now" disappears.
+6. Sell it back (sell_upgrades): refund, and the silo button disappears.
 7. Remove the mod (or disable `custom_upgrades`) and load the save: the game loads normally,
    with no custom items.
 8. Other plot menus (corral, coop, garden) are unchanged.
