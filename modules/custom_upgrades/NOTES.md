@@ -87,6 +87,34 @@ findings from in-game tests that are easy to get wrong again.
   NavigateInDirection checks the event's `used` flag (used -> no SetFocus). `NavigateInDirection`
   itself is hooked by drone_price_limit (one hook per address).
 
+### Ranch drones (user report: "no option to select chicken output as a source")
+
+- The drone program's source **Coop** already has two parts (`RanchDrone.GatherSourceTask(COOP)`):
+  `RanchDroneSourceProgramCoop` (live chickens above the task config's minimums) and
+  `RanchDroneSourceProgramElderCollector` (a silo-storage source over
+  `RanchMetadata.Plots[].elderCollectors`). The UI offers a source when all its programs accept the
+  target; the elder-collector part accepts every target, so Coop shows for meat / hen / rooster
+  targets as before.
+- `RanchMetadata.Register(LandPlot)` fills a coop's `elderCollectors` only from its own
+  `DeluxeCoopUpgrader.DeluxeStuff` storage, one `StorageMetadata(slot, storage, SiloCatcher with that
+  SlotIdx)` per slot. The ~1 Hz tick appends the Hen Collector's two slots the same way
+  (`LinkDrones`: new array = live old entries + ours). Every `ApplyUpgrades` / `OnUpgradesChanged`
+  builds a new entry without them, so the next tick adds them again (log `linked to the ranch
+  drones`). Sold / not owned / module off: `RanchMetadata.OnUpgradesChanged(plot)` rebuilds the
+  vanilla entry (log `unlinked from the ranch drones`).
+- So a program with the source **Coop**, a target such as Meat or a hen / rooster type and any
+  destination (silo, corral feeder, ...) now also takes the chickens out of the Hen Collector, through
+  its two output ports, like the deluxe coop's elder collector. Fast-forward (sleep) uses the same
+  entries. The contents the drones take leave the sidecar copy with the next tick.
+- Not a separate "Hen Collector" source: a new `DroneTaskSourceType` value would need the UI's
+  source definitions (an asset) and would be written into the vanilla save's `DroneTaskData`.
+- Known edge: turning custom upgrades off while a drone flies to a Hen Collector port that still
+  holds chickens leaves that drone with a destroyed port (vanilla has the same case when a deluxe coop
+  is demolished). Selling is refused while it holds chickens, so selling can't cause it.
+
+Not checked in game yet: a drone with Coop -> Silo (target Meat, or Hen) emptying the Hen Collector,
+the log lines, no errors after buying another coop upgrade (re-link) or selling the Hen Collector.
+
 ## Buy menu cards (fixes after the test of build 506a4f60)
 
 - **Purchase / Sell overlap.** The buttons size themselves: the prefab `TextButton_NoneSelectable`
