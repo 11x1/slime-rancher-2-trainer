@@ -1,16 +1,12 @@
 // custom_upgrades: framework for NEW land-plot upgrades bought in the game's own plot
 // purchase menu, with save-safe sidecar persistence (SR2 1.3.0). Upgrades: the silo
 // "Sell-All Button" (sell every plort stored in that silo at the current Plort Market
-// price, market saturation applied by the game; a "Sell All Plorts Now" menu action plus a
-// press button on the silo, cloned from the corral collector button - silo_world.cpp) and
-// the per-plot upgrade TIERS whose
+// price, market saturation applied by the game; a press button on the silo, cloned from the
+// corral collector button - silo_world.cpp) and the per-plot upgrade TIERS whose
 // effects plot_upgrades applies (api.h Multiplier):
 //
 //   tier                 plot         needs                 price   effect
-//   Plort Collector II   corral       Plort Collector       2500    collects 1.5x as often
-//   Plort Collector III  corral       Plort Collector II    5000    collects 2x as often
-//   Auto-Feeder II       corral       Auto-Feeder           2500    2x food per feeding cycle
-//   Music Box II         corral       Music Box             2000    2x calming bonus
+//   Music Box II        corral       Music Box             2000    2x calming bonus
 //   Faster Hens I        coop         -                     2000    hens lay 1.5x as often
 //   Faster Hens II       coop         Faster Hens I         4000    hens lay 2x as often
 //   Fast Growth I        garden       -                     2000    crops grow 1.5x as fast
@@ -209,9 +205,7 @@ constexpr int32_t kPlotIncinerator = 7;
 // LandPlot.Upgrade (vanilla)
 constexpr int32_t kUpgMusicBox = 2;
 constexpr int32_t kUpgSprinkler = 7;
-constexpr int32_t kUpgFeeder = 9;
 constexpr int32_t kUpgAirNet = 11;
-constexpr int32_t kUpgPlortCollector = 12;
 constexpr int32_t kUpgAshTrough = 14;
 constexpr int32_t kUpgDeluxeCoop = 17;
 constexpr int32_t kUpgStorageCapacity = 20;  // template preference
@@ -224,11 +218,7 @@ constexpr int kNoFamily = -1;
 
 // ---- custom upgrade definitions -------------------------------------------------------
 enum CustomId : int32_t {
-    SILO_SELL_ALL = custom_upgrades::kIdBase + 0x0001,      // owned upgrade
-    SILO_SELL_ALL_NOW = custom_upgrades::kIdBase + 0x0002,  // action item (needs SILO_SELL_ALL)
-    CORRAL_COLLECTOR_2 = custom_upgrades::kIdBase + 0x0010,
-    CORRAL_COLLECTOR_3 = custom_upgrades::kIdBase + 0x0011,
-    CORRAL_FEEDER_2 = custom_upgrades::kIdBase + 0x0012,
+    SILO_SELL_ALL = custom_upgrades::kIdBase + 0x0001,  // owned upgrade (silo world button)
     CORRAL_MUSIC_2 = custom_upgrades::kIdBase + 0x0013,
     COOP_HENS_1 = custom_upgrades::kIdBase + 0x0020,
     COOP_HENS_2 = custom_upgrades::kIdBase + 0x0021,
@@ -238,6 +228,12 @@ enum CustomId : int32_t {
     COOP_AIR_NET = custom_upgrades::kIdBase + 0x0050,        // world object (coop_world.cpp)
     COOP_HEN_COLLECTOR = custom_upgrades::kIdBase + 0x0051,  // world object (coop_world.cpp)
 };
+// Retired (never reuse these ids or sidecar keys): 0x0002 "silo_sell_all_now" (the menu action),
+// 0x0010 "corral_collector_2", 0x0011 "corral_collector_3", 0x0012 "corral_feeder_2". A sidecar
+// that still lists one loads fine: the key is ignored (logged once per plot, no refund) and is
+// gone from that save's sidecar after the next game save.
+const char* const kRetiredKeys[] = {"silo_sell_all_now", "corral_collector_2", "corral_collector_3",
+                                    "corral_feeder_2"};
 
 // Upgrades that are a world object (only offered while the world-object code is ready).
 bool IsWorldUpgrade(int32_t id) { return id == COOP_AIR_NET || id == COOP_HEN_COLLECTOR; }
@@ -246,12 +242,12 @@ struct UpgradeDef {
     int32_t id;
     const char* key;     // sidecar key (stable)
     int32_t plotType;    // LandPlot.Id
-    bool action;         // never owned; buying runs the action
     int32_t needs;       // listed only while this upgrade is owned: custom id, vanilla id or 0
-    int price;           // Newbucks (0 = setting / action)
+    int price;           // Newbucks (0 = setting)
     int family;          // Family (kNoFamily = not a tier)
     float mult;          // tier multiplier
     int32_t iconFrom;    // vanilla upgrade whose menu icon is reused (0 = Market Link icon)
+    int32_t after;       // vanilla upgrade whose menu entry this one follows (0 = end of the list)
     const char* title;
     const char* description;
     const char* prompt;
@@ -260,49 +256,34 @@ struct UpgradeDef {
 constexpr int F(Family f) { return static_cast<int>(f); }
 
 const UpgradeDef kDefs[] = {
-    {SILO_SELL_ALL, "silo_sell_all", kPlotSilo, false, 0, 0, kNoFamily, 1.0f, 0, "Sell-All Button",
+    {SILO_SELL_ALL, "silo_sell_all", kPlotSilo, 0, 0, kNoFamily, 1.0f, 0, 0, "Sell-All Button",
      "A big red button for this silo that sells every plort inside at today's prices. Food and slimes stay put.",
      "Buy the Sell-All Button for this silo?"},
-    {SILO_SELL_ALL_NOW, "silo_sell_all_now", kPlotSilo, true, SILO_SELL_ALL, 0, kNoFamily, 1.0f, 0,
-     "Sell All Plorts Now", "Sells every plort in this silo at today's Plort Market prices.",
-     "Sell all plorts in this silo?"},
-    // ---- tiers ----
-    {CORRAL_COLLECTOR_2, "corral_collector_2", kPlotCorral, false, kUpgPlortCollector, 2500, F(Family::kCollector),
-     1.5f, kUpgPlortCollector, "Plort Collector II",
-     "Tunes up this corral's plort collector so it vacuums up plorts 1.5x as often.",
-     "Buy Plort Collector II for this corral?"},
-    {CORRAL_COLLECTOR_3, "corral_collector_3", kPlotCorral, false, CORRAL_COLLECTOR_2, 5000, F(Family::kCollector),
-     2.0f, kUpgPlortCollector, "Plort Collector III",
-     "A fully tuned plort collector that vacuums up plorts twice as often. Replaces Plort Collector II.",
-     "Buy Plort Collector III for this corral?"},
-    {CORRAL_FEEDER_2, "corral_feeder_2", kPlotCorral, false, kUpgFeeder, 2500, F(Family::kFeeder), 2.0f, kUpgFeeder,
-     "Auto-Feeder II",
-     "A bigger hopper drops twice as much food per feeding. Just remember to keep it stocked!",
-     "Buy Auto-Feeder II for this corral?"},
-    {CORRAL_MUSIC_2, "corral_music_2", kPlotCorral, false, kUpgMusicBox, 2000, F(Family::kMusicBox), 2.0f,
-     kUpgMusicBox, "Music Box II", "A catchier tune that calms this corral's slimes twice as well.",
+    // ---- tiers (one menu card per chain, see Shown) ----
+    {CORRAL_MUSIC_2, "corral_music_2", kPlotCorral, kUpgMusicBox, 2000, F(Family::kMusicBox), 2.0f, kUpgMusicBox, 0,
+     "Music Box II", "A catchier tune that calms this corral's slimes twice as well.",
      "Buy Music Box II for this corral?"},
-    {COOP_HENS_1, "coop_hens_1", kPlotCoop, false, 0, 2000, F(Family::kCoop), 1.5f, kUpgDeluxeCoop, "Faster Hens I",
+    {COOP_HENS_1, "coop_hens_1", kPlotCoop, 0, 2000, F(Family::kCoop), 1.5f, kUpgDeluxeCoop, 0, "Faster Hens I",
      "Cozier nests help this coop's hens lay eggs 1.5x as fast.", "Buy Faster Hens I for this coop?"},
-    {COOP_HENS_2, "coop_hens_2", kPlotCoop, false, COOP_HENS_1, 4000, F(Family::kCoop), 2.0f, kUpgDeluxeCoop,
+    {COOP_HENS_2, "coop_hens_2", kPlotCoop, COOP_HENS_1, 4000, F(Family::kCoop), 2.0f, kUpgDeluxeCoop, 0,
      "Faster Hens II", "The coziest nests around: hens lay eggs twice as fast. Replaces Faster Hens I.",
      "Buy Faster Hens II for this coop?"},
-    {GARDEN_GROWTH_1, "garden_growth_1", kPlotGarden, false, 0, 2000, F(Family::kGarden), 1.5f, kUpgSprinkler,
+    {GARDEN_GROWTH_1, "garden_growth_1", kPlotGarden, 0, 2000, F(Family::kGarden), 1.5f, kUpgSprinkler, kUpgSprinkler,
      "Fast Growth I", "Extra-rich soil makes crops grow 1.5x as fast. Stacks with the sprinkler!",
      "Buy Fast Growth I for this garden?"},
-    {GARDEN_GROWTH_2, "garden_growth_2", kPlotGarden, false, GARDEN_GROWTH_1, 4000, F(Family::kGarden), 2.0f,
+    {GARDEN_GROWTH_2, "garden_growth_2", kPlotGarden, GARDEN_GROWTH_1, 4000, F(Family::kGarden), 2.0f, kUpgSprinkler,
      kUpgSprinkler, "Fast Growth II",
      "Crops grow twice as fast. Stacks with the sprinkler and replaces Fast Growth I.",
      "Buy Fast Growth II for this garden?"},
-    {INCIN_ASH_BOOST, "incinerator_ash_boost", kPlotIncinerator, false, kUpgAshTrough, 1500, F(Family::kAsh), 2.0f,
-     kUpgAshTrough, "Ash Booster",
+    {INCIN_ASH_BOOST, "incinerator_ash_boost", kPlotIncinerator, kUpgAshTrough, 1500, F(Family::kAsh), 2.0f,
+     kUpgAshTrough, 0, "Ash Booster",
      "Squeezes twice the ash out of everything you burn. Fire slimes approve!",
      "Buy the Ash Booster for this incinerator?"},
     // ---- world objects ----
-    {COOP_AIR_NET, "coop_air_net", kPlotCoop, false, 0, 425, kNoFamily, 1.0f, kUpgAirNet, "Coop Air Net",
+    {COOP_AIR_NET, "coop_air_net", kPlotCoop, 0, 425, kNoFamily, 1.0f, kUpgAirNet, 0, "Coop Air Net",
      "An air net for your coop. Launched chickens stay in, and nothing drops in from above.",
      "Buy the Coop Air Net for this coop?"},
-    {COOP_HEN_COLLECTOR, "coop_hen_collector", kPlotCoop, false, 0, 1000, kNoFamily, 1.0f, kUpgDeluxeCoop,
+    {COOP_HEN_COLLECTOR, "coop_hen_collector", kPlotCoop, 0, 1000, kNoFamily, 1.0f, kUpgDeluxeCoop, 0,
      "Hen Collector",
      "Vacs up extra hens and roostros when this coop has more than 20. Chicks are safe! Set the limit with the "
      "slider.",
@@ -770,7 +751,6 @@ void CustomUpgrades::SetRef(Il2CppObject* obj, size_t offset, Il2CppObject* valu
 }
 
 int CustomUpgrades::Price(const UpgradeDef& d) const {
-    if (d.action) return 0;
     if (d.price > 0) return d.price;
     int p = settings::GetInt(kModule, kKeyPrice);
     return std::clamp(p, 0, 10000000);
@@ -931,9 +911,13 @@ bool CustomUpgrades::ReadSidecarFile(const std::filesystem::path& path, SaveStat
         const sr2::json::Value& ups = p["upgrades"];
         for (size_t i = 0; i < ups.size(); ++i) {
             std::string key = ups.at(i).asString();
-            bool known = false;
-            for (const UpgradeDef& d : kDefs) known |= (key == d.key && !d.action);
+            bool known = false, retired = false;
+            for (const UpgradeDef& d : kDefs) known |= key == d.key;
+            for (const char* r : kRetiredKeys) retired |= key == r;
             if (known) ps.owned.insert(key);
+            else if (retired)
+                SR2_INFO("[{}] sidecar: retired upgrade '{}' on plot '{}' ignored (no longer offered, no refund)",
+                         kModule, key, id);
             else if (!key.empty()) SR2_WARN("[{}] sidecar: unknown upgrade '{}' on plot '{}' ignored", kModule, key, id);
         }
         // Hen Collector contents: [{"type": "<IdentifiableType name>", "count": n}, ...], one per slot.
@@ -1270,7 +1254,6 @@ void CustomUpgrades::PruneSidecars(const std::string& game, const std::string& j
 }
 
 bool CustomUpgrades::OwnsKey(Il2CppObject* plot, const UpgradeDef& d, std::string* idOut) {
-    if (d.action) return false;
     if (!unity::IsAlive(plot) || !IsA(plot, plotClass_)) return false;
     if (PlotType(plot) != d.plotType) return false;
     if (!EnsureLoaded()) return false;
@@ -1298,6 +1281,7 @@ bool CustomUpgrades::Owns(Il2CppObject* plot, int32_t upg) {
 bool CustomUpgrades::Visible(Il2CppObject* plot, const UpgradeDef& d) {
     if (PlotType(plot) != d.plotType) return false;
     if (IsWorldUpgrade(d.id) && !world_.Ready()) return false;
+    if (d.id == SILO_SELL_ALL && !silo_.Ready()) return false;  // its world button is all it does
     if (!d.needs) return true;
     if (!custom_upgrades::IsCustomUpgrade(d.needs)) return VanillaOwned(plot, d.needs);  // vanilla prerequisite
     const UpgradeDef* r = FindDef(d.needs);
@@ -1355,10 +1339,6 @@ Il2CppObject* CustomUpgrades::MarketIcon() {
 const char* ModIconName(int32_t id) {
     switch (id) {
         case SILO_SELL_ALL: return "sell_all";
-        case SILO_SELL_ALL_NOW: return "sell_all_now";
-        case CORRAL_COLLECTOR_2: return "collector_2";
-        case CORRAL_COLLECTOR_3: return "collector_3";
-        case CORRAL_FEEDER_2: return "feeder_2";
         case CORRAL_MUSIC_2: return "music_2";
         case COOP_HENS_1: return "hens_1";
         case COOP_HENS_2: return "hens_2";
@@ -1600,28 +1580,7 @@ void CustomUpgrades::AfterMenuUpdate(Il2CppObject* root) {
     for (const Injected& in : inj->items) {
         if (!in.inList) continue;
         const UpgradeDef& d = *in.def;
-        if (d.id == SILO_SELL_ALL_NOW) {
-            const SiloSummary s = Summarize(plot, false, nullptr);
-            std::string desc, prompt;
-            if (!s.marketAvailable) {
-                desc = "The Plort Market can't be reached right now.";
-                prompt = desc;
-            } else if (s.marketClosed) {
-                desc = std::format("{} plort{} stored, but the Plort Market is closed. Come back later!", s.plorts,
-                                   s.plorts == 1 ? "" : "s");
-                prompt = "The Plort Market is closed right now. Nothing will be sold.";
-            } else if (s.plorts == 0) {
-                desc = "No plorts in this silo yet. Food and slimes are never sold.";
-                prompt = "There are no plorts in this silo. Nothing will be sold.";
-            } else {
-                desc = std::format("{} plort{} ({} kind{}) worth about {} Newbucks today. Food and slimes stay put.",
-                                   s.plorts, s.plorts == 1 ? "" : "s", s.types, s.types == 1 ? "" : "s", s.value);
-                prompt = std::format("Sell all {} plort{} in this silo for about {} Newbucks?\nMarket prices drop as "
-                                     "the market saturates.",
-                                     s.plorts, s.plorts == 1 ? "" : "s", s.value);
-            }
-            SetTexts(in, d.title, desc, prompt);
-        } else if (d.id == COOP_HEN_COLLECTOR) {
+        if (d.id == COOP_HEN_COLLECTOR) {
             // This coop's keep-limit (default until bought / set).
             int keep = custom_upgrades::world::kHenKeepDefault;
             const std::string id = PlotId(plot);
@@ -1853,17 +1812,6 @@ void CustomUpgrades::OnAddUpgrade(Il2CppObject* plot, int32_t upg) {
         SR2_WARN("[{}] {}: plot has no LandPlotLocation id - ignored", kModule, d->title);
         return;
     }
-    if (d->action) {
-        if (d->id == SILO_SELL_ALL_NOW) {
-            const UpgradeDef* req = FindDef(d->needs);
-            if (!req || !OwnsKey(plot, *req)) {
-                SR2_WARN("[{}] sell-all on plot '{}' without the Sell-All Button - ignored", kModule, id);
-                return;
-            }
-            SellAllNow(plot, id, "menu", true);
-        }
-        return;
-    }
     PlotState& ps = state_.plots[id];
     ps.type = d->plotType;
     ps.owned.insert(d->key);
@@ -1995,7 +1943,7 @@ std::string CustomUpgrades::CanSellCustom(Il2CppObject* plot, int32_t upg, std::
         return why;
     };
     const UpgradeDef* d = FindDef(upg);
-    if (!d || d->action) return no("This can't be sold.", "not sellable");
+    if (!d) return no("This can't be sold.", "not sellable");
     std::string id;
     if (!OwnsKey(plot, *d, &id)) return no("This upgrade is not owned.", "not owned");
     if (d->id == COOP_HEN_COLLECTOR) {
@@ -2012,7 +1960,7 @@ std::string CustomUpgrades::CanSellCustom(Il2CppObject* plot, int32_t upg, std::
     }
     // Tiers: an owned upgrade that needs this one must be sold first.
     for (const UpgradeDef& o : kDefs)
-        if (!o.action && o.needs == d->id && OwnsKey(plot, o))
+        if (o.needs == d->id && OwnsKey(plot, o))
             return no(std::format("Sell '{}' first - it needs this upgrade.", o.title),
                       std::format("sell {} first", o.title));
     return {};
@@ -2042,7 +1990,7 @@ bool CustomUpgrades::RemoveCustom(Il2CppObject* plot, int32_t upg, std::string& 
 std::string CustomUpgrades::VanillaDependentOf(Il2CppObject* plot, int32_t vanillaUpg) {
     if (custom_upgrades::IsCustomUpgrade(vanillaUpg) || !vanillaUpg) return {};
     for (const UpgradeDef& o : kDefs)
-        if (!o.action && o.needs == vanillaUpg && OwnsKey(plot, o)) return o.title;
+        if (o.needs == vanillaUpg && OwnsKey(plot, o)) return o.title;
     return {};
 }
 
@@ -2344,7 +2292,7 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
             SR2_WARN("[{}] sell-all HUD notices unavailable ({}) - text feedback only", kModule, nerr);
     }
 
-    // Silo Sell-All world button (optional; missing -> only the "Sell All Plorts Now" menu action).
+    // Silo Sell-All world button (optional; missing -> the Sell-All Button is not offered).
     {
         std::string serr;
         Il2CppClass* act = R.Class(kImage, "", "PlortCollectorActivator", &serr);
@@ -2362,8 +2310,7 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         if (!ok) {
             silo_ = custom_upgrades::world::SiloButtons{};  // not Ready(): no buttons are built
             g_offActCollector = 0;
-            SR2_WARN("[{}] silo sell button unavailable ({}) - the Sell-All Button keeps only its menu action", kModule,
-                     serr);
+            SR2_WARN("[{}] silo sell button unavailable ({}) - the Sell-All Button is not offered", kModule, serr);
         }
     }
 
@@ -2415,7 +2362,7 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     d.step = 50;
     d.tooltip =
         "Newbucks price of the silo 'Sell-All Button' custom upgrade (bought in the silo's own purchase menu). Once "
-        "bought, the silo menu shows 'Sell All Plorts Now'. Ownership is stored next to version.dll in "
+        "bought, a button on the silo sells its plorts. Ownership is stored next to version.dll in "
         "sr2mods_saves\\<save file>.sav.json (one per save file), never in the game's save.";
     settings::Register(d);
 

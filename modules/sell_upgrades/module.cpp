@@ -644,7 +644,7 @@ std::string SellUpgrades::CanSell(Il2CppObject* plot, int32_t upg, std::string* 
         default: break;
     }
     if (upg < WALLS || upg > STORAGE_CAPACITY_INCREASE) return no("This upgrade can't be sold.", "not sellable");
-    // A custom tier built on this vanilla upgrade (e.g. Plort Collector II) must be sold first.
+    // A custom tier built on this vanilla upgrade (e.g. Music Box II) must be sold first.
     if (std::string dep = custom_upgrades::VanillaDependent(plot, upg); !dep.empty())
         return no(std::format("Sell '{}' first - it needs this upgrade.", dep), std::format("sell {} first", dep));
     if (upg == ASH_TROUGH && HasUpgrade(plot, PLORT_COLLECTOR_INCINERATOR))

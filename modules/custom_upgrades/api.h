@@ -32,7 +32,7 @@ std::string Name(int32_t upgrade);
 
 // Main thread. "" = the owned custom upgrade can be sold back; else the reason.
 // `brief` (optional) gets a few-word form of the reason for a button label
-// ("holds chickens", "sell Plort Collector III first"); cleared when sellable.
+// ("holds chickens", "sell Faster Hens II first"); cleared when sellable.
 std::string CanSell(Il2CppObject* landPlot, int32_t upgrade, std::string* brief = nullptr);
 
 // Main thread. Removes the custom upgrade from the plot (sidecar state,
@@ -45,9 +45,7 @@ std::string VanillaDependent(Il2CppObject* landPlot, int32_t vanillaUpgrade);
 
 // Purchasable per-plot tiers (plot_upgrades applies the effects).
 enum class Family : int {
-    kCollector = 0,  // corral Plort Collector II / III: collection period divided by the multiplier
-    kFeeder,         // corral Auto-Feeder II: food per feeding cycle x multiplier
-    kMusicBox,       // corral Music Box II: calming bonus x multiplier
+    kMusicBox = 0,   // corral Music Box II: calming bonus x multiplier
     kCoop,           // coop Faster Hens I / II: laying period divided by the multiplier
     kGarden,         // garden Fast Growth I / II: crop growth rate x multiplier
     kAsh,            // incinerator Ash Booster: ash per incinerated food x multiplier
