@@ -42,6 +42,25 @@
 //       ButtonBehaviorConditionUtility.HasContinueGame() and the model has a save
 //       summary. Once per process; holding Shift while the game window is in the
 //       foreground at any point before it fires cancels it for this launch.
+//   skip_new_game_intro (default on)
+//     * New game: AutoSaveDirector.StartNewGame's load step calls
+//       CutsceneDirector.SpawnIntroSequence, which pushes IntroSequenceUIRoot (the
+//       story text frames before control). Its StartUpCoroutine queues the intro
+//       music, waits _fadeInWaitTime, fades the black screen out over
+//       _fadeInTime and calls StartFrame(0). After the last frame the game runs
+//       the same code as EndSequence(): input off, music dequeued, EndCoroutine
+//       (fade to black, wait, Close). Closing destroys the UI and its OnDestroy
+//       applies the intro's state: SFX unpaused, cutscene camera destroyed,
+//       _cameraEnabled = true, MetaGameDirector.StartMainQuest(true),
+//       FadeIntoGameplay (tutorials suppressed + LockOnDeath.Freeze until the
+//       DeathObscurer fade ends, then Unfreeze + UnsuppressTutorials) and
+//       CutsceneDirector.ClearIntroSequenceUIRoot.
+//     * IntroSequenceUIRoot.Start (pre-hook): fade-in wait 0, fade-in 0.1 s,
+//       fade-out <= 0.5 s, fade-out wait 0.
+//     * IntroSequenceUIRoot.StartFrame (replace, first call per instance): calls
+//       the game's own EndSequence() instead of showing frame 0, so the end path
+//       above runs unchanged. If that call fails, the original StartFrame runs
+//       (vanilla intro).
 //
 // Safety: objects are validated (class check, IsAlive, activeInHierarchy) before
 // use. All mod logic in hooks and in the frame callback runs inside a
@@ -85,11 +104,18 @@ constexpr const char* kMenuNs = "MonomiPark.SlimeRancher.UI.MainMenu";
 constexpr const char* kMenuModelNs = "MonomiPark.SlimeRancher.UI.MainMenu.Model";
 constexpr const char* kButtonNs = "MonomiPark.SlimeRancher.UI.ButtonBehavior";
 constexpr const char* kSceneNs = "MonomiPark.SlimeRancher.SceneManagement";
+constexpr const char* kIntroNs = "MonomiPark.SlimeRancher.UI.IntroSequence";
 
 // Setting keys.
 constexpr const char* kSkipIntro = "skip_intro";
 constexpr const char* kAutoContinue = "auto_continue";
 constexpr const char* kAutoContinueDelay = "auto_continue_delay";
+constexpr const char* kSkipNewGameIntro = "skip_new_game_intro";
+
+// IntroSequenceUIRoot fades while skipping (seconds). Waits go to 0; the fades
+// keep a short non-zero length (tween / particle durations, DeathObscurer).
+constexpr float kIntroFadeIn = 0.1f;
+constexpr float kIntroFadeOutMax = 0.5f;
 
 // Il2CppObject header (klass + monitor): a boxed value starts right after it.
 // Runtime ABI constant, same footing as unity::kArrayDataOffset.
@@ -176,12 +202,15 @@ public:
     void OnPromptLoaded(Il2CppObject* self);
     void OnPromptInteract(Il2CppObject* self);
     void OnMenuEnable(Il2CppObject* self);
+    void OnIntroStart(Il2CppObject* self);
+    bool OnIntroStartFrame(Il2CppObject* self, int index);  // true = replaced (original must not run)
 
     bool Enabled() const { return enabled_.load(std::memory_order_relaxed); }
 
 private:
     bool ResolveIntro(sr2::core::ModuleContext& ctx, std::string& why);
     bool ResolveContinue(sr2::core::ModuleContext& ctx, std::string& why);
+    bool ResolveNewGameIntro(sr2::core::ModuleContext& ctx, std::string& why);
     void Frame();
     void PatchLogoScene(Il2CppObject* scene, bool fromStart);
     void TryAutoInteract();
@@ -196,6 +225,7 @@ private:
     std::atomic<bool> enabled_{false};
     bool introOk_ = false;
     bool continueOk_ = false;
+    bool newGameIntroOk_ = false;
     int frameId_ = 0;
     Clock::time_point setupAt_{};
 
@@ -224,6 +254,10 @@ private:
     size_t offSummary_ = 0;                   // LoadGameBehaviorModel.<GameDataSummary>k__BackingField
     const MethodInfo* invokeBehaviorMi_ = nullptr;
     const MethodInfo* hasContinueMi_ = nullptr;
+    // skip_new_game_intro
+    Il2CppClass* introSeqClass_ = nullptr;    // IntroSequenceUIRoot
+    const MethodInfo* endSequenceMi_ = nullptr;
+    size_t offFadeInWait_ = 0, offFadeIn_ = 0, offFadeOut_ = 0, offFadeOutWait_ = 0;
 
     // -- state (main thread only) --
     // skip_intro: logo sequence
@@ -249,6 +283,9 @@ private:
     Clock::time_point menuReadyAt_{};
     double nextMenuPoll_ = 0;
     bool hintDone_ = false;  // overlay note finished for this launch
+    // skip_new_game_intro (identity only, never dereferenced)
+    const void* introPatched_ = nullptr;
+    const void* introSkipped_ = nullptr;
 };
 
 QuickStart* g_self = nullptr;
@@ -258,6 +295,8 @@ sr2::core::DetourGuard g_promptLoadedGuard{kModule, "PlatformEngagementPrompt.On
 sr2::core::DetourGuard g_promptInteractGuard{kModule, "StandaloneEngagementPrompt.OnInteract"};
 sr2::core::DetourGuard g_menuEnableGuard{kModule, "MainMenuLandingRootUI.OnEnable"};
 sr2::core::DetourGuard g_frameGuard{kModule, "frame"};
+sr2::core::DetourGuard g_introStartGuard{kModule, "IntroSequenceUIRoot.Start"};
+sr2::core::DetourGuard g_introFrameGuard{kModule, "IntroSequenceUIRoot.StartFrame"};
 
 using VoidFn = void (*)(Il2CppObject*, const MethodInfo*);
 // OnInteract(InputAction.CallbackContext): the 16-byte struct is passed by
@@ -267,6 +306,9 @@ VoidFn g_origLogoStart = nullptr;
 VoidFn g_origPromptLoaded = nullptr;
 InteractFn g_origPromptInteract = nullptr;
 VoidFn g_origMenuEnable = nullptr;
+VoidFn g_origIntroStart = nullptr;
+using StartFrameFn = void (*)(Il2CppObject*, int32_t, const MethodInfo*);
+StartFrameFn g_origIntroStartFrame = nullptr;
 
 bool HookReady(Il2CppObject* self) { return g_self && self && g_self->Enabled() && main_thread::IsMainThread(); }
 
@@ -288,6 +330,18 @@ void PromptInteractDetour(Il2CppObject* self, void* context, const MethodInfo* m
 void MenuEnableDetour(Il2CppObject* self, const MethodInfo* mi) {
     g_origMenuEnable(self, mi);
     if (HookReady(self)) g_menuEnableGuard.Run([&] { g_self->OnMenuEnable(self); });
+}
+
+void IntroStartDetour(Il2CppObject* self, const MethodInfo* mi) {
+    if (HookReady(self)) g_introStartGuard.Run([&] { g_self->OnIntroStart(self); });
+    g_origIntroStart(self, mi);
+}
+
+// Replace pattern: the original runs unless our logic ran and replaced it.
+void IntroStartFrameDetour(Il2CppObject* self, int32_t index, const MethodInfo* mi) {
+    bool replaced = false;
+    if (HookReady(self)) g_introFrameGuard.Run([&] { replaced = g_self->OnIntroStartFrame(self, index); });
+    if (!replaced) g_origIntroStartFrame(self, index, mi);
 }
 
 // ------------------------------------------------------------------ setup --
@@ -367,6 +421,17 @@ bool QuickStart::ResolveContinue(sr2::core::ModuleContext& ctx, std::string& why
     return true;
 }
 
+bool QuickStart::ResolveNewGameIntro(sr2::core::ModuleContext& ctx, std::string& why) {
+    Need n{ctx.resolver(), why};
+    introSeqClass_ = n.Class(kIntroNs, "IntroSequenceUIRoot");
+    if (!n.Offset(introSeqClass_, "_fadeInWaitTime", offFadeInWait_)) return false;
+    if (!n.Offset(introSeqClass_, "_fadeInTime", offFadeIn_)) return false;
+    if (!n.Offset(introSeqClass_, "_fadeOutTime", offFadeOut_)) return false;
+    if (!n.Offset(introSeqClass_, "_fadeOutWaitTime", offFadeOutWait_)) return false;
+    endSequenceMi_ = n.Method(introSeqClass_, "EndSequence", 0);
+    return endSequenceMi_ != nullptr;
+}
+
 bool QuickStart::Setup(sr2::core::ModuleContext& ctx) {
     setupAt_ = Clock::now();
 
@@ -379,12 +444,15 @@ bool QuickStart::Setup(sr2::core::ModuleContext& ctx) {
             return ctx.Fail("SceneLoader.IsSceneLoadInProgress not resolved: " + why);
     }
 
-    std::string introWhy, contWhy;
+    std::string introWhy, contWhy, newGameWhy;
     introOk_ = ResolveIntro(ctx, introWhy);
     continueOk_ = ResolveContinue(ctx, contWhy);
+    newGameIntroOk_ = ResolveNewGameIntro(ctx, newGameWhy);
     if (!introOk_) SR2_WARN("[{}] skip_intro unavailable: {}", kModule, introWhy);
     if (!continueOk_) SR2_WARN("[{}] auto_continue unavailable: {}", kModule, contWhy);
-    if (!introOk_ && !continueOk_) return ctx.Fail("neither feature resolved: " + introWhy + " / " + contWhy);
+    if (!newGameIntroOk_) SR2_WARN("[{}] skip_new_game_intro unavailable: {}", kModule, newGameWhy);
+    if (!introOk_ && !continueOk_ && !newGameIntroOk_)
+        return ctx.Fail("no feature resolved: " + introWhy + " / " + contWhy + " / " + newGameWhy);
 
     if (introOk_) {
         bool ok = ctx.HookMethod("CompanyLogoScene.Start", kImage, kUiNs, "CompanyLogoScene", "Start", 0,
@@ -402,6 +470,14 @@ bool QuickStart::Setup(sr2::core::ModuleContext& ctx) {
         if (!ctx.HookMethod("MainMenuLandingRootUI.OnEnable", kImage, kMenuNs, "MainMenuLandingRootUI", "OnEnable", 0,
                             reinterpret_cast<void*>(&MenuEnableDetour), reinterpret_cast<void**>(&g_origMenuEnable)))
             return false;
+    }
+    if (newGameIntroOk_) {
+        bool ok = ctx.HookMethod("IntroSequenceUIRoot.Start", kImage, kIntroNs, "IntroSequenceUIRoot", "Start", 0,
+                                 reinterpret_cast<void*>(&IntroStartDetour), reinterpret_cast<void**>(&g_origIntroStart));
+        ok = ok && ctx.HookMethod("IntroSequenceUIRoot.StartFrame", kImage, kIntroNs, "IntroSequenceUIRoot",
+                                  "StartFrame", 1, reinterpret_cast<void*>(&IntroStartFrameDetour),
+                                  reinterpret_cast<void**>(&g_origIntroStartFrame));
+        if (!ok) return false;
     }
 
     using settings::Def;
@@ -433,6 +509,10 @@ bool QuickStart::Setup(sr2::core::ModuleContext& ctx) {
             "How long the main menu stays interactive before auto-continue fires.");
         settings::SetParent(kModule, kAutoContinueDelay, kAutoContinue);  // shown while auto-continue is on
     }
+    if (newGameIntroOk_)
+        reg(kSkipNewGameIntro, "Skip new-game intro", Kind::Bool, 1.0, 0, 1, 1,
+            "When a new save starts, end the story intro (the text frames before you get control) right away "
+            "through the game's own end-of-intro path, so the main quest and tutorials start as usual.");
 
     // A fault in Frame() marks the module faulted (logged by the guard); exceptions are logged and skipped.
     frameId_ = main_thread::AddFrameCallback(kModule, [this](float) { g_frameGuard.Run([this] { Frame(); }); });
@@ -440,9 +520,10 @@ bool QuickStart::Setup(sr2::core::ModuleContext& ctx) {
 
     g_self = this;
     SR2_INFO("[{}] setup ok: skip_intro {} (CompanyLogoScene timings, PlatformEngagementPrompt), auto_continue {} "
-             "(MainMenuLandingRootUI / ContinueGameBehaviorModel.InvokeBehavior) | {}",
+             "(MainMenuLandingRootUI / ContinueGameBehaviorModel.InvokeBehavior), skip_new_game_intro {} "
+             "(IntroSequenceUIRoot.EndSequence) | {}",
              kModule, introOk_ ? "available" : "UNAVAILABLE", continueOk_ ? "available" : "UNAVAILABLE",
-             ProcessTime());
+             newGameIntroOk_ ? "available" : "UNAVAILABLE", ProcessTime());
     return true;
 }
 
@@ -741,6 +822,44 @@ void QuickStart::TryAutoContinue() {
     SR2_INFO("[{}] auto_continue: loading the most recent save via {} after the menu was interactive for {:.2f} s "
              "| {}",
              kModule, how, ready, ProcessTime());
+}
+
+// ------------------------------------------------------ skip_new_game_intro --
+
+void QuickStart::OnIntroStart(Il2CppObject* self) {
+    if (!newGameIntroOk_ || !settings::GetBool(kModule, kSkipNewGameIntro)) return;
+    if (self == introPatched_ || !IsA(self, introSeqClass_) || !unity::IsAlive(self)) return;
+    float& fadeInWait = unity::Field<float>(self, offFadeInWait_);
+    float& fadeIn = unity::Field<float>(self, offFadeIn_);
+    float& fadeOut = unity::Field<float>(self, offFadeOut_);
+    float& fadeOutWait = unity::Field<float>(self, offFadeOutWait_);
+    SR2_INFO("[{}] skip_new_game_intro: new-game intro starting (vanilla fades: in-wait {:.2f}, in {:.2f}, out {:.2f}, "
+             "out-wait {:.2f} s) - shortening them",
+             kModule, fadeInWait, fadeIn, fadeOut, fadeOutWait);
+    fadeInWait = 0.0f;
+    if (!(fadeIn > 0.0f && fadeIn <= kIntroFadeIn)) fadeIn = kIntroFadeIn;
+    if (!(fadeOut > 0.0f && fadeOut <= kIntroFadeOutMax)) fadeOut = kIntroFadeOutMax;
+    fadeOutWait = 0.0f;
+    introPatched_ = self;
+}
+
+bool QuickStart::OnIntroStartFrame(Il2CppObject* self, int index) {
+    if (!newGameIntroOk_ || !settings::GetBool(kModule, kSkipNewGameIntro)) return false;
+    if (self == introSkipped_ || !IsA(self, introSeqClass_) || !unity::IsAlive(self)) return false;
+    introSkipped_ = self;  // once per instance; any later StartFrame call is vanilla
+    std::string err;
+    sr2::il2cpp::Resolver::Get().Invoke(endSequenceMi_, self, nullptr, &err);
+    if (!err.empty()) {
+        if (IsNativeFault(err))
+            sr2::core::MarkModuleFaulted(kModule, "IntroSequenceUIRoot.EndSequence: " + err);
+        else
+            SR2_WARN("[{}] skip_new_game_intro: EndSequence failed ({}); showing the intro as usual", kModule, err);
+        return false;
+    }
+    SR2_INFO("[{}] skip_new_game_intro: intro ended before frame {} via IntroSequenceUIRoot.EndSequence (the game's "
+             "end-of-intro path: StartMainQuest, FadeIntoGameplay, camera re-enabled on close)",
+             kModule, index);
+    return true;
 }
 
 // ----------------------------------------------------------------- per frame --
