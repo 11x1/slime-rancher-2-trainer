@@ -1381,27 +1381,23 @@ Il2CppObject* CustomUpgrades::CloneItem(Il2CppObject* tpl, const UpgradeDef& d, 
     if (!costEntry) return nullptr;
     unity::Field<int32_t>(clone, offItemUpgrade_) = d.id;
     unity::Field<int32_t>(costEntry, offCostAmount_) = Price(d);
-    // Icon: the vanilla upgrade this tier builds on (its normal and greyed "owned" icon);
-    // otherwise the Market Link icon (sell-all), for both states.
+    // Icon: the vanilla upgrade this tier builds on, otherwise the Market Link icon (sell-all).
+    // _unavailableIcon is NOT an item icon: every vanilla plot upgrade item points it at the shared
+    // "checkmark" sprite, which GenericViewHolder.BindData shows as an overlay image on top of the
+    // (tinted) list icon when the item is unavailable (= owned). So owned custom items keep that
+    // checkmark: the template's (= iconSrc's, same shared sprite) reference, copied by Instantiate.
     Il2CppObject* icon = iconSrc ? unity::Field<Il2CppObject*>(iconSrc, offItemIcon_) : nullptr;
-    Il2CppObject* unavailable = iconSrc ? unity::Field<Il2CppObject*>(iconSrc, offItemUnavailIcon_) : nullptr;
-    if (!unity::IsAlive(icon)) {
-        icon = MarketIcon();
-        unavailable = icon;
-    }    // Our own icon replaces the borrowed one (a greyed copy where the game uses a separate
-    // "unavailable" sprite); the borrowed sprite stays the fallback and sets the native size.
+    Il2CppObject* check = iconSrc ? unity::Field<Il2CppObject*>(iconSrc, offItemUnavailIcon_) : nullptr;
+    if (!unity::IsAlive(check)) check = unity::Field<Il2CppObject*>(tpl, offItemUnavailIcon_);
+    if (!unity::IsAlive(icon)) icon = MarketIcon();
+    // Our own icon replaces the borrowed one; the borrowed sprite stays the fallback and sets the
+    // native size.
     if (const char* own = ModIconName(d.id)) {
         Il2CppObject* sizeRef = unity::IsAlive(icon) ? icon : unity::Field<Il2CppObject*>(tpl, offItemIcon_);
-        if (Il2CppObject* mine = sr2::ui::mod_icons::Get(own, sizeRef)) {
-            Il2CppObject* mineUnavail = (unity::IsAlive(unavailable) && unavailable != icon)
-                                            ? sr2::ui::mod_icons::Get(own, sizeRef, true)
-                                            : nullptr;
-            unavailable = mineUnavail ? mineUnavail : mine;
-            icon = mine;
-        }
+        if (Il2CppObject* mine = sr2::ui::mod_icons::Get(own, sizeRef)) icon = mine;
     }
     if (unity::IsAlive(icon)) SetRef(clone, offItemIcon_, icon);
-    if (unity::IsAlive(unavailable) && offItemUnavailIcon_) SetRef(clone, offItemUnavailIcon_, unavailable);
+    if (offItemUnavailIcon_) SetRef(clone, offItemUnavailIcon_, unity::IsAlive(check) ? check : nullptr);
     return clone;
 }
 

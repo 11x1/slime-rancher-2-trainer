@@ -538,7 +538,7 @@ The user wants upgrades they buy, not global switches. Built on this framework:
 | Popup | `ListUIRoot.OpenPopupPrompt`, `PopupPrompt` | plot menu (sell_upgrades) | confirmations |
 | Slider | `UnityEngine.UI.Slider`, `MapZoomSlider`, `SliderStyler` | runtime uGUI / map UI prefab | Hen Wrangler limit panel |
 
-**Own icons (current):** every custom item shows its own sprite from `assets/icons/` (`ui/mod_icons.h`, `ModIconName` in module.cpp), set in `CloneItem` for `_icon`, and for `_unavailableIcon` a greyed copy when the vanilla item uses a separate unavailable sprite (else the same sprite). The borrowed sprites below are the fallback when the sprite cannot be created and the size reference (pixelsPerUnit is scaled to their native size).
+**Own icons (current):** every custom item shows its own sprite from `assets/icons/` (`ui/mod_icons.h`, `ModIconName` in module.cpp), set in `CloneItem` for `_icon`. `_unavailableIcon` is not an item icon: every vanilla plot upgrade item points it at the shared `checkmark` sprite, which `GenericViewHolder.BindData` (0x83C900) enables as an overlay image (`unavailableIcon`, +0x68) over the list icon (tinted with `unavailableColor`) while the item is unavailable (= owned). The clones keep the template's checkmark, so owned custom items show the same tick as vanilla ones. The borrowed sprites below are the fallback when the sprite cannot be created and the size reference (pixelsPerUnit is scaled to their native size).
 
 **Icons (sprites reachable without scanning):**
 * `IdentifiableType.icon` on any identifiable: hens, roosters, chicks, plorts, food, gadgets.
