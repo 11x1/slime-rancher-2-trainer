@@ -10,7 +10,7 @@
 namespace sr2::modules::minimap::api {
 
 struct Snapshot {
-    Il2CppObject* root = nullptr;         // "SR2Mods.Minimap" GameObject (our uGUI root, corner-anchored RectTransform)
+    Il2CppObject* root = nullptr;         // "SR2Mods.Minimap" GameObject (our uGUI root, freely placed RectTransform)
     Il2CppObject* zone = nullptr;         // current ZoneDefinition (MapUIUtilities.GetPlayerCurrentZone)
     Il2CppObject* mapDefinition = nullptr;// MapDefinition of the current map (when a page was built)
     Il2CppObject* pagePrefab = nullptr;   // map page prefab GameObject (read-only asset; never instantiate/modify)
@@ -22,7 +22,7 @@ struct Snapshot {
     bool visible = false;                 // minimap root currently shown
     bool loading = false;                 // scene load in progress (minimap hidden)
     float size = 0;                       // minimap edge length in canvas units (RectTransform sizeDelta)
-    int position = 1;                     // 0 TL, 1 TR, 2 BL, 3 BR (minimap setting)
+    int position = 1;                     // nearest corner of the placement: 0 TL, 1 TR, 2 BL, 3 BR
 };
 
 // False when the minimap module is not running (disabled, faulted, not set up).

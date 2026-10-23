@@ -8,6 +8,8 @@
 #include <cmath>
 #include <cstdio>
 
+#include "core/settings.h"
+#include "hud_edit.h"
 #include "overlay.h"
 
 #if defined(SR2_HAVE_IMGUI)
@@ -23,13 +25,20 @@ constexpr float kFadeTime = 0.35f;    // s for a full fade in / out
 
 std::atomic<unsigned long long> g_stamp{0};  // GetTickCount64 of the last publish, 0 = cleared
 std::atomic<float> g_speed{0}, g_trend{0}, g_pre{0}, g_preDelta{0}, g_sync{-1};
-std::atomic<float> g_yOffset{0.06f}, g_scale{1}, g_barFull{640};
+std::atomic<float> g_x{50}, g_y{57.1f}, g_size{1.6f}, g_barFull{640};
 std::atomic<bool> g_details{false}, g_bar{false}, g_fade{true};
 
 // Render thread only.
 float g_alpha = 0;       // current opacity
 float g_stillTime = 0;   // seconds below kStillSpeed
 float g_tint = 0;        // smoothed -1 (losing) .. +1 (gaining)
+
+// hl2_movement's settings for the edit-mode preview (the module does not
+// publish while the overlay has the input).
+constexpr const char* kOwner = "hl2_movement";
+constexpr const char* kKeyBar = "momentum_hud_bar";
+constexpr const char* kKeyDetails = "momentum_hud_details";
+constexpr float kSampleSpeed = 320;  // shown in the edit mode when there is no live speed
 
 bool Fresh() {
     const unsigned long long s = g_stamp.load(std::memory_order_acquire);
@@ -53,15 +62,24 @@ void Publish(const State& s) {
     g_details.store(s.details, r);
     g_bar.store(s.bar, r);
     g_fade.store(s.fade, r);
-    g_yOffset.store(s.yOffset, r);
-    g_scale.store(s.scale, r);
+    g_x.store(s.x, r);
+    g_y.store(s.y, r);
+    g_size.store(s.size, r);
     g_barFull.store(s.barFull, r);
     g_stamp.store(std::max<unsigned long long>(1, GetTickCount64()), std::memory_order_release);
 }
 
 void Clear() { g_stamp.store(0, std::memory_order_release); }
 
+void EditBox(float sizePct, float screenH, float& w, float& h) {
+    namespace settings = ::sr2::core::settings;
+    const float fs = screenH * sizePct / 100.0f;
+    w = fs * kBoxW;
+    h = fs * BoxHeightUnits(settings::GetBool(kOwner, kKeyBar), settings::GetBool(kOwner, kKeyDetails));
+}
+
 bool HasContent() {
+    if (hud_edit::Editing(hud_edit::Element::SpeedPanel)) return true;  // drawn while being placed
     if (!Fresh() || overlay::IsOpen()) {
         g_alpha = 0;  // re-appears with a short fade-in
         return false;
@@ -117,52 +135,69 @@ void ShadowText(ImDrawList* dl, ImFont* font, float size, ImVec2 p, ImU32 col, f
 }  // namespace
 
 void Draw() {
-    if (!Fresh()) return;
     constexpr auto r = std::memory_order_relaxed;
     const ImGuiIO& io = ImGui::GetIO();
+    const float w = io.DisplaySize.x, h = io.DisplaySize.y;
+    if (w <= 0 || h <= 0) return;
     const float dt = std::clamp(io.DeltaTime, 0.0f, 0.1f);
-    const float speed = g_speed.load(r);
+    const bool fresh = Fresh();
+    const bool editing = hud_edit::Editing(hud_edit::Element::SpeedPanel);
+    if (!fresh && !editing) return;
+    const float speed = fresh ? g_speed.load(r) : kSampleSpeed;
+    bool bar = g_bar.load(r), details = g_details.load(r);
+    if (editing) {
+        namespace settings = ::sr2::core::settings;
+        bar = settings::GetBool(kOwner, kKeyBar);
+        details = settings::GetBool(kOwner, kKeyDetails);
+    }
+    hud_edit::Placement place{g_x.load(r), g_y.load(r), g_size.load(r)};
+    hud_edit::Preview(hud_edit::Element::SpeedPanel, place);  // while editing, and until a commit has landed
 
-    g_stillTime = speed < kStillSpeed ? g_stillTime + dt : 0.0f;
-    const float target = TargetAlpha();
-    const float step = dt / kFadeTime;
-    g_alpha = g_alpha < target ? std::min(target, g_alpha + step) : std::max(target, g_alpha - step);
-    if (g_alpha <= 0.001f) return;
+    if (editing) {
+        g_alpha = 1.0f;
+        g_stillTime = 0;
+    } else {
+        g_stillTime = speed < kStillSpeed ? g_stillTime + dt : 0.0f;
+        const float target = TargetAlpha();
+        const float step = dt / kFadeTime;
+        g_alpha = g_alpha < target ? std::min(target, g_alpha + step) : std::max(target, g_alpha - step);
+        if (g_alpha <= 0.001f) return;
+    }
 
     // Colour follows the speed trend, smoothed (~0.12 s) so it never flickers.
-    const float want = TrendToTint(g_trend.load(r), speed);
+    const float want = fresh ? TrendToTint(g_trend.load(r), speed) : 0.0f;
     g_tint += (want - g_tint) * std::min(1.0f, dt / 0.12f);
 
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     ImFont* font = ImGui::GetFont();
-    const float scale = std::clamp(g_scale.load(r), 0.5f, 3.0f);
-    const float size = ImGui::GetFontSize() * 1.15f * scale;
-    const float w = io.DisplaySize.x, h = io.DisplaySize.y;
-    if (w <= 0 || h <= 0) return;
-    const float cx = w * 0.5f;
-    float y = h * 0.5f + h * std::clamp(g_yOffset.load(r), -0.45f, 0.45f);
+    const float size = std::max(4.0f, h * std::clamp(place.size, 0.2f, 20.0f) / 100.0f);
+    const float boxW = size * kBoxW, boxH = size * BoxHeightUnits(bar, details);
+    const float cx = hud_edit::ToPx(place.x, w, boxW) + boxW * 0.5f;
+    float y = hud_edit::ToPx(place.y, h, boxH);
 
     char buf[48];
     std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(std::lround(speed)));
     float cr, cg, cb;
     TintRgb(g_tint, cr, cg, cb);
     const ImVec2 ts = font->CalcTextSizeA(size, FLT_MAX, 0.0f, buf);
-    ShadowText(dl, font, size, ImVec2(std::round(cx - ts.x * 0.5f), std::round(y)), Col(cr, cg, cb, 0.9f * g_alpha),
-               g_alpha, buf);
-    y += ts.y;
+    // Each text is centred on its own line height (in font sizes), so the box
+    // does not depend on the font's metrics.
+    ShadowText(dl, font, size, ImVec2(std::round(cx - ts.x * 0.5f), std::round(y + (size * kLine - ts.y) * 0.5f)),
+               Col(cr, cg, cb, 0.9f * g_alpha), g_alpha, buf);
+    y += size * kLine;
 
-    if (g_bar.load(r)) {
-        const float bw = std::round(size * 3.2f), bh = std::max(1.0f, std::round(size / 12.0f));
+    if (bar) {
+        const float bw = std::round(size * kBoxW), bh = std::max(1.0f, std::round(size / 12.0f));
         const float frac = std::clamp(speed / std::max(1.0f, g_barFull.load(r)), 0.0f, 1.0f);
-        const float x0 = std::round(cx - bw * 0.5f), y0 = std::round(y + bh);
+        const float x0 = std::round(cx - bw * 0.5f), y0 = std::round(y + (size * kBarH - bh) * 0.5f);
         dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + bw, y0 + bh), Col(0, 0, 0, 0.25f * g_alpha));
         if (frac > 0)
             dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + bw * frac, y0 + bh), Col(cr, cg, cb, 0.7f * g_alpha));
-        y += bh * 3.0f;
+        y += size * kBarH;
     }
 
-    if (g_details.load(r)) {
-        const float pre = g_pre.load(r), sync = g_sync.load(r);
+    if (details) {
+        const float pre = fresh ? g_pre.load(r) : kSampleSpeed, sync = fresh ? g_sync.load(r) : 80.0f;
         const int ip = static_cast<int>(std::lround(pre)), is = static_cast<int>(std::lround(sync));
         char line[64];
         line[0] = 0;
@@ -172,9 +207,10 @@ void Draw() {
         if (line[0]) {
             const float s2 = size * 0.72f;
             float pr, pg, pb;
-            TintRgb(TrendToTint(g_preDelta.load(r), pre) * 0.8f, pr, pg, pb);
+            TintRgb(fresh ? TrendToTint(g_preDelta.load(r), pre) * 0.8f : 0.0f, pr, pg, pb);
             const ImVec2 ls = font->CalcTextSizeA(s2, FLT_MAX, 0.0f, line);
-            ShadowText(dl, font, s2, ImVec2(std::round(cx - ls.x * 0.5f), std::round(y + s2 * 0.1f)),
+            ShadowText(dl, font, s2,
+                       ImVec2(std::round(cx - ls.x * 0.5f), std::round(y + (size * kDetailsH - ls.y) * 0.5f)),
                        Col(pr, pg, pb, 0.7f * g_alpha), g_alpha, line);
         }
     }

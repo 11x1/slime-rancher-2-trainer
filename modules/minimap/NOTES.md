@@ -73,7 +73,7 @@ The build is re-tried every second while there is no page; the error line names 
 UI hierarchy: under the HudUI GameObject (it carries the HUD Canvas; the minimap then shows and hides with the HUD), or the root canvas above it, or an own overlay canvas after 10 s:
 
 ```
-SR2Mods.Minimap        corner-anchored RectTransform, nested Canvas, CanvasGroup (opacity, no raycasts)
+SR2Mods.Minimap        RectTransform with anchor = pivot = (pos_x, 1 - pos_y) / 100, nested Canvas, CanvasGroup (opacity, no raycasts)
   Mask                 Image (procedural disc / 9-sliced rounded square) + Mask, inset by round(1.5% size)+1 px
                        so the stencil edge lies inside the frame's opaque band (no map pixels through the
                        frame's anti-aliased outer edge = no white fringe)
@@ -383,9 +383,8 @@ All settings apply live.
 | Key | Type | Default / range |
 |---|---|---|
 | `enabled` | core | — |
-| `position` | enum | top left / top right / bottom left / bottom right |
-| `offset_x`, `offset_y` | float | % of screen height |
-| `size` | float | % of screen height |
+| `pos_x`, `pos_y` | float | 98.7 / 2.6 (the old top-right corner, 2 % of the height from both edges, at 16:9); % of the free space (screen minus minimap), set with the overlay's HUD edit mode (Move button, `ui/NOTES.md`). They replace `position` (corner) and `offset_x` / `offset_y` (% of the height), which are migrated once at the first layout |
+| `size` | float | 24; 10-50 % of screen height (edit mode: drag a corner) |
 | `shape` | enum | circle / rounded square |
 | `opacity` | float | — |
 | `zoom` | float | 0.5–4; 1.0 ≈ 160 m |

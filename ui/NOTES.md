@@ -26,6 +26,8 @@ The UI never draws an automatic `ui.enabled` toggle, because turning the UI off 
 | `slime_icons.cpp/.h` | sidebar logo: the game's own slime icons, a different one every time the overlay opens |
 | `fonts/` | Nunito and Fredoka (SIL OFL) as compressed arrays, with their licences and how they were made |
 | `game_input.cpp/.h` | gameplay input lock and cursor unlock while the overlay is open (main thread) |
+| `hud_edit.cpp/.h` | HUD edit mode: move and resize the minimap and the Speed Panel with the mouse (see below) |
+| `momentum_hud.cpp/.h` | the Speed Panel (`hl2_movement`'s speed readout), drawn by the overlay |
 | `options_tab.cpp/.h` | "Mods" category in the game's Options menu |
 | `mod_icons.cpp/.h` | the mod's own icons (`assets/icons/`, embedded as `mod_icons_data.inc`) as Unity sprites: stb_image decode, `Texture2D` + `Sprite.Create`, cached and pinned; used by the Mods tab and the custom plot upgrades, with the game's sprite as fallback |
 | `settings_view.cpp/.h` | shared helpers (see above) |
@@ -92,6 +94,7 @@ The UI never draws an automatic `ui.enabled` toggle, because turning the UI off 
 - **Sandbox** (`TabKind::Sandbox`, module `sandbox`, default off) draws its own page instead of setting cards. Off: a card with an explanation and an **Enable sandbox** button. The button and the tab bar's Enabled switch (only when turning on) open a modal, "Enable sandbox?" / "Sandbox edits change your save directly. Enable?" with Cancel / Enable (Esc cancels; Cancel comes first, so keyboard focus never starts on Enable); only Enable writes `sandbox.enabled`. Turning it off is the plain switch. On: left column Newbucks (amount, input, Set / Add / Subtract) and Player (health, energy, radiation with Refill / Clear, an infinite-energy switch); right column Vacpack (slot list with item and count; for the selected slot an amount slider, Set amount / Fill / Empty, a searchable list of the items that slot accepts and a Put button); a status line with the last result. The page reads `sandbox_bridge::Get()` only and marks itself viewed each frame, which makes the module refresh the snapshot at 4 Hz. The Options "Mods" tab has no Sandbox row and profiles skip the module, so nothing else turns it on. Details: `modules/sandbox/NOTES.md`.
 - **Locked switches.** A module can pin a setting with `settings::Lock(module, key, value, reason)`; while pinned, `Set` with another value is ignored (overlay, Options tab, profiles). The overlay draws a pinned `enabled` switch (card header or tab bar) disabled, with the reason as its tooltip (`settings::LockReason`). Used by Custom Upgrades while a save with custom upgrades is loaded (`re/custom-upgrades.md` 1.2b). The Options "Mods" tab does not show the lock: its row can read "Off" after a click until it is rebound, while the value stays on.
 - **Speed Panel** is `hl2_movement`'s HUD group. Its switch is `hl2_movement.momentum_hud`, it is locked while Hl2 Movement is off, and a (?) next to it says so.
+- **Position and size** of the minimap and the Speed Panel are not sliders: their placement keys show as one row, "Position and size" with a **Move** button, which starts the HUD edit mode (below). `hud_edit::MoveRow` names the row (the x key), `hud_edit::Hidden` the other two. The pages keep only the style settings (minimap: shape, opacity; Speed Panel: details, fade, bar). The game's Options "Mods" tab still shows the placement keys as sliders.
 - A module the layout does not list gets a card on Misc > General, so new modules show up without touching the UI. A setting the layout does not list stays in its module's tab.
 
 **Theme** (`theme.cpp`). Flat Slime Rancher 2 colours: Dark (plum panels, slime pink, sky-blue selection) and Light (cream panels, white cards, the same accents). `menu::SyncTheme` applies the style when the `overlay_theme` value or the scale changes; scale = client height / 1080, at least 1.
@@ -128,6 +131,37 @@ The UI never draws an automatic `ui.enabled` toggle, because turning the UI off 
 - If the main-thread dispatcher is not running, only the window-message filter applies, so gameplay actions polled through the Input System may still fire.
 - If Unity reads keyboard or mouse through a path that bypasses the window procedure, step 1 cannot stop it. Step 2 is the real lock.
 - ImGui gamepad navigation is off; use mouse or keyboard.
+
+## HUD edit mode (`hud_edit.cpp`)
+
+One edit mode for the HUD elements, `hud_edit::Element::Minimap` and `::SpeedPanel`. Each element is a table row in `hud_edit.cpp`: module, the three placement keys and the size range.
+
+| element | keys | size |
+|---|---|---|
+| minimap | `minimap.pos_x`, `pos_y`, `size` | edge length, 10-50 % of the screen height |
+| Speed Panel | `hl2_movement.momentum_hud_x`, `_y`, `_size` | the speed number's font size, 0.8-8 % of the screen height |
+
+**Placement.** x and y are percent of the free space: 0 = the element touches the left / top edge, 100 = the right / bottom edge, where the free space is the screen size minus the element size (`hud_edit::ToPx` / `ToPct`, clamped to 0..100). The size is percent of the screen height. All of it is resolution independent: the element keeps its place relative to the edges when the resolution or the aspect changes.
+- The minimap sets its RectTransform's anchors and pivot to the same point (x/100, 1 - y/100) with a zero anchored position: the left edge then lies at x % of (parent width - size), which is exactly the free-space percent, without knowing the canvas width.
+- The Speed Panel's box is `kBoxW` (3.2) font sizes wide and `kLine` (1.2) high plus `kBarH` (0.25) for the bar and `kDetailsH` (0.9) for the details line (`momentum_hud.h`). Each text is centred on its own line, so the box does not depend on font metrics; the content is centred horizontally in the box. Turning the bar or details on makes the box taller, so the panel moves a little to keep its percent.
+
+**Starting.** The Move button calls `hud_edit::Begin(element)`; the overlay sees `Active()` after `menu::Draw` and closes the window. Edit mode keeps the input like the open window: `overlay::IsOpen()` (and the internal `Captured()`) is true for both, so the WndProc queues and swallows keyboard and mouse (no mouse message or raw mouse input goes to the game, the camera stays still), `game_input` keeps the action map disabled and the cursor unlocked, the software cursor is drawn if the game had the cursor locked, and modules that skip their key polling while the overlay is open (minimap zoom key, hl2_movement keys, wall markers) keep doing so.
+
+**Controls** (render thread, `hud_edit::Draw`, after the HUD content, on the foreground draw list):
+- The element gets a long-dashed outline 6 px (at 1080p) outside it, with a dark shadow, and a square handle on each corner. A help line sits at the top centre (at the bottom while the element is up there).
+- Drag inside the outline: move. When the element's centre comes within 12 px of the horizontal screen centre it snaps there; while it is centred a long-dashed vertical guide runs through the screen centre.
+- Shift while moving: the nearest corner is picked by the element's centre. If the drag is mostly horizontal (since the press), the side gap is set equal to the top/bottom gap of that corner; if mostly vertical, the top/bottom gap is set equal to the side gap. Either way the element ends up equally far from both edges of its corner, and the other axis follows the mouse.
+- Drag a corner handle: resize with the opposite corner fixed; with Alt, around the centre. The size follows the larger of the two axes (both elements keep their aspect), clamped to the element's range and to the screen; the result is pushed back onto the screen if it would stick out.
+- Enter or a click outside the outline keeps the change: the three values go through `Write` (posted to the main thread, snapped to the 0.01 step). Esc cancels (nothing is written). The overlay hotkey cancels too. Either way the settings window opens again on the page it came from.
+
+**Live preview.** `hud_edit::Preview(element, out)` (any thread, mutex) returns the placement being dragged; after a keep it keeps returning it until the stored settings match (or 1.5 s), so the element does not jump back for the frames the posted writes take. The minimap compares it with what it applied last on every tick and re-runs `ApplyLayout` when it differs; while it is the one being edited, its "hide while a menu is open" rule ignores the cursor unlock. The Speed Panel is drawn while edited even without a fresh state (a sample speed of 320, details "320  80%" when on), at full opacity.
+
+**Migration.** Done once, only when the new keys have never been saved (`settings::Saved`) and at least one old key has.
+- Speed Panel (at registration): `momentum_hud_y_offset` (fraction of the height below the centre) and `momentum_hud_scale` (x the overlay's 15 px body font x 1.15 at 1080p) become x = 50, size = 1.597 % x scale, and the same top edge in percent of the free space.
+- Minimap (at its first layout, because it needs the canvas aspect): `position` (corner) with `offset_x` / `offset_y` (% of the height) become the same left/top edge in percent of the free space. A placement made before that (edit mode, profile) wins.
+The old keys stay in `sr2mods.json` but are no longer registered or used.
+
+**Unverified in game:** everything above (built, not run): the minimap's anchor/pivot placement on the HUD canvas, the input capture during edit mode (camera still, Esc not opening the pause menu), Alt-resize (Alt is a system key; `GetAsyncKeyState` is used for Shift and Alt), and that the migrations land where the old settings put the elements.
 
 ## Options tab (`options_tab.cpp`)
 

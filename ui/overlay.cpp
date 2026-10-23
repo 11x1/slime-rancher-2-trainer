@@ -31,6 +31,7 @@
 #include "core/version_guard.h"
 #include "game_input.h"
 #include "hud.h"
+#include "hud_edit.h"
 #include "menu.h"
 #include "momentum_hud.h"
 #include "quick_start_hint.h"
@@ -122,6 +123,11 @@ std::vector<QueuedMsg> g_msgQueue;
 constexpr size_t kMaxQueued = 2048;
 
 // ------------------------------------------------------------ helpers ----
+// The overlay owns mouse and keyboard: settings window open, or HUD edit mode.
+bool Captured() {
+    return !g_failed.load(std::memory_order_relaxed) && (g_open.load(std::memory_order_relaxed) || hud_edit::Active());
+}
+
 void LogSeh(const char* where, DWORD code) {
     SR2_ERROR("ui: native exception 0x{:08X} in overlay {} - overlay disabled", code, where);
 }
@@ -207,8 +213,7 @@ bool RawInputIsMouse(LPARAM lp) {
 // Mod logic of the WndProc detour (C++ part; exceptions never escape).
 WndAction WndFilterCpp(UINT msg, WPARAM wp, LPARAM lp) noexcept {
     LatchMouseDown(msg, wp);  // open or not: the hotkey may be a mouse button
-    const bool open = g_open.load(std::memory_order_relaxed);
-    if (!open) {
+    if (!Captured()) {
         g_gameButtons = 0;
         return WndAction::PassToGame;
     }
@@ -269,7 +274,7 @@ void DrainMessages() {
         std::lock_guard lk(g_msgMutex);
         msgs.swap(g_msgQueue);
     }
-    if (!g_open.load()) return;  // stale input from before closing
+    if (!Captured()) return;  // stale input from before closing
     for (const auto& m : msgs) ImGui_ImplWin32_WndProcHandler(g_hwnd, m.msg, m.wp, m.lp);
 }
 
@@ -355,7 +360,10 @@ void PollHotkey() {
     const bool down = fg && KeyDown(vk);
     // While a text field has focus, a character hotkey is typed, not a toggle.
     const bool typing = g_textInputActive && g_open.load() && IsCharacterKey(vk);
-    if ((latched || down) && !g_prevHotkeyDown && !typing) overlay::SetOpen(!g_open.load());
+    if ((latched || down) && !g_prevHotkeyDown && !typing) {
+        if (hud_edit::Active()) hud_edit::Cancel();  // back to the settings window (TakeFinished reopens it)
+        else overlay::SetOpen(!g_open.load());
+    }
     g_prevHotkeyDown = down;
 }
 
@@ -568,8 +576,10 @@ bool HintVisible() {
 void RenderFrame() {
     PollHotkey();
     PollCapture();
+    if (hud_edit::TakeFinished()) overlay::SetOpen(true);  // edit mode kept or cancelled: back to the page
 
     const bool open = g_open.load();
+    const bool editing = hud_edit::Active();
     if (!open) {
         g_openFrames = 0;
         g_imguiWantsMouse = true;
@@ -589,7 +599,7 @@ void RenderFrame() {
     const bool hint = menuHint || quick.phase != quick_start_hint::Phase::Hidden;
     const bool hudMarkers = hud::HasContent();  // world markers published by modules (wall_markers)
     const bool momentum = momentum_hud::HasContent();  // hl2_movement speed readout
-    if (!open && !hint && !hudMarkers && !momentum) {
+    if (!open && !editing && !hint && !hudMarkers && !momentum) {
         std::lock_guard lk(g_msgMutex);
         g_msgQueue.clear();
         return;
@@ -611,7 +621,7 @@ void RenderFrame() {
             io.DisplayFramebufferScale = ImVec2(g_bbWidth / io.DisplaySize.x, g_bbHeight / io.DisplaySize.y);
         ApplyScale(io.DisplaySize.y);
 
-        if (open) {
+        if (open || editing) {
             PollMouseButtons(io);
             io.MouseDrawCursor = !core::main_thread::Ready() || game_input::WantSoftwareCursor();
         } else {
@@ -627,9 +637,11 @@ void RenderFrame() {
         }
         if (hudMarkers) hud::Draw();  // foreground draw list (the module hides them while the settings window is open)
         if (momentum) momentum_hud::Draw();
+        if (editing) hud_edit::Draw(g_appliedScale);  // outline, handles, guide line (mouse and keys are ours)
         if (open) {
             if (!menu::Draw(MakeHost())) overlay::SetOpen(false);
-        } else if (hint) {
+            if (hud_edit::Active()) overlay::SetOpen(false);  // "Move" clicked: the window gives way to edit mode
+        } else if (hint && !editing) {
             menu::Host h = MakeHost();
             h.menuHint = menuHint;
             h.quickHint = static_cast<int>(quick.phase);  // Hidden 0, Pending 1, Staying 2
@@ -826,13 +838,13 @@ bool CreateAndEnable(const char* name, void* target, void* detour, void** orig, 
     return true;
 }
 
-void OnMainThreadTick(float /*dt*/) { game_input::Tick(g_open.load() && !g_failed.load()); }
+void OnMainThreadTick(float /*dt*/) { game_input::Tick(Captured() && !g_failed.load()); }
 
 }  // namespace
 
 namespace overlay {
 
-bool IsOpen() { return g_open.load(); }
+bool IsOpen() { return Captured(); }
 
 void SetOpen(bool open) {
     if (g_failed.load()) open = false;

@@ -15,6 +15,8 @@
 
 namespace sr2::ui::overlay {
 
+// True while the overlay owns mouse and keyboard: the settings window is open
+// or the HUD edit mode (hud_edit.h) is on.
 bool IsOpen();
 void SetOpen(bool open);
 

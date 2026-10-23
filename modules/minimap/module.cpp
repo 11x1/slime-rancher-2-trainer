@@ -61,6 +61,7 @@
 #include "modules/minimap/game.h"
 #include "modules/minimap/procgen.h"
 #include "modules/minimap/ugui.h"
+#include "ui/hud_edit.h"
 #include "ui/overlay.h"
 
 namespace sr2::modules {
@@ -132,8 +133,8 @@ struct NativeFault : std::runtime_error {
 
 // ------------------------------------------------------------- settings -----
 struct Cfg {
-    int position = 1;  // 0 TL, 1 TR, 2 BL, 3 BR
-    float offX = 2, offY = 2, size = 24, opacity = 1, zoom = 1;
+    float posX = 98.7f, posY = 2.6f;  // % of the free space (ui/hud_edit.h), set with the HUD edit mode
+    float size = 24, opacity = 1, zoom = 1;
     int shape = 0;        // 0 circle, 1 rounded square
     int orientation = 0;  // 0 north up, 1 rotate with player
     int zoomKey = 0;
@@ -163,10 +164,14 @@ void RegisterSettings() {
         x.tooltip = tip;
         settings::Register(x);
     };
-    def("position", "Position", "Layout", Kind::Enum, 1, 0, 3, 1, {"Top left", "Top right", "Bottom left", "Bottom right"});
-    def("offset_x", "Horizontal offset (% of screen height)", "Layout", Kind::Float, 2, 0, 25, 0.5);
-    def("offset_y", "Vertical offset (% of screen height)", "Layout", Kind::Float, 2, 0, 25, 0.5);
-    def("size", "Size (% of screen height)", "Layout", Kind::Float, 24, 10, 50, 1);
+    // Placement: the overlay shows a "Move" button for these (ui/hud_edit.h). The
+    // defaults are the old top-right corner, 2 % of the height from both edges, at 16:9.
+    def("pos_x", "Horizontal position (% of free space)", "Layout", Kind::Float, 98.7, 0, 100, 0.01, {},
+        "0 = left edge, 100 = right edge. Set with Move.");
+    def("pos_y", "Vertical position (% of free space)", "Layout", Kind::Float, 2.6, 0, 100, 0.01, {},
+        "0 = top edge, 100 = bottom edge. Set with Move.");
+    def("size", "Size (% of screen height)", "Layout", Kind::Float, 24, 10, 50, 0.01, {},
+        "Set with Move (drag a corner).");
     def("shape", "Shape", "Layout", Kind::Enum, 0, 0, 1, 1, {"Circle", "Rounded square"});
     def("opacity", "Opacity", "Layout", Kind::Float, 1, 0.2, 1, 0.05);
     def("zoom", "Zoom", "View", Kind::Float, 1, 0.5, 4, 0.25, {}, "1.0 shows about 160 m around the player");
@@ -209,9 +214,8 @@ void RegisterSettings() {
 
 Cfg LoadCfg() {
     Cfg c;
-    c.position = std::clamp(settings::GetInt(kModule, "position"), 0, 3);
-    c.offX = settings::GetFloat(kModule, "offset_x");
-    c.offY = settings::GetFloat(kModule, "offset_y");
+    c.posX = std::clamp(settings::GetFloat(kModule, "pos_x"), 0.0f, 100.0f);
+    c.posY = std::clamp(settings::GetFloat(kModule, "pos_y"), 0.0f, 100.0f);
     c.size = settings::GetFloat(kModule, "size");
     c.shape = std::clamp(settings::GetInt(kModule, "shape"), 0, 1);
     c.opacity = std::clamp(settings::GetFloat(kModule, "opacity"), 0.05f, 1.0f);
@@ -330,8 +334,17 @@ public:
         frameSpriteName_ = js["frame_sprite"].asString();
         logSprites_ = js["log_sprite_candidates"].isBool() && js["log_sprite_candidates"].asBool();
 
+        // Old corner + offset placement (before the HUD edit mode): migrated once, at the
+        // first layout, when the canvas size (screen aspect) is known.
+        migratePlacement_ = !settings::Saved(kModule, "pos_x") && !settings::Saved(kModule, "pos_y") &&
+                            (settings::Saved(kModule, "position") || settings::Saved(kModule, "offset_x") ||
+                             settings::Saved(kModule, "offset_y"));
         RegisterSettings();
-        if (!onChange_) onChange_ = settings::OnChange(kModule, [this](const std::string&) { cfgDirty_.store(true); });
+        if (!onChange_)
+            onChange_ = settings::OnChange(kModule, [this](const std::string& key) {
+                if (key == "pos_x" || key == "pos_y") migratePlacement_ = false;  // placed since: keep that
+                cfgDirty_.store(true);
+            });
         SR2_INFO("minimap: resolved (fog {}, fog readiness {}, markers {}, pods {}, nodes {}, gadgets {}, load guard {})",
                  sym_.fogShouldReveal ? "yes" : "no",
                  (game::Has(sym_.edModel) && sym_.eventDirector)
@@ -385,7 +398,8 @@ public:
         s.visible = s.root && ui_.visible && ui_.built;
         s.loading = wasLoading_;
         s.size = ui_.size;
-        s.position = cfg_.position;
+        const sr2::ui::hud_edit::Placement pl = EffectivePlacement();
+        s.position = (pl.y >= 50 ? 2 : 0) + (pl.x >= 50 ? 1 : 0);  // nearest corner (free placement)
         return true;
     }
 
@@ -525,6 +539,11 @@ private:
     game::Symbols sym_;
     Cfg cfg_;
     std::atomic<bool> cfgDirty_{true};
+    std::atomic<bool> migratePlacement_{false};  // old corner placement still to convert (first layout)
+    sr2::ui::hud_edit::Placement shown_{-1, -1, -1};  // placement of the last ApplyLayout
+    static bool SamePlace(const sr2::ui::hud_edit::Placement& a, const sr2::ui::hud_edit::Placement& b) {
+        return a.x == b.x && a.y == b.y && a.size == b.size;
+    }
     int frameCb_ = 0, onChange_ = 0;
     std::string frameSpriteName_;
     bool logSprites_ = false;
@@ -677,6 +696,8 @@ private:
             }
             for (Marker& m : view_.markers) m.nextCheck = 0;
         }
+        Step("edit preview");
+        if (ui_.built && !SamePlace(EffectivePlacement(), shown_)) ApplyLayout();  // HUD edit mode: follow the drag
         Step("hotkey");
         HandleHotkey();
         Step("captures");
@@ -1161,7 +1182,9 @@ private:
 
     bool ShouldHide() {
         if (cfg_.hideFullMap && mapOpen_) return true;
-        if (cfg_.hideMenus && MenusOpen()) return true;
+        // The overlay's HUD edit mode unlocks the cursor too, but the minimap is what is being placed.
+        if (cfg_.hideMenus && MenusOpen() && !sr2::ui::hud_edit::Editing(sr2::ui::hud_edit::Element::Minimap))
+            return true;
         if (cfg_.hideConservatory && inConservatory_) return true;
         if (hud_.Alive() && !unity::ActiveInHierarchy(hud_.get())) return true;
         if (cfg_.respectFog && unknownArea_) return true;  // the game hides the player's position here
@@ -1388,21 +1411,52 @@ private:
         SR2_INFO("minimap: UI built under '{}'", unity::GetName(unity::GameObjectOf(parentT)));
     }
 
+    // The placement to show: the HUD edit mode's live one while the minimap is
+    // being moved (and until the commit has landed), else the settings.
+    sr2::ui::hud_edit::Placement EffectivePlacement() const {
+        sr2::ui::hud_edit::Placement p{cfg_.posX, cfg_.posY, cfg_.size};
+        sr2::ui::hud_edit::Preview(sr2::ui::hud_edit::Element::Minimap, p);
+        return p;
+    }
+
+    // Old placement (corner, offsets in % of the height) -> % of the free space,
+    // for a canvas of w x h. Writes the new settings once.
+    void MigratePlacement(float w, float h) {
+        if (w <= 1 || h <= 1) return;  // canvas not laid out yet: at the next layout
+        migratePlacement_ = false;
+        const int corner = settings::Saved(kModule, "position") ? std::clamp(settings::GetInt(kModule, "position"), 0, 3) : 1;
+        const float ox = (settings::Saved(kModule, "offset_x") ? settings::GetFloat(kModule, "offset_x") : 2.0f) * h / 100.0f;
+        const float oy = (settings::Saved(kModule, "offset_y") ? settings::GetFloat(kModule, "offset_y") : 2.0f) * h / 100.0f;
+        const float s = std::max(32.0f, h * cfg_.size / 100.0f);
+        const bool right = corner == 1 || corner == 3, top = corner < 2;
+        const float x = sr2::ui::hud_edit::ToPct(right ? w - s - ox : ox, w, s);
+        const float y = sr2::ui::hud_edit::ToPct(top ? oy : h - s - oy, h, s);
+        settings::Set(kModule, "pos_x", x);
+        settings::Set(kModule, "pos_y", y);
+        cfg_.posX = std::clamp(settings::GetFloat(kModule, "pos_x"), 0.0f, 100.0f);
+        cfg_.posY = std::clamp(settings::GetFloat(kModule, "pos_y"), 0.0f, 100.0f);
+        SR2_INFO("minimap: placement migrated (corner {}, offsets {:.1f}/{:.1f} px on {:.0f}x{:.0f}) -> {:.1f}% / {:.1f}%",
+                 corner, ox, oy, w, h, cfg_.posX, cfg_.posY);
+    }
+
     void ApplyLayout() {
         if (!ui_.built || !ui_.rootT.Alive()) return;
-        float canvasH = ugui::GetRect(ui_.parentT.get()).h;
+        const ugui::Rect canvas = ugui::GetRect(ui_.parentT.get());
+        float canvasH = canvas.h;
         if (canvasH <= 1) canvasH = static_cast<float>(std::max(ugui::ScreenHeight(), 720));
-        float size = std::max(32.0f, canvasH * cfg_.size / 100.0f);
+        if (migratePlacement_) MigratePlacement(canvas.w, canvas.h);
+        const sr2::ui::hud_edit::Placement place = EffectivePlacement();
+        shown_ = place;
+        float size = std::max(32.0f, canvasH * place.size / 100.0f);
         ui_.size = size;
-        float ox = canvasH * cfg_.offX / 100.0f, oy = canvasH * cfg_.offY / 100.0f;
-        bool right = cfg_.position == 1 || cfg_.position == 3;
-        bool top = cfg_.position == 0 || cfg_.position == 1;
-        Vec2 a{right ? 1.0f : 0.0f, top ? 1.0f : 0.0f};
+        // Anchor and pivot at the same fraction of the parent and of the minimap: the
+        // left edge is then x% of (parent width - size), i.e. exactly the free-space percent.
+        const Vec2 a{place.x / 100.0f, 1.0f - place.y / 100.0f};
         Il2CppObject* rt = ui_.rootT.get();
         ugui::SetAnchors(rt, a, a);
         ugui::SetPivot(rt, a);
         ugui::SetSizeDelta(rt, {size, size});
-        ugui::SetAnchoredPosition(rt, {right ? -ox : ox, top ? -oy : oy});
+        ugui::SetAnchoredPosition(rt, {0, 0});
         ugui::SetLocalScale(rt, {1, 1, 1});
         ugui::CanvasGroupSetAlpha(ui_.group.get(), cfg_.opacity);
 
