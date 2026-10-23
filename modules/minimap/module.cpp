@@ -200,6 +200,9 @@ void RegisterSettings() {
     def("hide_full_map", "Full map open", "Hide when", Kind::Bool, 1, 0, 1, 1);
     def("hide_menus", "Menus open", "Hide when", Kind::Bool, 1, 0, 1, 1);
     def("hide_conservatory", "In the Conservatory", "Hide when", Kind::Bool, 0, 0, 1, 1);
+    // Visibility parents (settings::Def::parent): the refinements show only while placed gadgets are drawn.
+    for (const char* k : {"icon_drone_ports", "icon_placed_teleporters", "icon_placed_decor"})
+        settings::SetParent(kModule, k, "icon_placed_gadgets");
 }
 
 Cfg LoadCfg() {

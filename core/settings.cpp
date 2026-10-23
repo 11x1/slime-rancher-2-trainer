@@ -231,7 +231,13 @@ void Register(const Def& d) {
     }
     std::lock_guard lock(g_mutex);
     if (Entry* e = FindLocked(d.module, d.key)) {
+        const std::string parent = e->def.parent;
+        const int parentValue = e->def.parentValue;
         e->def = d;  // refresh metadata, keep the current value
+        if (d.parent.empty()) {  // e.g. the module manager re-registering "enabled": keep a parent set earlier
+            e->def.parent = parent;
+            e->def.parentValue = parentValue;
+        }
         e->value = Clamp(e->def, e->value);
         return;
     }
@@ -260,6 +266,36 @@ int GetInt(std::string_view module, std::string_view key) { return static_cast<i
 bool Has(std::string_view module, std::string_view key) {
     std::lock_guard lock(g_mutex);
     return FindLocked(module, key) != nullptr;
+}
+
+void SetParent(std::string_view module, std::string_view key, std::string_view parent, int parentValue) {
+    if (parent == key) return;
+    std::lock_guard lock(g_mutex);
+    if (Entry* e = FindLocked(module, key)) {
+        e->def.parent = std::string(parent);
+        e->def.parentValue = parentValue;
+    }
+}
+
+bool ParentAllows(const Def& d, double parentValue) {
+    if (d.parent.empty()) return true;
+    if (d.parentValue < 0) return std::fabs(parentValue) >= 0.5;
+    return std::lround(parentValue) == d.parentValue;
+}
+
+bool Visible(std::string_view module, std::string_view key) {
+    std::lock_guard lock(g_mutex);
+    const Entry* e = FindLocked(module, key);
+    if (!e) return true;
+    if (key != "enabled")
+        if (const Entry* en = FindLocked(module, "enabled"); en && en->value < 0.5) return false;
+    for (int depth = 0; depth < 8 && !e->def.parent.empty(); ++depth) {  // depth cap: cycles in a module's table
+        const Entry* p = FindLocked(module, e->def.parent);
+        if (!p) return true;  // parent not registered (feature unavailable): nothing to hide behind
+        if (!ParentAllows(e->def, p->value)) return false;
+        e = p;
+    }
+    return true;
 }
 
 void Set(std::string_view module, std::string_view key, double v) {

@@ -167,40 +167,6 @@ std::vector<Category> Build(const std::vector<ModuleView>& views) {
     return spec;
 }
 
-std::optional<Parent> ParentOf(std::string_view module, std::string_view key) {
-    struct Entry {
-        const char* module;
-        const char* key;
-        const char* parent;
-        int value;
-    };
-    static const Entry kTable[] = {
-        {"hl2_movement", "gravity", "gravity_mode", 0},
-        {"hl2_movement", "gravity_multiplier", "gravity_mode", 0},
-        {"hl2_movement", "autobhop_key", "autobhop", -1},
-        {"hl2_movement", "scroll_jump_dir", "scroll_jump", -1},
-        {"hl2_movement", "sprint_drain", "hl2_sprint", -1},
-        {"hl2_movement", "speed_limit", "speed_limit_on", -1},
-        {"minimap", "icon_drone_ports", "icon_placed_gadgets", -1},
-        {"minimap", "icon_placed_teleporters", "icon_placed_gadgets", -1},
-        {"minimap", "icon_placed_decor", "icon_placed_gadgets", -1},
-        {"quick_start", "auto_continue_delay", "auto_continue", -1},
-    };
-    for (const auto& e : kTable)
-        if (module == e.module && key == e.key) return Parent{e.parent, e.value};
-    // spawn_scaling: "src_<source>_advanced" sits under "src_<source>_apply".
-    constexpr std::string_view kSrc = "src_", kAdv = "_advanced";
-    if (module == "spawn_scaling" && StartsWith(key, kSrc) && key.size() > kSrc.size() + kAdv.size() &&
-        key.substr(key.size() - kAdv.size()) == kAdv)
-        return Parent{std::string(key.substr(0, key.size() - kAdv.size())) + "_apply", -1};
-    return std::nullopt;
-}
-
-bool ParentAllows(const Parent& p, double v) {
-    if (p.value < 0) return v >= 0.5;
-    return static_cast<int>(std::lround(v)) == p.value;
-}
-
 std::vector<OptionText> EnumTexts(const settings::Def& d) {
     struct Entry {
         const char* module;

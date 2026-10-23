@@ -1782,6 +1782,20 @@ void RegisterSettings() {
         "which limiter (friction, speed limit, sv_maxvelocity, boost clamp, ...) touched the velocity.");
     add(kDebugLog, "Debug speed log", "Advanced", Kind::Bool, 0, 0, 1, 1,
         "Log speed, input and tick counts once per second (needs log_level debug).");
+
+    // Visibility parents (settings::Def::parent): both settings UIs hide these
+    // while their parent is off (or, with a value, while it differs from it).
+    settings::SetParent(kModule, kGravity, kGravityMode, 0);  // HL2 gravity mode only
+    settings::SetParent(kModule, kGravityMult, kGravityMode, 0);
+    settings::SetParent(kModule, kJumpHeight, kGravityMode, 0);  // Vanilla SR2 ignores it
+    settings::SetParent(kModule, kSurfLimit, kRampPhysics);
+    settings::SetParent(kModule, kAutobhopKey, kAutobhop);
+    settings::SetParent(kModule, kScrollDir, kScrollJump);
+    settings::SetParent(kModule, kSprintDrain, kHl2Sprint);
+    settings::SetParent(kModule, kSpeedLimit, kSpeedLimitOn);
+    settings::SetParent(kModule, kUnitScale, kMatchVanilla, 0);  // ignored while matching
+    for (const char* k : {kMomentumDetails, kMomentumFade, kMomentumBar, kMomentumY, kMomentumScale})
+        settings::SetParent(kModule, k, kMomentumHud);
 }
 
 // ----------------------------------------------------------------- module --

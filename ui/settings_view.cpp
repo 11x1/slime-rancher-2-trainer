@@ -82,6 +82,30 @@ void RegisterUiSettings() {
     });
 }
 
+const settings::Def* FindDef(const ModuleView& mv, std::string_view key) {
+    if (mv.hasEnabled && mv.enabled.key == key) return &mv.enabled;
+    for (const auto& g : mv.groups)
+        for (const auto& d : g.defs)
+            if (d.key == key) return &d;
+    return nullptr;
+}
+
+bool ParentChainAllows(const ModuleView& mv, const settings::Def& d) {
+    const settings::Def* cur = &d;
+    for (int depth = 0; depth < 8 && !cur->parent.empty(); ++depth) {  // depth cap: cycles
+        const settings::Def* p = FindDef(mv, cur->parent);
+        if (!p) return true;  // parent not registered: nothing to hide behind
+        if (!settings::ParentAllows(*cur, Read(*p))) return false;
+        cur = p;
+    }
+    return true;
+}
+
+bool Visible(const ModuleView& mv, const settings::Def& d) {
+    if (d.key != kKeyEnabled && mv.hasEnabled && Read(mv.enabled) < 0.5) return false;
+    return ParentChainAllows(mv, d);
+}
+
 std::string PrettyModuleName(std::string_view module) {
     if (module == kUiModule) return "UI / Overlay";
     std::string out;

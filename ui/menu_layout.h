@@ -1,7 +1,7 @@
 #pragma once
 // How the overlay arranges the registered settings: sidebar categories, tabs,
-// options nested under the switch they depend on, and short dropdown labels
-// with descriptions. Presentation only: modules, keys and sr2mods.json are
+// and short dropdown labels with descriptions. Which option is nested under
+// which switch comes from the settings schema (settings::Def::parent). Presentation only: modules, keys and sr2mods.json are
 // unchanged. Anything not listed still shows up: an unknown module lands on
 // Misc > General, an unknown setting in its module's tab.
 
@@ -46,15 +46,6 @@ struct Category {
 // Categories for the modules registered now. Tabs whose module is missing are
 // dropped, then empty categories; Profiles and Settings are always present.
 std::vector<Category> Build(const std::vector<ModuleView>& views);
-
-// The option a setting is nested under. value < 0: shown while the parent is
-// on (non-zero); otherwise shown while the parent equals `value` (Enum index).
-struct Parent {
-    std::string key;
-    int value = -1;
-};
-std::optional<Parent> ParentOf(std::string_view module, std::string_view key);
-bool ParentAllows(const Parent& p, double parentValue);
 
 // Short label and one-line description per option of an Enum. Falls back to
 // splitting "Label (description)" options; descriptions may be empty.

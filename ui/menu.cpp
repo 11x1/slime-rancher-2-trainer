@@ -157,14 +157,6 @@ const ModuleView* FindView(const std::vector<ModuleView>& views, std::string_vie
     return nullptr;
 }
 
-const settings::Def* FindDef(const ModuleView& mv, std::string_view key) {
-    if (mv.hasEnabled && mv.enabled.key == key) return &mv.enabled;
-    for (const auto& g : mv.groups)
-        for (const auto& d : g.defs)
-            if (d.key == key) return &d;
-    return nullptr;
-}
-
 bool IsOn(const settings::Def& d) { return Read(d) >= 0.5; }
 bool ModuleOn(const ModuleView& mv) { return !mv.hasEnabled || IsOn(mv.enabled); }
 
@@ -433,7 +425,7 @@ void DrawKids(const Host& h, const settings::Def& parent, const std::vector<sett
               std::string_view masterLabel) {
     const Palette& P = theme::Colors();
     ImGuiStorage* st = ImGui::GetStateStorage();
-    const ImGuiID id = ImGui::GetID(("kids/" + parent.key).c_str());
+    const ImGuiID id = ImGui::GetID(("kids/" + parent.key + "/" + std::to_string(kids.front().parentValue)).c_str());
     float* t = st->GetFloatRef(id, visible ? 1.0f : 0.0f);
     *t = Approach(*t, visible ? 1.0f : 0.0f, 6.0f);
     if (*t <= 0.001f) return;
@@ -453,37 +445,62 @@ void DrawKids(const Host& h, const settings::Def& parent, const std::vector<sett
                                         ImGui::GetColorU32(P.line), U(2));
 }
 
-// Rows of one group, with nested options under their parent.
+// Rows of one group, with nested options under their parent (settings::Def::parent).
+// A setting is nested when its parent is a top-level row of the same group;
+// any other setting with a parent (parent in another card, or nested itself)
+// stays in place and is simply hidden while its parent chain does not allow it.
 struct Nesting {
-    std::map<std::string, std::vector<settings::Def>> kidsOf;
+    std::map<std::string, std::vector<settings::Def>> kidsOf;  // parent key -> kids, registration order
     std::set<std::string> isKid;
 };
 
-Nesting BuildNesting(const ModuleView& mv, const std::vector<const GroupView*>& groups, std::string_view skipKey) {
-    std::set<std::string> shown;
-    for (const auto* g : groups)
-        for (const auto& d : g->defs) shown.insert(d.key);
+Nesting BuildNesting(const std::vector<const GroupView*>& groups, std::string_view skipKey) {
     Nesting n;
-    for (const auto* g : groups)
+    for (const auto* g : groups) {
+        auto inGroup = [&](const std::string& key) -> const settings::Def* {
+            for (const auto& d : g->defs)
+                if (d.key == key) return &d;
+            return nullptr;
+        };
         for (const auto& d : g->defs) {
-            auto p = layout::ParentOf(mv.module, d.key);
-            if (!p || p->key == skipKey || !shown.count(p->key)) continue;
-            n.kidsOf[p->key].push_back(d);
+            if (d.parent.empty() || d.parent == skipKey) continue;
+            const settings::Def* p = inGroup(d.parent);
+            if (!p || (!p->parent.empty() && p->parent != skipKey && inGroup(p->parent))) continue;  // one level only
+            n.kidsOf[d.parent].push_back(d);
             n.isKid.insert(d.key);
         }
+    }
     return n;
+}
+
+// Rows the group shows right now (top-level rows whose parent chain allows them).
+bool RowShown(const ModuleView& mv, const settings::Def& d, const Nesting& n, std::string_view skipKey) {
+    return d.key != skipKey && !n.isKid.count(d.key) && ParentChainAllows(mv, d);
 }
 
 void DrawGroupRows(const Host& h, const ModuleView& mv, const GroupView& g, const Nesting& n, std::string_view skipKey,
                    std::string_view masterLabel) {
     for (const auto& d : g.defs) {
-        if (d.key == skipKey || n.isKid.count(d.key)) continue;
+        if (!RowShown(mv, d, n, skipKey)) continue;
         DrawRow(h, d, layout::ShortLabel(d, nullptr, g.name, masterLabel), false);
         auto it = n.kidsOf.find(d.key);
         if (it == n.kidsOf.end()) continue;
-        const auto p = layout::ParentOf(mv.module, it->second.front().key);
-        DrawKids(h, d, it->second, p && layout::ParentAllows(*p, Read(d)), masterLabel);
+        // One sliding block per distinct parentValue (e.g. "while on" and "while off" kids of one switch).
+        std::map<int, std::vector<settings::Def>> byValue;
+        for (const auto& k : it->second) byValue[k.parentValue].push_back(k);
+        const double pv = Read(d);
+        for (const auto& [value, kids] : byValue) DrawKids(h, d, kids, settings::ParentAllows(kids.front(), pv), masterLabel);
     }
+}
+
+// Shown instead of a module's settings while its switch is off.
+void OffNote(const std::string& text) {
+    ImGui::Dummy(ImVec2(0, U(4)));
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::Colors().dim);
+    ImGui::TextUnformatted(text.c_str());
+    ImGui::PopStyleColor();
+    ImGui::PopTextWrapPos();
 }
 
 void BeginCard(const char* id, float w) {
@@ -521,14 +538,15 @@ void DrawModuleCards(const Host& h, const ModuleView& mv, const Tab& tab, std::s
         if (std::find(tab.skipGroups.begin(), tab.skipGroups.end(), g.name) != tab.skipGroups.end()) continue;
         groups.push_back(&g);
     }
-    const Nesting n = BuildNesting(mv, groups, skipKey);
+    const Nesting n = BuildNesting(groups, skipKey);
     std::vector<const GroupView*> cols[2];
     float heights[2] = {0, 0};
     for (const auto* g : groups) {
-        float rows = g->name.empty() ? 0.0f : 1.3f;
+        float rows = 0.0f;
         for (const auto& d : g->defs)
-            if (d.key != skipKey && !n.isKid.count(d.key)) rows += 1.0f;
-        if (rows <= 0.0f) continue;
+            if (RowShown(mv, d, n, skipKey)) rows += 1.0f;
+        if (rows <= 0.0f) continue;  // every row hidden behind its parent: no empty card
+        if (!g->name.empty()) rows += 1.3f;
         const int c = heights[0] <= heights[1] ? 0 : 1;
         cols[c].push_back(g);
         heights[c] += rows + 1.2f;
@@ -600,10 +618,12 @@ void DrawNested(const Host& h, const ModuleView& nmv) {
     }
     ImGui::Dummy(ImVec2(0, U(4)));
     FailedBanner(nmv);
+    if (!on) {  // child settings only while the module is on
+        OffNote("Turn on " + nmv.title + " to see its settings.");
+        return;
+    }
     Tab all;
-    ImGui::BeginDisabled(!on);
     DrawModuleCards(h, nmv, all, {}, {});
-    ImGui::EndDisabled();
 }
 
 // Misc > General: one card per module, the module's switch in the card header.
@@ -641,13 +661,16 @@ void DrawCardsPage(const Host& h, const Tab& tab, const std::vector<ModuleView>&
             }
             std::vector<const GroupView*> groups;
             for (const auto& g : mv->groups) groups.push_back(&g);
-            const Nesting n = BuildNesting(*mv, groups, {});
-            ImGui::BeginDisabled(!on);
-            for (const auto* g : groups) {
-                if (!g->name.empty() && groups.size() > 1) CardHeading(g->name.c_str(), P.head);
-                DrawGroupRows(h, *mv, *g, n, {}, {});
+            const Nesting n = BuildNesting(groups, {});
+            if (on) {  // the card shows only its header and switch while the module is off
+                for (const auto* g : groups) {
+                    const bool any = std::any_of(g->defs.begin(), g->defs.end(),
+                                                 [&](const settings::Def& d) { return RowShown(*mv, d, n, {}); });
+                    if (!any) continue;
+                    if (!g->name.empty() && groups.size() > 1) CardHeading(g->name.c_str(), P.head);
+                    DrawGroupRows(h, *mv, *g, n, {}, {});
+                }
             }
-            ImGui::EndDisabled();
             EndCard();
             ImGui::Dummy(ImVec2(0, U(kGap) - ImGui::GetStyle().ItemSpacing.y));
             ImGui::PopID();
@@ -1310,11 +1333,17 @@ bool Draw(const Host& h) {
                 FailedBanner(*mv);
                 const TabState st = StateOf(tab, views);
                 const std::string masterLabel = !tab.masterKey.empty() && st.sw ? st.sw->label : std::string();
-                ImGui::BeginDisabled(!st.on);
+                if (!st.on) {  // child settings are hidden while the tab's switch (or its module) is off
+                    if (st.locked)
+                        OffNote(tab.title + " is part of " + mv->title + ". Turn on " + mv->title +
+                                " to use it.");
+                    else
+                        OffNote(tab.title + " is off. Turn it on with the Enabled switch above to see its settings.");
+                    break;
+                }
                 DrawModuleCards(h, *mv, tab, tab.masterKey, masterLabel);
                 for (const auto& n : tab.nested)
                     if (const ModuleView* nmv = FindView(views, n)) DrawNested(h, *nmv);
-                ImGui::EndDisabled();
                 break;
             }
             case TabKind::Cards: DrawCardsPage(h, tab, views); break;

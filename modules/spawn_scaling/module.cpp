@@ -1277,7 +1277,10 @@ bool SpawnScaling::Setup(sr2::core::ModuleContext& ctx) {
             std::format("Use the per-resource multipliers (group '{}') for each resource this source produces "
                         "INSTEAD of the global ore amount multiplier.{}",
                         kGroupPerResource, kLiveTip));
+        // Visibility parent (settings::Def::parent): advanced mode only matters while the source is scaled.
+        settings::SetParent(kModule, AdvancedKey(s), ApplyKey(s));
     }
+    if (paceOk_) settings::SetParent(kModule, kKeepHarvestTime, ApplyKey(kSrcNodes));
 
     settings::OnChange(kModule, [this](const std::string&) { dirty_.store(true); });
 
