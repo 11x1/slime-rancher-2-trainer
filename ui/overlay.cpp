@@ -938,6 +938,29 @@ bool StartOverlay() {
 
 }  // namespace sr2::ui
 
+// IM_ASSERT (third_party/imgui/imconfig.h): ImGui's checks, logged once per check
+// (file and line) instead of compiled out, so a misuse names itself in the log. ImGui
+// carries on as it would without asserts. Render thread (ImGui is used nowhere else).
+void Sr2ImGuiAssertFailed(const char* expr, const char* file, int line) {
+    std::string where = file ? file : "?";
+    if (const size_t slash = where.find_last_of("\\/"); slash != std::string::npos) where.erase(0, slash + 1);
+    where += ":" + std::to_string(line);
+    static std::mutex mutex;
+    static std::vector<std::string> seen;
+    {
+        std::lock_guard lk(mutex);
+        if (seen.size() >= 64 || std::find(seen.begin(), seen.end(), where) != seen.end()) return;
+        seen.push_back(where);
+    }
+    // The callers as module+offset (look them up with the build's PDB): the check names the
+    // ImGui line, the stack the overlay code that got there.
+    void* frames[10] = {};
+    const USHORT n = CaptureStackBackTrace(1, 10, frames, nullptr);
+    std::string stack;
+    for (USHORT i = 0; i < n; ++i) stack += (i ? " < " : "") + sr2::core::DescribeAddress(frames[i]);
+    SR2_ERROR("ui: ImGui check failed: {} ({}) - logged once; called from {}", expr ? expr : "?", where, stack);
+}
+
 #else  // !SR2_HAVE_IMGUI
 
 #include "core/log.h"

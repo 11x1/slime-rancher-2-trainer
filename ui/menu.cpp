@@ -438,7 +438,8 @@ void HelpMarker(const char* id, float size, const std::string& tip) {
     dl->AddCircle(c, r - U(0.75f), ImGui::GetColorU32(hov ? P.tabSel : P.line), 48, U(1.5f));
     ImFont* qf = theme::Display();
     const float qs = std::round(size * 0.62f);
-    const ImFontGlyph* g = qf->GetFontBaked(qs)->FindGlyph('?');
+    ImFontBaked* qb = qf->GetFontBaked(qs);  // nullptr only with a locked atlas
+    const ImFontGlyph* g = qb ? qb->FindGlyph('?') : nullptr;
     ImVec2 qp = g ? ImVec2(c.x - (g->X0 + g->X1) * 0.5f, c.y - (g->Y0 + g->Y1) * 0.5f) : c;
     qp = ImVec2(std::round(qp.x), std::round(qp.y));
     dl->AddText(qf, qs, qp, ImGui::GetColorU32(hov ? P.text : P.soft), "?");
@@ -2700,7 +2701,8 @@ void DrawSidebar(const Host& h, const std::vector<Category>& cats, const ModuleV
     std::string commit = ::sr2::core::build_info::Commit();
     const float x0 = sp.x + U(14), right = ImGui::GetWindowPos().x + ImGui::GetWindowWidth() - U(12);
     auto inkMid = [&](float size) {  // y of the digits' ink centre below the line top
-        const ImFontGlyph* g = bf->GetFontBaked(U(size))->FindGlyph('0');
+        ImFontBaked* b = bf->GetFontBaked(U(size));  // nullptr only with a locked atlas
+        const ImFontGlyph* g = b ? b->FindGlyph('0') : nullptr;
         return g ? (g->Y0 + g->Y1) * 0.5f : U(size) * 0.5f;
     };
     const ImVec2 ts = TextSize(bf, theme::kSmallSize, stamp);
