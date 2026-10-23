@@ -302,6 +302,29 @@ void DrawSlimeFallback(ImDrawList* dl, ImVec2 min, ImVec2 max) {
 }
 
 // -------------------------------------------------------------- widgets ----
+// "(?)" with a tooltip, `size` square at the cursor. Crisp at any scale: the
+// centre is snapped to the pixel grid, the ring is a soft filled disc with a
+// 1.5 px outline (many segments), and the "?" is the bold display font at a
+// whole-pixel position with its ink (not its line box) centred.
+void HelpMarker(const char* id, float size, const std::string& tip) {
+    const Palette& P = theme::Colors();
+    ImGui::InvisibleButton(id, ImVec2(size, size));
+    const bool hov = ImGui::IsItemHovered() || ImGui::IsItemFocused();
+    const ImVec2 a = ImGui::GetItemRectMin();
+    const ImVec2 c(std::floor(a.x + size * 0.5f) + 0.5f, std::floor(a.y + size * 0.5f) + 0.5f);
+    const float r = std::floor(size * 0.5f) - 0.5f;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddCircleFilled(c, r, ImGui::GetColorU32(hov ? P.frameHover : P.frame), 48);
+    dl->AddCircle(c, r - U(0.75f), ImGui::GetColorU32(hov ? P.tabSel : P.line), 48, U(1.5f));
+    ImFont* qf = theme::Display();
+    const float qs = std::round(size * 0.62f);
+    const ImFontGlyph* g = qf->GetFontBaked(qs)->FindGlyph('?');
+    ImVec2 qp = g ? ImVec2(c.x - (g->X0 + g->X1) * 0.5f, c.y - (g->Y0 + g->Y1) * 0.5f) : c;
+    qp = ImVec2(std::round(qp.x), std::round(qp.y));
+    dl->AddText(qf, qs, qp, ImGui::GetColorU32(hov ? P.text : P.soft), "?");
+    if (hov) Tooltip(tip);
+}
+
 // On/off switch, vertically centred in a frame-height row. True when clicked.
 bool Switch(const char* id, bool on) {
     const Palette& P = theme::Colors();
@@ -1675,16 +1698,7 @@ bool DrawTopBar(const Category& cat, int& ti, const std::vector<ModuleView>& vie
             const float hs = U(22);
             rx -= hs + U(10);
             ImGui::SetCursorScreenPos(ImVec2(rx, cy - hs * 0.5f));
-            ImGui::InvisibleButton("##help", ImVec2(hs, hs));
-            const bool hov = ImGui::IsItemHovered() || ImGui::IsItemFocused();
-            const ImVec2 c(rx + hs * 0.5f, cy);
-            dl->AddCircle(c, hs * 0.5f - U(1), hov ? P.tabSel : P.line, 0, U(2));
-            // Centre the glyph's ink, not its line box (which has room for descenders).
-            ImFont* qf = theme::Body();
-            const ImFontGlyph* g = qf->GetFontBaked(U(13))->FindGlyph('?');
-            const ImVec2 qp = g ? ImVec2(c.x - (g->X0 + g->X1) * 0.5f, c.y - (g->Y0 + g->Y1) * 0.5f) : c;
-            Text(dl, qf, 13, qp, hov ? P.text : P.soft, "?");
-            if (hov) Tooltip(tab.help);
+            HelpMarker("##help", hs, tab.help);
         }
         rx -= U(kSwitchW) + U(8);
         const float fh = ImGui::GetFrameHeight();
