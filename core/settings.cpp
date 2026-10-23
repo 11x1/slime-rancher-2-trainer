@@ -302,6 +302,11 @@ bool Has(std::string_view module, std::string_view key) {
     return FindLocked(module, key) != nullptr;
 }
 
+bool Saved(std::string_view module, std::string_view key) {
+    std::lock_guard lock(g_mutex);
+    return SavedLocked(module, key) != nullptr;
+}
+
 void SetParent(std::string_view module, std::string_view key, std::string_view parent, int parentValue) {
     if (parent == key) return;
     std::lock_guard lock(g_mutex);

@@ -41,6 +41,9 @@ std::vector<std::string> Modules();   // modules with registered defs, registrat
 // ---- additions ----
 void RemoveOnChange(int id);
 bool Has(std::string_view module, std::string_view key);
+// True if sr2mods.json had (or the mod has since written) a value for module.key,
+// registered or not. For one-time migrations of renamed settings.
+bool Saved(std::string_view module, std::string_view key);
 // Restore a def's default value (Set(def)).
 void Reset(std::string_view module, std::string_view key);
 // Write pending changes now (also done on shutdown).
