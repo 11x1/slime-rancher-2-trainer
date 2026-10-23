@@ -1717,7 +1717,31 @@ Poly ClipDiagonal(const Poly& in, ImVec2 o, ImVec2 s, float limit, bool below) {
     return out;
 }
 
-void FillPoly(ImDrawList* dl, const Poly& p, ImVec2 o, ImVec2 s, float lo, float hi, ImU32 clo, ImU32 chi, bool textured) {
+// The window's outline: a rectangle with rounded corners (convex, so the
+// diagonal clip and the fan fill below stay valid). The snapshot outside it is
+// the game behind the window, which must not show as square corners.
+Poly RoundedRect(ImVec2 a, ImVec2 b, float r) {
+    r = std::clamp(r, 0.0f, std::min(b.x - a.x, b.y - a.y) * 0.5f);
+    if (r < 0.5f) return {a, ImVec2(b.x, a.y), b, ImVec2(a.x, b.y)};
+    constexpr int kSeg = 8;
+    const ImVec2 centres[4] = {ImVec2(a.x + r, a.y + r), ImVec2(b.x - r, a.y + r), ImVec2(b.x - r, b.y - r),
+                               ImVec2(a.x + r, b.y - r)};
+    Poly p;
+    p.reserve(4 * (kSeg + 1));
+    for (int c = 0; c < 4; ++c) {
+        const float a0 = kPi * (1.0f + 0.5f * static_cast<float>(c));  // top-left corner starts at 180 degrees
+        for (int i = 0; i <= kSeg; ++i) {
+            const float an = a0 + 0.5f * kPi * static_cast<float>(i) / kSeg;
+            p.push_back(ImVec2(centres[c].x + std::cos(an) * r, centres[c].y + std::sin(an) * r));
+        }
+    }
+    return p;
+}
+
+// `uvOff`: where the window was when the snapshot was taken, relative to now
+// (the texture is sampled there, so the old look follows a moved window).
+void FillPoly(ImDrawList* dl, const Poly& p, ImVec2 o, ImVec2 s, float lo, float hi, ImU32 clo, ImU32 chi, bool textured,
+              ImVec2 uvOff = ImVec2(0, 0)) {
     if (p.size() < 3) return;
     const ImVec2 white = ImGui::GetFontTexUvWhitePixel();
     const ImVec2 disp = ImGui::GetIO().DisplaySize;
@@ -1732,7 +1756,8 @@ void FillPoly(ImDrawList* dl, const Poly& p, ImVec2 o, ImVec2 s, float lo, float
     for (const ImVec2& v : p) {
         const float k = (v.x - o.x) / s.x + (v.y - o.y) / s.y;
         const float t = hi > lo ? std::clamp((k - lo) / (hi - lo), 0.0f, 1.0f) : 0.0f;
-        dl->PrimWriteVtx(v, textured ? ImVec2(v.x / disp.x, v.y / disp.y) : white, textured ? IM_COL32_WHITE : Mix(clo, chi, t));
+        dl->PrimWriteVtx(v, textured ? ImVec2((v.x + uvOff.x) / disp.x, (v.y + uvOff.y) / disp.y) : white,
+                         textured ? IM_COL32_WHITE : Mix(clo, chi, t));
     }
 }
 
@@ -1746,12 +1771,15 @@ void DrawPeel() {
     // cubic-bezier-ish ease in-out; the edge runs from beyond the bottom-right corner to past the top-left one
     const float e = u < 0.5f ? 4 * u * u * u : 1 - std::pow(-2 * u + 2, 3.0f) / 2;
     const float p = 2.0f - 2.16f * e;
-    const ImVec2 o = g_peel.min, s(g_peel.max.x - g_peel.min.x, g_peel.max.y - g_peel.min.y);
-    const Poly rect = {o, ImVec2(o.x + s.x, o.y), g_peel.max, ImVec2(o.x, o.y + s.y)};
+    // Drawn where the window is now (it may have been dragged since the click),
+    // sampled where it was when the snapshot was taken.
+    const ImVec2 s(g_peel.max.x - g_peel.min.x, g_peel.max.y - g_peel.min.y);
+    const ImVec2 o = g_winMin, uvOff(g_peel.min.x - g_winMin.x, g_peel.min.y - g_winMin.y);
+    const Poly rect = RoundedRect(o, ImVec2(o.x + s.x, o.y + s.y), ImGui::GetStyle().WindowRounding);
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     // The old look, still on the top-left side of the edge.
     dl->PushTexture(ImTextureRef(g_peel.tex));
-    FillPoly(dl, ClipDiagonal(rect, o, s, p, true), o, s, 0, 0, 0, 0, true);
+    FillPoly(dl, ClipDiagonal(rect, o, s, p, true), o, s, 0, 0, 0, 0, true, uvOff);
     dl->PopTexture();
     // The lifted flap and its shadow, just past the edge.
     const Palette& P = theme::Colors();
