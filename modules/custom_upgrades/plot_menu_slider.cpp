@@ -52,6 +52,8 @@ constexpr float kLabelHeight = 34.0f;
 constexpr float kBarHeight = 28.0f;
 constexpr float kGap = 6.0f;
 constexpr float kTotalHeight = kLabelHeight + kGap + kBarHeight;
+constexpr float kColumnGap = 28.0f;    // between sliders side by side
+constexpr float kColumnFontScale = 0.85f;  // label size in a shared row (half the width)
 constexpr float kRepeatDelay = 0.40f;  // seconds before a held direction repeats
 constexpr float kRepeatRate = 0.07f;   // seconds between repeats
 constexpr uint64_t kSamePressMs = 150; // a navigation event and our poll this close belong to one press
@@ -126,6 +128,7 @@ struct PlotMenuSlider::Impl {
     const MethodInfo* padCurrent = nullptr, *padDpad = nullptr, *padStick = nullptr, *dpadLeft = nullptr,
                     *dpadRight = nullptr, *stickLeft = nullptr, *stickRight = nullptr, *btnPressed = nullptr;
     const MethodInfo* kbCurrent = nullptr, *kbLeft = nullptr, *kbRight = nullptr;
+    const MethodInfo* padRStick = nullptr, *kbShift = nullptr;  // SliderInput::kSecondary
     const MethodInfo* mouseCurrent = nullptr, *mouseLeft = nullptr;
     bool inputOk = false, selectionOk = false;
 
@@ -139,6 +142,8 @@ struct PlotMenuSlider::Impl {
     Il2CppObject* style = nullptr;  // pinned (never freed)
 
     // the live slider (main thread only)
+    Il2CppObject* row = nullptr;      // GameObject of the shared row this slider built (ownsRow), else null
+    bool ownsRow = false;
     Il2CppObject* root = nullptr;     // GameObject
     Il2CppObject* slider = nullptr;   // UnityEngine.UI.Slider
     Il2CppObject* sliderGo = nullptr; // its GameObject
@@ -265,6 +270,16 @@ struct PlotMenuSlider::Impl {
         return AddImage(go, c, false);
     }
     static uint64_t NowMs() { return GetTickCount64(); }
+    bool ShiftHeld() {
+        if (!kbCurrent || !kbShift) return false;
+        bool ok = false;
+        Il2CppObject* kb = Call(kbCurrent, nullptr, {}, "Keyboard.get_current", &ok);
+        return ok && kb && Pressed(kbShift, kb);
+    }
+    // This press / event is for this slider's keys (SliderInput): Shift held <=> kSecondary.
+    bool OwnInput() { return (spec.input == SliderInput::kSecondary) == ShiftHeld(); }
+    void PlaceInSlot(Il2CppObject* go, Il2CppObject* craftTr, bool layout);
+    bool AddRaycaster(Il2CppObject* go, Il2CppObject* parentTr);
     bool InputBlocked();
     bool Pressed(const MethodInfo* getControl, Il2CppObject* device) {
         if (!device || !getControl) return false;
@@ -304,7 +319,8 @@ struct PlotMenuSlider::Impl {
         }
     }
     void Clear() {
-        root = slider = sliderGo = label = nullptr;
+        root = slider = sliderGo = label = row = nullptr;
+        ownsRow = false;
         std::vector<Il2CppGCHandle> doomed;
         doomed.swap(handles);
         if (!doomed.empty()) main_thread::Post([doomed] {
@@ -503,6 +519,9 @@ bool PlotMenuSlider::Setup(Resolver& R, const char* module, std::string& why) {
         p->kbCurrent = kb ? R.Method(kb, "get_current", 0, &err) : nullptr;
         p->kbLeft = kb ? R.Method(kb, "get_leftArrowKey", 0, &err) : nullptr;
         p->kbRight = kb ? R.Method(kb, "get_rightArrowKey", 0, &err) : nullptr;
+        p->padRStick = pad ? R.Method(pad, "get_rightStick", 0, &err) : nullptr;
+        p->kbShift = kb ? R.Method(kb, "get_shiftKey", 0, &err) : nullptr;
+        if (!p->padRStick || !p->kbShift) report += " second slider keys (right stick / Shift + arrows): partly NOT available;";
         p->inputOk = p->btnPressed && ((p->padCurrent && p->padDpad && p->dpadLeft && p->dpadRight) ||
                                        (p->kbCurrent && p->kbLeft && p->kbRight));
         if (!p->inputOk) report += " gamepad / keyboard steps: NOT available;";
@@ -538,7 +557,61 @@ Il2CppObject* PlotMenuSlider::Impl::SliderStyle() {
     return style;
 }
 
-bool PlotMenuSlider::Create(Il2CppObject* contentView, const SliderSpec& specIn) {
+// The cost row's slot for `go` (a slider root, or the row of sliders side by side): with a LayoutGroup
+// a LayoutElement right after the cost row, else the cost row's RectTransform, else the panel bottom.
+void PlotMenuSlider::Impl::PlaceInSlot(Il2CppObject* go, Il2CppObject* craftTr, bool layout) {
+    Il2CppObject* rt = unity::TransformOf(go);
+    bool ok = false;
+    if (layout) {
+        Il2CppObject* le = AddComponent(go, layoutElemClass, "AddComponent(LayoutElement)");
+        float h = kTotalHeight, flex = 1.0f;
+        if (le) {
+            Call(leSetPrefH, le, {&h}, "LayoutElement.set_preferredHeight");
+            Call(leSetMinH, le, {&h}, "LayoutElement.set_minHeight");
+            Call(leSetFlexW, le, {&flex}, "LayoutElement.set_flexibleWidth");
+        }
+        if (craftTr) {
+            int32_t idx = Unbox<int32_t>(Call(trGetSibling, craftTr, {}, "Transform.GetSiblingIndex", &ok), -1);
+            if (ok && idx >= 0) {
+                ++idx;
+                Call(trSetSibling, rt, {&idx}, "Transform.SetSiblingIndex");
+            }
+        }
+    } else if (craftTr && IsA(craftTr, rtClass)) {
+        const Vec2 amin = GetVec(rtGetAnchorMin, craftTr, "get_anchorMin");
+        const Vec2 amax = GetVec(rtGetAnchorMax, craftTr, "get_anchorMax");
+        const Vec2 piv = GetVec(rtGetPivot, craftTr, "get_pivot");
+        const Vec2 pos = GetVec(rtGetPos, craftTr, "get_anchoredPosition");
+        Vec2 size = GetVec(rtGetSize, craftTr, "get_sizeDelta");
+        if (amin.y == amax.y) size.y = std::max(size.y, kTotalHeight);  // fixed height: at least ours
+        Rect(rt, amin, amax, piv, pos, size);
+    } else {
+        Rect(rt, {0, 0}, {1, 0}, {0.5f, 0}, {0, 16}, {-32, kTotalHeight});
+    }
+}
+
+// Pointer input: own Canvas + GraphicRaycaster on `go` (the panel's nested Canvas has no raycaster,
+// so nothing below it is ever hit). Sorted one above the panel's canvas so our hits win over the
+// menu's own graphics behind it.
+bool PlotMenuSlider::Impl::AddRaycaster(Il2CppObject* go, Il2CppObject* parentTr) {
+    if (!raycasterClass) return false;
+    bool inactive = true, ok = false;
+    Il2CppObject* parentCanvas =
+        Call(compInParent, parentTr, {unity::TypeOf(canvasClass), &inactive}, "GetComponentInParent(Canvas)", &ok);
+    if (!ok || !unity::IsAlive(parentCanvas) || !IsA(parentCanvas, canvasClass)) parentCanvas = nullptr;
+    Il2CppObject* canvas = AddComponent(go, canvasClass, "AddComponent(Canvas)");
+    if (!canvas) return false;
+    int32_t order = parentCanvas ? Unbox<int32_t>(Call(cvGetOrder, parentCanvas, {}, "Canvas.get_sortingOrder")) : 0;
+    int32_t sortLayer = parentCanvas ? Unbox<int32_t>(Call(cvGetLayer, parentCanvas, {}, "Canvas.get_sortingLayerID")) : 0;
+    bool over = true;
+    ++order;
+    Call(cvSetOverride, canvas, {&over}, "Canvas.set_overrideSorting");
+    Call(cvSetLayer, canvas, {&sortLayer}, "Canvas.set_sortingLayerID");
+    Call(cvSetOrder, canvas, {&order}, "Canvas.set_sortingOrder");
+    return AddComponent(go, raycasterClass, "AddComponent(GraphicRaycaster)") != nullptr;
+}
+
+bool PlotMenuSlider::Create(Il2CppObject* contentView, const SliderSpec& specIn, const PlotMenuSlider* rowOf) {
     if (!ready_ || !impl_ || !main_thread::IsMainThread()) return false;
     Impl& p = *impl_;
     Destroy();
@@ -546,7 +619,8 @@ bool PlotMenuSlider::Create(Il2CppObject* contentView, const SliderSpec& specIn)
     auto fail = [&](const char* what) {
         if (!p.loggedFail) SR2_WARN("[{}] slider '{}' not built: {}", p.module, specIn.name, what);
         p.loggedFail = true;
-        if (p.root) p.Destroy(p.root);
+        if (p.ownsRow && p.row) p.Destroy(p.row);
+        else if (p.root) p.Destroy(p.root);
         p.Clear();
         return false;
     };
@@ -569,60 +643,43 @@ bool PlotMenuSlider::Create(Il2CppObject* contentView, const SliderSpec& specIn)
     if (p.spec.max < p.spec.min) std::swap(p.spec.max, p.spec.min);
     p.value = p.Snap(p.spec.value);
 
+    // ---- shared row (sliders side by side): built by the first, joined by the others ----
+    Il2CppObject* rowTr = nullptr;
+    bool raycaster = false;
+    const bool shared = rowOf != nullptr || p.spec.columns > 1;
+    if (rowOf) {
+        const Impl* o = rowOf->impl_;
+        if (!o || !o->ownsRow || !unity::IsAlive(o->row)) return fail("the row to join is not built");
+        rowTr = unity::TransformOf(o->row);
+        raycaster = o->raycasterClass != nullptr;  // the row's Canvas + raycaster cover this root too
+    } else if (shared) {
+        Il2CppObject* rowGo = p.NewUi("sr2mods_SliderRow_" + p.spec.name, parentTr, layer);
+        if (!rowGo) return fail("row GameObject creation failed");
+        p.row = rowGo;
+        p.ownsRow = true;
+        p.Keep(rowGo);
+        p.PlaceInSlot(rowGo, craftTr, layout);
+        raycaster = p.AddRaycaster(rowGo, parentTr);
+        rowTr = unity::TransformOf(rowGo);
+    }
+    if (p.Faulted()) return fail("faulted");
+
     // ---- root (inactive while being built: SliderStyler.OnEnable must see its style) ----
-    Il2CppObject* root = p.NewUi("sr2mods_Slider_" + p.spec.name, parentTr, layer);
+    Il2CppObject* root = p.NewUi("sr2mods_Slider_" + p.spec.name, rowTr ? rowTr : parentTr, layer);
     if (!root) return fail("GameObject creation failed");
     p.root = root;
     p.Keep(root);
     unity::SetActive(root, false);
     Il2CppObject* rootRt = unity::TransformOf(root);
-    if (layout) {
-        Il2CppObject* le = p.AddComponent(root, p.layoutElemClass, "AddComponent(LayoutElement)");
-        float h = kTotalHeight, flex = 1.0f;
-        if (le) {
-            p.Call(p.leSetPrefH, le, {&h}, "LayoutElement.set_preferredHeight");
-            p.Call(p.leSetMinH, le, {&h}, "LayoutElement.set_minHeight");
-            p.Call(p.leSetFlexW, le, {&flex}, "LayoutElement.set_flexibleWidth");
-        }
-        if (craftTr) {
-            int32_t idx = p.Unbox<int32_t>(p.Call(p.trGetSibling, craftTr, {}, "Transform.GetSiblingIndex", &ok), -1);
-            if (ok && idx >= 0) {
-                ++idx;
-                p.Call(p.trSetSibling, rootRt, {&idx}, "Transform.SetSiblingIndex");
-            }
-        }
-    } else if (craftTr && p.IsA(craftTr, p.rtClass)) {
-        const Vec2 amin = p.GetVec(p.rtGetAnchorMin, craftTr, "get_anchorMin");
-        const Vec2 amax = p.GetVec(p.rtGetAnchorMax, craftTr, "get_anchorMax");
-        const Vec2 piv = p.GetVec(p.rtGetPivot, craftTr, "get_pivot");
-        const Vec2 pos = p.GetVec(p.rtGetPos, craftTr, "get_anchoredPosition");
-        Vec2 size = p.GetVec(p.rtGetSize, craftTr, "get_sizeDelta");
-        if (amin.y == amax.y) size.y = std::max(size.y, kTotalHeight);  // fixed height: at least ours
-        p.Rect(rootRt, amin, amax, piv, pos, size);
+    if (rowTr) {
+        const int cols = std::max(p.spec.columns, 1);
+        const int col = std::clamp(p.spec.column, 0, cols - 1);
+        p.Rect(rootRt, {static_cast<float>(col) / cols, 0}, {static_cast<float>(col + 1) / cols, 1}, {0.5f, 0.5f}, {0, 0},
+               {-kColumnGap, 0});
     } else {
-        p.Rect(rootRt, {0, 0}, {1, 0}, {0.5f, 0}, {0, 16}, {-32, kTotalHeight});
-    }
-    if (p.Faulted()) return fail("faulted");
-    // Pointer input: own Canvas + GraphicRaycaster (the panel's nested Canvas has no raycaster, so
-    // nothing below it is ever hit). Sorted one above the panel's canvas so our hits win over the
-    // menu's own graphics behind it.
-    bool raycaster = false;
-    if (p.raycasterClass) {
-        bool inactive = true;
-        Il2CppObject* parentCanvas =
-            p.Call(p.compInParent, parentTr, {unity::TypeOf(p.canvasClass), &inactive}, "GetComponentInParent(Canvas)", &ok);
-        if (!ok || !unity::IsAlive(parentCanvas) || !p.IsA(parentCanvas, p.canvasClass)) parentCanvas = nullptr;
-        Il2CppObject* canvas = p.AddComponent(root, p.canvasClass, "AddComponent(Canvas)");
-        if (canvas) {
-            int32_t order = parentCanvas ? p.Unbox<int32_t>(p.Call(p.cvGetOrder, parentCanvas, {}, "Canvas.get_sortingOrder")) : 0;
-            int32_t sortLayer = parentCanvas ? p.Unbox<int32_t>(p.Call(p.cvGetLayer, parentCanvas, {}, "Canvas.get_sortingLayerID")) : 0;
-            bool over = true;
-            ++order;
-            p.Call(p.cvSetOverride, canvas, {&over}, "Canvas.set_overrideSorting");
-            p.Call(p.cvSetLayer, canvas, {&sortLayer}, "Canvas.set_sortingLayerID");
-            p.Call(p.cvSetOrder, canvas, {&order}, "Canvas.set_sortingOrder");
-            raycaster = p.AddComponent(root, p.raycasterClass, "AddComponent(GraphicRaycaster)") != nullptr;
-        }
+        p.PlaceInSlot(root, craftTr, layout);
+        if (p.Faulted()) return fail("faulted");
+        raycaster = p.AddRaycaster(root, parentTr);
     }
     if (p.Faulted()) return fail("faulted");
 
@@ -648,6 +705,7 @@ bool PlotMenuSlider::Create(Il2CppObject* contentView, const SliderSpec& specIn)
                 col = p.Unbox<Color>(p.Call(p.tmpGetColor, src, {}, "TMP_Text.get_color"), col);
             }
             p.labelColor = col;
+            if (shared) size *= kColumnFontScale;
             p.Call(p.tmpSetSize, tmp, {&size}, "TMP_Text.set_fontSize");
             p.Call(p.tmpSetColor, tmp, {&col}, "TMP_Text.set_color");
             int32_t align = kTmpAlignLeft, noWrap = 0;
@@ -728,7 +786,7 @@ bool PlotMenuSlider::Create(Il2CppObject* contentView, const SliderSpec& specIn)
         p.loggedBuild = true;
         SR2_INFO("[{}] slider '{}' built under '{}' ({}; {}; {}; {}), range {}..{} step {}, value {}", p.module,
                  p.spec.name, unity::GetName(unity::GameObjectOf(parentTr)),
-                 layout ? "LayoutGroup: inserted after the cost row" : craftTr ? "cost row slot copied" : "panel bottom",
+                 rowOf ? "joined the row" : layout ? "LayoutGroup: inserted after the cost row" : craftTr ? "cost row slot copied" : "panel bottom",
                  sdf ? "game SDF shapes" : styled ? "game SliderStyle" : "plain colours",
                  raycaster ? "own Canvas + GraphicRaycaster" : "NO own raycaster",
                  p.externalSteps ? "left / right from the menu's navigation" : "left / right polled", p.spec.min,
@@ -743,7 +801,8 @@ void PlotMenuSlider::Destroy() {
     if (!p.root) return;
     if (!p.Faulted()) {
         p.HandBackSelection();  // never leave the EventSystem on a destroyed slider
-        p.Destroy(p.root);
+        // The row's builder removes the whole row (the other sliders' roots with it).
+        p.Destroy(p.ownsRow && unity::IsAlive(p.row) ? p.row : p.root);
     }
     p.Clear();
 }
@@ -768,18 +827,22 @@ int PlotMenuSlider::Impl::InputDirection() {
     if (!inputOk) return 0;
     bool ok = false;
     int dir = 0;
+    const bool primary = spec.input == SliderInput::kPrimary;
     if (padCurrent) {
         Il2CppObject* pad = Call(padCurrent, nullptr, {}, "Gamepad.get_current", &ok);
-        if (ok && pad) {
+        if (ok && pad && primary) {
             Il2CppObject* dpad = Call(padDpad, pad, {}, "Gamepad.get_dpad", &ok);
             if (ok && dpad) dir += (Pressed(dpadRight, dpad) ? 1 : 0) - (Pressed(dpadLeft, dpad) ? 1 : 0);
             if (dir == 0 && padStick && stickLeft && stickRight) {
                 Il2CppObject* stick = Call(padStick, pad, {}, "Gamepad.get_leftStick", &ok);
                 if (ok && stick) dir += (Pressed(stickRight, stick) ? 1 : 0) - (Pressed(stickLeft, stick) ? 1 : 0);
             }
+        } else if (ok && pad && padRStick && stickLeft && stickRight) {
+            Il2CppObject* stick = Call(padRStick, pad, {}, "Gamepad.get_rightStick", &ok);
+            if (ok && stick) dir += (Pressed(stickRight, stick) ? 1 : 0) - (Pressed(stickLeft, stick) ? 1 : 0);
         }
     }
-    if (dir == 0 && kbCurrent) {
+    if (dir == 0 && kbCurrent && OwnInput()) {  // arrows: Shift + arrows for the secondary slider
         Il2CppObject* kb = Call(kbCurrent, nullptr, {}, "Keyboard.get_current", &ok);
         if (ok && kb) dir += (Pressed(kbRight, kb) ? 1 : 0) - (Pressed(kbLeft, kb) ? 1 : 0);
     }
@@ -810,6 +873,7 @@ bool PlotMenuSlider::Step(int dir) {
     Impl& p = *impl_;
     if (p.Faulted() || !unity::IsAlive(p.root) || !unity::IsAlive(p.slider) || !unity::ActiveInHierarchy(p.root))
         return false;
+    if (!p.OwnInput()) return false;  // the other slider's keys (Shift held or not)
     if (p.InputBlocked()) return false;
     dir = dir > 0 ? 1 : -1;
     const uint64_t now = Impl::NowMs();

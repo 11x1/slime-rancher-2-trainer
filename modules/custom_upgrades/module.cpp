@@ -35,19 +35,21 @@
 //   Coop Air Net                    coop   425   the corral's Air Net cloned onto the coop,
 //                                                fitted to its walls (corral Air Net: 425)
 //   Hen Collector                   coop  1000   the deluxe coop's elder collector cloned for
-//                                                adult hens / roosters: collects the adults over
-//                                                the coop's limit (default 20, keeps 2 roosters)
-//                                                every 6 game hours into 2 x 100 slots; chicks
-//                                                never count (deluxe: 1300)
+//                                                adult hens / roosters: vacuums the hens and the
+//                                                roosters over the coop's two limits (defaults
+//                                                18 + 2) every 6 game hours into 2 x 100 slots;
+//                                                chicks never count (deluxe: 1300)
 //
-//   Hen Collector limit slider (plot_menu_slider.cpp, reusable): while the owned Hen Collector is
-//   selected in the coop's purchase menu, a slider "Collect above: N adults" (2..58, default 20)
-//   sits in the details panel where the price row is for unowned items. Built from a
-//   PurchaseItemDetailsContentView.BindData detour (post: our item = the view model's _description
-//   is our clone's LocalizedString instance), replaced on every bind (selection change, RebuildUI
-//   after a buy / sell), removed with the menu. The value is per coop in the sidecar
-//   ("hen_collector_keep"), saved with the next game save like ownership, and read live by the
-//   collector (CoopRequest.keepAdults).
+//   Hen Collector limit sliders (plot_menu_slider.cpp, reusable): while the owned Hen Collector is
+//   selected in the coop's purchase menu, two sliders side by side, "Keep hens: N" (0..58, default
+//   18) and "Keep roostros: N" (0..20, default 2), sit in the details panel where the price row is
+//   for unowned items. Mouse on either; d-pad / left stick / arrows step the hens, right stick /
+//   Shift + arrows the roosters. Built from a PurchaseItemDetailsContentView.BindData detour (post:
+//   our item = the view model's _description is our clone's LocalizedString instance), replaced on
+//   every bind (selection change, RebuildUI after a buy / sell), removed with the menu. The values
+//   are per coop in the sidecar ("hen_collector_keep_hens" / "_roosters"; an old single
+//   "hen_collector_keep" n reads as min(2, n) roosters + the rest hens), saved with the next game
+//   save like ownership, and read live by the collector (CoopRequest.keepHens / keepRoosters).
 //
 //   Hen Collector save safety: its storage is a LOCAL AmmoSlotManager (never linked to the
 //   plot's LandPlotModel, so never in the vanilla save; the vanilla elder slots would not
@@ -309,8 +311,8 @@ const UpgradeDef kDefs[] = {
      "Buy the Coop Air Net for this coop?"},
     {COOP_HEN_COLLECTOR, "coop_hen_collector", kPlotCoop, 0, 1000, kNoFamily, 1.0f, kUpgDeluxeCoop, 0,
      "Hen Collector",
-     "Vacs up extra hens and roostros when this coop has more than 20. Chicks are safe! Set the limit with the "
-     "slider.",
+     "Vacs up the hens and roostros over this coop's limits (18 hens, 2 roostros). Chicks are safe! Set the limits "
+     "with the sliders.",
      "Buy the Hen Collector for this coop?"},
 };
 
@@ -367,21 +369,27 @@ struct PlotState {
     int32_t type = 0;
     std::set<std::string> owned;  // UpgradeDef.key
     std::vector<custom_upgrades::world::HenSlot> hens;  // Hen Collector contents (per slot)
-    int henKeep = custom_upgrades::world::kHenKeepDefault;  // Hen Collector keep-limit (slider)
+    int henKeepHens = custom_upgrades::world::kHenKeepHensDefault;          // Hen Collector keep-limits (sliders)
+    int henKeepRoosters = custom_upgrades::world::kHenKeepRoostersDefault;
     std::map<std::string, std::string> values;          // api.h SetPlotValue ("<module>.<name>")
     bool Empty() const { return owned.empty() && values.empty(); }
 };
 
-int ClampHenKeep(int64_t v) {
-    return static_cast<int>(std::clamp<int64_t>(v, custom_upgrades::world::kHenKeepMin, custom_upgrades::world::kHenKeepMax));
+int ClampKeepHens(int64_t v) {
+    return static_cast<int>(
+        std::clamp<int64_t>(v, custom_upgrades::world::kHenKeepHensMin, custom_upgrades::world::kHenKeepHensMax));
+}
+int ClampKeepRoosters(int64_t v) {
+    return static_cast<int>(
+        std::clamp<int64_t>(v, custom_upgrades::world::kHenKeepRoostersMin, custom_upgrades::world::kHenKeepRoostersMax));
 }
 
 // Short enough for the details panel (vanilla upgrade texts are 44-156 characters).
-std::string HenDescription(int keep) {
+std::string HenDescription(int hens, int roosters) {
     return std::format(
-        "Vacs up extra hens and roostros when this coop has more than {}. Chicks are safe! Set the limit with the "
-        "slider.",
-        keep);
+        "Vacs up the hens and roostros over this coop's limits ({} hen{}, {} roostro{}). Chicks are safe! Pad: d-pad "
+        "hens, right stick roostros.",
+        hens, hens == 1 ? "" : "s", roosters, roosters == 1 ? "" : "s");
 }
 
 int HenCount(const PlotState& ps) {
@@ -484,7 +492,11 @@ public:
     bool WorldQuery(Il2CppObject* plot, custom_upgrades::world::CoopRequest& req);
     void AfterDetailsBind(Il2CppObject* view, Il2CppObject* vm);
     void SliderTick(float dt);
-    bool SliderActive() const { return slider_.Active(); }
+    bool SliderActive() const { return sliderHens_.Active() || sliderRoosters_.Active(); }
+    void DestroySliders() {
+        sliderHens_.Destroy();  // the row's builder first (removes the row with both)
+        sliderRoosters_.Destroy();
+    }
     bool OnGridNavigate(Il2CppObject* evt);
 
     // api.h
@@ -574,7 +586,8 @@ private:
     Il2CppObject* GlobalUpgradeItem(int32_t upgrade);
     custom_upgrades::world::CoopWorld world_;
     custom_upgrades::world::SiloButtons silo_;  // Sell-All Button world button
-    custom_upgrades::ui::PlotMenuSlider slider_;  // Hen Collector limit (one at a time)
+    custom_upgrades::ui::PlotMenuSlider sliderHens_;      // Hen Collector limits, side by side (one pair
+    custom_upgrades::ui::PlotMenuSlider sliderRoosters_;  // at a time; the hens slider builds the row)
     custom_upgrades::ui::SaleNotices notices_;    // Sell-All: per-plort HUD notifications
     // Grid navigation (gamepad / keyboard left / right for the slider): NavigationEventData
     Il2CppClass* navEventClass_ = nullptr;
@@ -905,7 +918,7 @@ void CustomUpgrades::ResetState(const char* why) {
     world_.Reset();  // clones of the previous game are destroyed (never read) at the next tick
     silo_.Reset();
     notices_.Clear();
-    slider_.Destroy();  // its value callback belongs to the old state
+    DestroySliders();  // their value callbacks belong to the old state
 }
 
 void CustomUpgrades::OnLoad(Il2CppObject* asd, const void* identifier) {
@@ -1002,11 +1015,21 @@ bool CustomUpgrades::ReadSidecarFile(const std::filesystem::path& path, SaveStat
             if (s.type.empty()) s.count = 0;
             ps.hens.push_back(std::move(s));
         }
-        // Hen Collector keep-limit (plot menu slider); absent -> default.
-        ps.henKeep = ClampHenKeep(p["hen_collector_keep"].asInt(custom_upgrades::world::kHenKeepDefault));
+        // Hen Collector keep-limits (plot menu sliders); absent -> defaults. Older sidecars have one
+        // limit for all adults ("hen_collector_keep"): min(2, n) roosters, the rest hens.
+        if (p["hen_collector_keep_hens"].isNumber() || p["hen_collector_keep_roosters"].isNumber()) {
+            ps.henKeepHens = ClampKeepHens(p["hen_collector_keep_hens"].asInt(custom_upgrades::world::kHenKeepHensDefault));
+            ps.henKeepRoosters =
+                ClampKeepRoosters(p["hen_collector_keep_roosters"].asInt(custom_upgrades::world::kHenKeepRoostersDefault));
+        } else if (p["hen_collector_keep"].isNumber()) {
+            const int64_t n = std::max<int64_t>(p["hen_collector_keep"].asInt(20), 0);
+            ps.henKeepRoosters = ClampKeepRoosters(std::min<int64_t>(n, custom_upgrades::world::kHenKeepRoostersDefault));
+            ps.henKeepHens = ClampKeepHens(n - ps.henKeepRoosters);
+        }
         if (!ps.owned.count("coop_hen_collector")) {
             ps.hens.clear();
-            ps.henKeep = custom_upgrades::world::kHenKeepDefault;
+            ps.henKeepHens = custom_upgrades::world::kHenKeepHensDefault;
+            ps.henKeepRoosters = custom_upgrades::world::kHenKeepRoostersDefault;
         }
         readValues(p["values"], ps.values);
         if (!ps.Empty()) into.plots[id] = std::move(ps);
@@ -1259,8 +1282,10 @@ bool CustomUpgrades::WriteSidecar(const std::string& save, unsigned long long sa
             }
             p.set("hen_collector", std::move(hens));
         }
-        if (ps.owned.count("coop_hen_collector"))
-            p.set("hen_collector_keep", sr2::json::Value(static_cast<double>(ClampHenKeep(ps.henKeep))));
+        if (ps.owned.count("coop_hen_collector")) {
+            p.set("hen_collector_keep_hens", sr2::json::Value(static_cast<double>(ClampKeepHens(ps.henKeepHens))));
+            p.set("hen_collector_keep_roosters", sr2::json::Value(static_cast<double>(ClampKeepRoosters(ps.henKeepRoosters))));
+        }
         if (!ps.values.empty()) {
             sr2::json::Value vals = sr2::json::Value::Object();
             for (const auto& [k, v] : ps.values) vals.set(k, sr2::json::Value(v));
@@ -1736,12 +1761,14 @@ void CustomUpgrades::AfterMenuUpdate(Il2CppObject* root) {
         if (!in.inList) continue;
         const UpgradeDef& d = *in.def;
         if (d.id == COOP_HEN_COLLECTOR) {
-            // This coop's keep-limit (default until bought / set).
-            int keep = custom_upgrades::world::kHenKeepDefault;
+            // This coop's keep-limits (defaults until bought / set).
+            int hens = custom_upgrades::world::kHenKeepHensDefault, roosters = custom_upgrades::world::kHenKeepRoostersDefault;
             const std::string id = PlotId(plot);
-            if (auto it = state_.plots.find(id); !id.empty() && it != state_.plots.end())
-                keep = ClampHenKeep(it->second.henKeep);
-            SetTexts(in, d.title, HenDescription(keep), d.prompt);
+            if (auto it = state_.plots.find(id); !id.empty() && it != state_.plots.end()) {
+                hens = ClampKeepHens(it->second.henKeepHens);
+                roosters = ClampKeepRoosters(it->second.henKeepRoosters);
+            }
+            SetTexts(in, d.title, HenDescription(hens, roosters), d.prompt);
         } else {
             SetTexts(in, d.title, d.description, d.prompt);
         }
@@ -1751,7 +1778,7 @@ void CustomUpgrades::AfterMenuUpdate(Il2CppObject* root) {
 void CustomUpgrades::Cleanup(const char* why) {
     if (cleaned_) return;
     cleaned_ = true;
-    slider_.Destroy();  // main thread only (no-op otherwise / without game calls after a fault)
+    DestroySliders();  // main thread only (no-op otherwise / without game calls after a fault)
     notices_.Clear();
     if (world_.Ready() && main_thread::IsMainThread()) {
         // Hen Collector contents go into the sidecar state first (written with the next save
@@ -1793,7 +1820,7 @@ void CustomUpgrades::FrameCheck(float dt) {
         gateAccum_ = 0.0f;
         g_gateGuard.Run([&] { GateTick(); });
     }
-    if (On() && slider_.Active()) g_sliderGuard.Run([&] { SliderTick(dt); });
+    if (On() && SliderActive()) g_sliderGuard.Run([&] { SliderTick(dt); });
     if (On() && silo_.Ready()) g_siloGuard.Run([&] { silo_.Frame(); });  // button message (cheap when none)
     if (On() && notices_.Ready()) g_siloGuard.Run([&] { notices_.Frame(dt); });  // queued sale notices
     if (!On() || (!world_.Ready() && !silo_.Ready())) return;
@@ -1920,7 +1947,10 @@ bool CustomUpgrades::WorldQuery(Il2CppObject* plot, custom_upgrades::world::Coop
     req.id = id;
     auto it = state_.plots.find(id);
     req.hens = (req.henCollector && it != state_.plots.end()) ? &it->second.hens : nullptr;
-    if (req.henCollector && it != state_.plots.end()) req.keepAdults = ClampHenKeep(it->second.henKeep);
+    if (req.henCollector && it != state_.plots.end()) {
+        req.keepHens = ClampKeepHens(it->second.henKeepHens);
+        req.keepRoosters = ClampKeepRoosters(it->second.henKeepRoosters);
+    }
     return true;
 }
 
@@ -1995,8 +2025,8 @@ void CustomUpgrades::TrackMenuRoot(Il2CppObject* root) {
 }
 
 void CustomUpgrades::AfterDetailsBind(Il2CppObject* view, Il2CppObject* vm) {
-    if (!main_thread::IsMainThread() || !slider_.Ready()) return;
-    slider_.Destroy();  // every bind (selection change, RebuildUI) replaces the slider
+    if (!main_thread::IsMainThread() || !sliderHens_.Ready() || !sliderRoosters_.Ready()) return;
+    DestroySliders();  // every bind (selection change, RebuildUI) replaces the sliders
     if (!vm || !offVmDescription_ || !menuRoot_ || !unity::IsAlive(menuRoot_) || !IsA(menuRoot_, rootClass_)) return;
     Il2CppObject* desc = unity::Field<Il2CppObject*>(vm, offVmDescription_);
     if (!desc) return;
@@ -2014,31 +2044,50 @@ void CustomUpgrades::AfterDetailsBind(Il2CppObject* view, Il2CppObject* vm) {
     if (!ours) return;
     const UpgradeDef* d = FindDef(COOP_HEN_COLLECTOR);
     std::string id;
-    if (!d || !OwnsKey(plot, *d, &id)) return;  // not bought (yet): no slider
+    if (!d || !OwnsKey(plot, *d, &id)) return;  // not bought (yet): no sliders
     auto it = state_.plots.find(id);
     if (it == state_.plots.end()) return;
 
-    custom_upgrades::ui::SliderSpec spec;
-    spec.name = "HenCollectorLimit";
-    spec.min = custom_upgrades::world::kHenKeepMin;
-    spec.max = custom_upgrades::world::kHenKeepMax;
-    spec.step = 1;
-    spec.value = ClampHenKeep(it->second.henKeep);
-    spec.label = [](int v) { return std::format("Collect above: {} adult{}", v, v == 1 ? "" : "s"); };
-    // By key (never a pointer into the map): the state may be reloaded while the menu is open.
-    spec.onChange = [this, id, game = state_.game](int v) {
-        if (!state_.loaded || state_.game != game) return;
-        auto p = state_.plots.find(id);
-        if (p == state_.plots.end() || !p->second.owned.count("coop_hen_collector")) return;
-        p->second.henKeep = ClampHenKeep(v);
-        SR2_DEBUG("[{}] hen collector limit on plot '{}': {} (saved with the next game save)", kModule, id, v);
+    // Two sliders side by side: hens (left, builds the row; d-pad / left stick / arrows) and roosters
+    // (right; right stick / Shift + arrows). By key (never a pointer into the map): the state may be
+    // reloaded while the menu is open.
+    auto onChange = [this, id, game = state_.game](bool roosters) {
+        return [this, id, game, roosters](int v) {
+            if (!state_.loaded || state_.game != game) return;
+            auto p = state_.plots.find(id);
+            if (p == state_.plots.end() || !p->second.owned.count("coop_hen_collector")) return;
+            if (roosters) p->second.henKeepRoosters = ClampKeepRoosters(v);
+            else p->second.henKeepHens = ClampKeepHens(v);
+            SR2_DEBUG("[{}] hen collector on plot '{}': keep {} {} (saved with the next game save)", kModule, id, v,
+                      roosters ? "roosters" : "hens");
+        };
     };
-    slider_.Create(view, spec);
+    custom_upgrades::ui::SliderSpec hens;
+    hens.name = "HenCollectorHens";
+    hens.min = custom_upgrades::world::kHenKeepHensMin;
+    hens.max = custom_upgrades::world::kHenKeepHensMax;
+    hens.value = ClampKeepHens(it->second.henKeepHens);
+    hens.label = [](int v) { return std::format("Keep hens: {}", v); };
+    hens.onChange = onChange(false);
+    hens.column = 0;
+    hens.columns = 2;
+    hens.input = custom_upgrades::ui::SliderInput::kPrimary;
+    custom_upgrades::ui::SliderSpec roosters = hens;
+    roosters.name = "HenCollectorRoosters";
+    roosters.min = custom_upgrades::world::kHenKeepRoostersMin;
+    roosters.max = custom_upgrades::world::kHenKeepRoostersMax;
+    roosters.value = ClampKeepRoosters(it->second.henKeepRoosters);
+    roosters.label = [](int v) { return std::format("Keep roostros: {}", v); };
+    roosters.onChange = onChange(true);
+    roosters.column = 1;
+    roosters.input = custom_upgrades::ui::SliderInput::kSecondary;
+    if (sliderHens_.Create(view, hens)) sliderRoosters_.Create(view, roosters, &sliderHens_);
 }
 
 void CustomUpgrades::SliderTick(float dt) {
     if (!main_thread::IsMainThread()) return;
-    slider_.Tick(dt);
+    sliderHens_.Tick(dt);
+    sliderRoosters_.Tick(dt);
 }
 
 bool CustomUpgrades::OnGridNavigate(Il2CppObject* evt) {
@@ -2048,7 +2097,9 @@ bool CustomUpgrades::OnGridNavigate(Il2CppObject* evt) {
     if (!ok) return false;
     constexpr int32_t kMoveLeft = 0, kMoveRight = 2;  // UnityEngine.EventSystems.MoveDirection
     if (dir != kMoveLeft && dir != kMoveRight) return false;
-    if (!slider_.Step(dir == kMoveRight ? 1 : -1)) return false;
+    // Each slider takes only its own keys (Shift held: the roosters one).
+    const int step = dir == kMoveRight ? 1 : -1;
+    if (!sliderHens_.Step(step) && !sliderRoosters_.Step(step)) return false;
     bool didNavigate = true;  // nobody else (late navigation handlers) acts on it
     Invoke(navUseMi_, evt, {&didNavigate}, "NavigationEventData.Use", &ok);
     return true;
@@ -2235,7 +2286,8 @@ bool CustomUpgrades::RemoveCustom(Il2CppObject* plot, int32_t upg, std::string& 
     it->second.owned.erase(d->key);
     if (d->id == COOP_HEN_COLLECTOR) {
         it->second.hens.clear();  // CanSell: it was empty
-        it->second.henKeep = custom_upgrades::world::kHenKeepDefault;
+        it->second.henKeepHens = custom_upgrades::world::kHenKeepHensDefault;
+        it->second.henKeepRoosters = custom_upgrades::world::kHenKeepRoostersDefault;
     }
     if (it->second.Empty()) state_.plots.erase(it);
     Bump();
@@ -2510,7 +2562,7 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
             SR2_WARN("[{}] coop world objects unavailable ({}) - Coop Air Net and Hen Collector are not offered", kModule, werr);
     }
 
-    // Hen Collector limit slider (optional: without it the limit stays at its saved / default value).
+    // Hen Collector limit sliders (optional: without them the limits stay at their saved / default values).
     const MethodInfo* detailsBindMi = nullptr;
     if (world_.Ready()) {
         std::string serr;
@@ -2518,11 +2570,11 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         Il2CppClass* vm = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Purchase", "PurchaseItemDetailsContentViewModel", &serr);
         auto o = vm ? R.FieldOffset(vm, "_description", &serr) : std::nullopt;
         detailsBindMi = view ? R.Method(view, "BindData", 1, &serr) : nullptr;  // the class's own override
-        if (o && detailsBindMi && slider_.Setup(R, kModule, serr)) {
+        if (o && detailsBindMi && sliderHens_.Setup(R, kModule, serr) && sliderRoosters_.Setup(R, kModule, serr)) {
             offVmDescription_ = *o;
         } else {
             detailsBindMi = nullptr;
-            SR2_WARN("[{}] Hen Collector limit slider unavailable ({}) - the limit stays at its saved value", kModule,
+            SR2_WARN("[{}] Hen Collector limit sliders unavailable ({}) - the limits stay at their saved values", kModule,
                      serr.empty() ? "PurchaseItemDetailsContentView.BindData / _description not found" : serr);
         }
     }
@@ -2585,7 +2637,8 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         void* np = (navMi && navMoveDirMi_ && navUseMi_) ? R.MethodPointer(navMi, &err) : nullptr;
         if (np && ctx.HookAddress("UniformGridView.OnNavigate", np, reinterpret_cast<void*>(&GridNavDetour),
                                   reinterpret_cast<void**>(&g_origGridNav))) {
-            slider_.SetNavigationSteps(true);
+            sliderHens_.SetNavigationSteps(true);
+            sliderRoosters_.SetNavigationSteps(true);
             report += std::format(" UniformGridView.OnNavigate@0x{:X}", Resolver::Rva(np));
         } else {
             navEventClass_ = nullptr;

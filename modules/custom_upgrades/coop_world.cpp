@@ -46,11 +46,12 @@
 //   output ports / slot displays work as vanilla (vac the chickens out).
 //   Collecting (our tick, ~1 Hz): adults = Physics.OverlapBox over the coop's active
 //   CoopRegion -> Identifiable.identType in {MeatGroup} - {ElderGroup} - UnstableMeat (chicks
-//   are in ChickGroup: never counted, never collected), not held by a vac. While more than
-//   the coop's keep-limit (CoopRequest.keepAdults: per coop from the sidecar, set with the plot
-//   menu slider, kHenKeepMin..kHenKeepMax, default 20) adults are in the coop and the collector's period (its CollectPeriod, 6 game
-//   hours, like the elder collector) is due, the excess is vacuumed in, keeping at least
-//   kKeepRoosters roosters, until the storage is full.
+//   are in ChickGroup: never counted, never collected), not held by a vac; a rooster is a type
+//   whose name has "Rooster". While more hens or roosters than the coop's keep-limits
+//   (CoopRequest.keepHens / keepRoosters: per coop from the sidecar, set with the two plot menu
+//   sliders, defaults 18 + 2) are in the coop and the collector's period (its CollectPeriod, 6
+//   game hours, like the elder collector) is due, the excess of each is vacuumed in until the
+//   storage (the elder collector's hardcoded 2 x 100) is full.
 //   Vacuum (user test of 4d16e38c: chickens just vanished): the vanilla elder collector's own
 //   suction. PlortCollector.DoCollection (0x98B670) gives every actor it takes a "CollectJoint"
 //   (kinematic Rigidbody under CollectPt, SpringJoint spring = CollectSpringiness, maxDistance =
@@ -123,7 +124,6 @@ constexpr std::string_view kAirNetKind = "CoopAirNet";
 constexpr std::string_view kHenKind = "HenCollector";
 constexpr float kFitTolerance = 0.02f;
 constexpr int kHideFlagsDontUnloadUnusedAsset = 32;
-constexpr int kKeepRoosters = 2;   // never collect the last roosters (keep-limit: CoopRequest.keepAdults)
 constexpr int kWarmupTicks = 5;    // no collecting in the first seconds after a (re)build / load
 constexpr int32_t kQueryTriggerIgnore = 1;
 constexpr size_t kAmmoMetadataSize = 32;  // AmmoSlot.AmmoMetadata {IdentifiableType Id; float4 Emotions; bool Radiant}
@@ -419,7 +419,10 @@ struct CoopWorld::Impl {
                    Il2CppObject** storageOut = nullptr);
     void SnapshotInto(Il2CppObject* clone, CoopRequest& req);
     void ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopRequest& req);
-    int Collect(Il2CppObject* clone, Il2CppObject* pc, Il2CppObject* ammo, const CoopInfo& c, int keep, int* adultsOut);
+    struct Census {
+        int hens = 0, roosters = 0;  // adults in the coop (not held by a vac)
+    };
+    int Collect(Il2CppObject* pc, Il2CppObject* ammo, const CoopInfo& c, int keepHens, int keepRoosters, Census& in);
     bool loggedNoHen = false;
     bool henBroken = false;  // a build failed structurally: not retried this session
     bool loggedLinked = false;
@@ -1325,10 +1328,9 @@ void CoopWorld::Impl::ReleaseJoints(Il2CppObject* clone) {
     SR2_INFO("[{}] hen collector: {} chicken(s) released from the vacuum", module, refs.size());
 }
 
-int CoopWorld::Impl::Collect(Il2CppObject* clone, Il2CppObject* pc, Il2CppObject* ammo, const CoopInfo& c, int keep,
-                             int* adultsOut) {
-    (void)clone;
-    *adultsOut = 0;
+int CoopWorld::Impl::Collect(Il2CppObject* pc, Il2CppObject* ammo, const CoopInfo& c, int keepHens, int keepRoosters,
+                             Census& in) {
+    in = {};
     if (!c.hasRegion) return 0;
     Vec3 center = c.region.center, half = c.region.extents;
     Quat rot{0, 0, 0, 1};
@@ -1353,10 +1355,10 @@ int CoopWorld::Impl::Collect(Il2CppObject* clone, Il2CppObject* pc, Il2CppObject
         if (vac && Value<bool>(Call(isCaptive, vac, {}, "Vacuumable.IsCaptive", &ok))) continue;  // held by a vac
         birds.push_back({ident, type, unity::GetName(type).find("Rooster") != std::string::npos});
     }
-    *adultsOut = static_cast<int>(birds.size());
-    int excess = static_cast<int>(birds.size()) - keep;
-    if (excess <= 0) return 0;
-    int roosters = static_cast<int>(std::count_if(birds.begin(), birds.end(), [](const Bird& b) { return b.rooster; }));
+    in.roosters = static_cast<int>(std::count_if(birds.begin(), birds.end(), [](const Bird& b) { return b.rooster; }));
+    in.hens = static_cast<int>(birds.size()) - in.roosters;
+    int excessHens = in.hens - keepHens, excessRoosters = in.roosters - keepRoosters;
+    if (excessHens <= 0 && excessRoosters <= 0) return 0;
     const int32_t nSlots = static_cast<int32_t>(unity::ArrayLength(Call(ammoSlots, ammo, {}, "AmmoSlotManager.get_Slots", &ok)));
     Il2CppObject* fx = unity::Field<Il2CppObject*>(pc, offPcFx);
     // The slots as they will be once the chickens on their way are stored (vacuum: stored later by
@@ -1375,8 +1377,9 @@ int CoopWorld::Impl::Collect(Il2CppObject* clone, Il2CppObject* pc, Il2CppObject
     const bool vac = Vacuuming(pc);
     int collected = 0;
     for (const Bird& b : birds) {
-        if (excess <= 0 || sr2::core::ModuleFaulted(module)) break;
-        if (b.rooster && roosters <= kKeepRoosters) continue;
+        if ((excessHens <= 0 && excessRoosters <= 0) || sr2::core::ModuleFaulted(module)) break;
+        int& excess = b.rooster ? excessRoosters : excessHens;
+        if (excess <= 0) continue;
         int32_t slot = -1;
         for (int32_t i = 0; i < static_cast<int32_t>(slots.size()); ++i) {
             if (slots[i].count > 0 && slots[i].type == b.type && slots[i].count < slots[i].max) {
@@ -1391,7 +1394,6 @@ int CoopWorld::Impl::Collect(Il2CppObject* clone, Il2CppObject* pc, Il2CppObject
             ++slots[slot].count;
             ++collected;
             --excess;
-            if (b.rooster) --roosters;
             continue;
         }
         if (sr2::core::ModuleFaulted(module)) break;
@@ -1414,7 +1416,6 @@ int CoopWorld::Impl::Collect(Il2CppObject* clone, Il2CppObject* pc, Il2CppObject
              &ok);
         ++collected;
         --excess;
-        if (b.rooster) --roosters;
     }
     if (vac && PendingJoints(pc) > 0) {
         // DoCollection's tail: how long the cyclone shows at least, when unfinished joints are dropped.
@@ -1460,10 +1461,11 @@ void CoopWorld::Impl::ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopReque
     if (!timeDir || PendingJoints(pc) > 0) return;  // chickens still on their way in
     bool ok = false;
     if (t.next > 0.0 && !Value<bool>(Call(hasReached, timeDir, {&t.next}, "TimeDirector.HasReached", &ok))) return;
-    int adultsIn = 0;
-    const int keep = std::clamp(req.keepAdults, std::max(kHenKeepMin, kKeepRoosters), kHenKeepMax);
-    const int n = Collect(clone, pc, ammo, c, keep, &adultsIn);
-    if (adultsIn <= keep) return;  // nothing over the limit: check again next tick
+    Census in;
+    const int keepHens = std::clamp(req.keepHens, kHenKeepHensMin, kHenKeepHensMax);
+    const int keepRoosters = std::clamp(req.keepRoosters, kHenKeepRoostersMin, kHenKeepRoostersMax);
+    const int n = Collect(pc, ammo, c, keepHens, keepRoosters, in);
+    if (in.hens <= keepHens && in.roosters <= keepRoosters) return;  // nothing over the limits: check again next tick
     float period = unity::Field<float>(pc, offPcPeriod);
     if (!std::isfinite(period) || period <= 0.0f) period = 6.0f;
     t.next = Value<double>(Call(hoursFromNow, timeDir, {&period}, "TimeDirector.HoursFromNow", &ok));
@@ -1472,8 +1474,9 @@ void CoopWorld::Impl::ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopReque
         if (unity::IsAlive(anim)) Call(animSetBool, anim, {&cyclone, &flag}, "Animator.SetBool");
         if (req.hens) ReadSlots(clone, *req.hens);
     }
-    SR2_INFO("[{}] hen collector on plot '{}': {} adult(s) in the coop (limit {}), {} {}; next in {:.1f} game hours",
-             module, req.id, adultsIn, keep, vac ? "vacuuming" : "stored directly", n, period);
+    SR2_INFO("[{}] hen collector on plot '{}': {} hen(s) / {} rooster(s) in the coop (keeps {} / {}), {} {}; next in "
+             "{:.1f} game hours",
+             module, req.id, in.hens, in.roosters, keepHens, keepRoosters, vac ? "vacuuming" : "stored directly", n, period);
 }
 
 // ---------------------------------------------------------------- api --
