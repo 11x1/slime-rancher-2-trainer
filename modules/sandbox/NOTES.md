@@ -1,6 +1,6 @@
 # sandbox
 
-Edits the character's resources from the overlay's **Misc > Sandbox** tab: Newbucks, health / energy / radiation, what each vacpack slot holds, spawning items in front of the player and crafting fabricator gadgets at no cost. Off by default.
+Edits the character's resources from the overlay's **Misc > Sandbox** tab: Newbucks, health / energy / radiation, what each vacpack slot holds, spawning items in front of the player and crafting fabricator gadgets at no cost. Off by default. While it is on, achievements are paused (see "Achievements paused").
 
 ## Turning it on
 
@@ -66,9 +66,37 @@ List: every `GadgetDefinition` asset whose `CraftingCosts` has ident or currency
 
 Crafting mirrors `GadgetFabricatableItem.FabricateAndSpendCost` (1.3.0, RVA 0x827E20) without `SpendableDirector.Spend`: `SceneContext.GadgetDirector.AddItem(definition, count * (BuyInPairs ? 2 : 1))`. Like the fabricator it needs the blueprint and respects the gadget's count limit (`CanAddGadget`), so it only makes states a vanilla game can reach (with enough resources). It does not send the fabricate analytics event or `MetaGameDirector.OnGadgetFabricated`.
 
+## Achievements paused
+
+While the module is enabled no achievement progress is made: no Steam unlock or stat, and the save's achievement progress does not move. The Sandbox card says "Achievements are paused while Sandbox is on." Code: `modules/sandbox/achievements.cpp`.
+
+How the game does it (1.3.0, decompiled):
+- `MetaGameDirector` (`MonomiPark.SlimeRancher`) owns `List<AchievementData> Achievements` (nested class `MetaGameDirector.AchievementData`; enum `MetaGameDirector.Achievement`, 27 entries) and an `IMetaGamePlatform _platform`. `AchievementData.CurrentProgress` is the in-game tracker; `PullMetaGameData` saves it into `MetaGameDirectorModel.ProgressPerAchievement` and `SetModel` restores it on load.
+- Both `Grant` overloads and `CheckForBehindTheWaterfall` call `AchievementData.IncrementProgress(n)` (0x5FE9C0); when it returns true (progress passed `LargestSavedProgress`) they call `_platform.Grant(data)`. Both `SetAchievementProgress` overloads do the same with `AchievementData.SetProgress(v)`. No other code changes `CurrentProgress` during play (`ForceComplete` has no native callers; `Clear` only on session end / load).
+- `SetProgress` is also how the save (`SetModel` -> private `SetAchievementProgress(AchievementData, int)`) and Steam (`SteamMetaGamePlatform.LoadAchievementProgress`) restore progress, so it is not hooked.
+- `SteamMetaGamePlatform.Grant` (0xB30F00) is the only caller of `SteamUserStats.SetStat` / `SetAchievement` / `StoreStats` (`IndicateAchievementProgress` is never called).
+- Beallionaire: `HandleSoldPlort(price)` grants the first sale of a 30 s window and adds later ones to `_tempBeallionaireProgress`, which `Update` / `ClearPendingBeallionaireUpdate` flush through `SetAchievementProgress` when the window ends.
+
+Hooks (created in `Setup`, on and off with the module; DetourGuard each; the detour checks the pause flag and the object's class, nothing else):
+
+| hook | while Sandbox is on | why |
+|---|---|---|
+| `AchievementData.IncrementProgress(int)` | returns false, progress unchanged | every Grant path goes through it, and false means the director never calls the platform |
+| `MetaGameDirector.SetAchievementProgress(Achievement, int)` (the public overload, picked by its first parameter's class) | skipped | every gameplay set (shop, upgrades, treasure pods, doors, pop, Beallionaire flush, query / event achievements, `ValidatePersistantAchievements`) |
+| `MetaGameDirector.HandleSoldPlort(int)` | skipped | keeps Sandbox-time sales out of the pending Beallionaire total, which would otherwise be flushed after Sandbox is turned off |
+| `SteamMetaGamePlatform.Grant(AchievementData)` | skipped | backstop: nothing reaches Steam, including a load that syncs older save progress (it syncs again on the next load with Sandbox off) |
+
+Nothing is queued: blocked calls are dropped, so turning Sandbox off replays nothing. The first blocked call per enable logs one line (`[sandbox] achievements paused: blocked ... while Sandbox is on`); turning the module on / off logs `achievements paused` / `resumed`.
+
+The hooks are required: if one can't be resolved the module fails setup and Sandbox can't be enabled (fail closed). If the module faults, its hooks are disabled with it (Sandbox edits stop too).
+
+Limits:
+- Achievements the game derives from world state (treasure pods opened, upgrades owned, vacpack contents in `CheckAmmo`, Slimepedia entries, query achievements) are checked again by the game later, for example by `ValidatePersistantAchievements` on every load. Anything Sandbox put into the world (gadgets, items, Newbucks) still counts then if the save is played with Sandbox off. That is the game re-reading the save, not replayed progress.
+- A Beallionaire window opened before Sandbox was enabled and ending while it is on loses its pending total.
+
 ## Threading and faults
 
-- No hooks. One main-thread frame callback: the snapshot for the tab every 250 ms, only while the tab was drawn in the last 0.6 s (`ui/sandbox_bridge.h`), and the infinite-energy top-up.
+- Hooks only for the achievement pause (above). One main-thread frame callback: the snapshot for the tab every 250 ms, only while the tab was drawn in the last 0.6 s (`ui/sandbox_bridge.h`), and the infinite-energy top-up.
 - The tab's buttons post an `Action` to the main thread (`main_thread::Post`); the module validates it, applies it, logs one line (`[sandbox] Newbucks set: 1,200 -> 5,000`, ...), sets the tab's status line and refreshes the snapshot.
 - Every game call is `Resolver::Invoke` (runtime_invoke, managed exceptions captured and logged). A native fault there marks the module faulted (`MarkModuleFaulted`); from then on it makes no game calls.
 - Each step re-reads the player: `SceneContextUtility.TryGetPlayerState`, `IsAlive` + class checks on `PlayerState`, `PlayerModel`, `AmmoSlotManager`, every `AmmoSlot` and every item.

@@ -9,7 +9,10 @@
 // and values are clamped to what a vanilla game can hold. Nothing is written
 // into the save directly; the game saves the result the next time it saves.
 //
-// Threading: no hooks. A main-thread frame callback copies a Snapshot for the
+// Achievements are paused while the module is enabled (achievements.cpp: four
+// hooks, switched on and off with the module).
+//
+// Threading: no hooks besides the achievement pause. A main-thread frame callback copies a Snapshot for the
 // tab (4 Hz while it is open) and tops up energy while "infinite energy" is on;
 // the tab's requests arrive as posted main-thread jobs (ui/sandbox_bridge.h).
 // Every game call goes through Resolver::Invoke (runtime_invoke, managed
@@ -37,6 +40,7 @@
 #include "core/main_thread.h"
 #include "core/module.h"
 #include "core/unity.h"
+#include "modules/sandbox/achievements.h"
 #include "ui/item_icons.h"
 #include "ui/sandbox_bridge.h"
 
@@ -383,6 +387,8 @@ bool Sandbox::Setup(sr2::core::ModuleContext& ctx) {
     locGet_ = method(locStringClass_, "GetLocalizedString", 0);
     locIsEmpty_ = method(locStringClass_, "get_IsEmpty", 0, false);
     if (!why.empty()) return ctx.Fail(why);
+    // Required: without the pause the module does not run (fail closed).
+    if (!sandbox::SetupAchievementPause(ctx)) return false;
     SetupExtras(R);
 
     g_self = this;
@@ -557,6 +563,7 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
 
 void Sandbox::OnEnable() {
     enabled_.store(true);
+    sandbox::SetAchievementsPaused(true);
     bridge::SetHandler(&HandleThunk);
     lastSnap_ = 0;
     // A list that came out empty (built before the assets were loaded) is tried again.
@@ -567,6 +574,7 @@ void Sandbox::OnEnable() {
 
 void Sandbox::OnDisable() {
     enabled_.store(false);
+    sandbox::SetAchievementsPaused(false);
     if (infinite_.exchange(false)) SR2_INFO("[{}] infinite energy off (module disabled)", kModule);
     bridge::SetHandler(nullptr);
     bridge::Snapshot s;
