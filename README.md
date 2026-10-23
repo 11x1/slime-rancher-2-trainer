@@ -45,9 +45,28 @@ You need Visual Studio 2022/2026 or the Build Tools, with the "Desktop developme
 
 ## Install
 
-Back up your saves first.
+The easy way is the deploy script. Close the game first.
 
-Copy two files from `dist\Release\` into the game folder, next to `SlimeRancher2.exe`:
+```powershell
+deploy.bat                     # deploy dist\Release\version.dll
+.\deploy.ps1 -Build            # build first (build.ps1), deploy only if the build succeeds
+.\deploy.ps1 -GameDir <dir>    # game folder override (default: Steam folder, then libraryfolders.vdf)
+.\deploy.ps1 -WaitForExit      # wait for the game to close instead of refusing
+.\deploy.ps1 -NoSaveBackup     # skip the save backup
+.\deploy.ps1 -Uninstall        # remove version.dll (backed up first); sr2mods.json and sr2mods_saves\ stay
+.\deploy.ps1 -Uninstall -Purge # also delete sr2mods.json, sr2mods.log, sr2mods.prev.log, sr2mods_saves\ (asks; -Force skips)
+```
+
+`deploy.ps1` finds the game folder (the default Steam path, otherwise the Steam library that holds app 1657630 according to `libraryfolders.vdf`; the `SR2MODS_GAMEDIR` environment variable or `-GameDir` override it). It refuses to run while `SlimeRancher2.exe` is running. Then it:
+
+1. copies your saves (`%USERPROFILE%\AppData\LocalLow\MonomiPark\SlimeRancher2\Steam\<steamid>\`) to `save-backups\<yyyy-MM-dd_HHmmss>\` (git-ignored; with more than one Steam account, one subfolder per account),
+2. copies the currently deployed `version.dll` to `dist\deployed-backup\version.<timestamp>.<sha8>.dll` (the last 5 are kept),
+3. copies the new `version.dll` into the game folder, or skips the copy if the deployed one is identical,
+4. copies the default `sr2mods.json` only if the game folder has none. Your live `sr2mods.json` is never overwritten.
+
+Nothing else is written into the game folder. Exit code 0 means success.
+
+To install by hand instead, back up your saves and copy two files from `dist\Release\` into the game folder, next to `SlimeRancher2.exe`:
 
 - `version.dll`
 - `sr2mods.json`
@@ -62,7 +81,7 @@ Every DLL that `build.ps1` produces is archived with its `version.pdb` and `sr2m
 
 ## Uninstall
 
-Delete `version.dll`, `sr2mods.json` and `sr2mods.log` from the game folder. Nothing else is changed.
+Run `.\deploy.ps1 -Uninstall` (add `-Purge` to also delete the settings, logs and `sr2mods_saves\`), or delete `version.dll`, `sr2mods.json`, `sr2mods.log` and `sr2mods.prev.log` from the game folder by hand. Nothing else is changed.
 
 ## Configuration (`sr2mods.json`)
 
