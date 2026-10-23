@@ -64,7 +64,13 @@ struct Syms {
     const MethodInfo* sprUv = nullptr;
     const MethodInfo* texWidth = nullptr;
     const MethodInfo* texHeight = nullptr;
-    const MethodInfo* texNative = nullptr;
+    // Texture.GetNativeTexturePtr() is stripped from this build's managed code, so
+    // the engine's icall is called directly: Unity 6 binds instance icalls as
+    // static `_Injected(IntPtr self)` taking the native object (Object.m_CachedPtr).
+    using NativePtrFn = void* (*)(void* nativeSelf);
+    NativePtrFn texNative = nullptr;
+    size_t objCachedPtr = 0;  // UnityEngine.Object.m_CachedPtr
+    Il2CppClass* texture = nullptr;
 };
 
 Syms S;
@@ -96,7 +102,7 @@ bool Resolve() {
     Il2CppClass* ident = cls(kImage, "", "IdentifiableType");
     S.locString = cls("Unity.Localization", "UnityEngine.Localization", "LocalizedString");
     Il2CppClass* sprite = cls(kCore, "UnityEngine", "Sprite");
-    Il2CppClass* texture = cls(kCore, "UnityEngine", "Texture");
+    Il2CppClass* texture = S.texture = cls(kCore, "UnityEngine", "Texture");
     auto parentOf = il2cpp::api().il2cpp_class_get_parent;
     if (err.empty() && (!parentOf || !parentOf(scene))) err = "SceneContext parent class not found";
 
@@ -126,7 +132,15 @@ bool Resolve() {
     S.sprRect = method(sprite, "get_textureRect", 0);
     S.texWidth = method(texture, "get_width", 0);
     S.texHeight = method(texture, "get_height", 0);
-    S.texNative = method(texture, "GetNativeTexturePtr", 0);
+    off(cls(kCore, "UnityEngine", "Object"), "m_CachedPtr", S.objCachedPtr);
+    if (err.empty()) {
+        // Same lookup the managed wrappers do (e.g. Texture.get_height -> GetDataHeight_Injected).
+        using ResolveIcall = void* (*)(const char*);
+        auto resolve = reinterpret_cast<ResolveIcall>(il::Export("il2cpp_resolve_icall"));
+        if (!resolve) err = "il2cpp_resolve_icall not exported";
+        else if (!(S.texNative = reinterpret_cast<Syms::NativePtrFn>(resolve("UnityEngine.Texture::GetNativeTexturePtr_Injected"))))
+            err = "icall UnityEngine.Texture::GetNativeTexturePtr_Injected not registered";
+    }
     if (!err.empty()) {
         SR2_WARN("ui: Slimepedia logo unavailable, using the drawn slime: {}", err);
         return false;
@@ -237,6 +251,32 @@ std::vector<Il2CppObject*> SlimeEntries(Il2CppObject* director) {
     return out;
 }
 
+// The icall under SEH like il::Invoke: a fault (or an engine exception raised
+// through it) puts the UI into fault mode; it is never a lookup result.
+void* CallNativePtr(Syms::NativePtrFn fn, void* self, DWORD* code) {
+    __try {
+        return fn(self);
+    } __except (*code = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+// ID3D11Resource* of a live Texture (Texture.GetNativeTexturePtr). The texture's
+// class and m_CachedPtr are checked first, so the icall never sees a destroyed object.
+bool NativeTexture(Il2CppObject* tex, void*& out) {
+    out = nullptr;
+    if (!tex || !il::IsA(tex, S.texture) || il::AnyFault()) return false;
+    void* self = unity::Field<void*>(tex, S.objCachedPtr);
+    if (!self) return false;
+    DWORD code = 0;
+    out = CallNativePtr(S.texNative, self, &code);
+    if (code) {
+        il::MarkFault("Texture::GetNativeTexturePtr_Injected", code);
+        out = nullptr;
+    }
+    return out != nullptr;
+}
+
 // Fills the icon part of `s` from the entry's list icon. False if it can't be drawn.
 bool ReadIcon(Il2CppObject* entry, Snapshot& s) {
     Il2CppObject* spr = nullptr;
@@ -251,7 +291,7 @@ bool ReadIcon(Il2CppObject* entry, Snapshot& s) {
     if (!tex || !unity::IsAlive(tex)) return false;
     void* native = nullptr;
     if (!il::UnboxTo(il::Invoke(S.texWidth, tex, {}), s.texW) || !il::UnboxTo(il::Invoke(S.texHeight, tex, {}), s.texH)) return false;
-    if (!il::UnboxTo(il::Invoke(S.texNative, tex, {}), native) || !native || s.texW <= 0 || s.texH <= 0) return false;
+    if (s.texW <= 0 || s.texH <= 0 || !NativeTexture(tex, native)) return false;
 
     // textureRect throws for tightly packed atlas sprites; for those the bounds of
     // the mesh UVs give the same rectangle (plus whatever transparent margin).
