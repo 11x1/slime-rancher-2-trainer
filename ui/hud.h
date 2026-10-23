@@ -34,6 +34,7 @@ struct Frame {
     bool showDistance = true;
     uint32_t color = 0xFFFF66E0;  // ImGui IM_COL32 order (A B G R in memory: 0xAABBGGRR)
     std::string tag;            // short text above the marker (optional)
+    bool textOnly = false;      // draw only `tag` (no diamond), centred on the marker: a world-space message
 };
 
 // Replaces `owner`'s frame (stamped with the current tick).
