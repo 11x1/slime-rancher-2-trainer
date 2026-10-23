@@ -1,5 +1,5 @@
-// sell_upgrades: sell owned ranch land-plot upgrades back for a fraction of their price
-// (default 50 %), from inside the game's own plot purchase menu (SR2 1.3.0).
+// sell_upgrades: sell owned ranch land-plot upgrades back for half their price (fixed,
+// floor(0.5 x price)), from inside the game's own plot purchase menu (SR2 1.3.0).
 //
 // ---------------------------------------------------------------- research --
 // (Cpp2IL dump + capstone disassembly of GameAssembly.dll 1.3.0; RVAs for reference)
@@ -63,7 +63,7 @@
 //     empty) bound to <PromptForUpgrade>b__0, exactly like the game builds it. Detour on
 //     b__0: if it is our pending closure, the sale runs instead. If the module is off /
 //     faulted, the original b__0 runs and does nothing (Upgrade() aborts: already owned).
-//   * Sale (main thread): re-validate, refund = floor(fraction x each currency cost) via
+//   * Sale (main thread): re-validate, refund = floor(0.5 x each currency cost) via
 //     PlayerState.AddCurrency, model.upgrades.Remove(u), revert the upgrader exactly
 //     (table above, inverted), ApplyUpgrades(empty set, false) to refresh trackers +
 //     RanchMetadata like vanilla does after a change, RebuildUI() to refresh the menu.
@@ -127,7 +127,6 @@
 #include "core/log.h"
 #include "core/main_thread.h"
 #include "core/module.h"
-#include "core/settings.h"
 #include "core/unity.h"
 #include "modules/custom_upgrades/api.h"
 
@@ -135,7 +134,6 @@ namespace sr2::modules {
 namespace {
 
 namespace unity = sr2::core::unity;
-namespace settings = sr2::core::settings;
 namespace main_thread = sr2::core::main_thread;
 using sr2::il2cpp::api;
 using sr2::il2cpp::Resolver;
@@ -145,7 +143,6 @@ constexpr const char* kImage = "Assembly-CSharp";
 constexpr const char* kCore = "UnityEngine.CoreModule";
 constexpr const char* kDataNs = "MonomiPark.SlimeRancher.DataModel";
 constexpr const char* kPlotUiNs = "MonomiPark.SlimeRancher.UI.Plot";
-constexpr const char* kKeyFraction = "refund_fraction";
 
 // LandPlot.Upgrade
 enum Upg : int32_t {
@@ -211,7 +208,6 @@ struct Bound<R(A...)> {
 struct PendingPrompt {
     Il2CppObject* closure = nullptr;  // identity only (kept alive by the popup's delegate)
     bool sell = false;                // false = info popup (OK does nothing)
-    float fraction = 0.5f;            // the fraction shown in the popup
     int32_t upgrade = 0;
 };
 
@@ -245,13 +241,11 @@ private:
         int32_t amount = 0;
     };
 
-    float Fraction() const;
     std::string CanSell(Il2CppObject* plot, int32_t upg);
-    bool Price(Il2CppObject* item, float fraction, std::vector<Refund>& out, int32_t& price, int32_t& refund);
-    bool OpenPrompt(Il2CppObject* root, Il2CppObject* item, int32_t upg, bool sell, const std::string& text,
-                    float fraction);
+    bool Price(Il2CppObject* item, std::vector<Refund>& out, int32_t& price, int32_t& refund);
+    bool OpenPrompt(Il2CppObject* root, Il2CppObject* item, int32_t upg, bool sell, const std::string& text);
     bool SetLabel(Il2CppObject* lse, const std::string& text);
-    void DoSell(Il2CppObject* root, Il2CppObject* plot, Il2CppObject* item, int32_t upg, float fraction);
+    void DoSell(Il2CppObject* root, Il2CppObject* plot, Il2CppObject* item, int32_t upg);
     int RevertVisuals(Il2CppObject* plot, int32_t upg, std::string& notes);
     bool ReplantNormalCrop(Il2CppObject* plot, std::string& notes);
     int CountUpgraders(Il2CppObject* plot, int32_t upg);
@@ -437,12 +431,6 @@ void ConfirmDetour(Il2CppObject* closure, const MethodInfo* mi) {
 
 // ---------------------------------------------------------------- helpers --
 
-float SellUpgrades::Fraction() const {
-    float f = settings::GetFloat(kModule, kKeyFraction);
-    if (!std::isfinite(f)) f = 0.5f;
-    return f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
-}
-
 Il2CppObject* SellUpgrades::Invoke(const MethodInfo* m, void* obj, std::initializer_list<void*> args,
                                    const char* what, bool* ok) {
     std::vector<void*> params(args);
@@ -522,8 +510,8 @@ std::string SellUpgrades::PlotId(Il2CppObject* plot) {
     return id.empty() ? std::string("?") : id;
 }
 
-bool SellUpgrades::Price(Il2CppObject* item, float fraction, std::vector<Refund>& out, int32_t& price,
-                         int32_t& refund) {
+// The refund is always half the price, rounded down (per currency).
+bool SellUpgrades::Price(Il2CppObject* item, std::vector<Refund>& out, int32_t& price, int32_t& refund) {
     out.clear();
     price = refund = 0;
     void* list = unity::Field<void*>(item, offItemCosts_);
@@ -537,7 +525,7 @@ bool SellUpgrades::Price(Il2CppObject* item, float fraction, std::vector<Refund>
         r.currency = unity::Field<Il2CppObject*>(e, offCostCurrency_);
         r.price = unity::Field<int32_t>(e, offCostAmount_);
         if (!r.currency || r.price <= 0 || r.price > 100000000) continue;
-        r.amount = static_cast<int32_t>(std::floor(static_cast<double>(r.price) * fraction + 1e-6));
+        r.amount = r.price / 2;  // price > 0: integer division = floor(0.5 x price)
         price += r.price;
         refund += r.amount;
         out.push_back(r);
@@ -624,7 +612,7 @@ bool SellUpgrades::SetLabel(Il2CppObject* lse, const std::string& text) {
 }
 
 bool SellUpgrades::OpenPrompt(Il2CppObject* root, Il2CppObject* item, int32_t upg, bool sell,
-                              const std::string& text, float fraction) {
+                              const std::string& text) {
     // UITemplates labels (fallback texts if our override would fail).
     bool ok = false;
     Il2CppObject* gameCtx = Invoke(gameCtxInstMi_, nullptr, {}, "GameContext.Instance", &ok);
@@ -648,7 +636,6 @@ bool SellUpgrades::OpenPrompt(Il2CppObject* root, Il2CppObject* item, int32_t up
     pending_ = {};
     pending_.closure = closure;
     pending_.sell = sell;
-    pending_.fraction = fraction;
     pending_.upgrade = upg;
 
     Il2CppObject* popup = Invoke(openPopupMi_, root, {title, message, nullptr, posLabel, negLabel, action, nullptr},
@@ -696,27 +683,26 @@ bool SellUpgrades::HandleAction(Il2CppObject* root, Il2CppObject* item) {
     // the prefab's own submit routing).
     if (pending_.closure && promptTick_ == main_thread::TickCount()) return true;
 
-    const float fraction = Fraction();
     std::string reason = CanSell(plot, upg);
     std::string text;
     if (reason.empty()) {
         std::vector<Refund> refunds;
         int32_t price = 0, refund = 0;
-        if (!Price(item, fraction, refunds, price, refund)) {
+        if (!Price(item, refunds, price, refund)) {
             reason = "This upgrade can't be sold (unexpected price data).";
         } else {
-            text = std::format("Sell this upgrade for {} Newbucks?\nYou get {}% of its {} Newbucks price back and can "
-                               "buy it again later at full price.",
-                               refund, static_cast<int>(std::lround(fraction * 100.0f)), price);
+            text = std::format("Sell this upgrade for {} Newbucks?\nYou get half of its {} Newbucks price back and "
+                               "can buy it again later at full price.",
+                               refund, price);
             if (upg == ASH_TROUGH) text += "\nThe ash in the trough is lost.";
             if (upg == DELUXE_GARDEN) text += "\nThe planted crop becomes a normal crop again (growth is kept).";
         }
     }
     if (!reason.empty()) {
         SR2_INFO("[{}] sell refused: plot '{}', {}: {}", kModule, PlotId(plot), UpgName(upg), reason);
-        return OpenPrompt(root, item, upg, false, reason, fraction);
+        return OpenPrompt(root, item, upg, false, reason);
     }
-    return OpenPrompt(root, item, upg, true, text, fraction);
+    return OpenPrompt(root, item, upg, true, text);
 }
 
 bool SellUpgrades::HandleConfirm(Il2CppObject* closure) {
@@ -735,7 +721,7 @@ bool SellUpgrades::HandleConfirm(Il2CppObject* closure) {
     Il2CppObject* plot = unity::Field<Il2CppObject*>(root, offActivator_);
     if (!IsA(plot, plotClass_) || !unity::IsAlive(plot)) return true;
     if (unity::Field<int32_t>(item, offItemUpgrade_) != upg || !HasUpgrade(plot, upg)) return true;
-    DoSell(root, plot, item, upg, p.fraction);
+    DoSell(root, plot, item, upg);
     return true;
 }
 
@@ -848,7 +834,7 @@ void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
     std::vector<Refund> refunds;
     int32_t price = 0, refund = 0;
     std::string text;
-    if (reason.empty() && Price(item, Fraction(), refunds, price, refund)) text = std::format("Sell +{}", refund);
+    if (reason.empty() && Price(item, refunds, price, refund)) text = std::format("Sell +{}", refund);
     else text = "Can't sell";
     if (!layout) text = "Owned - " + text;
     bool labelled = btnView && SetLabel(unity::Field<Il2CppObject*>(btnView, offMoreLabel_), text);
@@ -877,7 +863,7 @@ bool SellUpgrades::OnSellButton(Il2CppObject* button) {
 
 // ---------------------------------------------------------------- selling --
 
-void SellUpgrades::DoSell(Il2CppObject* root, Il2CppObject* plot, Il2CppObject* item, int32_t upg, float fraction) {
+void SellUpgrades::DoSell(Il2CppObject* root, Il2CppObject* plot, Il2CppObject* item, int32_t upg) {
     const std::string id = PlotId(plot);
     std::string reason = CanSell(plot, upg);  // re-check (state may have changed while the popup was open)
     if (!reason.empty()) {
@@ -890,7 +876,7 @@ void SellUpgrades::DoSell(Il2CppObject* root, Il2CppObject* plot, Il2CppObject* 
     if (!set) return;
     std::vector<Refund> refunds;
     int32_t price = 0, refund = 0;
-    if (!Price(item, fraction, refunds, price, refund)) return;
+    if (!Price(item, refunds, price, refund)) return;
     Il2CppObject* player = nullptr;
     if (!tryGetPlayerState_(&player) || !unity::IsAlive(player)) {
         SR2_WARN("[{}] sale cancelled: PlayerState not available", kModule);
@@ -908,8 +894,8 @@ void SellUpgrades::DoSell(Il2CppObject* root, Il2CppObject* plot, Il2CppObject* 
             if (r.amount > 0) addCurrency_(player, r.currency, r.amount, true, nullptr);
         bool rebuilt = false;
         Invoke(rebuildMi_, root, {}, "ListUIRoot.RebuildUI", &rebuilt);
-        SR2_INFO("[{}] sold {} (custom) on plot '{}': refund {} of price {} ({:.0f}%); {}", kModule, UpgName(upg), id,
-                 refund, price, fraction * 100.0f, notes);
+        SR2_INFO("[{}] sold {} (custom) on plot '{}': refund {} of price {}; {}", kModule, UpgName(upg), id, refund,
+                 price, notes);
         return;
     }
 
@@ -936,9 +922,8 @@ void SellUpgrades::DoSell(Il2CppObject* root, Il2CppObject* plot, Il2CppObject* 
     bool ok = false;
     Invoke(rebuildMi_, root, {}, "ListUIRoot.RebuildUI", &ok);
 
-    SR2_INFO("[{}] sold {} (Upgrade {}) on plot '{}': refund {} of price {} ({:.0f}%), {} upgrader(s) reverted{}{}",
-             kModule, UpgName(upg), upg, id, refund, price, fraction * 100.0f, reverted, notes.empty() ? "" : "; ",
-             notes);
+    SR2_INFO("[{}] sold {} (Upgrade {}) on plot '{}': refund {} of price {}, {} upgrader(s) reverted{}{}", kModule,
+             UpgName(upg), upg, id, refund, price, reverted, notes.empty() ? "" : "; ", notes);
 }
 
 bool SellUpgrades::ReplantNormalCrop(Il2CppObject* plot, std::string& notes) {
@@ -1331,29 +1316,13 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
                  buttonWhy);
     }
 
-    // ---- settings ----
-    settings::Def d;
-    d.module = kModule;
-    d.key = kKeyFraction;
-    d.label = "Refund fraction";
-    d.kind = settings::Kind::Float;
-    d.def = 0.5;
-    d.min = 0.0;
-    d.max = 1.0;
-    d.step = 0.05;
-    d.tooltip =
-        "Share of an upgrade's price paid back when you sell it (0.5 = half). Select an owned upgrade in a plot's "
-        "purchase menu and press the Sell button next to PURCHASED (or confirm the item) to get the sell prompt. "
-        "Silo storage upgrades can't be sold.";
-    settings::Register(d);
-
     g_self = this;
     SR2_INFO("[{}] setup ok: OnAction RVA 0x{:X}, <PromptForUpgrade>b__0 RVA 0x{:X}; offsets item._upgrade +0x{:X}, "
              "costs +0x{:X}, LandPlot._model +0x{:X}, model.upgrades +0x{:X}; deluxe-garden replant {}; refund "
-             "fraction {:.2f}{}{}",
+             "fixed at 50%{}{}",
              kModule, Resolver::Rva(onActionPtr), Resolver::Rva(confirmPtr), offItemUpgrade_, offItemCosts_,
              offPlotModel_, offModelUpgrades_, replantOk_ ? "available" : "NOT available (DELUXE_GARDEN unsellable)",
-             Fraction(), upgraderReport.empty() ? "" : "; upgraders unavailable:", upgraderReport);
+             upgraderReport.empty() ? "" : "; upgraders unavailable:", upgraderReport);
     if (!wbarrier_) SR2_WARN("[{}] il2cpp_gc_wbarrier_set_field not exported; closure fields stored directly", kModule);
     return true;
 }

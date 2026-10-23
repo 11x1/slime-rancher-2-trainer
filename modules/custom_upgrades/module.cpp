@@ -70,7 +70,7 @@
 //     The vanilla save never contains anything of ours: without the mod it loads unchanged
 //     (only the custom upgrades are gone).
 //   * sell_upgrades integration (modules/custom_upgrades/api.h): owned custom upgrades
-//     can be sold back at refund_fraction through sell_upgrades' popup.
+//     can be sold back for half their price through sell_upgrades' popup.
 //
 // ---------------------------------------------------------------- sell all ----------
 //   PlortEconomyDirector (SceneContext.PlortEconomyDirector).TrySell(id, count,

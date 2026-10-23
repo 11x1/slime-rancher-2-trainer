@@ -54,7 +54,10 @@ std::vector<Category> Spec() {
 
     Category ranch = Cat("ranch", "Ranch", Icon::Ranch);
     ranch.tabs.push_back(ModuleTab("plot_upgrades"));
-    ranch.tabs.push_back(ModuleTab("sell_upgrades"));
+    Tab sell = ModuleTab("sell_upgrades");
+    sell.help = "Sell an owned plot upgrade back for half its price: select it in the plot's purchase menu and "
+                "press the Sell button next to PURCHASED (or confirm the item). Silo storage upgrades can't be sold.";
+    ranch.tabs.push_back(sell);
     ranch.tabs.push_back(ModuleTab("custom_upgrades"));
     cats.push_back(ranch);
 
