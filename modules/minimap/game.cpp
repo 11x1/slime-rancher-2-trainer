@@ -185,6 +185,8 @@ bool Resolve(Symbols& s, std::string& err, std::vector<std::string>& optionalMis
     // ---- drone ports (quantum drone stations)
     s.droneStationModel = c.Class("MonomiPark.SlimeRancher.DataModel", "DroneStationGadgetModel", false);
     s.dsgmType = c.Field(s.droneStationModel, "_type", false);
+    s.teleporterModel = c.Class("MonomiPark.SlimeRancher.DataModel", "TeleporterGadgetModel", false);
+    s.warpDepotModel = c.Class("MonomiPark.SlimeRancher.DataModel", "WarpDepotModel", false);
     s.droneStationMarker = c.Class(nsUiMap, "DroneStationMapMarker", false);
     s.dsmDisplayConfig = c.Field(s.droneStationMarker, "_displayConfiguration", false);
     s.mpmDronePrefab = c.Field(s.markerPrefabMapping, "_droneStationPrefab", false);
