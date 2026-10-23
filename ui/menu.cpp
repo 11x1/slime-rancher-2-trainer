@@ -456,29 +456,57 @@ void DrawRow(const Host& h, const settings::Def& d, const std::string& label, bo
 }
 
 // Options that depend on `parent`: slide open below it, indented on a thread line.
+// Drawn in the card itself (no child window), so the block is measured in the
+// frame it is drawn: while animating, the rows are shifted up by the hidden part
+// and clipped to the visible part, and the layout advances by exactly that part
+// (trailing item spacing included), so open and close slide without a jump at
+// either end. Hidden rows fade with the slide instead of snapping to the
+// disabled look, and take no input while closing.
 void DrawKids(const Host& h, const settings::Def& parent, const std::vector<settings::Def>& kids, bool visible,
               std::string_view masterLabel) {
+    constexpr float kSlideSec = 0.22f;
     const Palette& P = theme::Colors();
     ImGuiStorage* st = ImGui::GetStateStorage();
-    const ImGuiID id = ImGui::GetID(("kids/" + parent.key + "/" + std::to_string(kids.front().parentValue)).c_str());
-    // Storage refs are only valid until the next insert: copy the value before fetching fullH.
-    float* tRef = st->GetFloatRef(id, visible ? 1.0f : 0.0f);
-    const float t = *tRef = Approach(*tRef, visible ? 1.0f : 0.0f, 6.0f);
-    if (t <= 0.001f) return;
-    float* fullH = st->GetFloatRef(id + 1, 0.0f);
-    const float height = std::max(1.0f, t >= 0.999f ? *fullH : *fullH * Smooth(t));
+    const std::string key = "kids/" + parent.key + "/" + std::to_string(kids.front().parentValue);
+    const ImGuiID tId = ImGui::GetID(key.c_str()), hId = ImGui::GetID((key + "/h").c_str());
+    const float target = visible ? 1.0f : 0.0f;
+    const float t = Approach(st->GetFloat(tId, target), target, 1.0f / kSlideSec);
+    st->SetFloat(tId, t);
+    if (t <= 0.0f) return;
+    // Last frame's block height; 0 = never measured (first open of a block that
+    // started closed): that frame draws it parked far above, fully clipped, to measure it.
+    const float fullH = st->GetFloat(hId, 0.0f);
+    const bool sliding = t < 1.0f;
+    const float e = Smooth(t);
+    const float shownH = sliding ? fullH * e : fullH;
+    const float shift = sliding ? (fullH > 0.0f ? fullH - shownH : U(100000)) : 0.0f;
+    const float sp = ImGui::GetStyle().ItemSpacing.y;
+
     const ImVec2 start = ImGui::GetCursorScreenPos();
-    ImGui::BeginChild(id, ImVec2(0, height), ImGuiChildFlags_None,
-                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground);
-    ImGui::Indent(U(22));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (sliding) {
+        ImGui::PushClipRect(ImVec2(dl->GetClipRectMin().x, start.y), ImVec2(dl->GetClipRectMax().x, start.y + shownH), true);
+        ImGui::SetCursorScreenPos(ImVec2(start.x, start.y - shift));
+    }
+    const float alpha = ImGui::GetStyle().Alpha;
     ImGui::BeginDisabled(!visible);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, sliding ? alpha * e : alpha);  // instead of the disabled dim
+    ImGui::Indent(U(22));
+    const float top = ImGui::GetCursorScreenPos().y;
     for (const auto& k : kids) DrawRow(h, k, layout::ShortLabel(k, &parent, "", masterLabel), true);
-    ImGui::EndDisabled();
-    *fullH = ImGui::GetCursorPosY();
+    const float measured = ImGui::GetCursorScreenPos().y - top;  // rows + the spacing after the last one
     ImGui::Unindent(U(22));
-    ImGui::EndChild();
-    ImGui::GetWindowDrawList()->AddLine(ImVec2(start.x + U(9), start.y), ImVec2(start.x + U(9), start.y + height - U(10)),
-                                        ImGui::GetColorU32(P.line), U(2));
+    ImGui::PopStyleVar();
+    ImGui::EndDisabled();
+    if (sliding) ImGui::PopClipRect();
+    st->SetFloat(hId, measured);
+
+    // Continue below the visible part; Dummy(0, 0) adds back the spacing taken off here.
+    const float advance = sliding ? shownH : measured;
+    ImGui::SetCursorScreenPos(ImVec2(start.x, start.y + advance - sp));
+    ImGui::Dummy(ImVec2(0, 0));
+    if (shownH > U(10))
+        dl->AddLine(ImVec2(start.x + U(9), start.y), ImVec2(start.x + U(9), start.y + shownH - U(10)), ImGui::GetColorU32(P.line), U(2));
 }
 
 // Rows of one group, with nested options under their parent (settings::Def::parent).
