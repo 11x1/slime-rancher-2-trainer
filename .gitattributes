@@ -1,0 +1,2 @@
+# git hooks run under Git for Windows' sh: keep LF so a CRLF checkout cannot break them
+githooks/post-merge text eol=lf
