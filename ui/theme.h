@@ -16,7 +16,9 @@ struct Palette {
     ImU32 tabSel, tabInk, head, offInk, offBg;
     ImU32 text, soft, dim, ok, warn, err;
     ImU32 scroll, shadow, scrim, pill, flap1, flap2;
-    ImU32 tipBg, tipText, tipBorder;  // tooltips: must stand out from cards and the window
+    // Floating surfaces (tooltips, open dropdowns): a dimmer selection colour, so they stand
+    // out from cards and the window; options inside get their own hover/selected fills.
+    ImU32 popBg, popBorder, optHover, optSel;
 };
 
 const Palette& Colors();  // palette of the applied mode

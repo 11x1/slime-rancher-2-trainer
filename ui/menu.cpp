@@ -88,15 +88,37 @@ struct FontScope {
     ~FontScope() { ImGui::PopFont(); }
 };
 
+// Background, border and flat drop shadow of a floating window (tooltip, open
+// dropdown), drawn by the window itself: its own ImGui background is turned off
+// (PopupBg transparent, no border) so the shadow can sit underneath.
+void FloatingSurface() {
+    const Palette& P = theme::Colors();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 a = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize(), b(a.x + sz.x, a.y + sz.y);
+    const float r = ImGui::GetStyle().PopupRounding;
+    dl->PushClipRectFullScreen();
+    dl->AddRectFilled(ImVec2(a.x + U(3), a.y + U(5)), ImVec2(b.x + U(3), b.y + U(5)), P.shadow, r);
+    dl->AddRectFilled(a, b, P.popBg, r);
+    dl->AddRect(a, b, P.popBorder, r, 0, std::max(1.0f, U(1)));
+    dl->PopClipRect();
+}
+
+void PushFloatingStyle() {
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
+}
+
+void PopFloatingStyle() {
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+}
+
 void Tooltip(const std::string& text) {
     if (text.empty()) return;
-    const Palette& P = theme::Colors();
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(12), U(9)));
-    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, std::max(1.0f, U(1)));
-    ImGui::PushStyleColor(ImGuiCol_PopupBg, P.tipBg);
-    ImGui::PushStyleColor(ImGuiCol_Border, P.tipBorder);
-    ImGui::PushStyleColor(ImGuiCol_Text, P.tipText);
+    PushFloatingStyle();
     if (ImGui::BeginTooltip()) {
+        FloatingSurface();
         {
             FontScope f(theme::Body(), theme::kSmallSize + 0.5f);  // popped before EndTooltip
             ImGui::PushTextWrapPos(U(300));
@@ -105,8 +127,8 @@ void Tooltip(const std::string& text) {
         }
         ImGui::EndTooltip();
     }
-    ImGui::PopStyleColor(3);
-    ImGui::PopStyleVar(2);
+    PopFloatingStyle();
+    ImGui::PopStyleVar();
 }
 
 void HoverTip(const std::string& text) {
@@ -297,19 +319,22 @@ void ComboDef(const settings::Def& d, double cur, float w) {
     const float fh = ImGui::GetFrameHeight();
     ImGui::SetNextItemWidth(w);
     ImGui::SetNextWindowSizeConstraints(ImVec2(popW, 0), ImVec2(popW, FLT_MAX));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(5), U(5)));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(6), U(6)));
+    PushFloatingStyle();
     const bool open = ImGui::BeginCombo("##e", texts[static_cast<size_t>(idx)].label.c_str(),
                                         ImGuiComboFlags_NoArrowButton | ImGuiComboFlags_HeightLarge);
+    PopFloatingStyle();
     ImGui::PopStyleVar();
+    if (open) FloatingSurface();
     DrawChevron(dl, ImVec2(pos.x + w - U(17), pos.y + fh * 0.5f), ImGui::GetColorU32(P.grab));
     if (!open) return;
-    // No item spacing (a Selectable spreads over half of it on each side), so the options get real gaps below.
+    // Options sit flush against each other inside the list's padding.
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0, 0));
-    // The chosen option keeps a soft fill (and a pink label); the hovered one gets the full fill.
-    ImGui::PushStyleColor(ImGuiCol_Header, WithAlpha(P.sel, 0.45f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, P.sel);
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive, P.sel);
+    // The chosen option keeps a soft fill (and a pink label); the hovered one gets a stronger one.
+    ImGui::PushStyleColor(ImGuiCol_Header, P.optSel);
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, P.optHover);
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, P.optHover);
     for (int i = 0; i < static_cast<int>(texts.size()); ++i) {
         const auto& t = texts[static_cast<size_t>(i)];
         const float innerW = ImGui::GetContentRegionAvail().x;
@@ -317,7 +342,6 @@ void ComboDef(const settings::Def& d, double cur, float w) {
         const ImVec2 ds = t.desc.empty() ? ImVec2(0, 0) : TextSize(body, theme::kSmallSize, t.desc.c_str(), innerW - U(20));
         const float h = U(16) + lineH + (t.desc.empty() ? 0.0f : U(3) + ds.y);
         const bool sel = i == idx;
-        if (i > 0) ImGui::Dummy(ImVec2(0, U(3)));
         ImGui::PushID(i);
         if (ImGui::Selectable("##opt", sel, 0, ImVec2(0, h)) && !sel) Write(d, i);
         if (sel) ImGui::SetItemDefaultFocus();
@@ -1086,8 +1110,11 @@ bool DrawTopBar(const Category& cat, int& ti, const std::vector<ModuleView>& vie
             const bool hov = ImGui::IsItemHovered() || ImGui::IsItemFocused();
             const ImVec2 c(rx + hs * 0.5f, cy);
             dl->AddCircle(c, hs * 0.5f - U(1), hov ? P.tabSel : P.line, 0, U(2));
-            const ImVec2 qs = TextSize(theme::Body(), 12.5f, "?");
-            Text(dl, theme::Body(), 12.5f, ImVec2(c.x - qs.x * 0.5f, c.y - qs.y * 0.5f), hov ? P.text : P.soft, "?");
+            // Centre the glyph's ink, not its line box (which has room for descenders).
+            ImFont* qf = theme::Body();
+            const ImFontGlyph* g = qf->GetFontBaked(U(13))->FindGlyph('?');
+            const ImVec2 qp = g ? ImVec2(c.x - (g->X0 + g->X1) * 0.5f, c.y - (g->Y0 + g->Y1) * 0.5f) : c;
+            Text(dl, qf, 13, qp, hov ? P.text : P.soft, "?");
             if (hov) Tooltip(tab.help);
         }
         rx -= U(kSwitchW) + U(8);
