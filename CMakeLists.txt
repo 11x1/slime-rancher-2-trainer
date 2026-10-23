@@ -110,6 +110,8 @@ add_library(sr2mods SHARED
   core/version_guard.h
   core/text_override.cpp
   core/text_override.h
+  core/build_info.cpp
+  core/build_info.h
 
   ${SR2_MODULE_SOURCES}
   ${SR2_UI_SOURCES}
@@ -121,6 +123,20 @@ set_target_properties(sr2mods PROPERTIES
 )
 
 target_include_directories(sr2mods PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Build stamp (time + short git commit, shown in the overlay sidebar): regenerated on
+# every build, not just on configure. The target is always out of date; the script
+# rewrites the header only when its text changes, and BYPRODUCTS lets Ninja notice
+# that and recompile core/build_info.cpp (the only file including it).
+set(SR2_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+add_custom_target(sr2mods_build_info
+  COMMAND "${CMAKE_COMMAND}" "-DOUT=${SR2_GEN_DIR}/sr2mods_build_info.h" "-DSRC=${CMAKE_CURRENT_SOURCE_DIR}"
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_info.cmake"
+  BYPRODUCTS "${SR2_GEN_DIR}/sr2mods_build_info.h"
+  COMMENT "Stamping build time"
+  VERBATIM)
+add_dependencies(sr2mods sr2mods_build_info)
+target_include_directories(sr2mods PRIVATE "${SR2_GEN_DIR}")
 target_link_libraries(sr2mods PRIVATE minhook bcrypt delayimp)
 
 # Every system DLL beyond kernel32/user32 is delay-loaded: the proxy is loaded

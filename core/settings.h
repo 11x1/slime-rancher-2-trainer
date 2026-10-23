@@ -45,6 +45,8 @@ bool Has(std::string_view module, std::string_view key);
 void Reset(std::string_view module, std::string_view key);
 // Write pending changes now (also done on shutdown).
 void Flush();
+// Why the last write of sr2mods.json failed; "" once a write succeeds (or none failed yet).
+std::string LastSaveError();
 
 // ---- visibility (Def::parent) ----
 // Sets a registered def's visibility parent (convenience for modules whose
