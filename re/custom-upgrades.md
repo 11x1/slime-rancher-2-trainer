@@ -532,8 +532,34 @@ Original research:
   right). On a tier card showing the next tier, Buy and Sell stand side by side. A press sells
   at once (no popup); confirming an owned item does nothing. A passing reason ("holds food")
   shows as a disabled button, a permanent one ("silo storage") as no button. The prefab
-  (`TextButton_NoneSelectable`) is not reachable by gamepad navigation, so selling is mouse-only.
-  Details in the sell_upgrades header.
+  (`TextButton_NoneSelectable`) is not reachable by gamepad navigation; gamepad / keyboard
+  selling is the alt action (2b.1b). Details in the sell_upgrades header.
+* **2b.1b gamepad / keyboard sell (feature/gamepad-sell):** the alt action (Info) sells. Findings
+  (IDA, 1.3.0):
+  * `ListUI.OnParentUIFocused` subscribes `Submit` / `AltSubmit` to the `submit` / `altSubmit`
+    InputEvents. `AltSubmit` (0x83EE30) invokes `onAltSubmitActionPerformed`.
+  * `ListUI.<ShowMenu>b__4` (selection, 0x10F7310) sets `onAltSubmitActionPerformed` =
+    `onAltActionPerformed(item)` for every item, with or without a visible Info button, then
+    `CreateDetailsMoreButton` (our BindData detour), then `CreateDetailsAltButton(item, category,
+    showAlt)` (0xF47ED0): destroys `altActionButtonGameObject`, and if `category.altDetailsButton`
+    and `showAlt(item)` instantiates the prefab into `altActionButtonContainer`. No label is set in
+    code (the prefab's own input hint: icon of the altSubmit binding for the current device + "Info").
+  * `ListUIRoot`4.ShowAltActionButton` (0x11AFE20) = item is an `IPediaEntryProvider` with an
+    entry; `ListUIRoot`4.OnAltAction` (0x11AF260) = `PediaDirector.ShowPedia(entry)`, else nothing.
+    Both are shared generic bodies, hooked through LandPlotUIRoot's inflated base and filtered by
+    class (like custom_upgrades' RebuildUI hook).
+  * `InputHint.Start` calls `Configure(color, _configuration)` when not configured yet, which sets
+    `_label.StringReference` (a disabled LocalizeStringEvent does not apply it).
+  * Built: when the selected card is sellable right now, sell_upgrades instantiates the card's
+    category `altDetailsButton` (fallback: another category's) into the alt slot, labelled
+    "Sell +N"; ShowAltActionButton returns false for that card (no Info hint stacked on it);
+    OnAltAction for that card sells once and skips the original (no Pedia for that press). A
+    passing reason ("holds food") shows no prompt (the mouse Sell button still shows the reason).
+    Cost: a sellable owned card with a Pedia entry loses its Info hint while it is sellable.
+  * Not checked in game: the prefab's components (InputHint expected; logged once as
+    `alt-action sell: prefab ... label via ...`), which key the altSubmit event has on keyboard
+    (the hint shows it; the event name is logged), and whether the plot categories have an
+    `altDetailsButton` at all.
 * **2b.2 as built:** prices/multipliers as proposed below, ids `0x5352_0013..0040` (Plort
   Collector II / III and Auto-Feeder II, `0x5352_0010..0012`, were retired), one menu card per
   chain (section 1.3), effects in
