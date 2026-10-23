@@ -22,7 +22,7 @@ struct Snapshot {
     bool visible = false;                 // minimap root currently shown
     bool loading = false;                 // scene load in progress (minimap hidden)
     float size = 0;                       // minimap edge length in canvas units (RectTransform sizeDelta)
-    int position = 1;                     // 0 TL, 1 TR, 2 BL, 3 BR (minimap setting)
+    int position = 1;                     // nearest corner of the placement: 0 TL, 1 TR, 2 BL, 3 BR
 };
 
 // False when the minimap module is not running (disabled, faulted, not set up).
