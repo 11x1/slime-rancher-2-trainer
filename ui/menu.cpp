@@ -88,17 +88,18 @@ struct FontScope {
     ~FontScope() { ImGui::PopFont(); }
 };
 
-// Soft drop shadow straight below a rounded rect. ImGui has no blur, so it is
-// stacked faint rounded layers, widest first: the overlap darkens towards the
-// middle and the edge fades out over `spread`.
+// Soft drop shadow below a rounded rect, nothing above it. ImGui has no blur, so
+// it is stacked faint rounded layers, widest first: the overlap darkens towards
+// the rect and the edge fades out over `spread` below it (dy + spread at most).
+// The layers start inside the rect, so its top edge never shows a shadow.
 void SoftShadow(ImDrawList* dl, ImVec2 a, ImVec2 b, float rounding, float dy, float spread, ImU32 col) {
-    constexpr int kLayers = 12;
-    const ImU32 layer = WithAlpha(col, 0.16f);
+    constexpr int kLayers = 10;
+    const ImU32 layer = WithAlpha(col, 0.18f);
+    const float top = a.y + rounding + spread;  // hidden behind the rect
     for (int i = 0; i < kLayers; ++i) {
-        const float e = spread * (1.0f - static_cast<float>(i + 1) / kLayers);
-        const float ex = e - spread * 0.45f, ey = e - spread * 0.25f;  // pulled in at the sides: the shadow sits below
-        dl->AddRectFilled(ImVec2(a.x - ex, a.y - ey + dy), ImVec2(b.x + ex, b.y + ey + dy), layer,
-                          std::max(0.0f, rounding + std::min(ex, ey)));
+        const float e = spread * (1.0f - static_cast<float>(i) / kLayers);
+        const float ex = e - spread;  // never wider than the rect: the shadow only shows below it
+        dl->AddRectFilled(ImVec2(a.x - ex, top), ImVec2(b.x + ex, b.y + dy + e), layer, std::max(0.0f, rounding + ex));
     }
 }
 
@@ -111,7 +112,7 @@ void FloatingSurface(bool outline) {
     const ImVec2 a = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize(), b(a.x + sz.x, a.y + sz.y);
     const float r = ImGui::GetStyle().PopupRounding;
     dl->PushClipRectFullScreen();
-    SoftShadow(dl, a, b, r, U(2), U(6), P.shadow);
+    SoftShadow(dl, a, b, r, U(1), U(4), P.shadow);
     dl->AddRectFilled(a, b, P.popBg, r);
     if (outline) dl->AddRect(a, b, P.popBorder, r, 0, std::max(1.0f, U(1)));
     dl->PopClipRect();
@@ -1281,7 +1282,7 @@ bool Draw(const Host& h) {
         g_winMin = pos;
         g_winMax = ImVec2(pos.x + ws.x, pos.y + ws.y);
         const float border = ImGui::GetStyle().WindowBorderSize, rounding = ImGui::GetStyle().WindowRounding;
-        SoftShadow(ImGui::GetBackgroundDrawList(), pos, g_winMax, rounding, U(5), U(12), P.shadow);
+        SoftShadow(ImGui::GetBackgroundDrawList(), pos, g_winMax, rounding, U(1), U(7), P.shadow);
         ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(pos.x + border, pos.y + border),
                                                   ImVec2(pos.x + U(kSideW), g_winMax.y - border), P.side,
                                                   std::max(0.0f, rounding - border), ImDrawFlags_RoundCornersLeft);
