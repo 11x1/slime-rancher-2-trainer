@@ -88,7 +88,21 @@ struct FontScope {
     ~FontScope() { ImGui::PopFont(); }
 };
 
-// Background, optional border and flat drop shadow of a floating window (tooltip, open
+// Soft drop shadow straight below a rounded rect. ImGui has no blur, so it is
+// stacked faint rounded layers, widest first: the overlap darkens towards the
+// middle and the edge fades out over `spread`.
+void SoftShadow(ImDrawList* dl, ImVec2 a, ImVec2 b, float rounding, float dy, float spread, ImU32 col) {
+    constexpr int kLayers = 12;
+    const ImU32 layer = WithAlpha(col, 0.16f);
+    for (int i = 0; i < kLayers; ++i) {
+        const float e = spread * (1.0f - static_cast<float>(i + 1) / kLayers);
+        const float ex = e - spread * 0.45f, ey = e - spread * 0.25f;  // pulled in at the sides: the shadow sits below
+        dl->AddRectFilled(ImVec2(a.x - ex, a.y - ey + dy), ImVec2(b.x + ex, b.y + ey + dy), layer,
+                          std::max(0.0f, rounding + std::min(ex, ey)));
+    }
+}
+
+// Background, optional border and soft drop shadow of a floating window (tooltip, open
 // dropdown), drawn by the window itself: its own ImGui background is turned off
 // (PopupBg transparent, no border) so the shadow can sit underneath.
 void FloatingSurface(bool outline) {
@@ -97,7 +111,7 @@ void FloatingSurface(bool outline) {
     const ImVec2 a = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize(), b(a.x + sz.x, a.y + sz.y);
     const float r = ImGui::GetStyle().PopupRounding;
     dl->PushClipRectFullScreen();
-    dl->AddRectFilled(ImVec2(a.x + U(3), a.y + U(5)), ImVec2(b.x + U(3), b.y + U(5)), P.shadow, r);
+    SoftShadow(dl, a, b, r, U(4), U(10), P.shadow);
     dl->AddRectFilled(a, b, P.popBg, r);
     if (outline) dl->AddRect(a, b, P.popBorder, r, 0, std::max(1.0f, U(1)));
     dl->PopClipRect();
@@ -331,26 +345,31 @@ void ComboDef(const settings::Def& d, double cur, float w) {
     // Options sit flush against each other inside the list's padding.
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0, 0));
-    // The chosen option keeps a soft fill (and a pink label); the hovered one gets a stronger one.
-    ImGui::PushStyleColor(ImGuiCol_Header, P.optSel);
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, P.optHover);
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive, P.optHover);
+    // Rows touch (no dead space between them); their fill is drawn inset below, so
+    // neighbouring highlights keep a gap. Selectable's own fill is off.
+    ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, IM_COL32(0, 0, 0, 0));
     for (int i = 0; i < static_cast<int>(texts.size()); ++i) {
         const auto& t = texts[static_cast<size_t>(i)];
         const float innerW = ImGui::GetContentRegionAvail().x;
         const float lineH = ImGui::GetFontSize();
         const ImVec2 ds = t.desc.empty() ? ImVec2(0, 0) : TextSize(body, theme::kSmallSize, t.desc.c_str(), innerW - U(20));
-        const float h = U(16) + lineH + (t.desc.empty() ? 0.0f : U(3) + ds.y);
+        const float h = U(20) + lineH + (t.desc.empty() ? 0.0f : U(3) + ds.y);
         const bool sel = i == idx;
         ImGui::PushID(i);
         if (ImGui::Selectable("##opt", sel, 0, ImVec2(0, h)) && !sel) Write(d, i);
         if (sel) ImGui::SetItemDefaultFocus();
-        const ImVec2 mn = ImGui::GetItemRectMin();
+        const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
         ImDrawList* pdl = ImGui::GetWindowDrawList();
+        const bool hov = ImGui::IsItemHovered() || ImGui::IsItemFocused();
+        if (hov || sel)
+            pdl->AddRectFilled(ImVec2(mn.x, mn.y + U(2)), ImVec2(mx.x, mx.y - U(2)), hov ? P.optHover : P.optSel,
+                               ImGui::GetStyle().SelectableRounding);
         const ImU32 labelCol = sel ? (theme::Current() == theme::Mode::Dark ? P.grab : P.accent) : P.text;
-        Text(pdl, body, theme::kBodySize, ImVec2(mn.x + U(10), mn.y + U(8)), labelCol, t.label.c_str());
+        Text(pdl, body, theme::kBodySize, ImVec2(mn.x + U(10), mn.y + U(10)), labelCol, t.label.c_str());
         if (!t.desc.empty())
-            Text(pdl, body, theme::kSmallSize, ImVec2(mn.x + U(10), mn.y + U(8) + lineH + U(3)), P.dim, t.desc.c_str(),
+            Text(pdl, body, theme::kSmallSize, ImVec2(mn.x + U(10), mn.y + U(10) + lineH + U(3)), P.dim, t.desc.c_str(),
                  innerW - U(20));
         ImGui::PopID();
     }
@@ -1262,8 +1281,7 @@ bool Draw(const Host& h) {
         g_winMin = pos;
         g_winMax = ImVec2(pos.x + ws.x, pos.y + ws.y);
         const float border = ImGui::GetStyle().WindowBorderSize, rounding = ImGui::GetStyle().WindowRounding;
-        ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(pos.x + U(6), pos.y + U(8)), ImVec2(g_winMax.x + U(6), g_winMax.y + U(8)),
-                                                      P.shadow, rounding);
+        SoftShadow(ImGui::GetBackgroundDrawList(), pos, g_winMax, rounding, U(10), U(26), P.shadow);
         ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(pos.x + border, pos.y + border),
                                                   ImVec2(pos.x + U(kSideW), g_winMax.y - border), P.side,
                                                   std::max(0.0f, rounding - border), ImDrawFlags_RoundCornersLeft);
