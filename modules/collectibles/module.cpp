@@ -15,6 +15,11 @@
 //     ZoneDetectionArea polygons, else the nearest zone label marker.
 //     Done state: GameModel gordo model popped / CalculateIsSolved() / the
 //     marker's discovery query (IFilterableMapMarker.CanBeShown).
+//   * Map data nodes: the page prefab's FogMapElements (one fog area per reveal
+//     event = per node; distinct StaticGameEvents per zone, zone by polygon of
+//     the area's art), so totals include unvisited areas. Done: the full map's
+//     own reveal query FogMapElement.ShouldBeRevealed(EventDirector), only once
+//     the director's record IS the loaded save's (GameModel.eventRecordModel).
 //   * Research drones: no static per-zone list exists; counted from the drones
 //     loaded so far this session (ResearchDroneController, low-rate scan),
 //     marked with '*' (known so far).
@@ -78,7 +83,10 @@ constexpr size_t kNoOff = static_cast<size_t>(-1);
 constexpr float kRecomputeInterval = 1.0f;
 constexpr float kDroneScanInterval = 10.0f;
 
-enum Cat { kPods = 0, kGordos, kShadowDepositors, kShadowDoors, kPlortDoors, kTeleporters, kStabilizers, kDrones, kCatCount };
+enum Cat {
+    kPods = 0, kGordos, kShadowDepositors, kShadowDoors, kPlortDoors, kTeleporters, kStabilizers, kMapNodes, kDrones,
+    kCatCount
+};
 struct CatInfo {
     const char* key;
     const char* label;   // list mode / settings
@@ -97,6 +105,9 @@ const CatInfo kCats[kCatCount] = {
     {"cat_teleporters", "Ancient teleporters (found)", "Teleporters", true, "Discovered / total ancient teleporters"},
     {"cat_stabilizers", "Stabilizer gates (found)", "Gates", true,
      "Discovered / total prisma stabilizer gates (Grey Labyrinth)"},
+    {"cat_map_nodes", "Map data nodes", "Nodes", false,
+     "Activated / total map data nodes: the fog areas of the full map in this zone (one per node), revealed or not. "
+     "Includes unvisited areas"},
     {"cat_research_drones", "Research drones (read)", "Drones", false,
      "Read / known research drones. The game keeps no static list per zone, so only drones loaded at least once "
      "this session are known (marked with *)"},
@@ -114,7 +125,8 @@ bool Has(size_t off) { return off != kNoOff; }
 
 // ------------------------------------------------------------- settings -----
 struct Cfg {
-    bool cats[kCatCount] = {true, true, true, true, true, true, true, true};
+    bool cats[kCatCount];
+    Cfg() { std::fill(std::begin(cats), std::end(cats), true); }
     bool showCompleted = true;
     bool compact = true;
     bool spoilerFree = false;
@@ -165,16 +177,20 @@ struct Sym {
                 *teleMarker = nullptr;
     Il2CppClass *gameModel = nullptr, *gordoModel = nullptr;
     Il2CppClass *droneCtrl = nullptr, *droneEntry = nullptr, *droneModel = nullptr;
+    Il2CppClass *fogElement = nullptr, *staticGameEvent = nullptr, *eventDirector = nullptr, *eventRecordModel = nullptr;
     const MethodInfo* counterGetState = nullptr;  // MapCounterDefinition.GetState (abstract; virtual slot per object)
     const MethodInfo* canBeShown = nullptr;       // IFilterableMapMarker.get_CanBeShown
     const MethodInfo* getDescriptor = nullptr;    // IMapMarkerDescriptorProvider.GetMapMarkerDescriptor
     const MethodInfo* descMapIcon = nullptr;      // IMapMarkerDescriptor.get_MapIcon
     ugui::Fn tryGetGameModel, getGordoModel, gordoHasPopped, puzzleSolved, puzzleShadow, depSolved, depShadow;
+    ugui::Fn fogShouldReveal;  // FogMapElement.ShouldBeRevealed(EventDirector)
     size_t mdCounters = kNoOff, counterIcon = kNoOff;
     size_t areaZoneData = kNoOff, areaPoints = kNoOff, zmdPrimary = kNoOff, zoneMarkerData = kNoOff,
            labZoneMarkerData = kNoOff;
     size_t gordoZone = kNoOff, gordoId = kNoOff, gordoIcon = kNoOff, puzzleIcon = kNoOff, depIcon = kNoOff;
     size_t droneEntryF = kNoOff, droneModelF = kNoOff, entryRefId = kNoOff, droneRead = kNoOff;
+    size_t fogEvent = kNoOff, sgeDirector = kNoOff, sgeKey = kNoOff, edModel = kNoOff, gmEventRecord = kNoOff,
+           mdEventDirector = kNoOff;
 };
 
 struct ResolveCtx {
@@ -269,6 +285,19 @@ public:
         s_.entryRefId = c.Field(s_.droneEntry, "referenceId");
         s_.droneModel = c.Class(nsData, "ResearchDroneModel");
         s_.droneRead = c.Field(s_.droneModel, "read");
+        // map data nodes = fog areas (MapUIFogReveal.RevealKnownZones: SetRevealState(ShouldBeRevealed(director)))
+        const char* nsEvent = "MonomiPark.SlimeRancher.Event";
+        s_.fogElement = c.Class(nsUiMap, "FogMapElement");
+        s_.fogShouldReveal = c.Bind(s_.fogElement, "ShouldBeRevealed", 1);
+        s_.fogEvent = c.Field(s_.fogElement, "_fogRevealEvent");
+        s_.staticGameEvent = c.Class(nsEvent, "StaticGameEvent");
+        s_.sgeDirector = c.Field(s_.staticGameEvent, "_eventDirector");
+        s_.sgeKey = c.Field(s_.staticGameEvent, "_eventKey");
+        s_.eventDirector = c.Class(nsEvent, "EventDirector");
+        s_.edModel = c.Field(s_.eventDirector, "_model");
+        s_.eventRecordModel = c.Class(nsEvent, "EventRecordModel");
+        s_.gmEventRecord = c.Field(s_.gameModel, "eventRecordModel");
+        s_.mdEventDirector = c.Field(s_.mapDirector, "_eventDirector");
 
         // Nothing works without the page / zone basics; everything else degrades per category.
         if (!s_.zoneDef || !ugui::HasTmp())
@@ -278,11 +307,12 @@ public:
         RegisterSettings();
         if (!onChange_) onChange_ = settings::OnChange(kModule, [this](const std::string&) { cfgDirty_.store(true); });
         SR2_INFO("collectibles: resolved (counters {}, gordos {}, plort doors {}, depositors {}, teleporters {}, "
-                 "gates {}, drones {}, zone areas {}, {} optional symbols missing)",
+                 "gates {}, map nodes {}, drones {}, zone areas {}, {} optional symbols missing)",
                  (Has(s_.mdCounters) && s_.counterGetState) ? "yes" : "no",
                  (s_.gordoMarker && s_.gordoHasPopped && s_.getGordoModel && s_.tryGetGameModel) ? "yes" : "no",
                  s_.puzzleSolved ? "yes" : "no", s_.depSolved ? "yes" : "no",
                  (s_.teleMarker && s_.canBeShown) ? "yes" : "no", (s_.stabMarker && s_.canBeShown) ? "yes" : "no",
+                 MapNodesResolved() ? "yes" : "no",
                  (s_.droneCtrl && Has(s_.droneModelF) && Has(s_.droneRead)) ? "yes" : "no",
                  (Has(s_.areaPoints) && Has(s_.zmdPrimary)) ? "yes" : "no", c.missing.size());
         return true;
@@ -338,6 +368,15 @@ private:
         Il2CppObject* zone = nullptr;
         bool read = false;
     };
+    // One map data node = one reveal event of the page's fog areas.
+    struct FogNode {
+        Ref event;          // StaticGameEvent (asset)
+        Ref comp;           // a FogMapElement of the prefab with that event (queries only)
+        Il2CppObject* zone; // pinned in zonePins_ or nullptr
+        std::string name;   // event key (logs)
+        int failures = 0;
+        bool revealed = false;  // reveals are permanent within one save (reset on a record change)
+    };
     struct Count {
         int done = 0, total = 0, discovered = 0;
         bool partial = false;  // totals only from what was loaded (drones)
@@ -376,6 +415,9 @@ private:
     std::vector<CounterRef> counters_;
     std::vector<Area> areas_;
     std::vector<ZoneMk> zoneMarkers_;
+    std::vector<FogNode> fogNodes_;
+    Il2CppObject* fogRecord_ = nullptr;  // identity only: the event record the reveal cache belongs to
+    bool fogReady_ = false;              // last Tally: the save's event record was queryable
     bool pageHasZoneInfo_ = false;
     Ref catIcon_[kCatCount];
     float scaleX_ = 0, scaleY_ = 0, offX_ = 0, offY_ = 0;
@@ -433,12 +475,17 @@ private:
         for (Entry& e : entries_) e.comp.Abandon();
         for (CounterRef& c : counters_) c.counter.Abandon();
         for (Area& a : areas_) a.t.Abandon();
+        for (FogNode& n : fogNodes_) {
+            n.event.Abandon();
+            n.comp.Abandon();
+        }
         for (Ref& r : zonePins_) r.Abandon();
         for (Ref& r : catIcon_) r.Abandon();
         for (Ref* r : {&pagePrefab_, &mapT_, &mapDirector_, &zone_}) r->Abandon();
         entries_.clear();
         counters_.clear();
         areas_.clear();
+        fogNodes_.clear();
         zonePins_.clear();
         if (frameCb_) main_thread::RemoveFrameCallback(frameCb_);
         frameCb_ = 0;
@@ -614,6 +661,8 @@ private:
         counters_.clear();
         areas_.clear();
         zoneMarkers_.clear();
+        fogNodes_.clear();
+        fogRecord_ = nullptr;
         zonePins_.clear();
         zoneSet_.clear();
         for (Ref& r : catIcon_) r.Reset(nullptr);
@@ -712,10 +761,13 @@ private:
         addMarkers(s_.teleMarker, [](Il2CppObject*) { return static_cast<int>(kTeleporters); });
         addMarkers(s_.stabMarker, [](Il2CppObject*) { return static_cast<int>(kStabilizers); });
 
+        int fogAreas = 0, fogNoEvent = 0;
+        IndexFogNodes(prefab, fogAreas, fogNoEvent);
+
         // the game's map counters (all zones)
         Il2CppObject* dir = snap.mapDirector;
+        if (ugui::IsA(dir, s_.mapDirector)) mapDirector_.Reset(dir);
         if (ugui::IsA(dir, s_.mapDirector) && Has(s_.mdCounters) && s_.counterGetState) {
-            mapDirector_.Reset(dir);
             Il2CppObject* list = F<Il2CppObject*>(dir, s_.mdCounters);
             if (list && ugui::PlausiblePointer(list))
                 ugui::ForEachListStructPair(list, "Zone", "Counter", [&](Il2CppObject* zone, Il2CppObject* counter) {
@@ -740,13 +792,102 @@ private:
                 });
         }
 
-        LogTotals(byOwn, byPoly, byLabel, unassigned);
+        LogTotals(byOwn, byPoly, byLabel, unassigned, fogAreas, fogNoEvent);
         recomputeAcc_ = 1e9f;
         shownSig_.clear();
     }
 
+    bool MapNodesResolved() const {
+        return s_.fogElement && s_.fogShouldReveal && Has(s_.fogEvent) && s_.eventDirector && Has(s_.edModel) &&
+               Has(s_.gmEventRecord) && s_.tryGetGameModel;
+    }
+
+    // Map data nodes: every FogMapElement of the page is one fog area that a node's reveal event
+    // (MapNodeActivator.Activate -> _fogRevealEvent.RaiseEvent) uncovers; areas sharing an event
+    // count once. Zone: majority of the polygon hits of the area's rect centre and its art's centres.
+    void IndexFogNodes(Il2CppObject* prefab, int& areas, int& noEvent) {
+        if (!MapNodesResolved()) return;
+        std::unordered_map<Il2CppObject*, size_t> byEvent;
+        ugui::ForEachInChildren(prefab, s_.fogElement, true, [&](Il2CppObject* f) {
+            if (!ugui::IsA(f, s_.fogElement)) return true;
+            ++areas;
+            Il2CppObject* ev = F<Il2CppObject*>(f, s_.fogEvent);
+            if (s_.staticGameEvent ? !ugui::IsA(ev, s_.staticGameEvent) : !ugui::PlausiblePointer(ev)) {
+                ++noEvent;
+                return true;
+            }
+            std::unordered_map<Il2CppObject*, int> votes;
+            Il2CppObject* labelZone = nullptr;
+            auto vote = [&](Il2CppObject* rt) {
+                if (!rt || !ugui::IsRectTransform(rt)) return;
+                ugui::Rect r = ugui::GetRect(rt);
+                if (!std::isfinite(r.x) || !std::isfinite(r.y) || !std::isfinite(r.w) || !std::isfinite(r.h)) return;
+                Vec3 w = ugui::TransformPoint(rt, {r.x + r.w * 0.5f, r.y + r.h * 0.5f, 0});
+                int m = 0;
+                Il2CppObject* z = ZoneAtPrefabPoint(w, m);
+                if (m == 1) ++votes[z];
+                else if (m == 2 && !labelZone) labelZone = z;
+            };
+            vote(unity::TransformOf(f));
+            if (Il2CppObject* go = unity::GameObjectOf(f))
+                ugui::ForEachInChildren(go, ugui::ImageClass(), true, [&](Il2CppObject* img) {
+                    vote(unity::TransformOf(img));
+                    return true;
+                });
+            Il2CppObject* z = labelZone;
+            int best = 0;
+            for (const auto& [vz, n] : votes)
+                if (n > best) {
+                    best = n;
+                    z = vz;
+                }
+            auto it = byEvent.find(ev);
+            if (it != byEvent.end()) {  // second area of the same node: only fills a missing zone
+                if (!fogNodes_[it->second].zone) fogNodes_[it->second].zone = z;
+                return true;
+            }
+            std::string name;
+            if (Has(s_.sgeKey)) {
+                auto* key = F<Il2CppString*>(ev, s_.sgeKey);
+                if (key && ugui::PlausiblePointer(key)) name = unity::ToUtf8(key);
+            }
+            if (name.empty()) name = unity::GetName(ev);
+            byEvent.emplace(ev, fogNodes_.size());
+            FogNode n{Ref(ev), Ref(f), z, std::move(name)};
+            fogNodes_.push_back(std::move(n));
+            return true;
+        });
+    }
+
+    // The director whose record IS the loaded save's (else the reveal answers belong to no / another
+    // save): the one the reveal events raise into, then MapDirector._eventDirector.
+    Il2CppObject* FogDirector(Il2CppObject* gm, Il2CppObject*& record) {
+        record = nullptr;
+        if (!MapNodesResolved() || !gm) return nullptr;
+        Il2CppObject* saveRec = F<Il2CppObject*>(gm, s_.gmEventRecord);
+        if (s_.eventRecordModel ? !ugui::IsA(saveRec, s_.eventRecordModel) : !ugui::PlausiblePointer(saveRec))
+            return nullptr;
+        Il2CppObject* cands[2] = {};
+        if (Has(s_.sgeDirector))
+            for (FogNode& n : fogNodes_)
+                if (n.event.Alive()) {
+                    cands[0] = F<Il2CppObject*>(n.event.get(), s_.sgeDirector);
+                    break;
+                }
+        if (mapDirector_.Alive() && Has(s_.mdEventDirector))
+            cands[1] = F<Il2CppObject*>(mapDirector_.get(), s_.mdEventDirector);
+        for (Il2CppObject* d : cands) {
+            if (!ugui::IsA(d, s_.eventDirector)) continue;
+            if (F<Il2CppObject*>(d, s_.edModel) == saveRec) {
+                record = saveRec;
+                return d;
+            }
+        }
+        return nullptr;
+    }
+
     // One-shot (per page build) summary of every zone's totals.
-    void LogTotals(int byOwn, int byPoly, int byLabel, int unassigned) {
+    void LogTotals(int byOwn, int byPoly, int byLabel, int unassigned, int fogAreas, int fogNoEvent) {
         Il2CppObject* gm = GameModel();
         std::vector<Il2CppObject*> zones;
         for (const Ref& r : zonePins_) zones.push_back(r.get());
@@ -755,18 +896,27 @@ private:
             Count c[kCatCount];
             Tally(z, gm, c, true);
             std::string line;
-            for (int i = 0; i < kCatCount; ++i)
-                if (c[i].total > 0)
-                    line += std::format("{}{} {}/{}", line.empty() ? "" : ", ", kCats[i].shortLabel, c[i].done, c[i].total);
+            for (int i = 0; i < kCatCount; ++i) {
+                if (c[i].total <= 0) continue;
+                const bool unknownDone = i == kMapNodes && !fogReady_;
+                line += unknownDone ? std::format("{}{} ?/{}", line.empty() ? "" : ", ", kCats[i].shortLabel, c[i].total)
+                                    : std::format("{}{} {}/{}", line.empty() ? "" : ", ", kCats[i].shortLabel, c[i].done,
+                                                  c[i].total);
+            }
             if (!line.empty()) out += std::format(" | '{}': {}", unity::GetName(z), line);
         }
         std::string icons;
         for (int i = 0; i < kCatCount; ++i)
             if (catIcon_[i]) icons += std::format("{}{}", icons.empty() ? "" : ",", kCats[i].shortLabel);
+        int nodesNoZone = 0;
+        for (const FogNode& n : fogNodes_) nodesNoZone += n.zone ? 0 : 1;
         SR2_INFO("collectibles: page '{}': {} markers (zone by own field {}, polygon {}, nearest zone label {}, "
-                 "unassigned {}), {} zone areas, {} zone labels, {} map counters, icons [{}]; per zone (done/total):{}",
+                 "unassigned {}), {} zone areas, {} zone labels, {} map counters, {} map nodes ({} fog areas, {} without "
+                 "a reveal event, {} without a zone; reveal state {}), icons [{}]; per zone (done/total):{}",
                  unity::GetName(pagePrefab_.get()), entries_.size(), byOwn, byPoly, byLabel, unassigned, areas_.size(),
-                 zoneMarkers_.size(), counters_.size(), icons, out.empty() ? " (none)" : out);
+                 zoneMarkers_.size(), counters_.size(), fogNodes_.size(), fogAreas, fogNoEvent, nodesNoZone,
+                 fogReady_ ? "read" : "not readable yet (save's event record not set)", icons,
+                 out.empty() ? " (none)" : out);
     }
 
     // ------------------------------------------------------------- counting --
@@ -853,6 +1003,35 @@ private:
                     disc = false;
                 }
                 if (disc) ++k.discovered;
+            }
+        }
+        if (!hasCounter[kMapNodes] && (forLog || cfg_.cats[kMapNodes]) && !fogNodes_.empty()) {
+            Il2CppObject* rec = nullptr;
+            Il2CppObject* dir = FogDirector(gm, rec);
+            fogReady_ = dir != nullptr;
+            if (dir && rec != fogRecord_) {  // another save / session: cached reveals are void
+                fogRecord_ = rec;
+                for (FogNode& n : fogNodes_) n.revealed = false;
+            }
+            for (FogNode& n : fogNodes_) {
+                Il2CppObject* nz = n.zone ? n.zone : (attributeUnassigned ? zone : nullptr);
+                if (nz != zone || n.failures >= 3) continue;
+                Count& k = c[kMapNodes];
+                k.known = false;  // no discovery information: spoiler-free shows "done/?"
+                if (!dir) {       // save data not there yet: totals only in the log, nothing shown
+                    if (forLog) ++k.total;
+                    continue;
+                }
+                bool r = n.revealed;
+                if (!r && (!n.comp.Alive() ||
+                           !Managed([&] { r = ugui::Call<bool>(s_.fogShouldReveal, n.comp.get(), dir); }))) {
+                    if (++n.failures == 3)
+                        SR2_WARN("collectibles: map node '{}' cannot be queried - left out of the counts", n.name);
+                    continue;
+                }
+                n.revealed = r;
+                ++k.total;
+                if (r) ++k.done;
             }
         }
         if (!hasCounter[kDrones] && (forLog || cfg_.cats[kDrones])) {
