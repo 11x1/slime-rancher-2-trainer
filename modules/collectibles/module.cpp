@@ -23,15 +23,21 @@
 //   * Research drones: no static per-zone list exists (GameModel.researchDrones
 //     only holds drones whose scene registered them; ResearchDroneEntry has no
 //     zone); counted from the drones loaded this session (ResearchDroneController,
-//     low-rate scan). A zone is loaded as a whole (ZoneSceneGroupMapping: zone ->
+//     scene scan). A zone is loaded as a whole (ZoneSceneGroupMapping: zone ->
 //     SceneGroup[], a SceneGroup loads all its scenes), so once a scan ran while
 //     the player stood in a zone that maps to exactly ONE scene group, that
 //     zone's total is complete; otherwise it is marked with '*' (known so far).
+//     Read state: the controller's model, re-read at 1 Hz while it is loaded.
+//     Scan cost: one Object.FindObjectsByType(includeInactive) walks every
+//     scene object (~15-20 ms each in the open world), so the scan runs once
+//     per zone, kZoneSettle s after entering it, drones and ghosts on two
+//     different frames; only zones that are not loaded as a whole are rescanned
+//     (every kPartialRescan s) to pick up scenes that stream in later.
 //   * Ghostly drones: ComponentAcqDroneSpawner sits on a TreasurePod (InitDrone:
 //     SRGetComponent<TreasurePod>); the drone carries that pod and opening it
 //     awards it. Spawners are scene objects (no static list), so they are
 //     collected by the same low-rate scan as research drones (same '*' rule
-//     for zones not fully scanned). Zone: the pod's
+//     for zones not fully scanned, same once-per-zone schedule). Zone: the pod's
 //     GetZoneId() (CellDirector), else the zone polygons. Done: pod OPEN
 //     (TreasurePod.get_CurrState), re-read at 1 Hz while the pod is loaded.
 //
@@ -92,7 +98,7 @@ constexpr const char* kModule = "collectibles";
 constexpr const char* kAsm = "Assembly-CSharp";
 constexpr size_t kNoOff = static_cast<size_t>(-1);
 constexpr float kRecomputeInterval = 1.0f;
-constexpr float kDroneScanInterval = 10.0f;
+constexpr float kPartialRescan = 30.0f;  // scene rescan of a zone that is not loaded as a whole
 constexpr float kZoneSettle = 3.0f;  // a zone's scenes count as fully loaded this long after entering it
 
 enum Cat {
@@ -401,6 +407,7 @@ private:
     struct Drone {
         Il2CppObject* zone = nullptr;
         bool read = false;
+        Ref ctrl;  // ResearchDroneController while its scene is loaded (read state re-read at 1 Hz)
     };
     struct Ghost {
         Il2CppObject* zone = nullptr;
@@ -473,7 +480,8 @@ private:
     std::unordered_set<Il2CppObject*> dronesComplete_, ghostsComplete_;
     float zoneAge_ = 0;
     bool settleScanDue_ = false;
-    float recomputeAcc_ = 1e9f, droneAcc_ = 1e9f, retryAcc_ = 0;
+    int scanStage_ = 0;  // 1: research drone scan this frame, 2: ghostly drone scan this frame, 0: idle
+    float recomputeAcc_ = 1e9f, droneAcc_ = 0, retryAcc_ = 0;
     Count counts_[kCatCount];
     std::string shownSig_;
     Ui ui_;
@@ -529,6 +537,7 @@ private:
         for (Ref& r : zonePins_) r.Abandon();
         for (Ref& r : catIcon_) r.Abandon();
         for (auto& [id, g] : ghosts_) g.pod.Abandon();
+        for (auto& [id, d] : drones_) d.ctrl.Abandon();
         ghostIcon_.Abandon();
         for (Ref* r : {&pagePrefab_, &mapT_, &mapDirector_, &zone_}) r->Abandon();
         entries_.clear();
@@ -536,6 +545,7 @@ private:
         areas_.clear();
         fogNodes_.clear();
         ghosts_.clear();
+        drones_.clear();
         zonePins_.clear();
         if (frameCb_) main_thread::RemoveFrameCallback(frameCb_);
         frameCb_ = 0;
@@ -550,6 +560,7 @@ private:
         if (cfgDirty_.exchange(false)) {
             cfg_ = LoadCfg();
             recomputeAcc_ = 1e9f;
+            settleScanDue_ = true;  // a category may just have been switched on
             shownSig_.clear();
         }
         Step("minimap state");
@@ -584,7 +595,7 @@ private:
             ghosts_.clear();
             dronesComplete_.clear();
             ghostsComplete_.clear();
-            droneAcc_ = 1e9f;
+            settleScanDue_ = true;
             recomputeAcc_ = 1e9f;
         }
 
@@ -592,27 +603,36 @@ private:
         if (snap.zone != zone_.get()) {
             zone_.Reset(snap.zone);
             recomputeAcc_ = 1e9f;
-            droneAcc_ = 1e9f;  // scan now (show what is there) and again once settled (completeness)
             zoneAge_ = 0;
-            settleScanDue_ = true;
+            settleScanDue_ = true;  // one scan once the zone's scenes are in (counts + completeness)
             SR2_DEBUG("collectibles: zone -> '{}'", unity::GetName(snap.zone));
         }
 
+        // Scene scans (each one FindObjectsByType over every scene object): once per zone after it
+        // settled, drones and ghosts on separate frames; rescans only for zones not loaded as a whole.
         droneAcc_ += dt;
         zoneAge_ += dt;
-        if (settleScanDue_ && zoneAge_ >= kZoneSettle) {
-            settleScanDue_ = false;
-            droneAcc_ = 1e9f;
+        if (scanStage_ == 0 && (cfg_.cats[kDrones] || cfg_.cats[kGhostDrones])) {
+            if (settleScanDue_ && zoneAge_ >= kZoneSettle) scanStage_ = 1;
+            else if (!settleScanDue_ && droneAcc_ >= kPartialRescan && !CurrentZoneFullyLoaded()) scanStage_ = 1;
+            if (scanStage_) {
+                settleScanDue_ = false;
+                droneAcc_ = 0;
+            }
         }
-        if (droneAcc_ >= kDroneScanInterval && (cfg_.cats[kDrones] || cfg_.cats[kGhostDrones])) {
-            droneAcc_ = 0;
+        if (scanStage_ == 1) {
+            scanStage_ = 2;
             if (cfg_.cats[kDrones]) {
                 Step("research drones");
                 ScanDrones(gm);
+                recomputeAcc_ = 1e9f;
             }
+        } else if (scanStage_ == 2) {
+            scanStage_ = 0;
             if (cfg_.cats[kGhostDrones]) {
                 Step("ghostly drones");
                 ScanGhosts();
+                recomputeAcc_ = 1e9f;
             }
         }
         recomputeAcc_ += dt;
@@ -1107,8 +1127,9 @@ private:
             }
         }
         if (!hasCounter[kDrones] && (forLog || cfg_.cats[kDrones])) {
-            for (const auto& [id, d] : drones_) {
+            for (auto& [id, d] : drones_) {
                 if (d.zone != zone) continue;
+                if (!forLog && !d.read && d.ctrl.Alive()) d.read = DroneRead(d.ctrl.get());
                 Count& k = c[kDrones];
                 ++k.total;
                 ++k.discovered;
@@ -1240,6 +1261,13 @@ private:
         });
     }
 
+    // ResearchDroneController._model.read (false while the model is not there yet).
+    bool DroneRead(Il2CppObject* ctrl) {
+        if (!ugui::IsA(ctrl, s_.droneCtrl)) return false;
+        Il2CppObject* model = F<Il2CppObject*>(ctrl, s_.droneModelF);
+        return ugui::IsA(model, s_.droneModel) && F<bool>(model, s_.droneRead);
+    }
+
     void ScanDrones(Il2CppObject* gm) {
         if (!s_.droneCtrl || !Has(s_.droneModelF) || !Has(s_.droneRead) || !gm) return;
         int seen = 0;
@@ -1255,19 +1283,23 @@ private:
                 }
             }
             if (id.empty()) id = std::format("obj:{}", static_cast<const void*>(c));
-            Il2CppObject* model = F<Il2CppObject*>(c, s_.droneModelF);
-            bool read = ugui::IsA(model, s_.droneModel) && F<bool>(model, s_.droneRead);
+            const bool read = DroneRead(c);
             auto it = drones_.find(id);
             if (it == drones_.end()) {
                 int method = 0;
                 Il2CppObject* z = ZoneAtWorld(ugui::GetPosition(unity::TransformOf(c)), method);
                 if (!z && !pageHasZoneInfo_) z = zone_.get() ? PinZone(zone_.get()) : nullptr;
                 if (!z) return true;
-                drones_.emplace(id, Drone{z, read});
+                Drone d;
+                d.zone = z;
+                d.read = read;
+                d.ctrl.Reset(c);
+                drones_.emplace(id, std::move(d));
                 SR2_DEBUG("collectibles: research drone '{}' in '{}' ({}), read {}", id, unity::GetName(z),
                           method == 1 ? "polygon" : method == 2 ? "nearest zone label" : "current zone", read);
             } else {
                 it->second.read = it->second.read || read;
+                if (!it->second.ctrl.Alive() || it->second.ctrl.get() != c) it->second.ctrl.Reset(c);
             }
             return true;
         });
@@ -1572,7 +1604,7 @@ private:
         TeardownStep("release ui", [&] { ui_ = Ui{}; });
         TeardownStep("release index", [&] { ClearIndex(); });
         TeardownStep("release zone", [&] { zone_.Reset(nullptr); });
-        drones_.clear();
+        TeardownStep("release drones", [&] { drones_.clear(); });
         TeardownStep("release ghosts", [&] {
             ghosts_.clear();
             ghostIcon_.Reset(nullptr);
