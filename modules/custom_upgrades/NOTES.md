@@ -104,6 +104,42 @@ Not checked in game yet: all of the above (layout and centring, the hidden icon,
 buys, the label, the slider keys on keyboard and pad, the Activate button's position, prompt and
 animation).
 
+## Sell-All receipt (checklist ut4)
+
+Pressing the silo's Sell-All button no longer sells at once: it opens a receipt (`silo_receipt.cpp`).
+One row per sellable plort type (icon, name, "x count", "@ unit price", line total + coin), the grand
+total, Cancel and Sell. Market closed / unreachable or no plorts: the old text above the button, no
+dialog.
+
+- **Input lock = the game's own.** The dialog root carries the game's `UIInputLocker` component, as
+  menu prefabs do: `OnEnable` -> `TimeDirector.Pause` (timeScale 0, ref-counted) ->
+  `InputDirector.OnPausedChanged` disables the player action map and enables the UI map (no movement,
+  no look, no interact), `CursorLockHandler` frees the cursor while paused, non-UI sound pauses.
+  Closing deactivates the root first (`OnDisable` -> `Unpause` at once), then destroys it. Every close
+  path (cancel, sell, load, module off, fault, scene change) goes through that, so the game cannot
+  stay paused because of the dialog.
+- **Keys** (polled from `Keyboard.current` / `Gamepad.current`, nothing hooked): Left / Right, A / D,
+  Tab, d-pad, left stick switch Cancel / Sell; Enter / Space / pad A press the focused one (Sell is
+  focused first); Esc / pad B cancel. Mouse: the two buttons, a click on the dimmed backdrop cancels.
+  Input is ignored for 0.3 s after opening or refreshing, so the press that opened it never confirms.
+- **What is sold.** Sell quotes the silo again. Only an identical quote (same types, counts and
+  prices, market still open) is sold, with the quote as the plan: at most the shown count per type
+  (`Summarize(..., plan)`). Anything else refreshes the receipt with an orange note ("Prices or
+  contents changed - this is the new receipt", "The Plort Market just closed") and sells nothing; Sell
+  is disabled while nothing can be sold. Time is paused while it is open, so a change is unlikely.
+- **After the sale** the dialog is already closed; the per-plort HUD notices are queued as before
+  (shown once the HUD takes them), the text fallback above the button stays for a missing HUD list.
+- Log: `silo receipt ready`, `sell all (plot '...'): receipt shown, N plort(s) in T type(s) for V`,
+  `receipt cancelled, nothing sold`, `receipt changed before the sale (...) - refreshed`, then the
+  usual `sell all (receipt, plot '...'): sold ...`. Without the dialog parts (setup failed) the button
+  sells at once as before (`sell-all receipt unavailable`).
+
+Not checked in game yet: the look (font taken from a HUD text, sizes at other resolutions), that the
+locker really freezes movement / camera and shows the cursor here, that Esc / Start do not open the
+pause menu as well (they should not: `PauseMenuDirector.TogglePause` (0xAEFF20) only calls `PauseGame`
+while `Time.timeScale > 0`, and the locker sets it to 0), mouse clicks (needs the scene's
+EventSystem), pad A / B and the d-pad / stick.
+
 ## Selling with gamepad / keyboard
 
 The plot menu's alt action (the Info / Pedia button) sells the selected card's sellable upgrade:

@@ -1,0 +1,761 @@
+// custom_upgrades: the silo Sell-All receipt dialog (see silo_receipt.h). SR2 1.3.0, all lookups by name.
+//
+// Layout (CanvasScaler reference 1920 x 1080, the panel centred):
+//   title "Sell-All receipt" + one line of explanation
+//   column labels   Plort | Count | Price | Total
+//   one row per plort type: inner box (kBacker), icon, localized name, "x N", "@ P", line total
+//   separator, "Total" + "N plorts" + grand total with the Newbucks coin
+//   note line (orange; empty unless the receipt was refreshed / the market closed)
+//   [ Cancel (Esc / B) ]                                   [ Sell (Enter / A) ]
+// Rows shrink (56 -> 34 px) when there are many types; a silo has 12 slots, so 12 rows at most.
+// The palette is the game's menu one (drone station / plot menu scene data): navy text, white
+// content, lavender border, light blue inner boxes, teal focus, pink accent (the plot menu's scroll
+// handle, used by the Hen Collector sliders too).
+
+#include "modules/custom_upgrades/silo_receipt.h"
+
+#include <windows.h>
+
+#include <algorithm>
+#include <cmath>
+#include <format>
+#include <initializer_list>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "core/detour_guard.h"
+#include "core/il2cpp_api.h"
+#include "core/log.h"
+#include "core/main_thread.h"
+#include "core/module.h"
+#include "core/resolver.h"
+#include "core/unity.h"
+
+namespace sr2::modules::custom_upgrades::ui {
+
+long long Receipt::Total() const {
+    long long t = 0;
+    for (const ReceiptLine& l : lines) t += l.Total();
+    return t;
+}
+
+int Receipt::Count() const {
+    int n = 0;
+    for (const ReceiptLine& l : lines) n += l.count;
+    return n;
+}
+
+namespace {
+
+namespace unity = sr2::core::unity;
+namespace main_thread = sr2::core::main_thread;
+using sr2::il2cpp::api;
+using sr2::il2cpp::Resolver;
+
+constexpr const char* kImage = "Assembly-CSharp";
+constexpr const char* kCore = "UnityEngine.CoreModule";
+constexpr const char* kUi = "UnityEngine.UI";
+constexpr const char* kTmp = "Unity.TextMeshPro";
+constexpr const char* kInput = "Unity.InputSystem";
+
+constexpr int kAlignLeft = 513, kAlignCenter = 514, kAlignRight = 516;  // TMP TextAlignmentOptions
+constexpr float kGraceSeconds = 0.3f;  // input ignored right after opening
+constexpr int kSortingOrder = 1000;    // above the HUD
+
+struct Vec2 {
+    float x, y;
+};
+struct Color {
+    float r, g, b, a;
+};
+
+constexpr Color kNavy{0.267f, 0.325f, 0.478f, 1.0f};
+constexpr Color kNavyDim{0.267f, 0.325f, 0.478f, 0.70f};
+constexpr Color kWhite{1.0f, 1.0f, 1.0f, 1.0f};
+constexpr Color kLavender{0.737f, 0.686f, 0.824f, 1.0f};
+constexpr Color kBacker{0.875f, 0.902f, 0.945f, 1.0f};
+constexpr Color kTeal{0.063f, 0.675f, 0.757f, 1.0f};
+constexpr Color kPink{0.871f, 0.310f, 0.522f, 1.0f};
+constexpr Color kGrey{0.78f, 0.80f, 0.84f, 1.0f};
+constexpr Color kOrange{0.90f, 0.45f, 0.12f, 1.0f};
+
+constexpr float kPanelW = 980.0f;
+constexpr float kPad = 40.0f;
+constexpr float kInnerW = kPanelW - 2 * kPad;
+constexpr float kButtonW = 320.0f, kButtonH = 64.0f;
+
+// "12,345"
+std::string Group(long long v) {
+    std::string s = std::to_string(v < 0 ? -v : v);
+    for (int i = static_cast<int>(s.size()) - 3; i > 0; i -= 3) s.insert(static_cast<size_t>(i), ",");
+    return v < 0 ? "-" + s : s;
+}
+
+}  // namespace
+
+struct SiloReceipt::Impl {
+    const char* module = "custom_upgrades";
+
+    // ---- classes ----
+    Il2CppClass* goClass = nullptr, *rtClass = nullptr, *imageClass = nullptr, *toggleClass = nullptr;
+    Il2CppClass* canvasClass = nullptr, *scalerClass = nullptr, *raycasterClass = nullptr;
+    Il2CppClass* tmpTextClass = nullptr, *tmpUguiClass = nullptr, *sdfRectClass = nullptr;
+    Il2CppClass* lockerClass = nullptr, *identClass = nullptr, *lsClass = nullptr;
+
+    // ---- offsets ----
+    size_t offIdentIcon = 0, offIdentName = 0;
+    size_t offGcLookup = 0, offLookupCurrencies = 0, offCurrencyArr = 0, offCurrencyIcon = 0;  // optional (coin)
+
+    // ---- methods ----
+    const MethodInfo* goCtor = nullptr, *goAddComponent = nullptr;
+    const MethodInfo* trSetParent = nullptr;
+    const MethodInfo* rtSetAnchorMin = nullptr, *rtSetAnchorMax = nullptr, *rtSetPivot = nullptr, *rtSetSize = nullptr,
+                    *rtSetPos = nullptr;
+    const MethodInfo* objDestroy = nullptr;
+    const MethodInfo* gfxSetColor = nullptr, *gfxSetRaycast = nullptr, *imgSetSprite = nullptr, *imgSetPreserve = nullptr;
+    const MethodInfo* tmpSetText = nullptr, *tmpGetFont = nullptr, *tmpSetFont = nullptr, *tmpSetSize = nullptr,
+                    *tmpSetColor = nullptr, *tmpSetAlign = nullptr, *tmpSetWrap = nullptr, *tmpSetOverflow = nullptr;
+    const MethodInfo* cvSetMode = nullptr, *cvSetOrder = nullptr;
+    const MethodInfo* scSetMode = nullptr, *scSetRef = nullptr, *scSetMatch = nullptr;
+    const MethodInfo* sdfSetRadius = nullptr, *sdfSetBorder = nullptr, *sdfSetBorderColor = nullptr;
+    const MethodInfo* tglGetOn = nullptr, *tglSetOnQuiet = nullptr, *selSetTransition = nullptr, *selSetNav = nullptr;
+    const MethodInfo* lsGet = nullptr, *gcInstance = nullptr;
+    // input (InputSystem)
+    const MethodInfo* kbCurrent = nullptr, *padCurrent = nullptr, *btnPressed = nullptr;
+    const MethodInfo* kbEsc = nullptr, *kbEnter = nullptr, *kbNumEnter = nullptr, *kbSpace = nullptr, *kbLeft = nullptr,
+                    *kbRight = nullptr, *kbA = nullptr, *kbD = nullptr, *kbTab = nullptr;
+    const MethodInfo* padSouth = nullptr, *padEast = nullptr, *padDpad = nullptr, *padStick = nullptr;
+    const MethodInfo* dirLeft = nullptr, *dirRight = nullptr;      // DpadControl.get_left / get_right
+    const MethodInfo* stickLeft = nullptr, *stickRight = nullptr;  // StickControl.get_left / get_right
+    using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
+    ObjectNewFn objectNew = nullptr;
+
+    // ---- live state (main thread) ----
+    bool open = false;
+    float grace = 0.0f;
+    int focus = 1;  // 0 = Cancel, 1 = Sell
+    bool canSell = true;
+    std::vector<Il2CppGCHandle> handles;       // root-level objects (whole open)
+    std::vector<Il2CppGCHandle> panelHandles;  // current panel (rebuilt by Refresh)
+    Il2CppObject* root = nullptr, *rootRt = nullptr, *backdropToggle = nullptr;
+    Il2CppObject* panel = nullptr;
+    Il2CppObject* btnBg[2] = {}, *btnText[2] = {}, *btnToggle[2] = {};
+    Il2CppObject* font = nullptr;  // TMP_FontAsset of a HUD text (this open only)
+    bool loggedOpen = false, loggedFail = false;
+
+    // ---- helpers ----
+    bool Faulted() const { return sr2::core::ModuleFaulted(module); }
+    Il2CppObject* Call(const MethodInfo* m, void* obj, std::initializer_list<void*> args, const char* what,
+                       bool* ok = nullptr) {
+        if (!m) {
+            if (ok) *ok = false;
+            return nullptr;
+        }
+        std::vector<void*> params(args);
+        std::string err;
+        Il2CppObject* r = Resolver::Get().Invoke(m, obj, params.empty() ? nullptr : params.data(), &err);
+        const bool good = err.empty();
+        if (ok) *ok = good;
+        if (!good) {
+            if (err.rfind("native exception", 0) == 0) sr2::core::MarkModuleFaulted(module, std::format("{}: {}", what, err));
+            else SR2_WARN("[{}] silo receipt: {} failed: {}", module, what, err);
+        }
+        return r;
+    }
+    template <class T>
+    static T Unbox(Il2CppObject* boxed, T def = T{}) {
+        return boxed ? *reinterpret_cast<T*>(reinterpret_cast<char*>(boxed) + 2 * sizeof(void*)) : def;
+    }
+    bool IsA(Il2CppObject* obj, Il2CppClass* k) const {
+        const auto& a = api();
+        if (!obj || !k || !a.il2cpp_object_get_class) return false;
+        Il2CppClass* c = a.il2cpp_object_get_class(obj);
+        if (c == k) return true;
+        return c && a.il2cpp_class_is_assignable_from && a.il2cpp_class_is_assignable_from(k, c);
+    }
+    static void Keep(std::vector<Il2CppGCHandle>& into, Il2CppObject* o) {
+        if (Il2CppGCHandle h = o ? unity::NewGCHandle(o) : nullptr) into.push_back(h);
+    }
+    static void FreeLater(std::vector<Il2CppGCHandle>& hs) {
+        std::vector<Il2CppGCHandle> doomed;
+        doomed.swap(hs);
+        if (!doomed.empty()) main_thread::Post([doomed] {
+            for (Il2CppGCHandle h : doomed) unity::FreeGCHandle(h);
+        });
+    }
+    Il2CppObject* AddComponent(Il2CppObject* go, Il2CppClass* k, const char* what) {
+        if (!unity::IsAlive(go) || !k) return nullptr;
+        bool ok = false;
+        Il2CppObject* c = Call(goAddComponent, go, {unity::TypeOf(k)}, what, &ok);
+        return ok && unity::IsAlive(c) && IsA(c, k) ? c : nullptr;
+    }
+    void SetVec(const MethodInfo* m, Il2CppObject* rt, Vec2 v, const char* what) { Call(m, rt, {&v}, what); }
+    void Rect(Il2CppObject* rt, Vec2 amin, Vec2 amax, Vec2 pivot, Vec2 pos, Vec2 size) {
+        SetVec(rtSetAnchorMin, rt, amin, "RectTransform.set_anchorMin");
+        SetVec(rtSetAnchorMax, rt, amax, "RectTransform.set_anchorMax");
+        SetVec(rtSetPivot, rt, pivot, "RectTransform.set_pivot");
+        SetVec(rtSetSize, rt, size, "RectTransform.set_sizeDelta");
+        SetVec(rtSetPos, rt, pos, "RectTransform.set_anchoredPosition");
+    }
+    // Top-left anchored rect inside the parent (y grows downwards).
+    void At(Il2CppObject* rt, float x, float y, float w, float h) { Rect(rt, {0, 1}, {0, 1}, {0, 1}, {x, -y}, {w, h}); }
+    Il2CppObject* NewGo(const std::string& name) {
+        Il2CppObject* go = objectNew ? objectNew(goClass) : nullptr;
+        if (!go) return nullptr;
+        bool ok = false;
+        Call(goCtor, go, {unity::NewString(name)}, "GameObject..ctor", &ok);
+        return ok && unity::IsAlive(go) ? go : nullptr;
+    }
+    Il2CppObject* NewUi(const std::string& name, Il2CppObject* parentTr) {
+        Il2CppObject* go = NewGo(name);
+        if (!go) return nullptr;
+        if (!AddComponent(go, rtClass, "AddComponent(RectTransform)")) {
+            Destroy(go);
+            return nullptr;
+        }
+        bool stays = false, ok = false;
+        Call(trSetParent, unity::TransformOf(go), {parentTr, &stays}, "Transform.SetParent", &ok);
+        if (!ok) {
+            Destroy(go);
+            return nullptr;
+        }
+        return go;
+    }
+    void Destroy(Il2CppObject* go) {
+        if (unity::IsAlive(go)) Call(objDestroy, nullptr, {go}, "Object.Destroy");
+    }
+    void SetColor(Il2CppObject* g, Color c) {
+        if (unity::IsAlive(g)) Call(gfxSetColor, g, {&c}, "Graphic.set_color");
+    }
+    void SetRaycast(Il2CppObject* g, bool on) {
+        if (unity::IsAlive(g)) Call(gfxSetRaycast, g, {&on}, "Graphic.set_raycastTarget");
+    }
+    void SetText(Il2CppObject* tmp, const std::string& s) {
+        if (unity::IsAlive(tmp)) Call(tmpSetText, tmp, {unity::NewString(s)}, "TMP_Text.set_text");
+    }
+    Il2CppObject* Shape(Il2CppObject* go, Color c, float radius, float border = 0.0f, Color borderColor = {}) {
+        if (sdfRectClass) {
+            if (Il2CppObject* g = AddComponent(go, sdfRectClass, "AddComponent(SDFRoundedRectangle)")) {
+                SetColor(g, c);
+                Call(sdfSetRadius, g, {&radius}, "SDFRoundedRectangle.SetCornerRadius");
+                if (border > 0.0f && sdfSetBorder && sdfSetBorderColor) {
+                    Call(sdfSetBorder, g, {&border}, "SDFGraphic.set_BorderSize");
+                    Call(sdfSetBorderColor, g, {&borderColor}, "SDFGraphic.set_BorderColor");
+                }
+                return g;
+            }
+        }
+        Il2CppObject* img = AddComponent(go, imageClass, "AddComponent(Image)");
+        SetColor(img, c);
+        return img;
+    }
+    Il2CppObject* Box(Il2CppObject* parentRt, const char* name, float x, float y, float w, float h, Color c, float radius,
+                      float border = 0.0f, Color borderColor = {}) {
+        Il2CppObject* go = NewUi(name, parentRt);
+        if (!go) return nullptr;
+        At(unity::TransformOf(go), x, y, w, h);
+        Il2CppObject* g = Shape(go, c, radius, border, borderColor);
+        SetRaycast(g, false);
+        return go;
+    }
+    Il2CppObject* Text(Il2CppObject* parentRt, const char* name, float x, float y, float w, float h, const std::string& s,
+                       float size, Color col, int align, bool wrap = false) {
+        Il2CppObject* go = NewUi(name, parentRt);
+        if (!go) return nullptr;
+        At(unity::TransformOf(go), x, y, w, h);
+        Il2CppObject* tmp = AddComponent(go, tmpUguiClass, "AddComponent(TextMeshProUGUI)");
+        if (!tmp) return nullptr;
+        if (unity::IsAlive(font)) Call(tmpSetFont, tmp, {font}, "TMP_Text.set_font");
+        Call(tmpSetSize, tmp, {&size}, "TMP_Text.set_fontSize");
+        Call(tmpSetColor, tmp, {&col}, "TMP_Text.set_color");
+        int32_t a = align, wrapMode = wrap ? 1 : 0, overflow = 1;  // TextWrappingModes Normal / NoWrap; Ellipsis
+        Call(tmpSetAlign, tmp, {&a}, "TMP_Text.set_alignment");
+        if (tmpSetWrap) Call(tmpSetWrap, tmp, {&wrapMode}, "TMP_Text.set_textWrappingMode");
+        if (!wrap && tmpSetOverflow) Call(tmpSetOverflow, tmp, {&overflow}, "TMP_Text.set_overflowMode");
+        SetRaycast(tmp, false);
+        SetText(tmp, s);
+        return tmp;
+    }
+    Il2CppObject* Sprite(Il2CppObject* parentRt, const char* name, float x, float y, float w, float h, Il2CppObject* sprite) {
+        if (!unity::IsAlive(sprite)) return nullptr;
+        Il2CppObject* go = NewUi(name, parentRt);
+        if (!go) return nullptr;
+        At(unity::TransformOf(go), x, y, w, h);
+        Il2CppObject* img = AddComponent(go, imageClass, "AddComponent(Image)");
+        if (!img) return nullptr;
+        Call(imgSetSprite, img, {sprite}, "Image.set_sprite");
+        bool keep = true;
+        if (imgSetPreserve) Call(imgSetPreserve, img, {&keep}, "Image.set_preserveAspect");
+        SetRaycast(img, false);
+        return img;
+    }
+    // A pollable click target on `go` (whose graphic must be a raycast target).
+    Il2CppObject* Clickable(Il2CppObject* go) {
+        Il2CppObject* t = AddComponent(go, toggleClass, "AddComponent(Toggle)");
+        if (!t) return nullptr;
+        int32_t none = 0;                       // Selectable.Transition.None
+        alignas(8) unsigned char nav[64] = {};  // Navigation.Mode.None
+        Call(selSetTransition, t, {&none}, "Selectable.set_transition");
+        Call(selSetNav, t, {nav}, "Selectable.set_navigation");
+        bool off = false;
+        Call(tglSetOnQuiet, t, {&off}, "Toggle.SetIsOnWithoutNotify");
+        return t;
+    }
+    bool Clicked(Il2CppObject* toggle) {  // true once per click
+        if (!unity::IsAlive(toggle)) return false;
+        bool ok = false;
+        const bool on = Unbox<bool>(Call(tglGetOn, toggle, {}, "Toggle.get_isOn", &ok));
+        if (!ok || !on) return false;
+        bool off = false;
+        Call(tglSetOnQuiet, toggle, {&off}, "Toggle.SetIsOnWithoutNotify");
+        return true;
+    }
+    Il2CppObject* Device(const MethodInfo* current) {
+        if (!current) return nullptr;
+        bool ok = false;
+        Il2CppObject* dev = Call(current, nullptr, {}, "InputDevice.get_current", &ok);
+        return ok ? dev : nullptr;
+    }
+    bool Pressed(Il2CppObject* dev, const MethodInfo* control, const MethodInfo* sub = nullptr) {
+        if (!dev || !control || !btnPressed) return false;
+        bool ok = false;
+        Il2CppObject* ctl = Call(control, dev, {}, "input control getter", &ok);
+        if (ok && ctl && sub) ctl = Call(sub, ctl, {}, "input sub-control getter", &ok);
+        if (!ok || !ctl) return false;
+        return Unbox<bool>(Call(btnPressed, ctl, {}, "ButtonControl.get_wasPressedThisFrame", &ok)) && ok;
+    }
+    std::string Localized(Il2CppObject* ls) {
+        if (!ls || !lsGet || !IsA(ls, lsClass)) return {};
+        bool ok = false;
+        Il2CppObject* r = Call(lsGet, ls, {}, "LocalizedString.GetLocalizedString", &ok);
+        return ok && r ? unity::ToUtf8(reinterpret_cast<Il2CppString*>(r)) : std::string();
+    }
+    Il2CppObject* CoinSprite() {
+        if (!gcInstance || !offGcLookup || !offLookupCurrencies || !offCurrencyArr || !offCurrencyIcon) return nullptr;
+        bool ok = false;
+        Il2CppObject* gc = Call(gcInstance, nullptr, {}, "GameContext.Instance", &ok);
+        if (!ok || !unity::IsAlive(gc)) return nullptr;
+        Il2CppObject* lookup = unity::Field<Il2CppObject*>(gc, offGcLookup);
+        if (!unity::IsAlive(lookup)) return nullptr;
+        Il2CppObject* list = unity::Field<Il2CppObject*>(lookup, offLookupCurrencies);
+        if (!unity::IsAlive(list)) return nullptr;
+        void* arr = unity::Field<void*>(list, offCurrencyArr);
+        auto* first = arr && unity::ArrayLength(arr) > 0 ? static_cast<Il2CppObject*>(unity::ArrayAt(arr, 0)) : nullptr;
+        Il2CppObject* icon = unity::IsAlive(first) ? unity::Field<Il2CppObject*>(first, offCurrencyIcon) : nullptr;
+        return unity::IsAlive(icon) ? icon : nullptr;
+    }
+
+    bool BuildPanel(const Receipt& r, const std::string& note);
+    void StyleButtons();
+    void Teardown();
+};
+
+// ---------------------------------------------------------------- setup --
+
+SiloReceipt::SiloReceipt() = default;
+SiloReceipt::~SiloReceipt() = default;  // impl_ lives for the process (detour-free, but cheap to keep)
+
+bool SiloReceipt::Setup(Resolver& R, const char* module, std::string& why) {
+    auto* p = new Impl();
+    p->module = module;
+    auto parentOf = [](Il2CppClass* c) { return api().il2cpp_class_get_parent ? api().il2cpp_class_get_parent(c) : nullptr; };
+    auto cls = [&](const char* image, const char* ns, const char* name) -> Il2CppClass* {
+        std::string err;
+        Il2CppClass* k = R.Class(image, ns, name, &err);
+        if (!k && why.empty()) why = err.empty() ? std::format("class {}.{} not found", ns, name) : err;
+        return k;
+    };
+    auto method = [&](Il2CppClass* k, const char* name, int argc, bool required = true) -> const MethodInfo* {
+        std::string err;
+        for (Il2CppClass* c = k; c; c = parentOf(c))
+            if (const MethodInfo* m = R.Method(c, name, argc, &err)) return m;
+        if (required && why.empty()) why = std::format("method {}({}) not found", name, argc);
+        return nullptr;
+    };
+    auto byParams = [&](Il2CppClass* k, const char* name, std::initializer_list<std::string_view> params) {
+        std::string err;
+        const MethodInfo* m = k ? R.MethodByParams(k, name, params, &err) : nullptr;
+        if (!m && why.empty()) why = std::format("{}: {}", name, err);
+        return m;
+    };
+    auto off = [&](Il2CppClass* k, const char* field, size_t& out) {
+        std::string err;
+        for (Il2CppClass* c = k; c; c = parentOf(c))
+            if (auto o = R.FieldOffset(c, field, &err)) {
+                out = *o;
+                return;
+            }
+        if (why.empty()) why = std::format("field {} not found", field);
+    };
+    auto fail = [&]() {
+        delete p;
+        return false;
+    };
+
+    HMODULE ga = api().module;
+    p->objectNew = reinterpret_cast<Impl::ObjectNewFn>(ga ? GetProcAddress(ga, "il2cpp_object_new") : nullptr);
+    if (!p->objectNew) why = "il2cpp_object_new export missing";
+
+    p->goClass = cls(kCore, "UnityEngine", "GameObject");
+    Il2CppClass* transform = cls(kCore, "UnityEngine", "Transform");
+    Il2CppClass* uobject = cls(kCore, "UnityEngine", "Object");
+    p->rtClass = cls(kCore, "UnityEngine", "RectTransform");
+    p->canvasClass = cls("UnityEngine.UIModule", "UnityEngine", "Canvas");
+    p->scalerClass = cls(kUi, "UnityEngine.UI", "CanvasScaler");
+    p->raycasterClass = cls(kUi, "UnityEngine.UI", "GraphicRaycaster");
+    p->imageClass = cls(kUi, "UnityEngine.UI", "Image");
+    Il2CppClass* graphic = cls(kUi, "UnityEngine.UI", "Graphic");
+    Il2CppClass* selectable = cls(kUi, "UnityEngine.UI", "Selectable");
+    p->toggleClass = cls(kUi, "UnityEngine.UI", "Toggle");
+    p->tmpTextClass = cls(kTmp, "TMPro", "TMP_Text");
+    p->tmpUguiClass = cls(kTmp, "TMPro", "TextMeshProUGUI");
+    p->lsClass = cls("Unity.Localization", "UnityEngine.Localization", "LocalizedString");
+    p->lockerClass = cls(kImage, "MonomiPark.SlimeRancher.UI", "UIInputLocker");
+    p->identClass = cls(kImage, "", "IdentifiableType");
+    Il2CppClass* kb = cls(kInput, "UnityEngine.InputSystem", "Keyboard");
+    Il2CppClass* pad = cls(kInput, "UnityEngine.InputSystem", "Gamepad");
+    Il2CppClass* button = cls(kInput, "UnityEngine.InputSystem.Controls", "ButtonControl");
+    Il2CppClass* dpad = cls(kInput, "UnityEngine.InputSystem.Controls", "DpadControl");
+    Il2CppClass* stick = cls(kInput, "UnityEngine.InputSystem.Controls", "StickControl");
+    if (!why.empty()) return fail();
+
+    off(p->identClass, "icon", p->offIdentIcon);
+    off(p->identClass, "localizedName", p->offIdentName);
+    if (!why.empty()) return fail();
+
+    p->goCtor = byParams(p->goClass, ".ctor", {"System.String"});
+    p->goAddComponent = byParams(p->goClass, "AddComponent", {"System.Type"});
+    p->trSetParent = byParams(transform, "SetParent", {"UnityEngine.Transform", "System.Boolean"});
+    p->rtSetAnchorMin = method(p->rtClass, "set_anchorMin", 1);
+    p->rtSetAnchorMax = method(p->rtClass, "set_anchorMax", 1);
+    p->rtSetPivot = method(p->rtClass, "set_pivot", 1);
+    p->rtSetSize = method(p->rtClass, "set_sizeDelta", 1);
+    p->rtSetPos = method(p->rtClass, "set_anchoredPosition", 1);
+    p->objDestroy = byParams(uobject, "Destroy", {"UnityEngine.Object"});
+    p->gfxSetColor = method(graphic, "set_color", 1);
+    p->gfxSetRaycast = method(graphic, "set_raycastTarget", 1);
+    p->imgSetSprite = method(p->imageClass, "set_sprite", 1);
+    p->tmpSetText = method(p->tmpTextClass, "set_text", 1);
+    p->tmpGetFont = method(p->tmpTextClass, "get_font", 0);
+    p->tmpSetFont = method(p->tmpTextClass, "set_font", 1);
+    p->tmpSetSize = method(p->tmpTextClass, "set_fontSize", 1);
+    p->tmpSetColor = method(p->tmpTextClass, "set_color", 1);
+    p->tmpSetAlign = method(p->tmpTextClass, "set_alignment", 1);
+    p->cvSetMode = method(p->canvasClass, "set_renderMode", 1);
+    p->cvSetOrder = method(p->canvasClass, "set_sortingOrder", 1);
+    p->scSetMode = method(p->scalerClass, "set_uiScaleMode", 1);
+    p->scSetRef = method(p->scalerClass, "set_referenceResolution", 1);
+    p->scSetMatch = method(p->scalerClass, "set_matchWidthOrHeight", 1);
+    p->tglGetOn = method(p->toggleClass, "get_isOn", 0);
+    p->tglSetOnQuiet = method(p->toggleClass, "SetIsOnWithoutNotify", 1);
+    p->selSetTransition = method(selectable, "set_transition", 1);
+    p->selSetNav = method(selectable, "set_navigation", 1);
+    p->lsGet = method(p->lsClass, "GetLocalizedString", 0);
+    p->kbCurrent = method(kb, "get_current", 0);
+    p->padCurrent = method(pad, "get_current", 0);
+    p->btnPressed = method(button, "get_wasPressedThisFrame", 0);
+    p->kbEsc = method(kb, "get_escapeKey", 0);
+    p->kbEnter = method(kb, "get_enterKey", 0);
+    p->kbNumEnter = method(kb, "get_numpadEnterKey", 0);
+    p->kbSpace = method(kb, "get_spaceKey", 0);
+    p->kbLeft = method(kb, "get_leftArrowKey", 0);
+    p->kbRight = method(kb, "get_rightArrowKey", 0);
+    p->kbA = method(kb, "get_aKey", 0);
+    p->kbD = method(kb, "get_dKey", 0);
+    p->kbTab = method(kb, "get_tabKey", 0);
+    p->padSouth = method(pad, "get_buttonSouth", 0);
+    p->padEast = method(pad, "get_buttonEast", 0);
+    p->padDpad = method(pad, "get_dpad", 0);
+    p->padStick = method(pad, "get_leftStick", 0);
+    p->dirLeft = method(dpad, "get_left", 0);
+    p->dirRight = method(dpad, "get_right", 0);
+    p->stickLeft = method(stick, "get_left", 0);
+    p->stickRight = method(stick, "get_right", 0);
+    if (!why.empty()) return fail();
+
+    // ---- optional parts ----
+    std::string report;
+    {
+        std::string err;
+        p->tmpSetWrap = R.Method(p->tmpTextClass, "set_textWrappingMode", 1, &err);
+        p->tmpSetOverflow = R.Method(p->tmpTextClass, "set_overflowMode", 1, &err);
+        p->imgSetPreserve = R.Method(p->imageClass, "set_preserveAspect", 1, &err);
+        p->sdfRectClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.SDFUI", "SDFRoundedRectangle", &err);
+        if (p->sdfRectClass) {
+            p->sdfSetRadius = R.MethodByParams(p->sdfRectClass, "SetCornerRadius", {"System.Single"}, &err);
+            Il2CppClass* sdf = parentOf(p->sdfRectClass);  // SDFGraphic
+            p->sdfSetBorder = sdf ? R.Method(sdf, "set_BorderSize", 1, &err) : nullptr;
+            p->sdfSetBorderColor = sdf ? R.Method(sdf, "set_BorderColor", 1, &err) : nullptr;
+            if (!p->sdfSetRadius) p->sdfRectClass = nullptr;
+        }
+        if (!p->sdfRectClass) report += " SDF shapes: NOT available (plain images);";
+        Il2CppClass* gameCtx = R.Class(kImage, "", "GameContext", &err);
+        Il2CppClass* lookup = R.Class(kImage, "", "LookupDirector", &err);
+        Il2CppClass* curList = R.Class(kImage, "MonomiPark.SlimeRancher.Economy", "CurrencyList", &err);
+        Il2CppClass* curDef = R.Class(kImage, "MonomiPark.SlimeRancher.Economy", "CurrencyDefinition", &err);
+        if (gameCtx && lookup && curList && curDef) {
+            if (Il2CppClass* single = parentOf(gameCtx)) p->gcInstance = R.Method(single, "get_Instance", 0, &err);
+            if (auto o = R.FieldOffset(gameCtx, "<LookupDirector>k__BackingField", &err)) p->offGcLookup = *o;
+            if (auto o = R.FieldOffset(lookup, "_currencyList", &err)) p->offLookupCurrencies = *o;
+            if (auto o = R.FieldOffset(curList, "_currencies", &err)) p->offCurrencyArr = *o;
+            if (auto o = R.FieldOffset(curDef, "_icon", &err)) p->offCurrencyIcon = *o;
+        }
+        if (!p->gcInstance || !p->offGcLookup || !p->offLookupCurrencies || !p->offCurrencyArr || !p->offCurrencyIcon)
+            report += " coin icon: NOT available;";
+    }
+    impl_ = p;
+    ready_ = true;
+    SR2_INFO("[{}] silo receipt ready{}", module, report.empty() ? "" : ":" + report);
+    return true;
+}
+
+// ---------------------------------------------------------------- build --
+
+bool SiloReceipt::Impl::BuildPanel(const Receipt& r, const std::string& note) {
+    // Rows sorted by the caller; heights shrink so 12 rows still fit 1080.
+    const int n = static_cast<int>(r.lines.size());
+    const float titleY = 28.0f, subY = 84.0f, headY = 136.0f, rowsY = 172.0f, gap = 6.0f;
+    const float maxRows = 1080.0f - 80.0f - rowsY - 230.0f;
+    const float rowH = std::clamp(n > 0 ? maxRows / n - gap : 56.0f, 34.0f, 56.0f);
+    const float rowsEnd = rowsY + n * (rowH + gap);
+    const float sepY = rowsEnd + 8.0f, totalY = sepY + 16.0f, noteY = totalY + 58.0f, btnY = noteY + 44.0f;
+    const float panelH = btnY + kButtonH + 30.0f;
+    // Columns (x inside the content, left edge = kPad).
+    const float cIcon = kPad + 12.0f, cName = kPad + 70.0f, cCount = kPad + 460.0f, cPrice = kPad + 590.0f,
+                cTotal = kPad + 720.0f, cCoin = kPad + 866.0f;
+    const float nameW = 380.0f, colW = 120.0f, totalW = 140.0f, coin = 28.0f;
+
+    Il2CppObject* p = NewUi("Panel", rootRt);
+    if (!p) return false;
+    panel = p;
+    Keep(panelHandles, p);
+    Il2CppObject* prt = unity::TransformOf(p);
+    Rect(prt, {0.5f, 0.5f}, {0.5f, 0.5f}, {0.5f, 0.5f}, {0, 0}, {kPanelW, panelH});
+    Box(prt, "Border", -8, -8, kPanelW + 16, panelH + 16, kLavender, 34.0f);
+    if (Il2CppObject* content = Box(prt, "Content", 0, 0, kPanelW, panelH, kWhite, 30.0f)) {
+        SetRaycast(sdfRectClass ? unity::GetComponent(content, sdfRectClass) : unity::GetComponent(content, imageClass), true);
+        Clickable(content);  // never polled: a click on the panel must not reach the backdrop (= Cancel)
+    }
+    Text(prt, "Title", kPad, titleY, kInnerW, 50, "Sell-All receipt", 40.0f, kNavy, kAlignLeft);
+    Text(prt, "Subtitle", kPad, subY, kInnerW, 34, "Every plort in this silo at today's Plort Market prices.", 22.0f,
+         kNavyDim, kAlignLeft);
+    Text(prt, "HeadPlort", cName, headY, nameW, 30, "Plort", 20.0f, kNavyDim, kAlignLeft);
+    Text(prt, "HeadCount", cCount, headY, colW, 30, "Count", 20.0f, kNavyDim, kAlignRight);
+    Text(prt, "HeadPrice", cPrice, headY, colW, 30, "Price", 20.0f, kNavyDim, kAlignRight);
+    Text(prt, "HeadTotal", cTotal, headY, totalW, 30, "Total", 20.0f, kNavyDim, kAlignRight);
+
+    Il2CppObject* coinSprite = CoinSprite();
+    const float textSize = rowH >= 48.0f ? 26.0f : 22.0f;
+    const float iconSize = std::min(44.0f, rowH - 8.0f);
+    for (int i = 0; i < n; ++i) {
+        const ReceiptLine& l = r.lines[static_cast<size_t>(i)];
+        const float y = rowsY + i * (rowH + gap);
+        Box(prt, "Row", kPad, y, kInnerW, rowH, kBacker, 18.0f);
+        std::string name;
+        Il2CppObject* icon = nullptr;
+        if (unity::IsAlive(l.type) && IsA(l.type, identClass)) {
+            name = Localized(unity::Field<Il2CppObject*>(l.type, offIdentName));
+            if (name.empty()) name = unity::GetName(l.type);
+            icon = unity::Field<Il2CppObject*>(l.type, offIdentIcon);
+        }
+        Sprite(prt, "Icon", cIcon, y + (rowH - iconSize) * 0.5f, iconSize, iconSize, icon);
+        Text(prt, "Name", cName, y, nameW, rowH, name, textSize, kNavy, kAlignLeft);
+        Text(prt, "Count", cCount, y, colW, rowH, std::format("x {}", Group(l.count)), textSize, kNavy, kAlignRight);
+        Text(prt, "Price", cPrice, y, colW, rowH, std::format("@ {}", Group(l.price)), textSize, kNavyDim, kAlignRight);
+        Text(prt, "Total", cTotal, y, totalW, rowH, Group(l.Total()), textSize, kNavy, kAlignRight);
+        Sprite(prt, "Coin", cCoin, y + (rowH - coin) * 0.5f, coin, coin, coinSprite);
+    }
+    if (n == 0) Text(prt, "Empty", cName, rowsY, kInnerW - 70, 56, "No plorts to sell.", 26.0f, kNavyDim, kAlignLeft);
+
+    Box(prt, "Separator", kPad, sepY, kInnerW, 3, kLavender, 1.5f);
+    Text(prt, "TotalLabel", kPad + 12, totalY, 300, 50, "Total", 32.0f, kNavy, kAlignLeft);
+    const int count = r.Count();
+    Text(prt, "TotalCount", cCount - 140, totalY, colW + 140, 50, std::format("{} plort{}", Group(count), count == 1 ? "" : "s"),
+         26.0f, kNavyDim, kAlignRight);
+    Text(prt, "TotalValue", cTotal - 60, totalY, totalW + 60, 50, Group(r.Total()), 32.0f, kNavy, kAlignRight);
+    Sprite(prt, "TotalCoin", cCoin - 2, totalY + 9, 32, 32, coinSprite);
+    if (!note.empty()) Text(prt, "Note", kPad, noteY, kInnerW, 40, note, 22.0f, kOrange, kAlignCenter, true);
+
+    const char* labels[2] = {"Cancel  (Esc / B)", "Sell  (Enter / A)"};
+    const float bx[2] = {kPad, kPanelW - kPad - kButtonW};
+    for (int i = 0; i < 2; ++i) {
+        Il2CppObject* b = NewUi(i == 0 ? "Cancel" : "Sell", prt);
+        if (!b) return false;
+        At(unity::TransformOf(b), bx[i], btnY, kButtonW, kButtonH);
+        btnBg[i] = Shape(b, kBacker, 32.0f, 4.0f, kLavender);
+        SetRaycast(btnBg[i], true);
+        btnText[i] = Text(unity::TransformOf(b), "Label", 0, 0, kButtonW, kButtonH, labels[i], 26.0f, kNavy, kAlignCenter);
+        btnToggle[i] = Clickable(b);
+        Keep(panelHandles, btnBg[i]);
+        Keep(panelHandles, btnText[i]);
+        Keep(panelHandles, btnToggle[i]);
+        if (!btnBg[i] || !btnToggle[i]) return false;
+    }
+    StyleButtons();
+    return !Faulted();
+}
+
+void SiloReceipt::Impl::StyleButtons() {
+    if (!canSell && focus == 1) focus = 0;
+    for (int i = 0; i < 2; ++i) {
+        const bool focused = focus == i;
+        const bool disabled = i == 1 && !canSell;
+        const Color fill = disabled ? kGrey : focused ? (i == 1 ? kPink : kTeal) : kBacker;
+        SetColor(btnBg[i], fill);
+        if (sdfSetBorderColor && sdfRectClass && IsA(btnBg[i], sdfRectClass)) {
+            Color border = focused && !disabled ? kWhite : kLavender;
+            Call(sdfSetBorderColor, btnBg[i], {&border}, "SDFGraphic.set_BorderColor");
+        }
+        SetColor(btnText[i], disabled ? kWhite : focused ? kWhite : kNavy);
+    }
+}
+
+void SiloReceipt::Impl::Teardown() {
+    // Deactivate first: UIInputLocker.OnDisable unpauses (input back) right now, Destroy is deferred.
+    // Done even after a fault - the game must never stay paused because of us.
+    if (unity::IsAlive(root)) {
+        unity::SetActive(root, false);
+        Destroy(root);
+    }
+    open = false;
+    root = rootRt = backdropToggle = panel = nullptr;
+    for (int i = 0; i < 2; ++i) btnBg[i] = btnText[i] = btnToggle[i] = nullptr;
+    font = nullptr;
+    FreeLater(panelHandles);
+    FreeLater(handles);
+}
+
+// ---------------------------------------------------------------- api --
+
+bool SiloReceipt::Open(const Receipt& r) {
+    if (!ready_ || !impl_ || impl_->open || !main_thread::IsMainThread()) return false;
+    Impl& p = *impl_;
+    auto failOpen = [&](const char* what) {
+        if (!p.loggedFail) SR2_WARN("[{}] silo receipt: not opened: {}", p.module, what);
+        p.loggedFail = true;
+        p.Teardown();
+        return false;
+    };
+    // Font: the HUD's (any active TextMeshProUGUI in the scene; one lookup per open).
+    if (Il2CppObject* hudText = unity::FindObjectOfType(p.tmpUguiClass); unity::IsAlive(hudText)) {
+        Il2CppObject* f = p.Call(p.tmpGetFont, hudText, {}, "TMP_Text.get_font");
+        if (unity::IsAlive(f)) {
+            p.font = f;
+            Impl::Keep(p.handles, f);
+        }
+    }
+    Il2CppObject* go = p.NewGo("sr2mods_SiloSellReceipt");
+    if (!go) return failOpen("GameObject creation failed");
+    p.root = go;
+    Impl::Keep(p.handles, go);
+    unity::SetActive(go, false);  // the locker pauses only once everything is built
+    Il2CppObject* canvas = p.AddComponent(go, p.canvasClass, "AddComponent(Canvas)");
+    if (!canvas) return failOpen("Canvas failed");
+    int32_t overlay = 0, order = kSortingOrder;  // RenderMode.ScreenSpaceOverlay
+    p.Call(p.cvSetMode, canvas, {&overlay}, "Canvas.set_renderMode");
+    p.Call(p.cvSetOrder, canvas, {&order}, "Canvas.set_sortingOrder");
+    if (Il2CppObject* scaler = p.AddComponent(go, p.scalerClass, "AddComponent(CanvasScaler)")) {
+        int32_t scaleWithScreen = 1;
+        Vec2 ref{1920.0f, 1080.0f};
+        float match = 0.5f;
+        p.Call(p.scSetMode, scaler, {&scaleWithScreen}, "CanvasScaler.set_uiScaleMode");
+        p.Call(p.scSetRef, scaler, {&ref}, "CanvasScaler.set_referenceResolution");
+        p.Call(p.scSetMatch, scaler, {&match}, "CanvasScaler.set_matchWidthOrHeight");
+    }
+    if (!p.AddComponent(go, p.raycasterClass, "AddComponent(GraphicRaycaster)")) return failOpen("GraphicRaycaster failed");
+    p.rootRt = unity::TransformOf(go);
+    if (!unity::IsAlive(p.rootRt) || !p.IsA(p.rootRt, p.rtClass)) return failOpen("no RectTransform on the canvas");
+    // Dimmed backdrop over the whole screen; a click on it cancels.
+    if (Il2CppObject* bd = p.NewUi("Backdrop", p.rootRt)) {
+        p.Rect(unity::TransformOf(bd), {0, 0}, {1, 1}, {0.5f, 0.5f}, {0, 0}, {0, 0});
+        Il2CppObject* img = p.AddComponent(bd, p.imageClass, "AddComponent(Image)");
+        p.SetColor(img, Color{0.05f, 0.07f, 0.12f, 0.55f});
+        p.backdropToggle = p.Clickable(bd);
+        Impl::Keep(p.handles, p.backdropToggle);
+    }
+    p.canSell = r.marketAvailable && !r.marketClosed && !r.lines.empty();
+    p.focus = p.canSell ? 1 : 0;
+    if (!p.BuildPanel(r, "")) return failOpen("panel failed");
+    // The game's own lock: pauses time, swaps to the UI action map, frees the cursor.
+    if (!p.AddComponent(go, p.lockerClass, "AddComponent(UIInputLocker)")) return failOpen("UIInputLocker failed");
+    if (p.Faulted()) return failOpen("module faulted");
+    unity::SetActive(go, true);
+    p.open = true;
+    p.grace = kGraceSeconds;
+    if (!p.loggedOpen) {
+        p.loggedOpen = true;
+        SR2_INFO("[{}] silo receipt opened ({} row(s), font {}, input locked by UIInputLocker)", p.module, r.lines.size(),
+                 p.font ? "from the HUD" : "TMP default");
+    }
+    return true;
+}
+
+void SiloReceipt::Refresh(const Receipt& r, const std::string& note, bool canSell) {
+    if (!ready_ || !impl_ || !impl_->open) return;
+    Impl& p = *impl_;
+    if (unity::IsAlive(p.panel)) p.Destroy(p.panel);
+    p.panel = nullptr;
+    for (int i = 0; i < 2; ++i) p.btnBg[i] = p.btnText[i] = p.btnToggle[i] = nullptr;
+    Impl::FreeLater(p.panelHandles);
+    p.canSell = canSell;
+    if (!p.BuildPanel(r, note)) {
+        SR2_WARN("[{}] silo receipt: refresh failed - closed", p.module);
+        p.Teardown();
+    }
+    p.grace = kGraceSeconds;  // the same press must not confirm the new receipt
+}
+
+bool SiloReceipt::IsOpen() const { return ready_ && impl_ && impl_->open; }
+
+SiloReceipt::Result SiloReceipt::Tick(float unscaledDt) {
+    if (!ready_ || !impl_ || !impl_->open) return Result::kNone;
+    Impl& p = *impl_;
+    if (!unity::IsAlive(p.root)) {  // scene change destroyed it (its locker unpaused on the way)
+        p.Teardown();
+        return Result::kCancel;
+    }
+    // Clicks first (reset every frame, also during the grace time).
+    const bool clickBackdrop = p.Clicked(p.backdropToggle);
+    const bool clickCancel = p.Clicked(p.btnToggle[0]);
+    const bool clickSell = p.Clicked(p.btnToggle[1]);
+    if (std::isfinite(unscaledDt) && unscaledDt > 0.0f) p.grace -= std::min(unscaledDt, 0.25f);
+    if (p.grace > 0.0f) return Result::kNone;
+    if (clickCancel || clickBackdrop) return Result::kCancel;
+    if (clickSell) {
+        if (p.canSell) return Result::kConfirm;
+        p.focus = 0;
+        p.StyleButtons();
+        return Result::kNone;
+    }
+    Il2CppObject* kb = p.Device(p.kbCurrent);
+    Il2CppObject* pad = p.Device(p.padCurrent);
+    if (p.Pressed(kb, p.kbEsc) || p.Pressed(pad, p.padEast)) return Result::kCancel;
+    const bool left = p.Pressed(kb, p.kbLeft) || p.Pressed(kb, p.kbA) || p.Pressed(pad, p.padDpad, p.dirLeft) ||
+                      p.Pressed(pad, p.padStick, p.stickLeft);
+    const bool right = p.Pressed(kb, p.kbRight) || p.Pressed(kb, p.kbD) || p.Pressed(pad, p.padDpad, p.dirRight) ||
+                       p.Pressed(pad, p.padStick, p.stickRight);
+    const bool tab = p.Pressed(kb, p.kbTab);
+    if (left || right || tab) {
+        const int want = tab ? 1 - p.focus : left ? 0 : 1;
+        if (want != p.focus && (want == 0 || p.canSell)) {
+            p.focus = want;
+            p.StyleButtons();
+        }
+    }
+    const bool submit = p.Pressed(kb, p.kbEnter) || p.Pressed(kb, p.kbNumEnter) || p.Pressed(kb, p.kbSpace) ||
+                        p.Pressed(pad, p.padSouth);
+    if (submit) {
+        if (p.focus == 0) return Result::kCancel;
+        if (p.canSell) return Result::kConfirm;
+    }
+    return Result::kNone;
+}
+
+void SiloReceipt::Close(const char* why) {
+    if (!ready_ || !impl_ || !impl_->open) return;
+    SR2_DEBUG("[{}] silo receipt closed ({})", impl_->module, why ? why : "");
+    impl_->Teardown();
+}
+
+}  // namespace sr2::modules::custom_upgrades::ui

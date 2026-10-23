@@ -146,6 +146,11 @@
 //   Slots[], GetSlotName(i) (IdentifiableType), GetSlotCount(i), Decrement(i, n) (0xA39790,
 //   clears the slot at 0). Only IdentifiableType.IsPlort types are sold, everything else
 //   stays. Order per slot: TrySell first (no money -> no item change), then Decrement.
+//   Receipt (silo_receipt.cpp): the world button first quotes the silo (one line per plort type:
+//   count, current price) and shows it in a game-styled dialog that locks input like the game's
+//   menus (UIInputLocker: time paused, UI action map, cursor). Sell re-quotes: an identical quote is
+//   sold with the quote as the plan (at most the shown count per type); a different one (prices,
+//   contents, market closed) refreshes the receipt and nothing is sold. Cancel / Esc / B: nothing.
 //
 // ---------------------------------------------------------------- gate --------------
 //   The module is off by default: no custom item in any purchase menu until the switch is
@@ -202,6 +207,7 @@
 #include "modules/custom_upgrades/plot_menu_slider.h"
 #include "modules/custom_upgrades/plot_props.h"
 #include "modules/custom_upgrades/sale_notify.h"
+#include "modules/custom_upgrades/silo_receipt.h"
 #include "modules/custom_upgrades/silo_world.h"
 #include "ui/mod_icons.h"
 
@@ -496,7 +502,12 @@ public:
     void WorldTick();
     bool OnSiloButton(Il2CppObject* activator);
     bool OnHenButton(Il2CppObject* activator);
-    SiloSummary SellAllNow(Il2CppObject* plot, const std::string& id, const char* via, bool fromMenu);
+    SiloSummary SellAllNow(Il2CppObject* plot, const std::string& id, const char* via, bool queueNotices,
+                           const custom_upgrades::ui::Receipt* plan = nullptr);
+    bool OpenReceipt(Il2CppObject* plot, Il2CppObject* activator, const std::string& id,
+                     const custom_upgrades::ui::Receipt& quote);
+    void ReceiptTick(float dt);
+    void CloseReceipt(const char* why);
     bool WorldQuery(Il2CppObject* plot, custom_upgrades::world::CoopRequest& req);
     void AfterDetailsBind(Il2CppObject* view, Il2CppObject* vm);
     void SliderTick(float dt);
@@ -571,7 +582,8 @@ private:
     void Cleanup(const char* why);
 
     Il2CppObject* EconDirector();
-    SiloSummary Summarize(Il2CppObject* plot, bool sell, std::string* log);
+    SiloSummary Summarize(Il2CppObject* plot, bool sell, std::string* log, custom_upgrades::ui::Receipt* quote = nullptr,
+                          const custom_upgrades::ui::Receipt* plan = nullptr);
 
     std::atomic<bool> enabled_{false};
     std::atomic<bool> resync_{false};  // (re-)enabled: state must be re-read for the loaded save
@@ -599,6 +611,14 @@ private:
     custom_upgrades::ui::PlotMenuSlider sliderHens_;      // Hen Collector limits, side by side (one pair
     custom_upgrades::ui::PlotMenuSlider sliderRoosters_;  // at a time; the hens slider builds the row)
     custom_upgrades::ui::SaleNotices notices_;    // Sell-All: per-plort HUD notifications
+    custom_upgrades::ui::SiloReceipt receipt_;    // Sell-All: confirmation dialog (silo_receipt.h)
+    // While the receipt is open: the silo, the pressed button (both pinned; handles freed by a posted
+    // job on close), the silo's plot id and the quote the dialog shows (what Sell may sell).
+    Il2CppObject* receiptPlot_ = nullptr;
+    Il2CppObject* receiptButton_ = nullptr;
+    std::vector<Il2CppGCHandle> receiptHandles_;
+    std::string receiptPlotId_;
+    custom_upgrades::ui::Receipt receiptQuote_;
     // Grid navigation (gamepad / keyboard left / right for the slider): NavigationEventData
     Il2CppClass* navEventClass_ = nullptr;
     const MethodInfo* navMoveDirMi_ = nullptr;  // NavigationEventData.get_MoveDirection
@@ -935,6 +955,7 @@ void CustomUpgrades::ResetState(const char* why) {
     props_.Reset();
     notices_.Clear();
     DestroySliders();  // their value callbacks belong to the old state
+    if (receipt_.IsOpen() && main_thread::IsMainThread()) CloseReceipt(why);  // its silo belongs to the old game
 }
 
 void CustomUpgrades::OnLoad(Il2CppObject* asd, const void* identifier) {
@@ -1803,6 +1824,9 @@ void CustomUpgrades::AfterMenuUpdate(Il2CppObject* root) {
 }
 
 void CustomUpgrades::Cleanup(const char* why) {
+    // Always (also after a fault, also when cleaned already): the receipt's input lock (paused
+    // time) must never outlive the module.
+    if (receipt_.IsOpen() && main_thread::IsMainThread()) CloseReceipt(why);
     if (cleaned_) return;
     cleaned_ = true;
     DestroySliders();  // main thread only (no-op otherwise / without game calls after a fault)
@@ -1842,10 +1866,11 @@ void CustomUpgrades::Cleanup(const char* why) {
 
 void CustomUpgrades::FrameCheck(float dt) {
     if (sr2::core::ModuleFaulted(kModule)) {
-        if (!cleaned_) Cleanup("module faulted");
+        if (!cleaned_ || receipt_.IsOpen()) Cleanup("module faulted");
         SetLocked(false);
         return;
     }
+    if (!On() && receipt_.IsOpen()) CloseReceipt("module off");
     if (std::isfinite(dt) && dt > 0.0f) gateAccum_ += std::min(dt, 1.0f);
     if (gateAccum_ >= kGateTickSeconds) {
         gateAccum_ = 0.0f;
@@ -1854,6 +1879,7 @@ void CustomUpgrades::FrameCheck(float dt) {
     if (On() && SliderActive()) g_sliderGuard.Run([&] { SliderTick(dt); });
     if (On() && silo_.Ready()) g_siloGuard.Run([&] { silo_.Frame(); });  // button message (cheap when none)
     if (On() && notices_.Ready()) g_siloGuard.Run([&] { notices_.Frame(dt); });  // queued sale notices
+    if (On() && receipt_.IsOpen()) g_siloGuard.Run([&] { ReceiptTick(dt); });   // Sell-All receipt input
     if (!On() || (!world_.Ready() && !silo_.Ready() && !props_.Ready())) return;
     if (std::isfinite(dt) && dt > 0.0f) worldAccum_ += std::min(dt, 1.0f);
     if (worldAccum_ < kWorldTickSeconds) return;
@@ -2027,18 +2053,22 @@ std::vector<custom_upgrades::world::PropRequest> CustomUpgrades::WantedProps() c
 
 // ---------------------------------------------------------------- silo button --
 
-SiloSummary CustomUpgrades::SellAllNow(Il2CppObject* plot, const std::string& id, const char* via, bool fromMenu) {
+SiloSummary CustomUpgrades::SellAllNow(Il2CppObject* plot, const std::string& id, const char* via, bool queueNotices,
+                                       const custom_upgrades::ui::Receipt* plan) {
     std::string log;
-    SiloSummary s = Summarize(plot, true, &log);
+    SiloSummary s = Summarize(plot, true, &log, nullptr, plan);
     if (!s.marketAvailable) SR2_INFO("[{}] sell all ({}, plot '{}'): Plort Market not available", kModule, via, id);
     else if (s.marketClosed) SR2_INFO("[{}] sell all ({}, plot '{}'): Plort Market closed, nothing sold", kModule, via, id);
     else SR2_INFO("[{}] sell all ({}, plot '{}'): sold {} plort(s) for {} Newbucks{}{}", kModule, via, id, s.plorts, s.value,
                   log.empty() ? "" : ": ", log);
-    // One HUD notice per plort type (icon, name, count) like the drones' "plorts sold" ones; from
-    // the plot menu they show once the menu is closed (the HUD drops notices while it is open, and
-    // may not be active then: queued anyway, the menu has no text feedback). The world button
-    // queues only if the HUD is there now, else it shows its text instead.
-    if (!s.sold.empty() && notices_.Ready() && (fromMenu || notices_.Available())) {
+    if (plan && s.marketAvailable && !s.marketClosed && (s.plorts != plan->Count() || s.value != plan->Total()))
+        SR2_WARN("[{}] sell all ({}, plot '{}'): the receipt said {} plort(s) for {} Newbucks, sold {} for {}", kModule, via,
+                 id, plan->Count(), plan->Total(), s.plorts, s.value);
+    // One HUD notice per plort type (icon, name, count) like the drones' "plorts sold" ones. The HUD
+    // drops notices while it is suppressed (a menu, our receipt just closing), so `queueNotices`
+    // queues them anyway (shown once it allows); otherwise only if the HUD list is there now, and
+    // the caller shows its own text when nothing was queued.
+    if (!s.sold.empty() && notices_.Ready() && (queueNotices || notices_.Available())) {
         notices_.Queue(s.sold);
         s.noticed = true;
     }
@@ -2050,6 +2080,7 @@ bool CustomUpgrades::OnSiloButton(Il2CppObject* activator) {
     if (OnHenButton(activator)) return true;
     if (!silo_.IsOurs(activator)) return false;
     if (!On()) return true;  // swallowed (the button is removed with the next frame)
+    if (receipt_.IsOpen()) return true;  // a receipt is up (input is locked; never expected)
     Il2CppObject* plot = silo_.OwnerPlot(activator);
     if (!plot || !silo_.Press(activator)) return true;  // no silo / pressed again within 0.4 s
     const UpgradeDef* d = FindDef(SILO_SELL_ALL);
@@ -2059,6 +2090,17 @@ bool CustomUpgrades::OnSiloButton(Il2CppObject* activator) {
         worldAccum_ = kWorldTickSeconds;  // remove the stale button
         return true;
     }
+    // The receipt first: nothing is sold until the player confirms it.
+    if (receipt_.Ready()) {
+        custom_upgrades::ui::Receipt quote;
+        Summarize(plot, false, nullptr, &quote);
+        if (!quote.marketAvailable) silo_.Message(activator, "The Plort Market can't be reached right now", false);
+        else if (quote.marketClosed) silo_.Message(activator, "The Plort Market is closed - nothing sold", false);
+        else if (quote.lines.empty()) silo_.Message(activator, "No plorts in this silo", false);
+        else if (OpenReceipt(plot, activator, id, quote)) return true;
+        else SR2_WARN("[{}] sell all (plot '{}'): the receipt could not be opened - selling at once", kModule, id);
+        if (!quote.marketAvailable || quote.marketClosed || quote.lines.empty()) return true;
+    }
     const SiloSummary s = SellAllNow(plot, id, "world button", false);
     if (!s.marketAvailable) silo_.Message(activator, "The Plort Market can't be reached right now", false);
     else if (s.marketClosed) silo_.Message(activator, "The Plort Market is closed - nothing sold", false);
@@ -2067,6 +2109,86 @@ bool CustomUpgrades::OnSiloButton(Il2CppObject* activator) {
         silo_.Message(activator, std::format("Sold {} plort{} for {} Newbucks", s.plorts, s.plorts == 1 ? "" : "s", s.value),
                       true);
     return true;
+}
+
+// ---------------------------------------------------------------- sell-all receipt --
+
+bool CustomUpgrades::OpenReceipt(Il2CppObject* plot, Il2CppObject* activator, const std::string& id,
+                                 const custom_upgrades::ui::Receipt& quote) {
+    if (!receipt_.Open(quote)) return false;
+    receiptPlot_ = plot;
+    receiptButton_ = activator;
+    if (Il2CppGCHandle h = unity::NewGCHandle(plot)) receiptHandles_.push_back(h);
+    if (Il2CppGCHandle h = unity::NewGCHandle(activator)) receiptHandles_.push_back(h);
+    receiptPlotId_ = id;
+    receiptQuote_ = quote;
+    SR2_INFO("[{}] sell all (plot '{}'): receipt shown, {} plort(s) in {} type(s) for {} Newbucks", kModule, id,
+             quote.Count(), quote.lines.size(), quote.Total());
+    return true;
+}
+
+void CustomUpgrades::CloseReceipt(const char* why) {
+    receipt_.Close(why);
+    receiptPlot_ = receiptButton_ = nullptr;
+    receiptPlotId_.clear();
+    receiptQuote_ = {};
+    std::vector<Il2CppGCHandle> doomed;
+    doomed.swap(receiptHandles_);
+    if (!doomed.empty()) main_thread::Post([doomed] {  // freed by a posted job, never inline
+        for (Il2CppGCHandle h : doomed) unity::FreeGCHandle(h);
+    });
+}
+
+// Every frame while the receipt is open. Sell re-quotes the silo: only the very receipt the player
+// saw is sold (exact counts per type at the shown prices); anything else (prices, contents, the
+// market) refreshes the dialog instead and waits for a new confirmation.
+void CustomUpgrades::ReceiptTick(float dt) {
+    using Result = custom_upgrades::ui::SiloReceipt::Result;
+    const Result r = receipt_.Tick(dt);
+    if (r == Result::kNone) return;
+    const std::string id = receiptPlotId_;
+    if (r == Result::kCancel) {
+        SR2_INFO("[{}] sell all (plot '{}'): receipt cancelled, nothing sold", kModule, id);
+        CloseReceipt("cancelled");
+        return;
+    }
+    Il2CppObject* plot = receiptPlot_;
+    Il2CppObject* button = receiptButton_;
+    const UpgradeDef* d = FindDef(SILO_SELL_ALL);
+    std::string ownedId;
+    if (!unity::IsAlive(plot) || !IsA(plot, plotClass_) || !d || !OwnsKey(plot, *d, &ownedId) || ownedId != id) {
+        SR2_WARN("[{}] sell all (plot '{}'): the silo or its Sell-All Button is gone - nothing sold", kModule, id);
+        CloseReceipt("silo gone");
+        return;
+    }
+    custom_upgrades::ui::Receipt now;
+    Summarize(plot, false, nullptr, &now);
+    if (!now.Same(receiptQuote_)) {
+        const bool canSell = now.marketAvailable && !now.marketClosed && !now.lines.empty();
+        const char* note = !now.marketAvailable ? "The Plort Market can't be reached right now."
+                           : now.marketClosed   ? "The Plort Market just closed - nothing can be sold now."
+                           : now.lines.empty()  ? "There are no plorts left in this silo."
+                                                : "Prices or contents changed - this is the new receipt. Sell again to confirm.";
+        SR2_INFO("[{}] sell all (plot '{}'): receipt changed before the sale ({} plort(s) for {} -> {} for {}) - refreshed, "
+                 "nothing sold", kModule, id, receiptQuote_.Count(), receiptQuote_.Total(), now.Count(), now.Total());
+        receiptQuote_ = now;
+        receipt_.Refresh(now, note, canSell);
+        if (!receipt_.IsOpen()) CloseReceipt("refresh failed");
+        return;
+    }
+    // Close first: the input lock (paused time) goes, then the sale; its HUD notices are queued
+    // and show as soon as the HUD takes them.
+    const custom_upgrades::ui::Receipt plan = receiptQuote_;
+    const bool buttonAlive = unity::IsAlive(button);
+    CloseReceipt("confirmed");
+    const SiloSummary s = SellAllNow(plot, id, "receipt", true, &plan);
+    if (!buttonAlive) return;
+    if (!s.marketAvailable) silo_.Message(button, "The Plort Market can't be reached right now", false);
+    else if (s.marketClosed) silo_.Message(button, "The Plort Market is closed - nothing sold", false);
+    else if (s.plorts == 0) silo_.Message(button, "Nothing was sold", false);
+    else if (!s.noticed)
+        silo_.Message(button, std::format("Sold {} plort{} for {} Newbucks", s.plorts, s.plorts == 1 ? "" : "s", s.value),
+                      true);
 }
 
 // The Hen Collector's own button (the elder collector's, kept on the clone with a null Collector,
@@ -2221,8 +2343,16 @@ Il2CppObject* CustomUpgrades::EconDirector() {
     return unity::IsAlive(econ) ? econ : nullptr;
 }
 
-SiloSummary CustomUpgrades::Summarize(Il2CppObject* plot, bool sell, std::string* log) {
+// sell = false: count only (`quote`, optional, gets one line per plort type: count, current price;
+// sorted by type name). sell = true: TrySell + Decrement per slot; with `plan` (the receipt the
+// player confirmed) at most the planned count per type is sold, nothing else.
+SiloSummary CustomUpgrades::Summarize(Il2CppObject* plot, bool sell, std::string* log, custom_upgrades::ui::Receipt* quote,
+                                      const custom_upgrades::ui::Receipt* plan) {
     SiloSummary s;
+    if (quote) *quote = {};
+    std::vector<std::pair<Il2CppObject*, int>> remaining;  // plan: type -> count still to sell
+    if (plan)
+        for (const auto& l : plan->lines) remaining.emplace_back(l.type, l.count);
     Il2CppObject* econ = EconDirector();
     if (!econ) return s;
     s.marketAvailable = true;
@@ -2231,6 +2361,10 @@ SiloSummary CustomUpgrades::Summarize(Il2CppObject* plot, bool sell, std::string
     if (!ok) {
         s.marketAvailable = false;
         return s;
+    }
+    if (quote) {
+        quote->marketAvailable = true;
+        quote->marketClosed = s.marketClosed;
     }
     Il2CppArray* storages = getComponentsInChildren_(plot, unity::TypeOf(siloStorageClass_), true);
     std::vector<Il2CppObject*> seen;
@@ -2258,13 +2392,27 @@ SiloSummary CustomUpgrades::Summarize(Il2CppObject* plot, bool sell, std::string
                 s.plorts += count;
                 s.value += static_cast<long long>(cur) * count;
                 types.insert(id);
+                if (quote) {
+                    auto it = std::find_if(quote->lines.begin(), quote->lines.end(),
+                                           [id](const custom_upgrades::ui::ReceiptLine& l) { return l.type == id; });
+                    if (it != quote->lines.end()) it->count += count;  // same type in several slots: same price
+                    else quote->lines.push_back({id, count, cur});
+                }
                 continue;
             }
             if (s.marketClosed) continue;
+            std::pair<Il2CppObject*, int>* left = nullptr;
+            if (plan) {
+                auto it = std::find_if(remaining.begin(), remaining.end(), [id](const auto& e) { return e.first == id; });
+                if (it == remaining.end() || it->second <= 0) continue;  // not on the receipt (or done)
+                left = &*it;
+                count = std::min(count, it->second);
+            }
             bool ignoreShutdown = false, showUi = true;
             const bool sold = Unbox<bool>(Invoke(trySellMi_, econ, {id, &count, &ignoreShutdown, &showUi, nullptr},
                                                  "PlortEconomyDirector.TrySell", &ok));
             if (!ok || !sold) continue;
+            if (left) left->second -= count;
             // Paid: now take the plorts out of the slot.
             Invoke(decrementMi_, ammo, {&i, &count}, "AmmoSlotManager.Decrement", &ok);
             if (!ok) SR2_WARN("[{}] sold {} x {} but could not empty the silo slot", kModule, count, unity::GetName(id));
@@ -2280,6 +2428,12 @@ SiloSummary CustomUpgrades::Summarize(Il2CppObject* plot, bool sell, std::string
         }
     }
     s.types = static_cast<int>(types.size());
+    if (quote)
+        std::sort(quote->lines.begin(), quote->lines.end(),
+                  [](const custom_upgrades::ui::ReceiptLine& a, const custom_upgrades::ui::ReceiptLine& b) {
+                      const std::string na = unity::GetName(a.type), nb = unity::GetName(b.type);
+                      return na != nb ? na < nb : a.type < b.type;
+                  });
     return s;
 }
 
@@ -2731,6 +2885,9 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         std::string nerr;
         if (!notices_.Setup(R, kModule, nerr))
             SR2_WARN("[{}] sell-all HUD notices unavailable ({}) - text feedback only", kModule, nerr);
+        std::string rerr;
+        if (!receipt_.Setup(R, kModule, rerr))
+            SR2_WARN("[{}] sell-all receipt unavailable ({}) - the Sell-All button sells at once", kModule, rerr);
     }
 
     // Silo Sell-All world button (optional; missing -> the Sell-All Button is not offered).

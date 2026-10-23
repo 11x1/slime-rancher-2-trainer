@@ -394,9 +394,10 @@ Original plan:
   1. Buy "Sell-All Button" in the silo menu (fixed price 10,000 Newbucks in `kDefs`; the old
      `sell_all_price` setting was removed, checklist si2). It is
      only offered when the world button below can be built.
-  2. The button on the silo sells (HUD notices per plort type, log line with every type × count
-     @ price). If the market is closed, it says so and nothing is sold. The former "Sell All
-     Plorts Now" menu action (an action item, id 0x53520002) was retired (checklist u12).
+  2. The button on the silo opens a receipt (below); Sell sells (HUD notices per plort type, log
+     line with every type × count @ price). If the market is closed, it says so and nothing is
+     sold. The former "Sell All Plorts Now" menu action (an action item, id 0x53520002) was
+     retired (checklist u12).
   3. The upgrade can be sold back with sell_upgrades.
 * World button (`modules/custom_upgrades/silo_world.cpp`, built, not yet tested in game): while
   the upgrade is owned, the corral Plort Collector's press button (`PlortCollectorUpgrader.Collector`
@@ -434,6 +435,20 @@ Original plan:
   * Not used (unverified, risky): building a `NotificationEntry` ourselves and adding it to the
     list's `_pendingNotifications` with another or no provider. The list calls the entry's provider
     (`TryDequeueMergeNext`, paging), and the shop provider expects its own entry type.
+  * **Receipt (checklist ut4, `modules/custom_upgrades/silo_receipt.cpp`).** A press quotes the
+    silo (per plort type: count, `TryGetMarketValues` current price) and opens a runtime uGUI dialog
+    (own overlay Canvas + CanvasScaler 1920 x 1080 + GraphicRaycaster, SDFRoundedRectangle shapes,
+    the menu palette, a HUD text's TMP font). Findings (disassembly, 1.3.0) on how game menus lock
+    input: `UIInputLocker` (MonomiPark.SlimeRancher.UI) `OnEnable` (0x6B0F00) = `TimeDirector.Pause`
+    (0x550570: `_pauserCount`, timeScale 0, OnPausedChanged(true)) + `SECTR_AudioSystem.PauseNonUiSfx`;
+    `OnDisable` (0x6B0DD0) = `TimeDirector.Unpause` (0x5507F0, a coroutine). `InputDirector.OnPausedChanged`
+    = `UpdateInputMaps(uiMode)` (0x9DBB00: one map Disable, the other Enable: player map off, UI map
+    on). `CursorLockHandler.LateUpdate` (0x68AF70) enables the cursor when the pause state changes
+    (not on gamepad). `UIDirector.Push(IStackableUI, ...)` (0x6AF0C0) only hides / disables the
+    previous UI, hides popups and tutorials and raises AddedToStack; it does not lock input, and
+    `BaseUI.Awake` does not push itself. So the receipt adds a `UIInputLocker` to its root (and is not
+    on the UI stack). Sell re-quotes: identical -> sold with the quote as the plan (at most the shown
+    count per type), different -> the receipt is refreshed, nothing sold.
   Silos come
   from the sidecar ids -> `SceneContext.GameModel.GetLandPlotModel(id).gameObj` (the
   LandPlotLocation) -> `GetComponentInChildren<LandPlot>` at ~1 Hz; sold / disabled / faulted
