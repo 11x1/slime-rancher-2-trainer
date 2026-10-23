@@ -91,7 +91,8 @@ findings from in-game tests that are easy to get wrong again.
   pointer down / up (before the Button click reaches the Press detour): on a tier card that opened
   the purchase prompt of the shown tier and the same click confirmed it (log: "sold Music Box" and
   "bought Music Box II" 4 ms apart). Disabled on our clone; its submit-key icon (`InputEventDisplay`
-  under "Icon Background") is hidden too. The popup-confirm guard from feature/plot-props-2 stays as a
+  under "Icon Background") now shows the alt-action key instead (`SetInputEvent(ListUI.altSubmit)`,
+  the key that sells, user feedback "sell should have a key"), hidden when the button is disabled. The popup-confirm guard from feature/plot-props-2 stays as a
   backstop.
 - **Stale card label** ("High Walls" on the Music Box card). The clones' texts were registered only
   in the post hook of `UpdateMenuItemAvailabilityAndHidden` / `RebuildUI`. With the menu open,

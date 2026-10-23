@@ -152,6 +152,11 @@
 //   * OnAltAction detour (shared body, LandPlotUIRoot only): for the card that shows our prompt,
 //     sells once (SellNow, one sale per frame) and never reaches the original (no Pedia for that
 //     press). Other cards: vanilla. A click on the prompt performs the same InputEvent -> same path.
+//   * Key on the Sell button: the cloned Purchase prefab's InputEventDisplay (which showed the
+//     submit key) gets InputEventDisplay.SetInputEvent(ListUI.altSubmit, null) while the button can
+//     sell now, so it shows the alt-action key (the game's own icon for the current device). Without
+//     an alt prompt (prefab / label missing) that key still sells the card (btnAltCard_). Disabled
+//     buttons ("Holds food") hide the icon.
 //
 // Fault policy: every detour runs its logic inside a DetourGuard (native fault -> module
 // faulted, detours pass-through). Objects are class- and IsAlive-checked; runtime_invoke
@@ -286,7 +291,8 @@ public:
     bool OnSellButton(Il2CppObject* button);
     Il2CppObject* SellButton() const { return btnButton_; }  // pointer compare only
     bool HidesAltButton(Il2CppObject* root, Il2CppObject* item) const {
-        return altGo_ && item == altItem_ && root == root_;  // pointer compare only
+        if (root != root_) return false;  // pointer compare only
+        return (altGo_ && item == altItem_) || (btnAltCard_ && item == btnAltCard_);
     }
     bool HandleAltAction(Il2CppObject* root, Il2CppObject* item);
 
@@ -362,6 +368,7 @@ private:
     Il2CppObject* btnButton_ = nullptr;  // its UnityEngine.UI.Button (may be null)
     Il2CppObject* btnItem_ = nullptr;    // the menu item whose price the refund uses (menu asset)
     int32_t btnUpgrade_ = 0;             // the owned upgrade it sells
+    Il2CppObject* btnAltCard_ = nullptr; // the card whose alt action the button's key icon names (sellable only)
     Il2CppGCHandle btnHandle_ = nullptr;
     // Purchase + Sell pair (main thread only): the vanilla Purchase view's RectTransform (handle
     // held), the pair's centre and a generation that stops stale CentrePair jobs.
@@ -444,6 +451,7 @@ public:
     Il2CppClass* layoutGroupClass_ = nullptr;  // UnityEngine.UI.LayoutGroup (optional)
     Il2CppClass* inputEventButtonClass_ = nullptr;   // InputEventButton (optional)
     Il2CppClass* inputEventDisplayClass_ = nullptr;  // InputEventDisplay (optional)
+    const MethodInfo* displaySetEventMi_ = nullptr;  // InputEventDisplay.SetInputEvent(InputEvent, InputEvent)
     Bound<void(Il2CppObject*)> objectDestroy_;  // UnityEngine.Object.Destroy(Object)
     // RectTransform (optional: side-by-side layout of PURCHASED / Purchase and our Sell button)
     Il2CppClass* rtClass_ = nullptr;
@@ -855,7 +863,7 @@ Il2CppObject* SellUpgrades::FindItemByInfoLabel(Il2CppObject* root, Il2CppObject
 void SellUpgrades::DestroySellButton() {
     if (!main_thread::IsMainThread()) return;
     if (btnGo_ && unity::IsAlive(btnGo_) && objectDestroy_) objectDestroy_(btnGo_);
-    btnGo_ = btnButton_ = btnItem_ = nullptr;
+    btnGo_ = btnButton_ = btnItem_ = btnAltCard_ = nullptr;
     btnUpgrade_ = 0;
     if (Il2CppGCHandle h = btnHandle_) {
         btnHandle_ = nullptr;
@@ -1043,19 +1051,43 @@ void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
     // the same click confirmed it (selling Music Box / Fast Growth I bought tier II in the same
     // frame). Disabled, it gets no pointer events (EventSystem skips disabled behaviours); the
     // Button's own click still sells. Its InputEventDisplay shows the submit key, which on this
-    // button would buy, not sell: hidden with its "Icon Background" (the alt-action prompt
-    // carries the key for selling).
+    // button would buy, not sell: when the button can sell now and the alt action is ours, the
+    // display is pointed at the menu's altSubmit InputEvent (the key that sells: the game's own icon
+    // for the current device, as Purchase shows submit); otherwise it is hidden with its "Icon
+    // Background".
     Il2CppObject* goT = unity::TransformOf(go);  // Component calls below go through the transform
     if (inputEventButtonClass_ && unity::IsAlive(goT)) {
         Il2CppObject* ieb = getComponent_(goT, Type(inputEventButtonClass_));
         if (unity::IsAlive(ieb) && IsA(ieb, inputEventButtonClass_)) setEnabled_(ieb, false);
     }
+    const char* keyIcon = "none";
     if (inputEventDisplayClass_ && unity::IsAlive(goT)) {
         Il2CppObject* disp = getComponentInChildren_(goT, Type(inputEventDisplayClass_), true);
-        Il2CppObject* dt = unity::IsAlive(disp) && IsA(disp, inputEventDisplayClass_) ? getTransform_(disp) : nullptr;
-        Il2CppObject* iconBg = unity::IsAlive(dt) ? getParent_(dt) : nullptr;
-        // Only the icon's own holder (a direct child of the button root), never the root itself.
-        if (unity::IsAlive(iconBg) && iconBg != goT && getParent_(iconBg) == goT) SetActive(GameObjectOf(iconBg), false);
+        if (!unity::IsAlive(disp) || !IsA(disp, inputEventDisplayClass_)) disp = nullptr;
+        bool shown = false;
+        if (disp && sellable && altOk_ && displaySetEventMi_) {
+            Il2CppObject* list = unity::Field<Il2CppObject*>(root_, offSwapper_);
+            Il2CppObject* ev = IsA(list, listUiClass_) && unity::IsAlive(list)
+                                   ? unity::Field<Il2CppObject*>(list, offAltSubmit_) : nullptr;
+            if (unity::IsAlive(ev)) {
+                bool ok = false;
+                Invoke(displaySetEventMi_, disp, {ev, nullptr}, "InputEventDisplay.SetInputEvent", &ok);
+                if (ok) {
+                    shown = true;
+                    btnAltCard_ = item;  // the alt key sells this card's target (HandleAltAction)
+                    keyIcon = "alt submit";
+                }
+            }
+        }
+        if (disp && !shown) {
+            Il2CppObject* dt = getTransform_(disp);
+            Il2CppObject* iconBg = unity::IsAlive(dt) ? getParent_(dt) : nullptr;
+            // Only the icon's own holder (a direct child of the button root), never the root itself.
+            if (unity::IsAlive(iconBg) && iconBg != goT && getParent_(iconBg) == goT) {
+                SetActive(GameObjectOf(iconBg), false);
+                keyIcon = "hidden";
+            }
+        }
     }
 
     // Owned card (PURCHASED variant): Sell alone, PURCHASED hidden (user feedback). Tier card
@@ -1103,9 +1135,9 @@ void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
     if (!loggedButton_) {
         loggedButton_ = true;
         SR2_INFO("[{}] sell button: prefab '{}' cloned into '{}' (LayoutGroup {}, side by side {}), Button {}, label {} "
-                 "- '{}'",
+                 "- '{}', key icon {}",
                  kModule, unity::GetName(prefab), unity::GetName(parent), layoutGroup ? "yes" : "no",
-                 placed ? "yes" : "NO", btnButton_ ? "found" : "MISSING", labelled ? "set" : "NOT set", text);
+                 placed ? "yes" : "NO", btnButton_ ? "found" : "MISSING", labelled ? "set" : "NOT set", text, keyIcon);
     }
 }
 
@@ -1235,13 +1267,20 @@ void SellUpgrades::CreateAltPrompt(Il2CppObject* category, Il2CppObject* item, I
 }
 
 bool SellUpgrades::HandleAltAction(Il2CppObject* root, Il2CppObject* item) {
-    if (!main_thread::IsMainThread()) return false;
-    if (!altGo_ || item != altItem_ || root != root_) return false;  // vanilla Info / Pedia
-    if (!unity::IsAlive(root) || !unity::IsAlive(altGo_)) return false;
-    // Handled either way: this press is the Sell prompt's, never the Pedia's. One sale per frame.
-    if (sellTick_ != main_thread::TickCount() && altPriceItem_ && altUpgrade_)
-        SellNow(root, altPriceItem_, altUpgrade_, "alt action");
-    return true;
+    if (!main_thread::IsMainThread() || root != root_ || !unity::IsAlive(root)) return false;
+    if (altGo_ && item == altItem_ && unity::IsAlive(altGo_)) {
+        // Handled either way: this press is the Sell prompt's, never the Pedia's. One sale per frame.
+        if (sellTick_ != main_thread::TickCount() && altPriceItem_ && altUpgrade_)
+            SellNow(root, altPriceItem_, altUpgrade_, "alt action");
+        return true;
+    }
+    // No prompt (prefab / label missing), but the Sell button shows the alt key: that key sells too.
+    if (btnAltCard_ && item == btnAltCard_ && btnGo_ && unity::IsAlive(btnGo_)) {
+        if (sellTick_ != main_thread::TickCount() && btnItem_ && btnUpgrade_)
+            SellNow(root, btnItem_, btnUpgrade_, "alt action (sell button key)");
+        return true;
+    }
+    return false;  // vanilla Info / Pedia
 }
 
 // ---------------------------------------------------------------- ash trough re-purchase --
@@ -1772,6 +1811,10 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         inputEventButtonClass_ = R.Class(kImage, "MonomiPark.SlimeRancher.Input", "InputEventButton");
         inputEventDisplayClass_ =
             R.Class(kImage, "MonomiPark.SlimeRancher.UI.Framework.CommonControls", "InputEventDisplay");
+        if (inputEventDisplayClass_)  // optional: the Sell button's key icon (missing -> icon hidden)
+            displaySetEventMi_ = R.MethodByParams(inputEventDisplayClass_, "SetInputEvent",
+                                                  {"MonomiPark.SlimeRancher.Input.InputEvent",
+                                                   "MonomiPark.SlimeRancher.Input.InputEvent"});
         // Optional: side-by-side layout (missing -> no Sell button next to Purchase; on owned
         // items it covers the PURCHASED slot as before).
         if (why.empty()) {
