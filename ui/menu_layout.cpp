@@ -29,16 +29,20 @@ Category Cat(std::string id, std::string title, Icon icon, bool bottom = false) 
 std::vector<Category> Spec() {
     std::vector<Category> cats;
 
+    Category ranch = Cat("ranch", "Ranch", Icon::Ranch);
+    ranch.tabs.push_back(ModuleTab("plot_upgrades"));
+    Tab sell = ModuleTab("sell_upgrades");
+    sell.help = "Sell an owned plot upgrade back for half its price: select it in the plot's purchase menu and "
+                "press the Sell button next to PURCHASED (or confirm the item). Silo storage upgrades can't be sold.";
+    ranch.tabs.push_back(sell);
+    ranch.tabs.push_back(ModuleTab("custom_upgrades"));
+    cats.push_back(ranch);
+
     Category movement = Cat("movement", "Movement", Icon::Movement);
     Tab hl2 = ModuleTab("hl2_movement");
     hl2.skipGroups = {"HUD"};  // on HUD > Speed Panel
     movement.tabs.push_back(hl2);
     cats.push_back(movement);
-
-    Category world = Cat("world", "World", Icon::World);
-    world.tabs.push_back(ModuleTab("spawn_scaling"));
-    world.tabs.push_back(ModuleTab("wall_markers"));
-    cats.push_back(world);
 
     Category hud = Cat("hud", "HUD", Icon::Hud);
     Tab minimap = ModuleTab("minimap");
@@ -52,14 +56,10 @@ std::vector<Category> Spec() {
     hud.tabs.push_back(speed);
     cats.push_back(hud);
 
-    Category ranch = Cat("ranch", "Ranch", Icon::Ranch);
-    ranch.tabs.push_back(ModuleTab("plot_upgrades"));
-    Tab sell = ModuleTab("sell_upgrades");
-    sell.help = "Sell an owned plot upgrade back for half its price: select it in the plot's purchase menu and "
-                "press the Sell button next to PURCHASED (or confirm the item). Silo storage upgrades can't be sold.";
-    ranch.tabs.push_back(sell);
-    ranch.tabs.push_back(ModuleTab("custom_upgrades"));
-    cats.push_back(ranch);
+    Category world = Cat("world", "World", Icon::World);
+    world.tabs.push_back(ModuleTab("spawn_scaling"));
+    world.tabs.push_back(ModuleTab("wall_markers"));
+    cats.push_back(world);
 
     Category misc = Cat("misc", "Misc", Icon::Misc);
     Tab general;
