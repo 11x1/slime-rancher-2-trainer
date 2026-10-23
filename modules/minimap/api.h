@@ -5,6 +5,8 @@
 // current frame: callers must not keep them across frames without their own
 // GC handle, and must re-validate (IsAlive / class checks) before use.
 
+#include <vector>
+
 #include "core/il2cpp_api.h"
 
 namespace sr2::modules::minimap::api {
@@ -27,5 +29,42 @@ struct Snapshot {
 
 // False when the minimap module is not running (disabled, faulted, not set up).
 bool Get(Snapshot& out);
+
+// Icon categories, in the order of the minimap's own "Icons" settings.
+enum IconCat {
+    kIconTeleporter = 0,  // page markers: ancient teleporters
+    kIconTreasurePod,
+    kIconGordo,           // page markers
+    kIconResource,
+    kIconOther,           // page markers: plort doors, landmarks, ...
+    kIconNullWall,
+    kIconPlaced,          // placed gadgets (master switch; the three groups below refine it)
+    kIconDronePort,
+    kIconPlacedTele,
+    kIconPlacedDecor,
+    kIconCatCount
+};
+
+struct PageIcon {
+    int cat = kIconOther;
+    float x = 0, y = 0;              // page-local position (see Snapshot::scaleX)
+    Il2CppObject* sprite = nullptr;  // pinned by the minimap; valid this frame only
+    float r = 1, g = 1, b = 1, a = 1;
+};
+
+struct PageIconQuery {
+    bool cats[kIconCatCount] = {};
+    // Page markers (teleporters, gordos, other) are drawn by the full map itself once discovered. With this
+    // on, the ones the full map does NOT show yet (not discovered) are returned, unless they are done
+    // (popped gordo, solved plort door). Off: no page markers at all.
+    bool undiscoveredMarkers = false;
+};
+
+// Every icon of the minimap's current map page (the whole page, not only the minimap's view): treasure pods,
+// resource nodes, Nullifier walls and placed gadgets from the minimap's world scanners (done states applied,
+// fog NOT applied), plus undiscovered page markers if asked. `mapDefinition` = the page's MapDefinition (the
+// icons only fit that map). Main thread; costs a full scan, so call it every few seconds at most. False when
+// the minimap is not running or has no page right now.
+bool CollectPageIcons(const PageIconQuery& query, std::vector<PageIcon>& out, Il2CppObject** mapDefinition);
 
 }  // namespace sr2::modules::minimap::api
