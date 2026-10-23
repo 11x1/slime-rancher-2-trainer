@@ -495,6 +495,7 @@ public:
     void GateTick();
     void WorldTick();
     bool OnSiloButton(Il2CppObject* activator);
+    bool OnHenButton(Il2CppObject* activator);
     SiloSummary SellAllNow(Il2CppObject* plot, const std::string& id, const char* via, bool fromMenu);
     bool WorldQuery(Il2CppObject* plot, custom_upgrades::world::CoopRequest& req);
     void AfterDetailsBind(Il2CppObject* view, Il2CppObject* vm);
@@ -699,9 +700,10 @@ using ActivateFn = void (*)(Il2CppObject*, const MethodInfo*);
 ActivateFn g_origActivate = nullptr;
 size_t g_offActCollector = 0;  // PlortCollectorActivator.Collector
 
-// Our silo button clones have Collector == null (silo_world.cpp): the original would only NRE on
-// them, so it never runs for them - also not while the module is off / faulted. Vanilla buttons
-// (Collector set) always go to the original.
+// Our button clones (the silo's Sell-All button, silo_world.cpp, and the Hen Collector's Activate
+// button, coop_world.cpp) have Collector == null: the original would only NRE on them, so it never
+// runs for them - also not while the module is off / faulted. Vanilla buttons (Collector set)
+// always go to the original.
 void ActivateDetour(Il2CppObject* self, const MethodInfo* mi) {
     if (!self || !g_offActCollector || unity::Field<Il2CppObject*>(self, g_offActCollector) != nullptr) {
         g_origActivate(self, mi);
@@ -2044,7 +2046,9 @@ SiloSummary CustomUpgrades::SellAllNow(Il2CppObject* plot, const std::string& id
 }
 
 bool CustomUpgrades::OnSiloButton(Il2CppObject* activator) {
-    if (!main_thread::IsMainThread() || !silo_.IsOurs(activator)) return false;
+    if (!main_thread::IsMainThread()) return false;
+    if (OnHenButton(activator)) return true;
+    if (!silo_.IsOurs(activator)) return false;
     if (!On()) return true;  // swallowed (the button is removed with the next frame)
     Il2CppObject* plot = silo_.OwnerPlot(activator);
     if (!plot || !silo_.Press(activator)) return true;  // no silo / pressed again within 0.4 s
@@ -2062,6 +2066,24 @@ bool CustomUpgrades::OnSiloButton(Il2CppObject* activator) {
     else if (!s.noticed)  // fallback: no HUD notices (the currency popup comes from TrySell showUi)
         silo_.Message(activator, std::format("Sold {} plort{} for {} Newbucks", s.plorts, s.plorts == 1 ? "" : "s", s.value),
                       true);
+    return true;
+}
+
+// The Hen Collector's own button (the elder collector's, kept on the clone with a null Collector,
+// coop_world.cpp): collects the excess chickens now, like the vanilla collector buttons. Button
+// animation, press cue and the 0.4 s rate limit as on the silo button (SiloButtons::Press works on
+// any PlortCollectorActivator); the result as a short text above the button.
+bool CustomUpgrades::OnHenButton(Il2CppObject* activator) {
+    if (!world_.Ready()) return false;
+    Il2CppObject* plot = world_.HenButtonPlot(activator);
+    if (!plot) return false;
+    if (!On()) return true;  // swallowed (the clone is removed with the next world tick)
+    if (silo_.Ready() && !silo_.Press(activator)) return true;  // pressed again within 0.4 s
+    const custom_upgrades::world::QueryFn query = [&](Il2CppObject* p, custom_upgrades::world::CoopRequest& req) {
+        return state_.loaded && WorldQuery(p, req);
+    };
+    const std::string text = world_.Activate(plot, query);
+    if (silo_.Ready()) silo_.Message(activator, text, text.rfind("Collecting", 0) == 0);
     return true;
 }
 
@@ -2726,6 +2748,8 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
             if (ok) report += std::format(" PlortCollectorActivator.Activate@0x{:X}", Resolver::Rva(p));
             else serr = "hook failed";
         }
+        // The Hen Collector keeps its button only with this detour (a null Collector would NRE in vanilla).
+        world_.KeepHenButton(ok);
         if (!ok) {
             silo_ = custom_upgrades::world::SiloButtons{};  // not Ready(): no buttons are built
             g_offActCollector = 0;
