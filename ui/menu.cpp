@@ -43,7 +43,9 @@ float U(float v) { return v * g_scale; }
 // ---------------------------------------------------------------- state ----
 std::string g_cat = "ranch";
 std::map<std::string, int> g_tab;  // selected tab per category
-std::string g_lastPage;            // category/tab drawn last frame (scroll reset on change)
+std::string g_lastPage;            // category/tab drawn last frame ("" after the overlay opens)
+std::map<std::string, float> g_pageScroll;  // scroll position per page, kept for the session
+int g_scrollRestore = 0;           // frames left to re-apply a page's saved scroll (clamped while content grows)
 ImVec2 g_winMin, g_winMax;         // window rect of the last frame
 
 struct Peel {
@@ -2230,7 +2232,10 @@ void SyncTheme(float scale) {
     theme::Sync(std::lround(v) == 1 ? theme::Mode::Light : theme::Mode::Dark, scale);
 }
 
-void OnOpened() { slime_icons::OnOpen(); }
+void OnOpened() {
+    slime_icons::OnOpen();
+    g_lastPage.clear();  // restore the page's saved scroll position
+}
 
 bool Draw(const Host& h) {
     g_scale = h.scale;
@@ -2280,8 +2285,25 @@ bool Draw(const Host& h) {
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(18), 0));
         ImGui::BeginChild("##body", ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoBackground);
-        if (page != g_lastPage) ImGui::SetScrollY(0);
-        g_lastPage = page;
+        // Each page keeps its scroll position across page switches and closing / reopening.
+        // SetScrollY lands next frame, clamped to the previous frame's content height (the
+        // other page's), so a restore is re-applied for a few frames.
+        if (page != g_lastPage) {
+            g_lastPage = page;
+            g_scrollRestore = 4;
+        }
+        if (g_scrollRestore > 0) {
+            const auto it = g_pageScroll.find(page);
+            const float want = it != g_pageScroll.end() ? it->second : 0.0f;
+            if (std::fabs(ImGui::GetScrollY() - want) > 0.5f) {
+                ImGui::SetScrollY(want);
+                --g_scrollRestore;
+            } else {
+                g_scrollRestore = 0;
+            }
+        } else {
+            g_pageScroll[page] = ImGui::GetScrollY();
+        }
         if (h.versionMismatch)
             Banner(P.warn, "This game build differs from the one the mod was made for; some modules may be disabled. " +
                                h.versionStatus);
