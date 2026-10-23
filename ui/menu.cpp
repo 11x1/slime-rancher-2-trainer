@@ -1241,7 +1241,6 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     if (s.catalog) {
         for (const sbx::Item& it : *s.catalog) {
             if (!(it.slotMask & bit)) continue;
-            if (it.id == g_sbxItem) pickedName = it.name;
             if (!ContainsNoCase(it.name, g_sbxSearch)) continue;
             ++shown;
             ImGui::PushID(reinterpret_cast<const void*>(it.id));
@@ -1253,6 +1252,11 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     ImGui::EndChild();
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();
+    // Looked up after the list, so an item clicked this frame counts too (checking inside the
+    // loop, before the click, dropped every new pick again in the same frame).
+    if (s.catalog && g_sbxItem)
+        for (const sbx::Item& it : *s.catalog)
+            if (it.id == g_sbxItem && (it.slotMask & bit)) pickedName = it.name;
     if (pickedName.empty()) g_sbxItem = 0;  // not accepted by this slot (or gone)
 
     const bool canPut = g_sbxItem != 0 && g_sbxAmount > 0;
