@@ -79,7 +79,7 @@ RVAs are only for reference (GameAssembly.dll 1.3.0). The code finds everything 
     old per-game file.
   * Generic per-save values (`custom_upgrades::PlotValue` / `SetPlotValue` / `SaveValue` /
     `SetSaveValue`, api.h) live in the same file. sell_upgrades stores the ash of a sold Ash
-    Trough there.
+    Trough there; drone_price_limit the per-station limits (`drone_price_limit.station.<actor id>`).
 * Why the game folder and not the Steam save folder: Steam Cloud syncs
   `LocalLow\MonomiPark\SlimeRancher2\Steam\<id>\` (steam_autocloud.vdf). Extra files there would
   be uploaded to the game's cloud quota and land on PCs without the mod, and unknown files in the
@@ -467,11 +467,14 @@ Built, not yet tested in game. Full findings are in the header comment of
   * Detour `RanchDroneBehaviourDumpAmmo.Relevancy`: false while the drone holds a plort held back
     by the limit and has a Plort Market sink program. The drone then rests at its station with the
     plorts, re-thinks on the Rest timer and deposits once the price is back.
-  * Settings: `min_price` (Newbucks, 0 = off) and `min_price_fraction_of_base` (0 = off); the
-    higher limit counts. One log line per change of state per plort type.
-* Later: per-plort-type / per-station limits (sidecar keyed by the station's gadget id, UI from the
-  drone station menu), "fall back to silo" when a silo sink program is also set (vanilla already
-  tries every relevant sink program in order, so a second silo program takes held-back plorts).
+  * ~~Settings `min_price` / `min_price_fraction_of_base`~~ (replaced): the limit is now **per drone
+    station** (minimum price or minimum percent of the base price), keyed by the station's saved
+    actor id in this sidecar's `values`, and set in the drone station menu (a "Price limit" action
+    next to "Change", C key). See `modules/drone_price_limit/NOTES.md`. One log line per change of
+    state per station and plort type.
+* Later: per-plort-type limits, "fall back to silo" when a silo sink program is also set (vanilla
+  already tries every relevant sink program in order, so a second silo program takes held-back
+  plorts).
 
 ### 2.4 Coop roof - IMPLEMENTED as the "Coop Air Net" (`modules/custom_upgrades/coop_world.cpp`)
 

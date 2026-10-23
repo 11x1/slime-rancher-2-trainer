@@ -150,6 +150,8 @@ struct PlotMenuSlider::Impl {
     Il2CppObject* label = nullptr;    // TMP_Text (may be null)
     Color labelColor{0.259f, 0.310f, 0.451f, 1.0f};  // the panel's description colour (game default)
     bool externalSteps = false;       // left / right come from the menu's navigation (Step), not polling
+    bool polling = true;              // pad / keyboard polled in Tick (SetPolling)
+    bool styled = false;              // the last build got a SliderStyler
     std::vector<Il2CppGCHandle> handles;
     SliderSpec spec;
     int value = 0;
@@ -289,6 +291,8 @@ struct PlotMenuSlider::Impl {
         return Unbox<bool>(Call(btnPressed, ctl, {}, "ButtonControl.get_isPressed", &ok)) && ok;
     }
     Il2CppObject* SliderStyle();
+    const char* BuildBody(Il2CppObject* root, Il2CppObject* rootRt, int layer, Il2CppObject* labelSrc, float fontSize,
+                          float fontScale);
     std::string LabelText(int v) const { return spec.label ? spec.label(v) : std::to_string(v); }
     int Snap(int v) const {
         const int step = std::max(spec.step, 1);
@@ -611,6 +615,111 @@ bool PlotMenuSlider::Impl::AddRaycaster(Il2CppObject* go, Il2CppObject* parentTr
     return AddComponent(go, raycasterClass, "AddComponent(GraphicRaycaster)") != nullptr;
 }
 
+// Label + uGUI slider under the (inactive) root; activates it. nullptr = ok, else what failed.
+const char* PlotMenuSlider::Impl::BuildBody(Il2CppObject* r, Il2CppObject* rootRt, int layer, Il2CppObject* labelSrc,
+                                            float fontSize, float fontScale) {
+    // ---- label ----
+    Il2CppObject* labelGo = NewUi("Label", rootRt, layer);
+    if (labelGo) {
+        Rect(unity::TransformOf(labelGo), {0, 1}, {1, 1}, {0.5f, 1}, {0, 0}, {0, kLabelHeight});
+        Il2CppObject* tmp = AddComponent(labelGo, tmpUguiClass, "AddComponent(TextMeshProUGUI)");
+        if (tmp) {
+            Keep(tmp);
+            label = tmp;
+            Il2CppObject* src = unity::IsAlive(labelSrc) ? labelSrc : nullptr;
+            float size = 26.0f;
+            Color col = labelColor;
+            if (src) {
+                if (Il2CppObject* font = Call(tmpGetFont, src, {}, "TMP_Text.get_font"); unity::IsAlive(font))
+                    Call(tmpSetFont, tmp, {font}, "TMP_Text.set_font");
+                if (Il2CppObject* mat = Call(tmpGetMat, src, {}, "TMP_Text.get_fontSharedMaterial"); unity::IsAlive(mat))
+                    Call(tmpSetMat, tmp, {mat}, "TMP_Text.set_fontSharedMaterial");
+                const float s = Unbox<float>(Call(tmpGetSize, src, {}, "TMP_Text.get_fontSize"));
+                if (std::isfinite(s) && s >= 10.0f && s <= 80.0f) size = s;
+                col = Unbox<Color>(Call(tmpGetColor, src, {}, "TMP_Text.get_color"), col);
+            }
+            labelColor = col;
+            if (fontSize > 0.0f) size = fontSize;
+            size *= fontScale;
+            Call(tmpSetSize, tmp, {&size}, "TMP_Text.set_fontSize");
+            Call(tmpSetColor, tmp, {&col}, "TMP_Text.set_color");
+            int32_t align = kTmpAlignLeft, noWrap = 0;
+            Call(tmpSetAlign, tmp, {&align}, "TMP_Text.set_alignment");
+            if (tmpSetWrap) Call(tmpSetWrap, tmp, {&noWrap}, "TMP_Text.set_textWrappingMode");
+            bool off = false;
+            Call(gfxSetRaycast, tmp, {&off}, "Graphic.set_raycastTarget");
+            SetLabel(value);
+        }
+    }
+
+    // ---- slider: standard uGUI hierarchy (names are what SliderStyler looks for) ----
+    Il2CppObject* sGo = NewUi("Slider", rootRt, layer);
+    if (!sGo) return "slider GameObject creation failed";
+    Il2CppObject* sRt = unity::TransformOf(sGo);
+    Rect(sRt, {0, 0}, {1, 0}, {0.5f, 0}, {0, 0}, {-8, kBarHeight});
+    Il2CppObject* bgGo = NewUi("Background", sRt, layer);
+    Il2CppObject* fillArea = NewUi("Fill Area", sRt, layer);
+    Il2CppObject* fillGo = fillArea ? NewUi("Fill", unity::TransformOf(fillArea), layer) : nullptr;
+    Il2CppObject* handleArea = NewUi("Handle Slide Area", sRt, layer);
+    Il2CppObject* handleGo = handleArea ? NewUi("Handle", unity::TransformOf(handleArea), layer) : nullptr;
+    if (!bgGo || !fillGo || !handleGo) return "slider parts creation failed";
+    // Unity's DefaultControls.CreateSlider geometry, scaled to our bar.
+    Rect(unity::TransformOf(bgGo), {0, 0.25f}, {1, 0.75f}, {0.5f, 0.5f}, {0, 0}, {0, 0});
+    Rect(unity::TransformOf(fillArea), {0, 0.25f}, {1, 0.75f}, {0.5f, 0.5f}, {-6, 0}, {-28, 0});
+    Rect(unity::TransformOf(fillGo), {0, 0}, {0, 1}, {0.5f, 0.5f}, {0, 0}, {12, 0});
+    Rect(unity::TransformOf(handleArea), {0, 0}, {1, 1}, {0.5f, 0.5f}, {0, 0}, {-28, 0});
+    Rect(unity::TransformOf(handleGo), {0, 0}, {0, 1}, {0.5f, 0.5f}, {0, 0}, {28, 0});
+    // Hit area: the whole bar (the track is only half its height); alpha 1/255, so it is drawn (a
+    // CanvasRenderer may cull fully transparent meshes, and undrawn graphics are never raycast).
+    if (Il2CppObject* hit = AddImage(sGo, Color{1.0f, 1.0f, 1.0f, 1.0f / 255.0f}, false); !hit)
+        return "hit area Image failed";
+    // The game's look: SDF rounded shapes in the menu's colours (the panel text colour for the track,
+    // the game's slider pink (scroll bars) for fill and handle border); a SliderStyle, when one is
+    // loaded and the shapes are plain Images, overrides what it sets.
+    const Color text = labelColor;
+    const Color pink{0.871f, 0.310f, 0.522f, 1.0f};
+    const bool sdf = sdfRectClass != nullptr;
+    Il2CppObject* bgImg = AddShape(bgGo, Color{text.r, text.g, text.b, 0.22f}, kBarHeight * 0.25f);
+    Il2CppObject* fillImg = AddShape(fillGo, pink, kBarHeight * 0.25f);
+    Il2CppObject* handleImg = AddShape(handleGo, Color{1.0f, 1.0f, 1.0f, 1.0f}, kBarHeight * 0.5f, 3.0f, pink);
+    if (!bgImg || !fillImg || !handleImg) return "Image components failed";
+
+    Il2CppObject* sl = AddComponent(sGo, sliderClass, "AddComponent(Slider)");
+    if (!sl) return "Slider component failed";
+    Keep(sl);
+    slider = sl;
+    sliderGo = sGo;
+    {
+        int32_t dir = 0;  // LeftToRight
+        float mn = static_cast<float>(spec.min), mx = static_cast<float>(spec.max);
+        bool whole = true;
+        alignas(8) unsigned char nav[64] = {};  // Navigation, all zero = Mode.None, no explicit targets
+        Call(sldSetFill, sl, {unity::TransformOf(fillGo)}, "Slider.set_fillRect");
+        Call(sldSetHandle, sl, {unity::TransformOf(handleGo)}, "Slider.set_handleRect");
+        Call(selSetTarget, sl, {handleImg}, "Selectable.set_targetGraphic");
+        Call(sldSetDir, sl, {&dir}, "Slider.set_direction");
+        Call(sldSetWhole, sl, {&whole}, "Slider.set_wholeNumbers");
+        Call(sldSetMin, sl, {&mn}, "Slider.set_minValue");
+        Call(sldSetMax, sl, {&mx}, "Slider.set_maxValue");
+        Call(selSetNav, sl, {nav}, "Selectable.set_navigation");
+        SetSliderValue(value);
+    }
+    // Game look: SliderStyler + a loaded SliderStyle (applied by its OnEnable when we activate).
+    styled = false;
+    if (Il2CppObject* st = sdf ? nullptr : SliderStyle()) {  // SliderStyler expects Images
+        if (Il2CppObject* styler = AddComponent(sGo, stylerClass, "AddComponent(SliderStyler)")) {
+            void** slot = reinterpret_cast<void**>(reinterpret_cast<char*>(styler) + offStylerStyle);
+            if (wbarrier) wbarrier(styler, slot, st);
+            else *slot = st;
+            styled = true;
+        }
+    }
+    if (Faulted()) return "faulted";
+    unity::SetActive(r, true);
+    SetSliderValue(value);  // after OnEnable (handle / fill placement)
+    return nullptr;
+}
+
 bool PlotMenuSlider::Create(Il2CppObject* contentView, const SliderSpec& specIn, const PlotMenuSlider* rowOf) {
     if (!ready_ || !impl_ || !main_thread::IsMainThread()) return false;
     Impl& p = *impl_;
@@ -683,105 +792,11 @@ bool PlotMenuSlider::Create(Il2CppObject* contentView, const SliderSpec& specIn,
     }
     if (p.Faulted()) return fail("faulted");
 
-    // ---- label ----
-    Il2CppObject* labelGo = p.NewUi("Label", rootRt, layer);
-    if (labelGo) {
-        p.Rect(unity::TransformOf(labelGo), {0, 1}, {1, 1}, {0.5f, 1}, {0, 0}, {0, kLabelHeight});
-        Il2CppObject* tmp = p.AddComponent(labelGo, p.tmpUguiClass, "AddComponent(TextMeshProUGUI)");
-        if (tmp) {
-            p.Keep(tmp);
-            p.label = tmp;
-            Il2CppObject* lse = unity::Field<Il2CppObject*>(contentView, p.offDetailsText);
-            Il2CppObject* src = unity::IsAlive(lse) ? unity::GetComponent(lse, p.tmpTextClass) : nullptr;
-            float size = 26.0f;
-            Color col = p.labelColor;
-            if (src) {
-                if (Il2CppObject* font = p.Call(p.tmpGetFont, src, {}, "TMP_Text.get_font"); unity::IsAlive(font))
-                    p.Call(p.tmpSetFont, tmp, {font}, "TMP_Text.set_font");
-                if (Il2CppObject* mat = p.Call(p.tmpGetMat, src, {}, "TMP_Text.get_fontSharedMaterial"); unity::IsAlive(mat))
-                    p.Call(p.tmpSetMat, tmp, {mat}, "TMP_Text.set_fontSharedMaterial");
-                const float s = p.Unbox<float>(p.Call(p.tmpGetSize, src, {}, "TMP_Text.get_fontSize"));
-                if (std::isfinite(s) && s >= 10.0f && s <= 80.0f) size = s;
-                col = p.Unbox<Color>(p.Call(p.tmpGetColor, src, {}, "TMP_Text.get_color"), col);
-            }
-            p.labelColor = col;
-            if (shared) size *= kColumnFontScale;
-            p.Call(p.tmpSetSize, tmp, {&size}, "TMP_Text.set_fontSize");
-            p.Call(p.tmpSetColor, tmp, {&col}, "TMP_Text.set_color");
-            int32_t align = kTmpAlignLeft, noWrap = 0;
-            p.Call(p.tmpSetAlign, tmp, {&align}, "TMP_Text.set_alignment");
-            if (p.tmpSetWrap) p.Call(p.tmpSetWrap, tmp, {&noWrap}, "TMP_Text.set_textWrappingMode");
-            bool off = false;
-            p.Call(p.gfxSetRaycast, tmp, {&off}, "Graphic.set_raycastTarget");
-            p.SetLabel(p.value);
-        }
-    }
-
-    // ---- slider: standard uGUI hierarchy (names are what SliderStyler looks for) ----
-    Il2CppObject* sGo = p.NewUi("Slider", rootRt, layer);
-    if (!sGo) return fail("slider GameObject creation failed");
-    Il2CppObject* sRt = unity::TransformOf(sGo);
-    p.Rect(sRt, {0, 0}, {1, 0}, {0.5f, 0}, {0, 0}, {-8, kBarHeight});
-    Il2CppObject* bgGo = p.NewUi("Background", sRt, layer);
-    Il2CppObject* fillArea = p.NewUi("Fill Area", sRt, layer);
-    Il2CppObject* fillGo = fillArea ? p.NewUi("Fill", unity::TransformOf(fillArea), layer) : nullptr;
-    Il2CppObject* handleArea = p.NewUi("Handle Slide Area", sRt, layer);
-    Il2CppObject* handleGo = handleArea ? p.NewUi("Handle", unity::TransformOf(handleArea), layer) : nullptr;
-    if (!bgGo || !fillGo || !handleGo) return fail("slider parts creation failed");
-    // Unity's DefaultControls.CreateSlider geometry, scaled to our bar.
-    p.Rect(unity::TransformOf(bgGo), {0, 0.25f}, {1, 0.75f}, {0.5f, 0.5f}, {0, 0}, {0, 0});
-    p.Rect(unity::TransformOf(fillArea), {0, 0.25f}, {1, 0.75f}, {0.5f, 0.5f}, {-6, 0}, {-28, 0});
-    p.Rect(unity::TransformOf(fillGo), {0, 0}, {0, 1}, {0.5f, 0.5f}, {0, 0}, {12, 0});
-    p.Rect(unity::TransformOf(handleArea), {0, 0}, {1, 1}, {0.5f, 0.5f}, {0, 0}, {-28, 0});
-    p.Rect(unity::TransformOf(handleGo), {0, 0}, {0, 1}, {0.5f, 0.5f}, {0, 0}, {28, 0});
-    // Hit area: the whole bar (the track is only half its height); alpha 1/255, so it is drawn (a
-    // CanvasRenderer may cull fully transparent meshes, and undrawn graphics are never raycast).
-    if (Il2CppObject* hit = p.AddImage(sGo, Color{1.0f, 1.0f, 1.0f, 1.0f / 255.0f}, false); !hit)
-        return fail("hit area Image failed");
-    // The game's look: SDF rounded shapes in the menu's colours (the panel text colour for the track,
-    // the game's slider pink (scroll bars) for fill and handle border); a SliderStyle, when one is
-    // loaded and the shapes are plain Images, overrides what it sets.
-    const Color text = p.labelColor;
-    const Color pink{0.871f, 0.310f, 0.522f, 1.0f};
+    Il2CppObject* lse = unity::Field<Il2CppObject*>(contentView, p.offDetailsText);
+    Il2CppObject* labelSrc = unity::IsAlive(lse) ? unity::GetComponent(lse, p.tmpTextClass) : nullptr;
+    if (const char* err = p.BuildBody(root, rootRt, layer, labelSrc, 0.0f, shared ? kColumnFontScale : 1.0f)) return fail(err);
     const bool sdf = p.sdfRectClass != nullptr;
-    Il2CppObject* bgImg = p.AddShape(bgGo, Color{text.r, text.g, text.b, 0.22f}, kBarHeight * 0.25f);
-    Il2CppObject* fillImg = p.AddShape(fillGo, pink, kBarHeight * 0.25f);
-    Il2CppObject* handleImg = p.AddShape(handleGo, Color{1.0f, 1.0f, 1.0f, 1.0f}, kBarHeight * 0.5f, 3.0f, pink);
-    if (!bgImg || !fillImg || !handleImg) return fail("Image components failed");
-
-    Il2CppObject* slider = p.AddComponent(sGo, p.sliderClass, "AddComponent(Slider)");
-    if (!slider) return fail("Slider component failed");
-    p.Keep(slider);
-    p.slider = slider;
-    p.sliderGo = sGo;
-    {
-        int32_t dir = 0;  // LeftToRight
-        float mn = static_cast<float>(p.spec.min), mx = static_cast<float>(p.spec.max);
-        bool whole = true;
-        alignas(8) unsigned char nav[64] = {};  // Navigation, all zero = Mode.None, no explicit targets
-        p.Call(p.sldSetFill, slider, {unity::TransformOf(fillGo)}, "Slider.set_fillRect");
-        p.Call(p.sldSetHandle, slider, {unity::TransformOf(handleGo)}, "Slider.set_handleRect");
-        p.Call(p.selSetTarget, slider, {handleImg}, "Selectable.set_targetGraphic");
-        p.Call(p.sldSetDir, slider, {&dir}, "Slider.set_direction");
-        p.Call(p.sldSetWhole, slider, {&whole}, "Slider.set_wholeNumbers");
-        p.Call(p.sldSetMin, slider, {&mn}, "Slider.set_minValue");
-        p.Call(p.sldSetMax, slider, {&mx}, "Slider.set_maxValue");
-        p.Call(p.selSetNav, slider, {nav}, "Selectable.set_navigation");
-        p.SetSliderValue(p.value);
-    }
-    // Game look: SliderStyler + a loaded SliderStyle (applied by its OnEnable when we activate).
-    bool styled = false;
-    if (Il2CppObject* style = sdf ? nullptr : p.SliderStyle()) {  // SliderStyler expects Images
-        if (Il2CppObject* styler = p.AddComponent(sGo, p.stylerClass, "AddComponent(SliderStyler)")) {
-            void** slot = reinterpret_cast<void**>(reinterpret_cast<char*>(styler) + p.offStylerStyle);
-            if (p.wbarrier) p.wbarrier(styler, slot, style);
-            else *slot = style;
-            styled = true;
-        }
-    }
-    if (p.Faulted()) return fail("faulted");
-    unity::SetActive(root, true);
-    p.SetSliderValue(p.value);  // after OnEnable (handle / fill placement)
+    const bool styled = p.styled;
     if (!p.loggedBuild) {
         p.loggedBuild = true;
         SR2_INFO("[{}] slider '{}' built under '{}' ({}; {}; {}; {}), range {}..{} step {}, value {}", p.module,
@@ -792,6 +807,43 @@ bool PlotMenuSlider::Create(Il2CppObject* contentView, const SliderSpec& specIn,
                  p.externalSteps ? "left / right from the menu's navigation" : "left / right polled", p.spec.min,
                  p.spec.max, p.spec.step, p.value);
     }
+    return true;
+}
+
+float PlotMenuSlider::Height() { return kTotalHeight; }
+
+bool PlotMenuSlider::CreateIn(const SliderHost& host, const SliderSpec& specIn) {
+    if (!ready_ || !impl_ || !main_thread::IsMainThread()) return false;
+    Impl& p = *impl_;
+    Destroy();
+    if (p.Faulted()) return false;
+    auto fail = [&](const char* what) {
+        if (!p.loggedFail) SR2_WARN("[{}] slider '{}' not built: {}", p.module, specIn.name, what);
+        p.loggedFail = true;
+        if (p.root) p.Destroy(p.root);
+        p.Clear();
+        return false;
+    };
+    if (!unity::IsAlive(host.parent) || !p.IsA(host.parent, p.rtClass)) return fail("host has no RectTransform");
+    Il2CppObject* labelSrc = unity::IsAlive(host.textStyle) && p.IsA(host.textStyle, p.tmpTextClass) ? host.textStyle : nullptr;
+    const int layer = p.Unbox<int32_t>(p.Call(p.goGetLayer, unity::GameObjectOf(host.parent), {}, "GameObject.get_layer"), -1);
+    p.spec = specIn;
+    p.spec.step = std::max(p.spec.step, 1);
+    if (p.spec.max < p.spec.min) std::swap(p.spec.max, p.spec.min);
+    p.value = p.Snap(p.spec.value);
+    Il2CppObject* root = p.NewUi("sr2mods_Slider_" + p.spec.name, host.parent, layer);
+    if (!root) return fail("GameObject creation failed");
+    p.root = root;
+    p.Keep(root);
+    unity::SetActive(root, false);
+    Il2CppObject* rootRt = unity::TransformOf(root);
+    p.Rect(rootRt, {0, 1}, {0, 1}, {0, 1}, {host.x, -host.y}, {host.width, kTotalHeight});
+    if (p.Faulted()) return fail("faulted");
+    if (const char* err = p.BuildBody(root, rootRt, layer, labelSrc, host.fontSize, 1.0f)) return fail(err);
+    SR2_INFO("[{}] slider '{}' built in '{}' at ({:.0f}, {:.0f}) width {:.0f} ({}), range {}..{} step {}, value {}",
+             p.module, p.spec.name, unity::GetName(unity::GameObjectOf(host.parent)), host.x, host.y, host.width,
+             p.sdfRectClass ? "game SDF shapes" : p.styled ? "game SliderStyle" : "plain colours", p.spec.min,
+             p.spec.max, p.spec.step, p.value);
     return true;
 }
 
@@ -809,6 +861,28 @@ void PlotMenuSlider::Destroy() {
 
 bool PlotMenuSlider::Active() const { return impl_ && impl_->root; }
 int PlotMenuSlider::Value() const { return impl_ ? impl_->value : 0; }
+Il2CppObject* PlotMenuSlider::Root() const { return impl_ ? impl_->root : nullptr; }
+
+void PlotMenuSlider::SetPolling(bool on) {
+    if (!impl_) return;
+    impl_->polling = on;
+    if (!on) impl_->heldDir = impl_->blockedDir = 0;
+}
+
+void PlotMenuSlider::SetValue(int v) {
+    if (!impl_ || !impl_->root || !main_thread::IsMainThread() || impl_->Faulted()) return;
+    Impl& p = *impl_;
+    v = p.Snap(v);
+    p.SetSliderValue(v);
+    p.Apply(v, false);
+}
+
+void PlotMenuSlider::SetLabel(std::function<std::string(int)> label) {
+    if (!impl_ || !main_thread::IsMainThread()) return;
+    Impl& p = *impl_;
+    p.spec.label = std::move(label);
+    if (p.root && !p.Faulted()) p.SetLabel(p.value);
+}
 
 // ---------------------------------------------------------------- per frame --
 
@@ -939,7 +1013,7 @@ void PlotMenuSlider::Tick(float dt) {
     }
 
     // Gamepad / keyboard steps (not while Unity's own Slider.OnMove has it, not under a popup).
-    int dir = sliderSelected ? 0 : p.InputDirection();
+    int dir = (sliderSelected || !p.polling) ? 0 : p.InputDirection();
     if (dir == 0 || dir != p.blockedDir) p.blockedDir = 0;
     if (dir != 0 && dir == p.blockedDir) dir = 0;  // held since it was refused: no re-check per frame
     if (dir != 0 && dir != p.heldDir && p.InputBlocked()) {  // checked once per new press, not per frame

@@ -7,7 +7,7 @@
 | note | about |
 |---|---|
 | `hen-collector-fix2.md` | Hen Collector corner, suction, hen/rooster sliders: built, in-game check open |
-| `drone-station-dialog.md` | drone price limit as a game-UI dialog |
+| `drone-station-dialog.md` | drone price limit as a game-UI dialog (built, in-game check open) |
 | `ideas.md` | unplanned ideas and the work order |
 
 ## Where the documentation lives

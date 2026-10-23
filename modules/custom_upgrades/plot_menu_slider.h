@@ -24,6 +24,12 @@
 // Steps only while the slider is interactable and no PopupPrompt is open. The value is read by
 // polling (no managed delegates).
 //
+// Other hosts: CreateIn() builds the same slider into any RectTransform (a panel of our own, e.g. the
+// drone station price-limit dialog) at a given top-left position and width, with the label styled
+// after a given TMP_Text. No own Canvas there: the host's canvas must have a GraphicRaycaster.
+// SetPolling(false) stops the pad / keyboard polling (several sliders in one panel: only the focused
+// one polls; the host can still call Step()).
+//
 // Lifetime: Create() replaces the previous slider (one instance per PlotMenuSlider); Destroy() removes
 // it; Tick() destroys it when its GameObject died with the menu. GC handles (root, slider, label,
 // remembered selection) are freed only from posted main-thread jobs, never inside a hook.
@@ -67,8 +73,19 @@ struct SliderSpec {
     SliderInput input = SliderInput::kPrimary;
 };
 
+// Where CreateIn() puts the slider.
+struct SliderHost {
+    Il2CppObject* parent = nullptr;     // RectTransform to build under (must be alive)
+    float x = 0.0f, y = 0.0f;           // top-left of the slider inside `parent` (y grows downwards)
+    float width = 400.0f;
+    Il2CppObject* textStyle = nullptr;  // TMP_Text whose font / material / size / colour the label copies
+    float fontSize = 0.0f;              // > 0: overrides the copied size
+};
+
 class PlotMenuSlider {
 public:
+    // Height of the built slider (label + bar), in the host's units.
+    static float Height();
     PlotMenuSlider();
     ~PlotMenuSlider();
     PlotMenuSlider(const PlotMenuSlider&) = delete;
@@ -82,6 +99,17 @@ public:
     // purchase menu), replacing any previous one. With `rowOf` (a slider built just before with
     // columns > 1) it goes into that slider's row instead. false = nothing built (logged once).
     bool Create(Il2CppObject* contentView, const SliderSpec& spec, const PlotMenuSlider* rowOf = nullptr);
+    // Main thread. Build the slider into an arbitrary RectTransform (see SliderHost), replacing any
+    // previous one (spec.columns / column are ignored). false = nothing built (logged once).
+    bool CreateIn(const SliderHost& host, const SliderSpec& spec);
+    // Main thread. Gamepad / keyboard polling in Tick() on or off (default on).
+    void SetPolling(bool on);
+    // Main thread. Set the value from outside (snapped; onChange is not called).
+    void SetValue(int v);
+    // Main thread. Replace the label function and redraw the label (e.g. units changed).
+    void SetLabel(std::function<std::string(int)> label);
+    // Main thread. The slider's root GameObject (nullptr while none).
+    Il2CppObject* Root() const;
     // Main thread. Remove the slider (idempotent); the row's builder removes the whole row.
     void Destroy();
     bool Active() const;
