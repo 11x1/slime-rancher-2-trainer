@@ -1,27 +1,18 @@
 // plot_upgrades: the effects of the purchasable per-plot upgrade tiers (SR2 1.3.0).
 //
-// The tiers themselves (Plort Collector II/III, Auto-Feeder II, Music Box II, Faster Hens
-// I/II, Fast Growth I/II, Ash Booster) are custom upgrades bought in each plot's own
-// purchase menu (modules/custom_upgrades: prices, prerequisites, sidecar persistence,
+// The tiers themselves (Music Box II, Faster Hens I/II, Fast Growth I/II, Ash Booster;
+// Plort Collector II/III and Auto-Feeder II were retired) are custom upgrades bought in
+// each plot's own purchase menu (modules/custom_upgrades: prices, prerequisites, sidecar persistence,
 // selling through sell_upgrades). This module only applies the multiplier of the tier a
 // plot owns, through custom_upgrades::Multiplier(plot or component, family) - a cached
 // O(1) lookup per object. A plot without a tier runs pure vanilla code (multiplier 1).
 // The former global multiplier sliders are gone (see modules/plot_upgrades/NOTES.md).
 //
 // Game side (Cpp2IL dump + disassembly of GameAssembly.dll 1.3.0):
-//   * The LandPlot upgrade components (PlortCollectorUpgrader, FeederUpgrader,
-//     MusicBoxUpgrader, ...) only switch GameObjects on/off. The numbers live in the
-//     activated components:
+//   * The LandPlot upgrade components (MusicBoxUpgrader, AshTroughUpgrader, ...) only
+//     switch GameObjects on/off. The numbers live in the activated components:
 //
 //   Corral
-//     PlortCollector.DoCollection(): model.collectorNextTime += CollectPeriod * 3600
-//       (CollectPeriod = hours between collections, a prefab field). Called from
-//       FixedUpdate when collectorNextTime is reached, and from StartCollection.
-//       Pond / incinerator collectors use the same component (not tiered: plot type).
-//     SlimeFeeder.FixedUpdate() / UpdateToTime(worldTime): every feeding cycle
-//       (HoursByFeedSpeed[model.feederCycleSpeed] hours) adds ItemsPerFeeding to
-//       model.remainingFeedOperations; each operation ejects one food item from the
-//       feeder's storage (0.5 s apart). UpdateToTime is the fast-forward (sleep) path.
 //     SlimeEmotions.ComputeAgitationChangePerHour(): factor = _agitationRecoveryFactor
 //       (+ daylight/darkness extra) + (_musicBoxCount > 0 ? MusicBoxRegion.EXTRA_CALMING_FACTOR
 //       (0.5, inlined const) : 0) + _toyAgitationFactor; ... Recomputed on many events.
@@ -43,10 +34,6 @@
 //       plotModel.ashUnits to MaxUnits (vanilla cap).
 //
 // What this module does (all runtime-only, nothing new is written into the save):
-//   * PlortCollector.DoCollection detour: CollectPeriod / m only while the original runs
-//     (restored right after, RAII). Saved value = the next collection timestamp.
-//   * SlimeFeeder.FixedUpdate / UpdateToTime detours: ItemsPerFeeding x m while the
-//     original runs. Saved value = remainingFeedOperations (an int counter).
 //   * SlimeEmotions.ComputeAgitationChangePerHour detour: for a slime inside a music box
 //     (_musicBoxCount > 0) that is in the _currentEmotions of a MusicBoxRegion whose
 //     corral owns Music Box II, adds 0.5 * (m - 1) to _toyAgitationFactor while the
@@ -133,9 +120,8 @@ struct FieldRestore {
     }
 };
 
-enum Feature { kFCollector, kFFeeder, kFMusic, kFCoop, kFGarden, kFAsh, kFeatureCount };
-const char* const kFeatureNames[kFeatureCount] = {"plort collector", "auto-feeder", "music box", "coop",
-                                                  "garden", "incinerator ash"};
+enum Feature { kFMusic, kFCoop, kFGarden, kFAsh, kFeatureCount };
+const char* const kFeatureNames[kFeatureCount] = {"music box", "coop", "garden", "incinerator ash"};
 
 float Mult(Il2CppObject* key, Family f) { return custom_upgrades::Multiplier(key, f); }
 
@@ -155,8 +141,6 @@ public:
     bool LogOnce(Feature f) { return !logged_[f].exchange(true, std::memory_order_relaxed); }
 
     // ---- detour bodies (main thread, inside DetourGuard) ----
-    void CollectorBefore(Il2CppObject* self, FieldRestore<float>& r);
-    void FeederBefore(Il2CppObject* self, FieldRestore<int32_t>& r, const char* path);
     void MusicBefore(Il2CppObject* self, FieldRestore<float>& r);
     void RegisterRegion(Il2CppObject* region);
     float CoopAfter(Il2CppObject* self, float period);
@@ -176,8 +160,6 @@ private:
 
 public:
     // classes
-    Il2CppClass* collectorClass_ = nullptr;
-    Il2CppClass* feederClass_ = nullptr;
     Il2CppClass* emotionsClass_ = nullptr;
     Il2CppClass* musicRegionClass_ = nullptr;
     Il2CppClass* reproduceClass_ = nullptr;
@@ -188,8 +170,6 @@ public:
     Il2CppClass* landPlotClass_ = nullptr;
     Il2CppClass* incinerateClass_ = nullptr;
     // offsets
-    size_t offCollectPeriod_ = 0;     // PlortCollector.CollectPeriod (float, hours)
-    size_t offItemsPerFeeding_ = 0;   // SlimeFeeder.ItemsPerFeeding (int)
     size_t offToyFactor_ = 0;         // SlimeEmotions._toyAgitationFactor (float)
     size_t offMusicBoxCount_ = 0;     // SlimeEmotions._musicBoxCount (int)
     size_t offRegionEmotions_ = 0;    // MusicBoxRegion._currentEmotions (List<SlimeEmotions>)
@@ -226,9 +206,6 @@ public:
 
 PlotUpgrades* g_self = nullptr;
 
-sr2::core::DetourGuard g_collectGuard{kModule, "PlortCollector.DoCollection"};
-sr2::core::DetourGuard g_feedFixedGuard{kModule, "SlimeFeeder.FixedUpdate"};
-sr2::core::DetourGuard g_feedFfGuard{kModule, "SlimeFeeder.UpdateToTime"};
 sr2::core::DetourGuard g_musicGuard{kModule, "SlimeEmotions.ComputeAgitationChangePerHour"};
 sr2::core::DetourGuard g_regionGuard{kModule, "MusicBoxRegion.OnTriggerEnter"};
 sr2::core::DetourGuard g_coopGuard{kModule, "Reproduce.ReproducePeriod"};
@@ -238,15 +215,11 @@ sr2::core::DetourGuard g_ash4Guard{kModule, "Incinerate.ProcessIncinerateResults
 
 using VoidFn = void (*)(Il2CppObject*, const MethodInfo*);
 using VoidObjFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
-using FeedFfFn = void (*)(Il2CppObject*, double, const MethodInfo*);
 using FloatFn = float (*)(Il2CppObject*, const MethodInfo*);
 using SrUpdateFn = void (*)(Il2CppObject*, double, double, float, const MethodInfo*);
 using Ash2Fn = bool (*)(Il2CppObject*, Il2CppObject*, int32_t, const MethodInfo*);
 using Ash4Fn = void (*)(Il2CppObject*, Il2CppObject*, int32_t, Vec3, Quat, const MethodInfo*);
 
-VoidFn g_origCollect = nullptr;
-VoidFn g_origFeedFixed = nullptr;
-FeedFfFn g_origFeedFf = nullptr;
 VoidFn g_origMusic = nullptr;
 VoidObjFn g_origRegionEnter = nullptr;
 FloatFn g_origCoop = nullptr;
@@ -256,24 +229,6 @@ Ash4Fn g_origAsh4 = nullptr;
 
 // Module on and custom_upgrades (the tiers) available.
 bool Live() { return g_self && g_self->On() && custom_upgrades::Active(); }
-
-void CollectDetour(Il2CppObject* self, const MethodInfo* mi) {
-    FieldRestore<float> r;
-    if (self && Live()) g_collectGuard.Run([&] { g_self->CollectorBefore(self, r); });
-    g_origCollect(self, mi);
-}
-
-void FeedFixedDetour(Il2CppObject* self, const MethodInfo* mi) {
-    FieldRestore<int32_t> r;
-    if (self && Live()) g_feedFixedGuard.Run([&] { g_self->FeederBefore(self, r, "FixedUpdate"); });
-    g_origFeedFixed(self, mi);
-}
-
-void FeedFfDetour(Il2CppObject* self, double worldTime, const MethodInfo* mi) {
-    FieldRestore<int32_t> r;
-    if (self && Live()) g_feedFfGuard.Run([&] { g_self->FeederBefore(self, r, "UpdateToTime"); });
-    g_origFeedFf(self, worldTime, mi);
-}
 
 void MusicDetour(Il2CppObject* self, const MethodInfo* mi) {
     FieldRestore<float> r;
@@ -318,39 +273,6 @@ std::string NameOf(Il2CppObject* obj, const char* fallback) {
 }
 
 // ------------------------------------------------------------------ bodies --
-
-void PlotUpgrades::CollectorBefore(Il2CppObject* self, FieldRestore<float>& r) {
-    if (!main_thread::IsMainThread() || !IsA(self, collectorClass_) || !unity::IsAlive(self)) return;
-    const float m = Mult(self, Family::kCollector);
-    if (!(m > 1.0f)) return;
-    float& period = unity::Field<float>(self, offCollectPeriod_);
-    const float orig = period;
-    if (!std::isfinite(orig) || !(orig > 0.0f)) return;
-    const float scaled = std::max(orig / m, 0.01f);  // >= 36 world seconds
-    r.saved = orig;
-    r.where = &period;
-    period = scaled;
-    if (LogOnce(kFCollector))
-        SR2_INFO("[{}] plort collector '{}': CollectPeriod {:.3f} h -> {:.3f} h (tier x{:.2f}) for this collection",
-                 kModule, NameOf(self, "PlortCollector"), orig, scaled, m);
-}
-
-void PlotUpgrades::FeederBefore(Il2CppObject* self, FieldRestore<int32_t>& r, const char* path) {
-    if (!main_thread::IsMainThread() || !IsA(self, feederClass_) || !unity::IsAlive(self)) return;
-    const float m = Mult(self, Family::kFeeder);
-    if (!(m > 1.0f)) return;
-    int32_t& items = unity::Field<int32_t>(self, offItemsPerFeeding_);
-    const int32_t orig = items;
-    if (orig <= 0 || orig > 1000) return;
-    const int32_t scaled = std::clamp(static_cast<int32_t>(std::lround(orig * m)), 1, 100);
-    if (scaled == orig) return;
-    r.saved = orig;
-    r.where = &items;
-    items = scaled;
-    if (LogOnce(kFFeeder))
-        SR2_INFO("[{}] auto-feeder '{}' ({}): ItemsPerFeeding {} -> {} per feeding cycle (tier)", kModule,
-                 NameOf(self, "SlimeFeeder"), path, orig, scaled);
-}
 
 bool PlotUpgrades::ListContains(void* list, Il2CppObject* item) {
     for (size_t i = 0, n = unity::ListCount(list); i < n && i < 512; ++i)
@@ -538,38 +460,6 @@ bool PlotUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         if (!landPlotClass_) return ctx.Fail(why);
     }
 
-    // --- plort collector ---
-    {
-        std::string why;
-        const MethodInfo* mi = nullptr;
-        collectorClass_ = cls("", "PlortCollector", why);
-        bool ok = off(collectorClass_, "CollectPeriod", offCollectPeriod_, why);
-        void* p = ok ? method(collectorClass_, "DoCollection", 0, mi, why) : nullptr;
-        ok = ok && hook("PlortCollector.DoCollection", p, reinterpret_cast<void*>(&CollectDetour),
-                        reinterpret_cast<void**>(&g_origCollect), why);
-        done(kFCollector, ok,
-             ok ? std::format("DoCollection RVA 0x{:X}, CollectPeriod +0x{:X}", Resolver::Rva(p), offCollectPeriod_)
-                : why);
-    }
-    // --- auto-feeder ---
-    {
-        std::string why;
-        const MethodInfo* mi1 = nullptr;
-        const MethodInfo* mi2 = nullptr;
-        feederClass_ = cls("", "SlimeFeeder", why);
-        bool ok = off(feederClass_, "ItemsPerFeeding", offItemsPerFeeding_, why);
-        void* p1 = ok ? method(feederClass_, "FixedUpdate", 0, mi1, why) : nullptr;
-        void* p2 = ok ? method(feederClass_, "UpdateToTime", 1, mi2, why) : nullptr;
-        ok = ok && p1 && p2 &&
-             hook("SlimeFeeder.FixedUpdate", p1, reinterpret_cast<void*>(&FeedFixedDetour),
-                  reinterpret_cast<void**>(&g_origFeedFixed), why) &&
-             hook("SlimeFeeder.UpdateToTime", p2, reinterpret_cast<void*>(&FeedFfDetour),
-                  reinterpret_cast<void**>(&g_origFeedFf), why);
-        done(kFFeeder, ok,
-             ok ? std::format("FixedUpdate RVA 0x{:X}, UpdateToTime RVA 0x{:X}, ItemsPerFeeding +0x{:X}",
-                              Resolver::Rva(p1), Resolver::Rva(p2), offItemsPerFeeding_)
-                : why);
-    }
     // --- music box ---
     {
         std::string why;

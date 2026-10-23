@@ -53,18 +53,13 @@
 //   ReplaceLandPlot) builds a NEW model, so it cannot be reused to drop one upgrade.
 //
 // ---------------------------------------------------------------- behaviour --
-//   * Detour LandPlotUIRoot.OnAction: for an OWNED upgrade item (module on) it opens the
-//     game's own confirm popup (OpenPopupPrompt with the item's title) and replaces the
-//     message / positive-button texts ("Sell this upgrade for N Newbucks?" / "Sell"). The
-//     LocalizeStringEvent of those two labels on that transient popup instance is disabled
-//     first so localisation cannot overwrite the text. Not owned -> vanilla purchase flow.
-//     If the upgrade cannot be sold, no popup opens (user feedback): the sell button shows
-//     it disabled with a short reason, and confirming the item does nothing (as vanilla
-//     does for an owned item). The full reason goes to the log.
-//   * The popup's positive Action is a fresh <>c__DisplayClass6_0 closure (its cost stays
-//     empty) bound to <PromptForUpgrade>b__0, exactly like the game builds it. Detour on
-//     b__0: if it is our pending closure, the sale runs instead. If the module is off /
-//     faulted, the original b__0 runs and does nothing (Upgrade() aborts: already owned).
+//   * Selling is the Sell button in the details panel (below), with NO confirm popup (user
+//     feedback): one press sells. Detour LandPlotUIRoot.OnAction: confirming an OWNED upgrade
+//     item (A / submit / clicking the selected card) does nothing, as in vanilla - a double
+//     click must not sell. Not owned -> vanilla purchase flow. If the upgrade cannot be sold
+//     there is no popup either: a disabled button with a short reason, or no button.
+//   * Detour on LandPlotUIRoot.<PromptForUpgrade>b__0 (the vanilla purchase confirm): only
+//     for the Ash Trough re-purchase below.
 //   * Sale (main thread): re-validate, refund = floor(0.5 x each currency cost) via
 //     PlayerState.AddCurrency, model.upgrades.Remove(u), revert the upgrader exactly
 //     (table above, inverted), ApplyUpgrades(empty set, false) to refresh trackers +
@@ -106,31 +101,40 @@
 //   event, which ends in LandPlotUIRoot.OnAction(selected item) - like gamepad A.
 //   * LandPlotUIRoot.SetActivator detour (pre): remember the open plot menu (GC handle;
 //     the previous handle is freed by a posted job, never inside a hook).
-//   * DetailsMoreButtonView.BindData detour (post): if the bound view is the label-only
-//     variant and vm.infoLabel is the _infoButtonLabel of an upgrade item of the open
-//     plot menu (pointer identity) that the plot owns, a copy of that category's own
-//     detailsButton prefab (the game's Purchase button) is instantiated as a sibling in
-//     the same container, labelled "Sell +N" (its LocalizeStringEvent is disabled, the TMP
-//     text set). With a LayoutGroup on the container it sits next to PURCHASED; without one
-//     it covers the PURCHASED slot and reads "Owned - Sell +N". An upgrade that can't be
-//     sold gets the same button, non-interactable (Selectable.set_interactable(false): the
-//     prefab's own disabled look, skipped by navigation; label alpha halved on top) and
-//     labelled "Can't sell: <short reason>" ("holds food", "silo storage", ...).
-//     The previous sell button is destroyed on every bind (= every selection change).
+//   * DetailsMoreButtonView.BindData detour (post): vm.infoLabel is matched (pointer
+//     identity) to an upgrade item of the open plot menu. What the Sell button sells:
+//     - label-only variant (PURCHASED): the owned item itself;
+//     - Purchase variant: only the card of a custom tier chain that shows the next tier
+//       (custom_upgrades::ChainSellTarget): the owned tier below it (a custom tier, or the
+//       vanilla Music Box / Ash Trough whose card the tier took over), priced by that tier's
+//       own menu item.
+//     A copy of that category's own detailsButton prefab (the game's Purchase button) is
+//     instantiated as a sibling in the same container, labelled "Sell +N" (its
+//     LocalizeStringEvent is disabled, the TMP text set). The container has no LayoutGroup
+//     (log: "MainActionButtonContainer (LayoutGroup no)"), so the vanilla view's rect is split:
+//     PURCHASED / Purchase keeps the left half, Sell takes the right half (RectTransform
+//     sizeDelta / anchoredPosition; with a LayoutGroup that would be left to it). Without the
+//     RectTransform accessors there is no Sell button next to Purchase. An upgrade that can't
+//     be sold for a passing reason ("holds food", "sell Music Box II first") gets the button
+//     non-interactable (Selectable.set_interactable(false): the prefab's own disabled look,
+//     skipped by navigation; label alpha halved on top) labelled with that reason; permanent
+//     reasons ("silo storage", "not sellable") get no button. The previous sell button is
+//     destroyed on every bind (= every selection change).
 //   * UnityEngine.UI.Button.Press detour: a click on OUR button (pointer compare; other
-//     buttons are not touched) opens the sell popup (HandleAction). If the prefab's own
-//     submit routing fires in the same frame too, the second request is dropped (one
-//     popup per frame). Gamepad: A on the selected owned item = submit = same popup.
+//     buttons are not touched) sells at once and never reaches the original Press (whose
+//     submit would buy the selected card's tier). An OnAction in that frame or the next (the
+//     prefab's own submit routing) is swallowed. Gamepad: the cloned prefab
+//     (TextButton_NoneSelectable) is not reachable by navigation, so selling is mouse-only.
 //
 // Fault policy: every detour runs its logic inside a DetourGuard (native fault -> module
 // faulted, detours pass-through). Objects are class- and IsAlive-checked; runtime_invoke
-// native faults mark the module faulted (never used as control flow). The closure /
-// delegate are referenced by the popup (we only compare the address). GC handles (open
+// native faults mark the module faulted (never used as control flow). GC handles (open
 // menu root, our sell button, one per remembered ash trough model) are freed only from
 // posted main-thread jobs. No scans, nothing per frame.
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -224,9 +228,11 @@ struct Bound<R(A...)> {
     R operator()(A... a) const { return fn(a..., mi); }
 };
 
-struct PendingPrompt {
-    Il2CppObject* closure = nullptr;  // identity only (pinned by pendingHandle_ while pending)
-    int32_t upgrade = 0;
+struct Vec2 {
+    float x, y;
+};
+struct Rect {
+    float x, y, width, height;
 };
 
 class SellUpgrades final : public sr2::core::Module {
@@ -237,7 +243,6 @@ public:
     void OnEnable() override { enabled_.store(true); }
     void OnDisable() override {
         enabled_.store(false);
-        ClearPending();
         main_thread::Post([this] {
             if (!enabled_.load()) DestroySellButton();
         });
@@ -246,7 +251,6 @@ public:
 
     // detour bodies (main thread, inside a DetourGuard)
     bool HandleAction(Il2CppObject* root, Il2CppObject* item);
-    bool HandleConfirm(Il2CppObject* closure);
     void TrackRoot(Il2CppObject* root);
     void AfterMoreBind(Il2CppObject* view, Il2CppObject* vm);
     bool OnSellButton(Il2CppObject* button);
@@ -271,9 +275,12 @@ private:
 
     std::string CanSell(Il2CppObject* plot, int32_t upg, std::string* brief = nullptr);
     bool Price(Il2CppObject* item, std::vector<Refund>& out, int32_t& price, int32_t& refund);
-    bool OpenPrompt(Il2CppObject* root, Il2CppObject* item, int32_t upg, const std::string& text);
     bool SetLabel(Il2CppObject* lse, const std::string& text);
+    bool SellNow(Il2CppObject* root, Il2CppObject* priceItem, int32_t upg, const char* via);
     void DoSell(Il2CppObject* root, Il2CppObject* plot, Il2CppObject* item, int32_t upg);
+    bool SideBySide(Il2CppObject* vanillaView, Il2CppObject* ourView);
+    Vec2 GetVec(const MethodInfo* m, Il2CppObject* rt, const char* what, bool& ok);
+    void SetVec(const MethodInfo* m, Il2CppObject* rt, Vec2 v, const char* what, bool& ok);
     int RevertVisuals(Il2CppObject* plot, int32_t upg, std::string& notes);
     bool ReplantNormalCrop(Il2CppObject* plot, std::string& notes);
     int CountUpgraders(Il2CppObject* plot, int32_t upg);
@@ -282,7 +289,6 @@ private:
                          bool* ok = nullptr);
     bool HashSetCall(Il2CppObject* set, const char* method, int32_t upg, bool* result);
     Il2CppObject* NewEmptySetLike(Il2CppObject* set);
-    void SetRef(Il2CppObject* obj, size_t offset, Il2CppObject* value);
     Il2CppObject* GameObjectOf(Il2CppObject* comp);
     void SetActive(Il2CppObject* go, bool on);
     bool HasUpgrade(Il2CppObject* plot, int32_t upg) { return hasUpgrade_(plot, upg); }
@@ -293,21 +299,12 @@ private:
     void DestroySellButton();
 
     std::atomic<bool> enabled_{false};
-    PendingPrompt pending_;  // main thread only
-    // GC handle on pending_.closure: a cancelled popup drops its delegate, and without the handle
-    // the GC could hand the closure's address to a later vanilla purchase closure (same class).
-    Il2CppGCHandle pendingHandle_ = nullptr;
-    void ClearPending() {
-        pending_ = {};
-        if (Il2CppGCHandle h = pendingHandle_) {
-            pendingHandle_ = nullptr;
-            main_thread::Post([h] { unity::FreeGCHandle(h); });  // never freed inside a hook
-        }
-    }
-    unsigned long long promptTick_ = ~0ull;  // TickCount of the last opened prompt
-    bool loggedFirstPrompt_ = false;
-    bool warnedLabel_ = false;
+    // TickCount of the last sale: a click on our button can also reach OnAction through the
+    // prefab's own submit routing, for the item that is selected after the sale (which may then be
+    // buyable): swallowed in that frame and the next.
+    unsigned long long sellTick_ = ~0ull;
     bool loggedButton_ = false;
+    bool loggedLayout_ = false;
 
     // open plot menu (main thread only)
     Il2CppObject* root_ = nullptr;
@@ -315,7 +312,8 @@ private:
     // our sell button (main thread only)
     Il2CppObject* btnGo_ = nullptr;      // GameObject (handle held)
     Il2CppObject* btnButton_ = nullptr;  // its UnityEngine.UI.Button (may be null)
-    Il2CppObject* btnItem_ = nullptr;    // the owned item it sells (menu asset)
+    Il2CppObject* btnItem_ = nullptr;    // the menu item whose price the refund uses (menu asset)
+    int32_t btnUpgrade_ = 0;             // the owned upgrade it sells
     Il2CppGCHandle btnHandle_ = nullptr;
     std::unordered_map<Il2CppClass*, size_t> offCategories_, offItems_, offDetailsButton_;
     // ash in a sold Ash Trough, per LandPlotModel (main thread only; handle keeps the key alive)
@@ -334,8 +332,6 @@ public:
     Il2CppClass* closureClass_ = nullptr;     // LandPlotUIRoot/<>c__DisplayClass6_0
     Il2CppClass* plotClass_ = nullptr;        // LandPlot
     Il2CppClass* modelClass_ = nullptr;       // LandPlotModel
-    Il2CppClass* popupClass_ = nullptr;       // PopupPrompt
-    Il2CppClass* actionClass_ = nullptr;      // System.Action
     Il2CppClass* costEntryClass_ = nullptr;   // CurrencyCostEntry
     Il2CppClass* upgraderClass_ = nullptr;    // PlotUpgrader
     Il2CppClass* tmpClass_ = nullptr;         // TMPro.TMP_Text
@@ -360,8 +356,6 @@ public:
 
     size_t offActivator_ = 0;     // LandPlotUIRoot.Activator
     size_t offItemUpgrade_ = 0;   // PlotUpgradePurchaseItemModel._upgrade
-    size_t offItemTitle_ = 0;     // MenuPurchaseItemModel._title
-    size_t offItemPrompt_ = 0;    // MenuPurchaseItemModel._promptMessage
     size_t offItemCosts_ = 0;     // MenuPurchaseItemModel._purchaseCost._currencyCosts
     size_t offCostCurrency_ = 0;  // CurrencyCostEntry._currency
     size_t offCostAmount_ = 0;    // CurrencyCostEntry._amount
@@ -369,11 +363,6 @@ public:
     size_t offPlotAttached_ = 0;  // LandPlot._attached
     size_t offModelUpgrades_ = 0; // LandPlotModel.upgrades
     size_t offModelAsh_ = 0;      // LandPlotModel.ashUnits
-    size_t offUiTemplates_ = 0;   // GameContext.<UITemplates>k__BackingField
-    size_t offPosLabel_ = 0;      // UITemplates.popupPromptPositiveActionLabel
-    size_t offNegLabel_ = 0;      // UITemplates.popupPromptNegativeActionLabel
-    size_t offPopupMsg_ = 0;      // PopupPrompt._messageText
-    size_t offPopupPos_ = 0;      // PopupPrompt._positiveActionButtonText
     size_t offLocationId_ = 0;    // IdHandler._id
     size_t offMenuConfig_ = 0;    // ListUIRoot`4.menuConfig
     size_t offItemInfoLabel_ = 0; // MenuPurchaseItemModel._infoButtonLabel
@@ -383,16 +372,27 @@ public:
     Il2CppClass* moreViewClass_ = nullptr;     // DetailsMoreButtonView
     Il2CppClass* layoutGroupClass_ = nullptr;  // UnityEngine.UI.LayoutGroup (optional)
     Bound<void(Il2CppObject*)> objectDestroy_;  // UnityEngine.Object.Destroy(Object)
+    // RectTransform (optional: side-by-side layout of PURCHASED / Purchase and our Sell button)
+    Il2CppClass* rtClass_ = nullptr;
+    const MethodInfo* rtGetRect_ = nullptr;
+    const MethodInfo* rtGetAnchorMin_ = nullptr;
+    const MethodInfo* rtSetAnchorMin_ = nullptr;
+    const MethodInfo* rtGetAnchorMax_ = nullptr;
+    const MethodInfo* rtSetAnchorMax_ = nullptr;
+    const MethodInfo* rtGetPivot_ = nullptr;
+    const MethodInfo* rtSetPivot_ = nullptr;
+    const MethodInfo* rtGetSize_ = nullptr;
+    const MethodInfo* rtSetSize_ = nullptr;
+    const MethodInfo* rtGetPos_ = nullptr;
+    const MethodInfo* rtSetPos_ = nullptr;
+    bool layoutOk_ = false;
 
     FieldInfo* fClosureThis_ = nullptr;
     FieldInfo* fClosureUpgrade_ = nullptr;
-    FieldInfo* fClosureItem_ = nullptr;
-    size_t offClosureThis_ = 0, offClosureUpgrade_ = 0, offClosureItem_ = 0;
+    size_t offClosureThis_ = 0, offClosureUpgrade_ = 0;
 
     const MethodInfo* b0Mi_ = nullptr;           // <PromptForUpgrade>b__0
-    const MethodInfo* openPopupMi_ = nullptr;    // ListUIRoot`4.OpenPopupPrompt (inflated)
     const MethodInfo* rebuildMi_ = nullptr;      // ListUIRoot`4.RebuildUI (inflated)
-    const MethodInfo* gameCtxInstMi_ = nullptr;  // SRSingleton<GameContext>.get_Instance
     const MethodInfo* tmpSetTextMi_ = nullptr;   // TMP_Text.set_text
     const MethodInfo* setRemoveMi_ = nullptr;    // HashSet<Upgrade>.Remove (lazy)
     const MethodInfo* setCtorMi_ = nullptr;      // HashSet<Upgrade>..ctor() (lazy)
@@ -402,7 +402,6 @@ public:
     Bound<void(Il2CppObject*, Il2CppObject*, bool)> applyUpgrades_;
     Bound<void(Il2CppObject*, Il2CppObject*, int32_t, bool, Il2CppObject*)> addCurrency_;
     Bound<bool(Il2CppObject**)> tryGetPlayerState_;
-    Bound<void(Il2CppObject*, Il2CppObject*, intptr_t)> actionCtor_;
     Bound<Il2CppObject*(Il2CppObject*, Il2CppObject*)> getComponent_;
     Bound<Il2CppArray*(Il2CppObject*, Il2CppObject*)> getComponents_;
     Bound<Il2CppObject*(Il2CppObject*, Il2CppObject*, bool)> getComponentInChildren_;
@@ -414,7 +413,6 @@ public:
     Bound<void(Il2CppObject*, bool)> setInteractable_;  // Selectable.set_interactable (optional)
     Bound<void(Il2CppObject*, float)> tmpSetAlpha_;     // TMP_Text.set_alpha (optional)
     Bound<int32_t(Il2CppObject*)> foodCount_;
-    Bound<void(Il2CppObject*)> closeNegative_;
     // deluxe garden replant (optional: missing -> DELUXE_GARDEN not sellable)
     Bound<Il2CppObject*(Il2CppObject*)> primarySpawnId_;
     Bound<void(Il2CppObject*, Il2CppObject*)> initAsReplacement_;
@@ -423,9 +421,7 @@ public:
     bool replantOk_ = false;
 
     using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
-    using WBarrierFn = void (*)(Il2CppObject*, void**, void*);
     ObjectNewFn objectNew_ = nullptr;
-    WBarrierFn wbarrier_ = nullptr;  // il2cpp_gc_wbarrier_set_field (optional)
 };
 
 SellUpgrades* g_self = nullptr;
@@ -477,14 +473,8 @@ void OnActionDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo* mi
 }
 
 void ConfirmDetour(Il2CppObject* closure, const MethodInfo* mi) {
-    bool handled = false;
     SellUpgrades::AshRebuy rebuy;
-    if (g_self && closure && g_self->On())
-        g_confirmGuard.Run([&] {
-            handled = g_self->HandleConfirm(closure);
-            if (!handled) rebuy = g_self->BeforeVanillaBuy(closure);
-        });
-    if (handled) return;
+    if (g_self && closure && g_self->On()) g_confirmGuard.Run([&] { rebuy = g_self->BeforeVanillaBuy(closure); });
     g_origConfirm(closure, mi);
     if (rebuy.plot && g_self && g_self->On()) g_confirmGuard.Run([&] { g_self->AfterVanillaBuy(rebuy); });
 }
@@ -507,13 +497,6 @@ Il2CppObject* SellUpgrades::Invoke(const MethodInfo* m, void* obj, std::initiali
         }
     }
     return r;
-}
-
-void SellUpgrades::SetRef(Il2CppObject* obj, size_t offset, Il2CppObject* value) {
-    // Reference store into a managed object: through the GC write barrier when available.
-    void** slot = reinterpret_cast<void**>(reinterpret_cast<char*>(obj) + offset);
-    if (wbarrier_) wbarrier_(obj, slot, value);
-    else *slot = value;
 }
 
 Il2CppObject* SellUpgrades::GameObjectOf(Il2CppObject* comp) {
@@ -644,7 +627,7 @@ std::string SellUpgrades::CanSell(Il2CppObject* plot, int32_t upg, std::string* 
         default: break;
     }
     if (upg < WALLS || upg > STORAGE_CAPACITY_INCREASE) return no("This upgrade can't be sold.", "not sellable");
-    // A custom tier built on this vanilla upgrade (e.g. Plort Collector II) must be sold first.
+    // A custom tier built on this vanilla upgrade (e.g. Music Box II) must be sold first.
     if (std::string dep = custom_upgrades::VanillaDependent(plot, upg); !dep.empty())
         return no(std::format("Sell '{}' first - it needs this upgrade.", dep), std::format("sell {} first", dep));
     if (upg == ASH_TROUGH && HasUpgrade(plot, PLORT_COLLECTOR_INCINERATOR))
@@ -669,7 +652,7 @@ std::string SellUpgrades::CanSell(Il2CppObject* plot, int32_t upg, std::string* 
 
 bool SellUpgrades::SetLabel(Il2CppObject* lse, const std::string& text) {
     if (!unity::IsAlive(lse) || !IsA(lse, lseClass_)) return false;
-    // Transient popup instance: stop its localisation from (re)writing the label, then set our text.
+    // Our own button instance: stop its localisation from (re)writing the label, then set our text.
     setEnabled_(lse, false);
     Il2CppObject* tmp = getComponent_(lse, Type(tmpClass_));
     if (!unity::IsAlive(tmp)) return false;
@@ -680,59 +663,16 @@ bool SellUpgrades::SetLabel(Il2CppObject* lse, const std::string& text) {
     return ok;
 }
 
-bool SellUpgrades::OpenPrompt(Il2CppObject* root, Il2CppObject* item, int32_t upg, const std::string& text) {
-    // UITemplates labels (fallback texts if our override would fail).
-    bool ok = false;
-    Il2CppObject* gameCtx = Invoke(gameCtxInstMi_, nullptr, {}, "GameContext.Instance", &ok);
-    if (!ok || !unity::IsAlive(gameCtx)) return false;
-    Il2CppObject* templates = unity::Field<Il2CppObject*>(gameCtx, offUiTemplates_);
-    if (!unity::IsAlive(templates)) return false;
-    Il2CppObject* posLabel = unity::Field<Il2CppObject*>(templates, offPosLabel_);
-    Il2CppObject* negLabel = unity::Field<Il2CppObject*>(templates, offNegLabel_);
-    Il2CppObject* title = unity::Field<Il2CppObject*>(item, offItemTitle_);
-    Il2CppObject* message = unity::Field<Il2CppObject*>(item, offItemPrompt_);
-
-    // The positive action: a closure of the game's own class bound to <PromptForUpgrade>b__0.
-    Il2CppObject* closure = objectNew_(closureClass_);
-    Il2CppObject* action = closure ? objectNew_(actionClass_) : nullptr;
-    if (!closure || !action) return false;
-    SetRef(closure, offClosureThis_, root);
-    unity::Field<int32_t>(closure, offClosureUpgrade_) = upg;
-    SetRef(closure, offClosureItem_, item);
-    actionCtor_(action, closure, reinterpret_cast<intptr_t>(b0Mi_));
-
-    ClearPending();
-    pending_.closure = closure;
-    pending_.upgrade = upg;
-    pendingHandle_ = unity::NewGCHandle(closure);
-
-    Il2CppObject* popup = Invoke(openPopupMi_, root, {title, message, nullptr, posLabel, negLabel, action, nullptr},
-                                 "ListUIRoot.OpenPopupPrompt", &ok);
-    if (!ok) {
-        ClearPending();
-        return false;
-    }
-    bool labelled = false;
-    if (unity::IsAlive(popup) && IsA(popup, popupClass_)) {
-        labelled = SetLabel(unity::Field<Il2CppObject*>(popup, offPopupMsg_), text) &&
-                   SetLabel(unity::Field<Il2CppObject*>(popup, offPopupPos_), "Sell");
-    }
-    if (!labelled) {
-        // Never leave a popup whose text could read like a purchase prompt.
-        ClearPending();
-        if (unity::IsAlive(popup) && IsA(popup, popupClass_)) closeNegative_(popup);
-        if (!warnedLabel_) {
-            warnedLabel_ = true;
-            SR2_WARN("[{}] could not set the popup texts (popup class {}), sell prompt closed again", kModule,
-                     popup ? unity::ClassName(popup) : std::string("null"));
-        }
-        return true;  // handled (no vanilla action for an owned upgrade anyway)
-    }
-    promptTick_ = main_thread::TickCount();
-    if (!loggedFirstPrompt_) {
-        loggedFirstPrompt_ = true;
-        SR2_INFO("[{}] first sell prompt opened via the game's popup ({})", kModule, UpgName(upg));
-    }
+// The Sell button was pressed: sells `upg` at once (no confirm popup, user feedback), refund from
+// `priceItem`'s price. DoSell re-checks everything and logs a refusal.
+bool SellUpgrades::SellNow(Il2CppObject* root, Il2CppObject* priceItem, int32_t upg, const char* via) {
+    if (!IsA(root, rootClass_) || !unity::IsAlive(root)) return false;
+    if (!IsA(priceItem, itemClass_) || !unity::IsAlive(priceItem)) return false;
+    Il2CppObject* plot = unity::Field<Il2CppObject*>(root, offActivator_);
+    if (!IsA(plot, plotClass_) || !unity::IsAlive(plot) || !HasUpgrade(plot, upg)) return false;
+    SR2_DEBUG("[{}] sell {} on plot '{}' ({})", kModule, UpgName(upg), PlotId(plot), via);
+    sellTick_ = main_thread::TickCount();
+    DoSell(root, plot, priceItem, upg);
     return true;
 }
 
@@ -742,56 +682,16 @@ bool SellUpgrades::HandleAction(Il2CppObject* root, Il2CppObject* item) {
     if (!main_thread::IsMainThread()) return false;
     if (!IsA(item, itemClass_) || !unity::IsAlive(item)) return false;  // plots, demolish, clear crop: vanilla
     if (!IsA(root, rootClass_) || !unity::IsAlive(root)) return false;
+    // A click on our Sell button can also arrive here through the prefab's own submit routing, for
+    // the item that is selected after the sale (it may be buyable now): no purchase prompt for it.
+    const unsigned long long tick = main_thread::TickCount();
+    if (sellTick_ != ~0ull && tick >= sellTick_ && tick - sellTick_ <= 1) return true;
     Il2CppObject* plot = unity::Field<Il2CppObject*>(root, offActivator_);
     if (!IsA(plot, plotClass_) || !unity::IsAlive(plot)) return false;
     const int32_t upg = unity::Field<int32_t>(item, offItemUpgrade_);
     if (!HasUpgrade(plot, upg)) return false;  // not owned: vanilla purchase flow
-    // One prompt per frame: a click on our sell button can arrive twice (Button.Press and
-    // the prefab's own submit routing).
-    if (pending_.closure && promptTick_ == main_thread::TickCount()) return true;
-
-    std::string reason = CanSell(plot, upg);
-    std::string text;
-    if (reason.empty()) {
-        std::vector<Refund> refunds;
-        int32_t price = 0, refund = 0;
-        if (!Price(item, refunds, price, refund)) {
-            reason = "This upgrade can't be sold (unexpected price data).";
-        } else {
-            text = std::format("Sell this upgrade for {} Newbucks?\nYou get half of its {} Newbucks price back and "
-                               "can buy it again later at full price.",
-                               refund, price);
-            if (upg == ASH_TROUGH)
-                text += "\nBought back on this plot, the trough keeps its current ash instead of coming full "
-                        "(also after a reload, once you have saved).";
-            if (upg == DELUXE_GARDEN) text += "\nThe planted crop becomes a normal crop again (growth is kept).";
-        }
-    }
-    if (!reason.empty()) {
-        // No popup (user feedback): the sell button already shows "Can't sell: <reason>" disabled.
-        // Handled = nothing happens, as vanilla does when an owned item is confirmed.
-        SR2_INFO("[{}] sell refused: plot '{}', {}: {}", kModule, PlotId(plot), UpgName(upg), reason);
-        return true;
-    }
-    return OpenPrompt(root, item, upg, text);
-}
-
-bool SellUpgrades::HandleConfirm(Il2CppObject* closure) {
-    if (!pending_.closure || closure != pending_.closure) return false;  // a vanilla purchase closure
-    if (!main_thread::IsMainThread() || !IsA(closure, closureClass_)) return false;
-    const PendingPrompt p = pending_;
-    ClearPending();
-
-    auto* root = unity::Field<Il2CppObject*>(closure, offClosureThis_);
-    auto* item = unity::Field<Il2CppObject*>(closure, offClosureItem_);
-    const int32_t upg = unity::Field<int32_t>(closure, offClosureUpgrade_);
-    if (upg != p.upgrade || !IsA(root, rootClass_) || !unity::IsAlive(root) || !IsA(item, itemClass_) ||
-        !unity::IsAlive(item))
-        return true;
-    Il2CppObject* plot = unity::Field<Il2CppObject*>(root, offActivator_);
-    if (!IsA(plot, plotClass_) || !unity::IsAlive(plot)) return true;
-    if (unity::Field<int32_t>(item, offItemUpgrade_) != upg || !HasUpgrade(plot, upg)) return true;
-    DoSell(root, plot, item, upg);
+    // Owned item confirmed (A / submit / clicking the selected card): nothing happens, as in
+    // vanilla. Selling is only the Sell button (no popup, so no accidental sale on a double click).
     return true;
 }
 
@@ -855,11 +755,75 @@ void SellUpgrades::DestroySellButton() {
     if (!main_thread::IsMainThread()) return;
     if (btnGo_ && unity::IsAlive(btnGo_) && objectDestroy_) objectDestroy_(btnGo_);
     btnGo_ = btnButton_ = btnItem_ = nullptr;
+    btnUpgrade_ = 0;
     if (Il2CppGCHandle h = btnHandle_) {
         btnHandle_ = nullptr;
         main_thread::Post([h] { unity::FreeGCHandle(h); });
     }
 }
+
+Vec2 SellUpgrades::GetVec(const MethodInfo* m, Il2CppObject* rt, const char* what, bool& ok) {
+    bool good = false;
+    Il2CppObject* boxed = ok ? Invoke(m, rt, {}, what, &good) : nullptr;
+    if (!good || !boxed) {
+        ok = false;
+        return {};
+    }
+    return *reinterpret_cast<Vec2*>(reinterpret_cast<char*>(boxed) + 2 * sizeof(void*));  // unboxed payload
+}
+
+void SellUpgrades::SetVec(const MethodInfo* m, Il2CppObject* rt, Vec2 v, const char* what, bool& ok) {
+    if (!ok) return;
+    bool good = false;
+    Invoke(m, rt, {&v}, what, &good);
+    ok = good;
+}
+
+// The action container has no LayoutGroup (PURCHASED / Purchase fill it alone): split the vanilla
+// button's rect in two halves, the vanilla one keeps the left half, ours (same anchors / pivot)
+// takes the right one. Works for fixed and stretched anchors alike (sizeDelta / anchoredPosition
+// shift the edges by the same amount). The vanilla view is a fresh instance per bind.
+bool SellUpgrades::SideBySide(Il2CppObject* vanillaView, Il2CppObject* ourView) {
+    if (!layoutOk_ || !unity::IsAlive(vanillaView) || !unity::IsAlive(ourView)) return false;
+    Il2CppObject* a = getTransform_(vanillaView);
+    Il2CppObject* b = getTransform_(ourView);
+    if (!unity::IsAlive(a) || !unity::IsAlive(b) || !IsA(a, rtClass_) || !IsA(b, rtClass_)) return false;
+    bool ok = false;
+    Il2CppObject* boxedRect = Invoke(rtGetRect_, a, {}, "RectTransform.get_rect", &ok);
+    if (!ok || !boxedRect) return false;
+    const Rect r = *reinterpret_cast<Rect*>(reinterpret_cast<char*>(boxedRect) + 2 * sizeof(void*));
+    const Vec2 amin = GetVec(rtGetAnchorMin_, a, "RectTransform.get_anchorMin", ok);
+    const Vec2 amax = GetVec(rtGetAnchorMax_, a, "RectTransform.get_anchorMax", ok);
+    const Vec2 pivot = GetVec(rtGetPivot_, a, "RectTransform.get_pivot", ok);
+    const Vec2 size = GetVec(rtGetSize_, a, "RectTransform.get_sizeDelta", ok);
+    const Vec2 pos = GetVec(rtGetPos_, a, "RectTransform.get_anchoredPosition", ok);
+    if (!ok || !std::isfinite(r.width) || !(r.width > 20.0f) || r.width > 10000.0f || !std::isfinite(pivot.x))
+        return false;
+    const float gap = std::clamp(r.width * 0.04f, 4.0f, 16.0f);
+    const float half = (r.width - gap) * 0.5f;
+    const Vec2 halfSize{size.x + (half - r.width), size.y};
+    const Vec2 left{pos.x - pivot.x * (r.width - half), pos.y};
+    const Vec2 right{pos.x - pivot.x * r.width + half + gap + pivot.x * half, pos.y};
+    SetVec(rtSetAnchorMin_, b, amin, "RectTransform.set_anchorMin", ok);
+    SetVec(rtSetAnchorMax_, b, amax, "RectTransform.set_anchorMax", ok);
+    SetVec(rtSetPivot_, b, pivot, "RectTransform.set_pivot", ok);
+    SetVec(rtSetSize_, b, halfSize, "RectTransform.set_sizeDelta", ok);
+    SetVec(rtSetPos_, b, right, "RectTransform.set_anchoredPosition", ok);
+    SetVec(rtSetSize_, a, halfSize, "RectTransform.set_sizeDelta", ok);
+    SetVec(rtSetPos_, a, left, "RectTransform.set_anchoredPosition", ok);
+    if (!loggedLayout_) {
+        loggedLayout_ = true;
+        SR2_INFO("[{}] sell button layout: vanilla rect {:.0f} x {:.0f} (anchors {:.2f},{:.2f}-{:.2f},{:.2f}, pivot "
+                 "{:.2f}) split into two {:.0f} wide halves, gap {:.0f}{}",
+                 kModule, r.width, r.height, amin.x, amin.y, amax.x, amax.y, pivot.x, half, gap, ok ? "" : " - FAILED");
+    }
+    return ok;
+}
+
+// Short reasons that go away by themselves or by selling something else first ("holds food",
+// "sell Music Box II first") get a disabled button saying so; permanent ones ("silo storage", "not
+// sellable") get no button at all.
+bool TemporaryReason(const std::string& brief) { return brief.rfind("holds ", 0) == 0 || brief.rfind("sell ", 0) == 0; }
 
 void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
     if (!main_thread::IsMainThread()) return;
@@ -867,7 +831,6 @@ void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
     if (btnGo_) DestroySellButton();
     if (!root_ || !unity::IsAlive(root_) || !vm) return;
     if (!IsA(view, moreViewClass_) || !unity::IsAlive(view)) return;
-    if (unity::Field<Il2CppObject*>(view, offMoreButton_) != nullptr) return;  // Purchase variant: not owned
     Il2CppObject* infoLabel = unity::Field<Il2CppObject*>(vm, offVmInfoLabel_);
     if (!infoLabel) return;
     Il2CppObject* category = nullptr;
@@ -875,8 +838,21 @@ void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
     if (!item || !category) return;  // another menu / not an upgrade item
     Il2CppObject* plot = unity::Field<Il2CppObject*>(root_, offActivator_);
     if (!IsA(plot, plotClass_) || !unity::IsAlive(plot)) return;
-    const int32_t upg = unity::Field<int32_t>(item, offItemUpgrade_);
-    if (!HasUpgrade(plot, upg)) return;
+
+    // What the button sells: an owned item (PURCHASED variant) sells itself; the card of a custom
+    // tier chain that shows the next tier (Purchase variant) sells the owned tier below it.
+    const bool purchaseVariant = unity::Field<Il2CppObject*>(view, offMoreButton_) != nullptr;
+    int32_t upg = unity::Field<int32_t>(item, offItemUpgrade_);
+    Il2CppObject* priceItem = item;
+    if (purchaseVariant && !custom_upgrades::ChainSellTarget(plot, item, upg, priceItem)) return;
+    if (!priceItem || !HasUpgrade(plot, upg)) return;
+
+    std::string brief;
+    const std::string reason = CanSell(plot, upg, &brief);
+    std::vector<Refund> refunds;
+    int32_t price = 0, refund = 0;
+    const bool sellable = reason.empty() && Price(priceItem, refunds, price, refund);
+    if (!sellable && !TemporaryReason(brief)) return;  // no "can't sell" button (user feedback)
 
     const size_t offPrefab = OffsetIn(category, "detailsButton", offDetailsButton_);
     Il2CppObject* prefab = offPrefab ? unity::Field<Il2CppObject*>(category, offPrefab) : nullptr;
@@ -893,22 +869,29 @@ void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
         return;
     }
     btnGo_ = go;
-    btnItem_ = item;
+    btnItem_ = priceItem;
+    btnUpgrade_ = upg;
     unity::SetName(go, "sr2mods_SellButton");
     Il2CppObject* btnView = unity::GetComponent(go, moreViewClass_);
     Il2CppObject* button = btnView ? unity::Field<Il2CppObject*>(btnView, offMoreButton_) : nullptr;
     btnButton_ = unity::IsAlive(button) ? button : nullptr;
 
-    const bool layout = layoutGroupClass_ && unity::GetComponent(parent, layoutGroupClass_) != nullptr;
-    std::string brief;
-    const std::string reason = CanSell(plot, upg, &brief);
-    std::vector<Refund> refunds;
-    int32_t price = 0, refund = 0;
+    // Side by side with PURCHASED / Purchase: by the container's LayoutGroup if it has one, else
+    // by splitting the slot. A Sell button that would cover the Purchase button is not shown.
+    const bool layoutGroup = layoutGroupClass_ && unity::GetComponent(parent, layoutGroupClass_) != nullptr;
+    const bool placed = layoutGroup || SideBySide(view, btnView);
+    if (!placed && purchaseVariant) {
+        DestroySellButton();
+        return;
+    }
+
     std::string text;
-    const bool sellable = reason.empty() && Price(item, refunds, price, refund);
-    if (sellable) text = std::format("Sell +{}", refund);
-    else text = brief.empty() ? std::string("Can't sell") : "Can't sell: " + brief;
-    if (!layout) text = "Owned - " + text;
+    if (sellable) {
+        text = std::format("Sell +{}", refund);
+    } else {
+        text = brief;  // "holds food" -> "Holds food"
+        if (!text.empty() && text[0] >= 'a' && text[0] <= 'z') text[0] = static_cast<char>(text[0] - 'a' + 'A');
+    }
     Il2CppObject* labelLse = btnView ? unity::Field<Il2CppObject*>(btnView, offMoreLabel_) : nullptr;
     bool labelled = btnView && SetLabel(labelLse, text);
     Il2CppObject* labelTmp = labelled ? getComponent_(labelLse, Type(tmpClass_)) : nullptr;
@@ -923,24 +906,26 @@ void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
         }
     }
     if (!sellable) {
-        // Disabled look instead of a "can't sell" popup: the Selectable's own non-interactable state
-        // (prefab transition, skipped by navigation) plus a dimmed label. A click still reaches the
-        // Press detour / OnAction, which then do nothing.
+        // Disabled look, no popup: the Selectable's own non-interactable state (prefab transition,
+        // skipped by navigation) plus a dimmed label.
         if (btnButton_ && setInteractable_) setInteractable_(btnButton_, false);
         if (unity::IsAlive(labelTmp) && IsA(labelTmp, tmpClass_) && tmpSetAlpha_) tmpSetAlpha_(labelTmp, 0.5f);
     }
     if (!loggedButton_) {
         loggedButton_ = true;
-        SR2_INFO("[{}] sell button: prefab '{}' cloned into '{}' (LayoutGroup {}), Button {}, label {} - '{}'", kModule,
-                 unity::GetName(prefab), unity::GetName(parent), layout ? "yes" : "no", btnButton_ ? "found" : "MISSING",
-                 labelled ? "set" : "NOT set", text);
+        SR2_INFO("[{}] sell button: prefab '{}' cloned into '{}' (LayoutGroup {}, side by side {}), Button {}, label {} "
+                 "- '{}'",
+                 kModule, unity::GetName(prefab), unity::GetName(parent), layoutGroup ? "yes" : "no",
+                 placed ? "yes" : "NO", btnButton_ ? "found" : "MISSING", labelled ? "set" : "NOT set", text);
     }
 }
 
 bool SellUpgrades::OnSellButton(Il2CppObject* button) {
     if (!main_thread::IsMainThread() || button != btnButton_ || !unity::IsAlive(button)) return false;
-    if (!root_ || !unity::IsAlive(root_) || !btnItem_) return false;
-    return HandleAction(root_, btnItem_);
+    // Always handled: the original Press would submit the menu, i.e. buy the selected card's tier.
+    if (sellTick_ == main_thread::TickCount()) return true;  // one sale per frame
+    if (root_ && unity::IsAlive(root_) && btnItem_ && btnUpgrade_) SellNow(root_, btnItem_, btnUpgrade_, "sell button");
+    return true;
 }
 
 // ---------------------------------------------------------------- ash trough re-purchase --
@@ -1293,7 +1278,6 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     };
 
     objectNew_ = Export<ObjectNewFn>("il2cpp_object_new");
-    wbarrier_ = Export<WBarrierFn>("il2cpp_gc_wbarrier_set_field");
     if (!objectNew_) return ctx.Fail("il2cpp_object_new export missing");
 
     // ---- classes ----
@@ -1302,18 +1286,14 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     closureClass_ = cls(kImage, kPlotUiNs, "LandPlotUIRoot/<>c__DisplayClass6_0");
     plotClass_ = cls(kImage, "", "LandPlot");
     modelClass_ = cls(kImage, kDataNs, "LandPlotModel");
-    popupClass_ = cls(kImage, "MonomiPark.SlimeRancher.UI.Popup", "PopupPrompt");
     costEntryClass_ = cls(kImage, "MonomiPark.SlimeRancher.Economy", "CurrencyCostEntry");
     Il2CppClass* purchaseCost = cls(kImage, "MonomiPark.SlimeRancher.Economy", "PurchaseCost");
     upgraderClass_ = cls(kImage, "", "PlotUpgrader");
     feederClass_ = cls(kImage, "", "SlimeFeeder");
     locationClass_ = cls(kImage, "", "LandPlotLocation");
-    Il2CppClass* gameCtx = cls(kImage, "", "GameContext");
-    Il2CppClass* templates = cls(kImage, "MonomiPark.SlimeRancher.UI", "UITemplates");
     Il2CppClass* playerState = cls(kImage, "", "PlayerState");
     Il2CppClass* scu = cls(kImage, "MonomiPark.SlimeRancher.Util", "SceneContextUtility");
     Il2CppClass* coopRegion = cls(kImage, "", "CoopRegion");
-    actionClass_ = cls("mscorlib", "System", "Action");
     Il2CppClass* component = cls(kCore, "UnityEngine", "Component");
     Il2CppClass* gameObject = cls(kCore, "UnityEngine", "GameObject");
     Il2CppClass* transform = cls(kCore, "UnityEngine", "Transform");
@@ -1364,8 +1344,6 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     size_t offCostField = 0, offCurrencyList = 0;
     off(rootClass_, "Activator", offActivator_);
     off(itemClass_, "_upgrade", offItemUpgrade_);
-    off(itemClass_, "_title", offItemTitle_);
-    off(itemClass_, "_promptMessage", offItemPrompt_);
     off(itemClass_, "_purchaseCost", offCostField);
     off(purchaseCost, "_currencyCosts", offCurrencyList);
     // Value-type field offsets include the object header (boxed layout).
@@ -1377,31 +1355,21 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     off(plotClass_, "_attached", offPlotAttached_);
     off(modelClass_, "upgrades", offModelUpgrades_);
     off(modelClass_, "ashUnits", offModelAsh_);
-    off(gameCtx, "<UITemplates>k__BackingField", offUiTemplates_);
-    off(templates, "popupPromptPositiveActionLabel", offPosLabel_);
-    off(templates, "popupPromptNegativeActionLabel", offNegLabel_);
-    off(popupClass_, "_messageText", offPopupMsg_);
-    off(popupClass_, "_positiveActionButtonText", offPopupPos_);
     off(locationClass_, "_id", offLocationId_);
     off(coopRegion, "_isDeluxe", offCoopDeluxe_);
     fieldInfo(closureClass_, "<>4__this", fClosureThis_, offClosureThis_);
     fieldInfo(closureClass_, "upgrade", fClosureUpgrade_, offClosureUpgrade_);
-    fieldInfo(closureClass_, "plotUpgradePurchaseItemModel", fClosureItem_, offClosureItem_);
     if (!why.empty()) return ctx.Fail(why);
 
     // ---- methods ----
     const MethodInfo* onActionMi = method(rootClass_, "OnAction", 1);
     b0Mi_ = method(closureClass_, "<PromptForUpgrade>b__0", 0);
-    openPopupMi_ = method(rootClass_, "OpenPopupPrompt", 7);
     rebuildMi_ = method(rootClass_, "RebuildUI", 0);
-    gameCtxInstMi_ = method(api().il2cpp_class_get_parent ? api().il2cpp_class_get_parent(gameCtx) : nullptr,
-                            "get_Instance", 0);
     tmpSetTextMi_ = method(tmpClass_, "set_text", 1);
     bind(hasUpgrade_, method(plotClass_, "HasUpgrade", 1));
     bind(applyUpgrades_, method(plotClass_, "ApplyUpgrades", 2));
     bind(addCurrency_, method(playerState, "AddCurrency", 4));
     bind(tryGetPlayerState_, method(scu, "TryGetPlayerState", 1));
-    bind(actionCtor_, method(actionClass_, ".ctor", 2));
     bind(getComponent_, byParams(component, "GetComponent", {"System.Type"}));
     bind(getComponents_, byParams(component, "GetComponents", {"System.Type"}));
     bind(getComponentInChildren_, byParams(component, "GetComponentInChildren", {"System.Type", "System.Boolean"}));
@@ -1411,9 +1379,8 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     bind(setActive_, method(gameObject, "SetActive", 1));
     bind(setEnabled_, method(behaviour, "set_enabled", 1));
     bind(foodCount_, method(feederClass_, "GetFoodCount", 0));
-    bind(closeNegative_, method(popupClass_, "CloseWithNegativeCue", 0));
     if (!why.empty()) return ctx.Fail(why);
-    if (!b0Mi_ || !openPopupMi_ || !rebuildMi_ || !gameCtxInstMi_ || !tmpSetTextMi_ || !onActionMi)
+    if (!b0Mi_ || !rebuildMi_ || !tmpSetTextMi_ || !onActionMi)
         return ctx.Fail("required method missing");
 
     // Optional: deluxe garden replant.
@@ -1475,6 +1442,28 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
             bind(tmpSetAlpha_, method(tmpClass_, "set_alpha", 1, false), false);
         }
         layoutGroupClass_ = R.Class("UnityEngine.UI", "UnityEngine.UI", "LayoutGroup");  // optional
+        // Optional: side-by-side layout (missing -> no Sell button next to Purchase; on owned
+        // items it covers the PURCHASED slot as before).
+        if (why.empty()) {
+            std::string lerr;
+            rtClass_ = R.Class(kCore, "UnityEngine", "RectTransform", &lerr);
+            auto m = [&](const char* name, int argc) { return rtClass_ ? R.Method(rtClass_, name, argc, &lerr) : nullptr; };
+            rtGetRect_ = m("get_rect", 0);
+            rtGetAnchorMin_ = m("get_anchorMin", 0);
+            rtSetAnchorMin_ = m("set_anchorMin", 1);
+            rtGetAnchorMax_ = m("get_anchorMax", 0);
+            rtSetAnchorMax_ = m("set_anchorMax", 1);
+            rtGetPivot_ = m("get_pivot", 0);
+            rtSetPivot_ = m("set_pivot", 1);
+            rtGetSize_ = m("get_sizeDelta", 0);
+            rtSetSize_ = m("set_sizeDelta", 1);
+            rtGetPos_ = m("get_anchoredPosition", 0);
+            rtSetPos_ = m("set_anchoredPosition", 1);
+            layoutOk_ = rtGetRect_ && rtGetAnchorMin_ && rtSetAnchorMin_ && rtGetAnchorMax_ && rtSetAnchorMax_ &&
+                        rtGetPivot_ && rtSetPivot_ && rtGetSize_ && rtSetSize_ && rtGetPos_ && rtSetPos_;
+            if (!layoutOk_)
+                SR2_WARN("[{}] RectTransform accessors not found ({}) - no Sell button on tier cards", kModule, lerr);
+        }
         buttonWhy = why;
         why = saved;
     }
@@ -1511,8 +1500,7 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
             if (!ctx.HookAddress(h.name, p, h.detour, h.orig)) return ctx.Fail(std::format("hook {} failed", h.name));
         }
     } else {
-        SR2_WARN("[{}] sell button unavailable ({}); selling still works by confirming an owned upgrade", kModule,
-                 buttonWhy);
+        SR2_WARN("[{}] sell button unavailable ({}) - upgrades can't be sold this session", kModule, buttonWhy);
     }
 
     g_self = this;
@@ -1522,7 +1510,6 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
              kModule, Resolver::Rva(onActionPtr), Resolver::Rva(confirmPtr), offItemUpgrade_, offItemCosts_,
              offPlotModel_, offModelUpgrades_, replantOk_ ? "available" : "NOT available (DELUXE_GARDEN unsellable)",
              ashRestoreOk_ ? "yes" : "NO (vanilla refill)", upgraderReport.empty() ? "" : "; upgraders unavailable:", upgraderReport);
-    if (!wbarrier_) SR2_WARN("[{}] il2cpp_gc_wbarrier_set_field not exported; closure fields stored directly", kModule);
     return true;
 }
 

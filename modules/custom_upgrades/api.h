@@ -32,7 +32,7 @@ std::string Name(int32_t upgrade);
 
 // Main thread. "" = the owned custom upgrade can be sold back; else the reason.
 // `brief` (optional) gets a few-word form of the reason for a button label
-// ("holds chickens", "sell Plort Collector III first"); cleared when sellable.
+// ("holds chickens", "sell Faster Hens II first"); cleared when sellable.
 std::string CanSell(Il2CppObject* landPlot, int32_t upgrade, std::string* brief = nullptr);
 
 // Main thread. Removes the custom upgrade from the plot (sidecar state,
@@ -43,11 +43,16 @@ bool Remove(Il2CppObject* landPlot, int32_t upgrade, std::string& notes);
 // this plot that needs it (it must be sold first), or "" if none.
 std::string VanillaDependent(Il2CppObject* landPlot, int32_t vanillaUpgrade);
 
+// Main thread. A tier chain has one menu card (Faster Hens I -> II, Music Box -> Music Box II):
+// once a tier is owned the card shows the next one. For such a card `item` (a plot menu item)
+// that shows a tier NOT owned yet: the owned tier below it, which the card's Sell button sells
+// (a custom id, or the vanilla upgrade the chain starts on), and the menu item whose price the
+// refund is based on. False for every other item (an owned item sells itself).
+bool ChainSellTarget(Il2CppObject* landPlot, Il2CppObject* item, int32_t& upgrade, Il2CppObject*& priceItem);
+
 // Purchasable per-plot tiers (plot_upgrades applies the effects).
 enum class Family : int {
-    kCollector = 0,  // corral Plort Collector II / III: collection period divided by the multiplier
-    kFeeder,         // corral Auto-Feeder II: food per feeding cycle x multiplier
-    kMusicBox,       // corral Music Box II: calming bonus x multiplier
+    kMusicBox = 0,   // corral Music Box II: calming bonus x multiplier
     kCoop,           // coop Faster Hens I / II: laying period divided by the multiplier
     kGarden,         // garden Fast Growth I / II: crop growth rate x multiplier
     kAsh,            // incinerator Ash Booster: ash per incinerated food x multiplier

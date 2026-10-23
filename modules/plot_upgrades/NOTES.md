@@ -9,9 +9,6 @@ then stays locked on for that save, see `re/custom-upgrades.md` 1.2b).
 
 | tier | plot | needs | price | effect |
 |---|---|---|---|---|
-| Plort Collector II | corral | Plort Collector | 2500 | collects 1.5x as often |
-| Plort Collector III | corral | Plort Collector II | 5000 | collects 2x as often |
-| Auto-Feeder II | corral | Auto-Feeder | 2500 | 2x food per feeding cycle |
 | Music Box II | corral | Music Box | 2000 | 2x calming bonus (0.5 -> 1.0) |
 | Faster Hens I | coop | - | 2000 | hens lay 1.5x as often |
 | Faster Hens II | coop | Faster Hens I | 4000 | hens lay 2x as often |
@@ -19,10 +16,20 @@ then stays locked on for that save, see `re/custom-upgrades.md` 1.2b).
 | Fast Growth II | garden | Fast Growth I | 4000 | crops grow 2x as fast |
 | Ash Booster | incinerator | Ash Trough | 1500 | 2x ash per incinerated food (capacity unchanged) |
 
-Only the highest owned tier of a family counts. A tier appears in the menu once its
-prerequisite is owned and reuses the vanilla upgrade's icon. Selling is refused while a higher
-tier (or, for a vanilla prerequisite, any tier built on it) is still owned. Prices are fixed
-in `kDefs` (custom_upgrades/module.cpp).
+Only the highest owned tier of a family counts. Prices are fixed in `kDefs`
+(custom_upgrades/module.cpp).
+
+Each chain has one menu card: the first tier not owned yet, or the last one once all are owned
+(greyed, checkmark). After Faster Hens I is bought the same card reads Faster Hens II, with Buy
+(next tier) and Sell (the owned tier) side by side. Music Box II and Ash Booster take over the
+vanilla Music Box / Ash Trough card once that is owned; Sell on that card sells the vanilla
+upgrade. Fast Growth is listed right after the Sprinkler. Selling is refused while a higher
+tier (or, for a vanilla prerequisite, any tier built on it) is still owned. Details:
+`re/custom-upgrades.md` (1.3, 2b) and the custom_upgrades / sell_upgrades headers.
+
+Retired: Plort Collector II / III and Auto-Feeder II (checklist u1-u3, "doesn't make sense").
+Saves that own one load cleanly: the sidecar key is ignored (logged, no refund) and dropped at
+the next save; the collector / feeder hooks are gone.
 
 ## Per-plot lookup
 
@@ -31,7 +38,7 @@ The result is cached per object, invalidated on buy / sell / load / new game / s
 expired after ~900 frames, so the hooks do one hash-map read per call. Plots without a tier run
 plain vanilla code.
 
-* collector / feeder / incinerator: the component itself (`GetComponentInParent(LandPlot)` on a miss)
+* incinerator: the component itself (`GetComponentInParent(LandPlot)` on a miss)
 * garden: `SpawnResource._landPlot`
 * music box: the slime must be in `MusicBoxRegion._currentEmotions` of a region whose corral owns
   Music Box II; regions are registered by a `MusicBoxRegion.OnTriggerEnter` detour
@@ -47,5 +54,5 @@ advanced flag, so it would have shown up as a switch again.
 ## Not tiered (on purpose)
 
 Silo / feeder storage capacity (stored counts are saved and not clamped on a mod-free load),
-collector vac radius, garden yield, walls / air net / solar shield / scareslime / vitamizer / soil
-(no numeric tunables). Pond and incinerator plort collectors are not tiered (corral only).
+plort collector speed and auto-feeder amount (retired tiers), collector vac radius, garden yield,
+walls / air net / solar shield / scareslime / vitamizer / soil (no numeric tunables).
