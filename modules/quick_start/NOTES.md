@@ -37,23 +37,27 @@ This module shortens the time from launch to playing. It is native only and reso
 
 ## Where the time goes (evidence)
 
-Sources: `Player.log` / `Player-prev.log` (Unity prints scene-group load durations but no timestamps) and the timestamped `sr2mods.log` of the same 19:00 launch. `sr2mods.log` was only read, never written.
+Sources: `Player.log` / `Player-prev.log` (Unity prints scene-group load times but no timestamps) and the timestamped `sr2mods.log` of the same 19:00 launch. `sr2mods.log` was only read, never written.
+
+**The `Scene Transition ... took N seconds` figures are cumulative.** The line is logged by `SceneLoader+<>c__DisplayClass99_0.<EnqueueLoadSceneGroup>b__16` (0x8E3150) from `SceneLoader.Stopwatch.ElapsedTimeInSeconds`. That is one `MonomiPark.SlimeRancher.Stopwatch` per `SceneLoader`, created lazily in `get_Stopwatch` (0x8DC6B0); its `Start()`/`Stop()` (0x99EF80/0x99F010) only resume and pause the wrapped `System.Diagnostics.Stopwatch`, and nothing resets it. Each figure is therefore the total scene-load time since launch: it keeps running only while a scene group loads, so time between loads (the logos, the prompt, the menu) is not in it. One step's load time is the difference to the previous line. The logs agree: the values only ever grow (launch of 2026-10-23 02:15: 0.735, 0.875, 9.731, 19.289, 21.799).
 
 | phase | time | evidence | skippable by a mod? |
 |---|---|---|---|
 | process start to first rendered frame (Unity engine, D3D11, IL2CPP init, bootstrap scene) | **~1.9 s** | proxy loaded 19:00:50.283; GameAssembly 50.337; IL2CPP domain ready 50.551; dispatcher live 52.197 and `Time.frameCount` 77 at 52.753 at ~7 ms/frame, so frame 1 was at ~52.2 | **no**. Native engine start; the mod only runs after IL2CPP is up (+ `settle_delay_ms` 1.5 s) |
-| scene group **CompanyLogo** (boot) | **0.75 s** | `Scene Transition from CompanyLogo to CompanyLogo took 0.746 s` (prev launch 0.725) | no (asset load) |
-| logo / warning / game-logo sequence | **~11 s (estimate)** | The serialized durations are in the CompanyLogo scene's addressable bundle and cannot be read offline here; the module logs the exact vanilla values on its first run. Estimate: the sequence started at ~52.95 and the StandaloneStart activation hitch (183.6 ms, frame 1912) came at 19:01:05.79 | **yes** (`skip_intro`). About 15 frames remain |
-| scene group **StandaloneStart** | **0.89 s** | `CompanyLogo to StandaloneStart took 0.885 s` (prev 0.863) | no |
+| scene group **CompanyLogo** (boot) | **0.75 s** | first transition line, so the total is this step: `CompanyLogo to CompanyLogo took 0.746` (prev launch 0.725) | no (asset load) |
+| logo / warning / game-logo sequence | **~11-12.7 s (estimate)** | The serialized durations are in the CompanyLogo scene's addressable bundle and cannot be read offline here; the module logs the exact vanilla values on its first run. Estimate: the sequence started at ~52.95 and the StandaloneStart activation hitch (183.6 ms, frame 1912) came at 19:01:05.79. That 12.8 s window still holds the 0.14 s StandaloneStart load, so 12.7 s is an upper bound | **yes** (`skip_intro`). About 15 frames remain |
+| scene group **StandaloneStart** | **0.14 s** | `CompanyLogo to StandaloneStart took 0.885` minus 0.746 = 0.139 (prev 0.863 - 0.725 = 0.138) | no |
 | "press any key" prompt | player's reaction time | In this launch the prompt stayed up ~18 s: the load's allocation burst began at 19:01:24, so the player was away | **yes** (`skip_intro`) |
 | prompt click animation | `AnimationDuration` (serialized, logged at runtime) | dump | **yes** (zeroed with `skip_intro`) |
-| scene group **MainMenuFromBoot** | **9.6-9.8 s** | `StandaloneStart to MainMenuFromBoot took 9.767 s` (prev 9.6). About 88k objects loaded (64k to 152k), 10,667 assets unloaded at the end | **no**. Addressables / asset loading and scene activation |
+| scene group **MainMenuFromBoot** | **8.6-8.9 s** | `StandaloneStart to MainMenuFromBoot took 9.767` minus 0.885 = 8.88 (prev 9.6 - 0.863 ≈ 8.7). About 88k objects loaded (64k to 152k), 10,667 assets unloaded at the end | **no**. Addressables / asset loading and scene activation |
 | first seconds of the menu | (menu usable; ~11 s of 40-670 ms hitches, 56 fps average) | `sr2mods.log` perf from 19:01:34 to 45 (shader / streaming warm-up) | no |
-| Continue to in-game | not in these logs | | the click and the menu wait are skippable (`auto_continue`); the save/world load is not |
+| Continue to in-game | **~9.4-9.6 s** load | not in the 19:00 logs. Later launches: `MainMenuFromBoot to ConservatoryFields took 19.289` minus 9.731 = 9.56, and 18.829 - 9.439 = 9.39 | the click and the menu wait are skippable (`auto_continue`); the save/world load is not |
 
-**Summary.** With an instant key press, vanilla is about 1.9 + 0.75 + ~11 + 0.9 + ~0.5-1 + 9.8 ≈ 24-25 s to the menu. The ~11 s is the uncertain part, and the user's ~20 s suggests the logo part is closer to 6-8 s.
+The later launches (2026-10-23) give the same per-step loads: CompanyLogo 0.735 / 0.721 s, StandaloneStart 0.140 / 0.147 s, MainMenuFromBoot 8.856 / 8.571 s.
 
-With `skip_intro` the floor is about 1.9 + 0.75 + ~0.1 + 0.9 + ~0.05 + 9.8 ≈ **13.5 s** to an interactive menu. Everything left is engine start-up and real asset loading that a mod cannot remove.
+**Summary.** With an instant key press, vanilla is about 1.9 + 0.75 + ~11-12.7 + 0.14 + ~0.5-1 + 8.9 ≈ 23-25 s to the menu. The logo part is the uncertain one, and the user's ~20 s suggests it is closer to 6-8 s.
+
+With `skip_intro` the floor is about 1.9 + 0.75 + ~0.1 + 0.14 + ~0.05 + 8.9 ≈ **12 s** to an interactive menu. Everything left is engine start-up and real asset loading that a mod cannot remove.
 
 Caveat: anything the game does in the background during the logos (for example platform/Steam initialisation) moves into the following load. The real saving can therefore be slightly smaller than the vanilla wait total. The module logs the measured time.
 
