@@ -61,8 +61,10 @@ std::vector<Category> Spec() {
 
     Category hud = Cat("hud", "HUD", Icon::Hud);
     Tab minimap = ModuleTab("minimap");
-    minimap.nested = {"collectibles"};  // the tracker is drawn under the minimap and reads its map
     hud.tabs.push_back(minimap);
+    Tab collectibles = ModuleTab("collectibles", "Collectibles");
+    collectibles.help = "The collectible tracker is drawn under the minimap, so it only shows while the Minimap is on.";
+    hud.tabs.push_back(collectibles);
     Tab speed = ModuleTab("hl2_movement", "Speed Panel");
     speed.onlyGroups = {"HUD"};
     speed.masterKey = "momentum_hud";
