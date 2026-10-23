@@ -220,7 +220,7 @@ struct Bound<R(A...)> {
 };
 
 struct PendingPrompt {
-    Il2CppObject* closure = nullptr;  // identity only (kept alive by the popup's delegate)
+    Il2CppObject* closure = nullptr;  // identity only (pinned by pendingHandle_ while pending)
     bool sell = false;                // false = info popup (OK does nothing)
     int32_t upgrade = 0;
 };
@@ -233,7 +233,7 @@ public:
     void OnEnable() override { enabled_.store(true); }
     void OnDisable() override {
         enabled_.store(false);
-        pending_ = {};
+        ClearPending();
         main_thread::Post([this] {
             if (!enabled_.load()) DestroySellButton();
         });
@@ -290,6 +290,16 @@ private:
 
     std::atomic<bool> enabled_{false};
     PendingPrompt pending_;  // main thread only
+    // GC handle on pending_.closure: a cancelled popup drops its delegate, and without the handle
+    // the GC could hand the closure's address to a later vanilla purchase closure (same class).
+    Il2CppGCHandle pendingHandle_ = nullptr;
+    void ClearPending() {
+        pending_ = {};
+        if (Il2CppGCHandle h = pendingHandle_) {
+            pendingHandle_ = nullptr;
+            main_thread::Post([h] { unity::FreeGCHandle(h); });  // never freed inside a hook
+        }
+    }
     unsigned long long promptTick_ = ~0ull;  // TickCount of the last opened prompt
     bool loggedFirstPrompt_ = false;
     bool warnedLabel_ = false;
@@ -677,15 +687,16 @@ bool SellUpgrades::OpenPrompt(Il2CppObject* root, Il2CppObject* item, int32_t up
     SetRef(closure, offClosureItem_, item);
     actionCtor_(action, closure, reinterpret_cast<intptr_t>(b0Mi_));
 
-    pending_ = {};
+    ClearPending();
     pending_.closure = closure;
     pending_.sell = sell;
     pending_.upgrade = upg;
+    pendingHandle_ = unity::NewGCHandle(closure);
 
     Il2CppObject* popup = Invoke(openPopupMi_, root, {title, message, nullptr, posLabel, negLabel, action, nullptr},
                                  "ListUIRoot.OpenPopupPrompt", &ok);
     if (!ok) {
-        pending_ = {};
+        ClearPending();
         return false;
     }
     bool labelled = false;
@@ -695,7 +706,7 @@ bool SellUpgrades::OpenPrompt(Il2CppObject* root, Il2CppObject* item, int32_t up
     }
     if (!labelled) {
         // Never leave a popup whose text could read like a purchase prompt.
-        pending_ = {};
+        ClearPending();
         if (unity::IsAlive(popup) && IsA(popup, popupClass_)) closeNegative_(popup);
         if (!warnedLabel_) {
             warnedLabel_ = true;
@@ -755,7 +766,7 @@ bool SellUpgrades::HandleConfirm(Il2CppObject* closure) {
     if (!pending_.closure || closure != pending_.closure) return false;  // a vanilla purchase closure
     if (!main_thread::IsMainThread() || !IsA(closure, closureClass_)) return false;
     const PendingPrompt p = pending_;
-    pending_ = {};
+    ClearPending();
     if (!p.sell) return true;  // info popup: OK does nothing
 
     auto* root = unity::Field<Il2CppObject*>(closure, offClosureThis_);
