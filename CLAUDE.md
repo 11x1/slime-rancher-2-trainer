@@ -13,7 +13,6 @@
 | `minimap-warp-terminals.md` | market/refinery link terminals as warp depots |
 | `hud-edit-bar.md` | edit bar with cancel/save, drag minimap to edit |
 | `sandbox-ux.md` | shift+scroll amounts, icon tabs, right-click menu, crafter |
-| `slime-dj.md` | custom songs from the music box |
 | `small-polish-2.md` | pill padding, copied!, scroll memory, [modded] label |
 | `ideas.md` | unplanned ideas |
 

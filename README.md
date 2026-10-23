@@ -2,7 +2,7 @@
 
 A native C++ mod suite for Slime Rancher 2 (PC, Unity 6000.0.73f1, IL2CPP, game v1.3.0).
 
-The DLL loads itself. It does not use MelonLoader, BepInEx, Doorstop, SRML, Harmony, CoreCLR or any other managed code. It is a `version.dll` proxy: `UnityPlayer.dll` imports `VERSION.dll`, and Windows loads the copy in the game folder before the one in System32. The only third-party code is [MinHook](https://github.com/TsudaKageyu/minhook) and, for the overlay, [Dear ImGui](https://github.com/ocornut/imgui). Both are compiled in statically.
+The DLL loads itself. It does not use MelonLoader, BepInEx, Doorstop, SRML, Harmony, CoreCLR or any other managed code. It is a `version.dll` proxy: `UnityPlayer.dll` imports `VERSION.dll`, and Windows loads the copy in the game folder before the one in System32. The only third-party code is [MinHook](https://github.com/TsudaKageyu/minhook), for the overlay [Dear ImGui](https://github.com/ocornut/imgui), and for Slime DJ's songs the single-file decoders [stb_vorbis](https://github.com/nothings/stb), [dr_mp3 and dr_wav](https://github.com/mackron/dr_libs). All of it is compiled in statically.
 
 The core provides a loader, name-based IL2CPP resolving, hooks, a Unity main-thread dispatcher, persistent runtime settings, Unity helpers and a version guard. The modules (`spawn_scaling`, `hl2_movement`, `minimap`) and the UI (in-game options tab and ImGui overlay) are built on top of it.
 
@@ -28,6 +28,8 @@ ui/            options tab (ui/options_tab.cpp) and ImGui overlay (ui/overlay.cp
 modules/<name>/module.cpp   one module each: spawn_scaling, hl2_movement, minimap
 third_party/minhook/   official MinHook sources, master @ 8af6b4a (2026-09-08)
 third_party/imgui/     Dear ImGui (optional; picked up by CMake if present)
+third_party/stb/       stb_image (PNG icons), stb_vorbis (Ogg songs)
+third_party/dr_libs/   dr_mp3, dr_wav (songs); built with stb_vorbis as sr2_codecs
 ```
 
 ## Build
@@ -89,13 +91,17 @@ The default game folder is `C:\Program Files (x86)\Steam\steamapps\common\Slime 
 
 Start the game. The log is written to `sr2mods.log` in the same folder. On each launch the previous log is renamed to `sr2mods.prev.log` (replacing the older one), so the log of a crashed run survives one restart.
 
+### Songs for Slime DJ
+
+Slime DJ (Ranch > Slime DJ in the overlay) plays your own songs from the corral Music Box. On its first start the mod creates a `sr2mods_music` folder in the game folder, next to `SlimeRancher2.exe`. Put `.ogg`, `.mp3` or `.wav` files there (subfolders work too), then press the refresh icon in the tab bar or "Open folder" to get there. Songs are streamed, so long files are fine; the details and limits are in `modules/slime_dj/NOTES.md`. The folder is yours: deploy and uninstall never touch it.
+
 ### Matching a log to its PDB
 
 Every DLL that `build.ps1` produces is archived with its `version.pdb` and `sr2mods.json` in `dist\archive\<yyyyMMdd-HHmmss>-<first 8 hex of SHA-256>\`, together with a `build-info.txt` that records the full SHA-256 and the PDB GUID and age. The last 20 archives are kept. At startup the log prints `self: PE timestamp 0x…, sha256 <first 16 hex>, pdb <GUID> age <n> (…)`. Find the archive folder whose name ends in the first 8 hex digits of that SHA-256.
 
 ## Uninstall
 
-Run `.\deploy.ps1 -Uninstall` (add `-Purge` to also delete the settings, logs and `sr2mods_saves\`), or delete `version.dll`, `sr2mods.json`, `sr2mods.log` and `sr2mods.prev.log` from the game folder by hand. Nothing else is changed.
+Run `.\deploy.ps1 -Uninstall` (add `-Purge` to also delete the settings, logs and `sr2mods_saves\`), or delete `version.dll`, `sr2mods.json`, `sr2mods.log` and `sr2mods.prev.log` from the game folder by hand. Nothing else is changed. The `profiles` and `sr2mods_music` folders stay; delete them by hand if you want.
 
 ## Configuration (`sr2mods.json`)
 
