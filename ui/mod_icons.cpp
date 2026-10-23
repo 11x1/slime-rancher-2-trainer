@@ -172,7 +172,17 @@ float PpuLike(Il2CppObject* ref, int size) {
     return static_cast<float>(size) * ppu / side;
 }
 
-Il2CppObject* Create(const EmbeddedPng& png, Il2CppObject* sizeLike) {
+// Greyed variant: desaturated and pulled towards a light grey, alpha unchanged.
+void Grey(std::vector<uint32_t>& rgba) {
+    for (uint32_t& p : rgba) {
+        const int r = p & 0xFF, g = (p >> 8) & 0xFF, b = (p >> 16) & 0xFF;
+        const int l = (r * 77 + g * 150 + b * 29) >> 8;
+        const uint32_t v = static_cast<uint32_t>(96 + l * 5 / 8);  // 96..255
+        p = (p & 0xFF000000u) | (v << 16) | (v << 8) | v;
+    }
+}
+
+Il2CppObject* Create(const EmbeddedPng& png, Il2CppObject* sizeLike, bool greyed) {
     int w = 0, h = 0, n = 0;
     stbi_uc* px = stbi_load_from_memory(png.data, static_cast<int>(png.size), &w, &h, &n, 4);
     if (!px || w <= 0 || h <= 0 || w > 4096 || h > 4096) {
@@ -187,6 +197,8 @@ Il2CppObject* Create(const EmbeddedPng& png, Il2CppObject* sizeLike) {
         std::memcpy(&rgba[static_cast<size_t>(h - 1 - y) * w], px + static_cast<size_t>(y) * w * 4,
                     static_cast<size_t>(w) * 4);
     stbi_image_free(px);
+    if (greyed) Grey(rgba);
+    const std::string objName = std::string("sr2mods_icon_") + png.name + (greyed ? "_grey" : "");
 
     Il2CppObject* tex = A.objectNew(A.texture2d);
     if (!tex) return nullptr;
@@ -205,7 +217,7 @@ Il2CppObject* Create(const EmbeddedPng& png, Il2CppObject* sizeLike) {
     bool updateMips = true, noLongerReadable = true;
     if (!Call(A.apply, tex, {&updateMips, &noLongerReadable}, "Texture2D.Apply")) return nullptr;
     Call(A.setHideFlags, tex, {&flags}, "Object.set_hideFlags");
-    Name(tex, std::string("sr2mods_icon_") + png.name);
+    Name(tex, objName);
     if (g_faulted) return nullptr;
 
     Rect rc{0, 0, static_cast<float>(w), static_cast<float>(h)};
@@ -216,17 +228,17 @@ Il2CppObject* Create(const EmbeddedPng& png, Il2CppObject* sizeLike) {
     if (!unity::IsAlive(sprite)) return nullptr;
     if (!unity::NewGCHandle(sprite)) return nullptr;
     Call(A.setHideFlags, sprite, {&flags}, "Object.set_hideFlags");
-    Name(sprite, std::string("sr2mods_icon_") + png.name);
+    Name(sprite, objName);
     if (g_faulted) return nullptr;
-    SR2_INFO("ui: mod icon '{}' created ({}x{}, {:.1f} px/unit)", png.name, w, h, ppu);
+    SR2_INFO("ui: mod icon '{}' created ({}x{}, {:.1f} px/unit)", objName, w, h, ppu);
     return sprite;
 }
 
 }  // namespace
 
-Il2CppObject* Get(std::string_view name, Il2CppObject* sizeLike) {
+Il2CppObject* Get(std::string_view name, Il2CppObject* sizeLike, bool greyed) {
     if (g_faulted || !core::main_thread::IsMainThread()) return nullptr;
-    auto [it, fresh] = g_cache.try_emplace(std::string(name));
+    auto [it, fresh] = g_cache.try_emplace(std::string(name) + (greyed ? "#grey" : ""));
     Entry& e = it->second;
     if (e.sprite && unity::IsAlive(e.sprite)) return e.sprite;
     e.sprite = nullptr;
@@ -241,7 +253,7 @@ Il2CppObject* Get(std::string_view name, Il2CppObject* sizeLike) {
         e.attempts = kMaxAttempts;
         return nullptr;
     }
-    e.sprite = Create(*png, sizeLike);
+    e.sprite = Create(*png, sizeLike, greyed);
     if (!e.sprite && e.attempts == 1 && !g_faulted)
         SR2_WARN("ui: mod icon '{}' could not be created - using the game's icon", name);
     return e.sprite;

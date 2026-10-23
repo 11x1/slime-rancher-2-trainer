@@ -23,6 +23,8 @@ namespace sr2::ui::mod_icons {
 // scaled so its native size (rect / pixelsPerUnit) equals that sprite's longer side,
 // which keeps layouts that use native sizes unchanged. Only the first call per icon
 // decides this (the sprite is cached).
-Il2CppObject* Get(std::string_view name, Il2CppObject* sizeLike = nullptr);
+// greyed: a desaturated, lighter copy (for greyed-out / owned menu entries), cached
+// separately from the normal icon.
+Il2CppObject* Get(std::string_view name, Il2CppObject* sizeLike = nullptr, bool greyed = false);
 
 }  // namespace sr2::ui::mod_icons

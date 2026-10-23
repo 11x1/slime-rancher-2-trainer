@@ -144,6 +144,7 @@
 #include "core/unity.h"
 #include "modules/custom_upgrades/api.h"
 #include "modules/custom_upgrades/coop_world.h"
+#include "ui/mod_icons.h"
 
 namespace sr2::modules {
 namespace {
@@ -840,6 +841,25 @@ Il2CppObject* CustomUpgrades::MarketIcon() {
     return marketIcon_;
 }
 
+// The mod's own icon for a custom item (assets/icons, ui/mod_icons.h).
+const char* ModIconName(int32_t id) {
+    switch (id) {
+        case SILO_SELL_ALL: return "sell_all";
+        case SILO_SELL_ALL_NOW: return "sell_all_now";
+        case CORRAL_COLLECTOR_2: return "collector_2";
+        case CORRAL_COLLECTOR_3: return "collector_3";
+        case CORRAL_FEEDER_2: return "feeder_2";
+        case CORRAL_MUSIC_2: return "music_2";
+        case COOP_HENS_1: return "hens_1";
+        case COOP_HENS_2: return "hens_2";
+        case GARDEN_GROWTH_1: return "growth_1";
+        case GARDEN_GROWTH_2: return "growth_2";
+        case INCIN_ASH_BOOST: return "ash_boost";
+        case COOP_AIR_NET: return "coop_air_net";
+        case COOP_HEN_COLLECTOR: return "hen_collector";
+        default: return nullptr;
+    }
+}
 Il2CppObject* CustomUpgrades::CloneItem(Il2CppObject* tpl, const UpgradeDef& d, Il2CppObject* iconSrc,
                                         Il2CppObject*& costEntry) {
     costEntry = nullptr;
@@ -884,6 +904,17 @@ Il2CppObject* CustomUpgrades::CloneItem(Il2CppObject* tpl, const UpgradeDef& d, 
     if (!unity::IsAlive(icon)) {
         icon = MarketIcon();
         unavailable = icon;
+    }    // Our own icon replaces the borrowed one (a greyed copy where the game uses a separate
+    // "unavailable" sprite); the borrowed sprite stays the fallback and sets the native size.
+    if (const char* own = ModIconName(d.id)) {
+        Il2CppObject* sizeRef = unity::IsAlive(icon) ? icon : unity::Field<Il2CppObject*>(tpl, offItemIcon_);
+        if (Il2CppObject* mine = sr2::ui::mod_icons::Get(own, sizeRef)) {
+            Il2CppObject* mineUnavail = (unity::IsAlive(unavailable) && unavailable != icon)
+                                            ? sr2::ui::mod_icons::Get(own, sizeRef, true)
+                                            : nullptr;
+            unavailable = mineUnavail ? mineUnavail : mine;
+            icon = mine;
+        }
     }
     if (unity::IsAlive(icon)) SetRef(clone, offItemIcon_, icon);
     if (unity::IsAlive(unavailable) && offItemUnavailIcon_) SetRef(clone, offItemUnavailIcon_, unavailable);
