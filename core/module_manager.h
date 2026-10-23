@@ -54,7 +54,7 @@ private:
         std::string reason;
     };
     bool Apply(std::string_view name, bool enabled);  // performs the switch on the current thread
-    bool SetupLocked(Entry& e);
+    bool SetupLocked(Entry& e, bool enable = true);  // enable = false: hooks stay off (state Disabled)
 
     mutable std::recursive_mutex mutex_;
     std::vector<Entry> entries_;
