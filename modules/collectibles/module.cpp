@@ -54,6 +54,8 @@
 // none (the ghostly drone's IdentifiableType has no icon), so they use the
 // mod's own icons (assets/icons/map_node, research_drone, ghost_drone, via
 // ui/mod_icons).
+// Size: row height 6.8 % of the minimap's size (list font 4.6 %) times the
+// "size" setting (60-160 %).
 //
 // Fault policy: every game call runs under core::Try + a native-fault guard;
 // managed exceptions of single queries are contained, any native fault
@@ -157,6 +159,7 @@ struct Cfg {
     bool showCompleted = true;
     bool compact = true;
     bool spoilerFree = false;
+    float scale = 1.0f;  // "size" setting / 100
 };
 
 void RegisterSettings() {
@@ -183,6 +186,18 @@ void RegisterSettings() {
     def("hide_totals_until_discovered", "Spoiler-free totals", "Display", 0,
         "Totals count only what you have discovered: '3/4+' means more exist that you have not found yet; "
         "pods and depositors show '?' until complete");
+    settings::Def size;
+    size.module = kModule;
+    size.key = "size";
+    size.label = "Size (%)";
+    size.group = "Display";
+    size.kind = Kind::Float;
+    size.def = 100;
+    size.min = 60;
+    size.max = 160;
+    size.step = 5;
+    size.tooltip = "Icon and text size of the tracker, relative to the minimap's size (100 = default)";
+    settings::Register(size);
     for (const CatInfo& c : kCats) def(c.key, c.label, "Categories", 1, c.tip);
 }
 
@@ -192,6 +207,8 @@ Cfg LoadCfg() {
     c.showCompleted = settings::GetBool(kModule, "show_completed_categories");
     c.compact = settings::GetBool(kModule, "compact");
     c.spoilerFree = settings::GetBool(kModule, "hide_totals_until_discovered");
+    const float pct = settings::GetFloat(kModule, "size");
+    c.scale = std::isfinite(pct) ? std::clamp(pct, 60.0f, 160.0f) / 100.0f : 1.0f;
     return c;
 }
 
@@ -1423,7 +1440,8 @@ private:
             if (!cfg_.showCompleted && c.done >= c.total) continue;
             shown.push_back(i);
         }
-        std::string sig = std::format("{}|{}|{}|{:.1f}|", cfg_.compact, cfg_.spoilerFree, snap.position, snap.size);
+        std::string sig = std::format("{}|{}|{}|{:.1f}|{:.2f}|", cfg_.compact, cfg_.spoilerFree, snap.position,
+                                      snap.size, cfg_.scale);
         for (int i : shown) sig += std::format("{}:{}/{}/{}{};", i, counts_[i].done, counts_[i].total,
                                                counts_[i].discovered, counts_[i].partial ? "*" : "");
         lastSize_ = snap.size;
@@ -1447,8 +1465,8 @@ private:
             for (Ref* t : {&ui_.listText, &ui_.listShadow})
                 if (t->Alive()) unity::SetActive(unity::GameObjectOf(t->get()), false);
             // One row of "icon X/Y" per category, as wide as the minimap; wraps only when it does not fit.
-            const float h = std::max(14.0f, std::round(S * 0.095f));  // row height = icon size
-            const float font = std::max(9.0f, std::round(h * 0.7f));
+            const float h = std::max(10.0f, std::round(S * 0.068f * cfg_.scale));  // row height = icon size
+            const float font = std::max(8.0f, std::round(h * 0.72f));
             const float iconGap = std::max(2.0f, std::round(h * 0.15f));
             const float spacing = std::max(4.0f, std::round(h * 0.55f));  // between two categories
             const float rowGap = std::max(1.0f, std::round(h * 0.2f));
@@ -1547,7 +1565,7 @@ private:
         } else {
             for (Cell& c : ui_.cells)
                 if (c.go.Alive()) unity::SetActive(c.go.get(), false);
-            const float font = std::max(10.0f, std::round(S * 0.062f));
+            const float font = std::max(9.0f, std::round(S * 0.046f * cfg_.scale));
             const float d = std::max(1.0f, std::round(font * 0.08f));
             std::string txt, shadow;
             for (size_t n = 0; n < shown.size(); ++n) {
