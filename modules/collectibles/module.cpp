@@ -20,13 +20,18 @@
 //     the area's art), so totals include unvisited areas. Done: the full map's
 //     own reveal query FogMapElement.ShouldBeRevealed(EventDirector), only once
 //     the director's record IS the loaded save's (GameModel.eventRecordModel).
-//   * Research drones: no static per-zone list exists; counted from the drones
-//     loaded so far this session (ResearchDroneController, low-rate scan),
-//     marked with '*' (known so far).
+//   * Research drones: no static per-zone list exists (GameModel.researchDrones
+//     only holds drones whose scene registered them; ResearchDroneEntry has no
+//     zone); counted from the drones loaded this session (ResearchDroneController,
+//     low-rate scan). A zone is loaded as a whole (ZoneSceneGroupMapping: zone ->
+//     SceneGroup[], a SceneGroup loads all its scenes), so once a scan ran while
+//     the player stood in a zone that maps to exactly ONE scene group, that
+//     zone's total is complete; otherwise it is marked with '*' (known so far).
 //   * Ghostly drones: ComponentAcqDroneSpawner sits on a TreasurePod (InitDrone:
 //     SRGetComponent<TreasurePod>); the drone carries that pod and opening it
 //     awards it. Spawners are scene objects (no static list), so they are
-//     collected by the same low-rate scan as research drones. Zone: the pod's
+//     collected by the same low-rate scan as research drones (same '*' rule
+//     for zones not fully scanned). Zone: the pod's
 //     GetZoneId() (CellDirector), else the zone polygons. Done: pod OPEN
 //     (TreasurePod.get_CurrState), re-read at 1 Hz while the pod is loaded.
 //
@@ -88,6 +93,7 @@ constexpr const char* kAsm = "Assembly-CSharp";
 constexpr size_t kNoOff = static_cast<size_t>(-1);
 constexpr float kRecomputeInterval = 1.0f;
 constexpr float kDroneScanInterval = 10.0f;
+constexpr float kZoneSettle = 3.0f;  // a zone's scenes count as fully loaded this long after entering it
 
 enum Cat {
     kPods = 0, kGordos, kShadowDepositors, kShadowDoors, kPlortDoors, kTeleporters, kStabilizers, kMapNodes, kDrones,
@@ -115,11 +121,11 @@ const CatInfo kCats[kCatCount] = {
      "Activated / total map data nodes: the fog areas of the full map in this zone (one per node), revealed or not. "
      "Includes unvisited areas"},
     {"cat_research_drones", "Research drones (read)", "Drones", false,
-     "Read / known research drones. The game keeps no static list per zone, so only drones loaded at least once "
-     "this session are known (marked with *)"},
+     "Read / total research drones. The game keeps no static list, so drones are counted from the loaded scenes: "
+     "complete once you have been in the zone (its scenes load as a whole), marked with * until then"},
     {"cat_ghostly_drones", "Ghostly drones (opened)", "Ghosts", false,
-     "Opened / known ghostly drones (each carries a treasure pod). Like research drones they exist only in the loaded "
-     "scenes, so the total counts the drones seen so far (marked with *)"},
+     "Opened / total ghostly drones (each carries a treasure pod). Counted from the loaded scenes like research "
+     "drones: complete once you have been in the zone, marked with * until then"},
 };
 
 struct NativeFault : std::runtime_error {
@@ -186,6 +192,7 @@ struct Sym {
                 *teleMarker = nullptr;
     Il2CppClass *gameModel = nullptr, *gordoModel = nullptr;
     Il2CppClass *droneCtrl = nullptr, *droneEntry = nullptr, *droneModel = nullptr;
+    Il2CppClass* zoneSgMapping = nullptr;  // ZoneSceneGroupMapping (asset)
     Il2CppClass *ghostSpawner = nullptr, *treasurePod = nullptr, *identType = nullptr;
     Il2CppClass *fogElement = nullptr, *staticGameEvent = nullptr, *eventDirector = nullptr, *eventRecordModel = nullptr;
     const MethodInfo* counterGetState = nullptr;  // MapCounterDefinition.GetState (abstract; virtual slot per object)
@@ -202,6 +209,7 @@ struct Sym {
     size_t droneEntryF = kNoOff, droneModelF = kNoOff, entryRefId = kNoOff, droneRead = kNoOff;
     size_t fogEvent = kNoOff, sgeDirector = kNoOff, sgeKey = kNoOff, edModel = kNoOff, gmEventRecord = kNoOff,
            mdEventDirector = kNoOff;
+    size_t sgMappings = kNoOff;
     size_t spawnerId = kNoOff, spawnerIdent = kNoOff, identIcon = kNoOff, podModel = kNoOff;
 };
 
@@ -297,6 +305,9 @@ public:
         s_.entryRefId = c.Field(s_.droneEntry, "referenceId");
         s_.droneModel = c.Class(nsData, "ResearchDroneModel");
         s_.droneRead = c.Field(s_.droneModel, "read");
+        // zone -> scene groups (whole-zone loading: completeness of the scene-scanned categories)
+        s_.zoneSgMapping = c.Class(nsMap, "ZoneSceneGroupMapping");
+        s_.sgMappings = c.Field(s_.zoneSgMapping, "_mappings");
         // ghostly drones: ComponentAcqDroneSpawner on a TreasurePod
         s_.ghostSpawner = c.Class("MonomiPark.SlimeRancher.Drone", "ComponentAcqDroneSpawner");
         s_.spawnerId = c.Field(s_.ghostSpawner, "_id");  // IdHandler._id
@@ -456,6 +467,12 @@ private:
     std::unordered_map<std::string, Drone> drones_;
     std::unordered_map<std::string, Ghost> ghosts_;
     Ref ghostIcon_;  // IdentifiableType.icon of the spawners' drone (kept across page rebuilds)
+    // zone -> number of scene groups (ZoneSceneGroupMapping; -1 = also a SceneGroupList asset)
+    std::unordered_map<Il2CppObject*, int> zoneGroups_;
+    // zones scanned while current and settled (identity only): their scene-scanned totals are complete
+    std::unordered_set<Il2CppObject*> dronesComplete_, ghostsComplete_;
+    float zoneAge_ = 0;
+    bool settleScanDue_ = false;
     float recomputeAcc_ = 1e9f, droneAcc_ = 1e9f, retryAcc_ = 0;
     Count counts_[kCatCount];
     std::string shownSig_;
@@ -565,6 +582,8 @@ private:
             lastGameModel_ = gm;
             drones_.clear();
             ghosts_.clear();
+            dronesComplete_.clear();
+            ghostsComplete_.clear();
             droneAcc_ = 1e9f;
             recomputeAcc_ = 1e9f;
         }
@@ -573,11 +592,18 @@ private:
         if (snap.zone != zone_.get()) {
             zone_.Reset(snap.zone);
             recomputeAcc_ = 1e9f;
-            droneAcc_ = 1e9f;
+            droneAcc_ = 1e9f;  // scan now (show what is there) and again once settled (completeness)
+            zoneAge_ = 0;
+            settleScanDue_ = true;
             SR2_DEBUG("collectibles: zone -> '{}'", unity::GetName(snap.zone));
         }
 
         droneAcc_ += dt;
+        zoneAge_ += dt;
+        if (settleScanDue_ && zoneAge_ >= kZoneSettle) {
+            settleScanDue_ = false;
+            droneAcc_ = 1e9f;
+        }
         if (droneAcc_ >= kDroneScanInterval && (cfg_.cats[kDrones] || cfg_.cats[kGhostDrones])) {
             droneAcc_ = 0;
             if (cfg_.cats[kDrones]) {
@@ -703,6 +729,7 @@ private:
         zoneMarkers_.clear();
         fogNodes_.clear();
         fogRecord_ = nullptr;
+        zoneGroups_.clear();
         zonePins_.clear();
         zoneSet_.clear();
         for (Ref& r : catIcon_) r.Reset(nullptr);
@@ -832,6 +859,7 @@ private:
                 });
         }
 
+        ReadZoneGroups();
         LogTotals(byOwn, byPoly, byLabel, unassigned, fogAreas, fogNoEvent);
         recomputeAcc_ = 1e9f;
         shownSig_.clear();
@@ -940,9 +968,13 @@ private:
                 if (c[i].total <= 0) continue;
                 const bool unknownDone = i == kMapNodes && !fogReady_;
                 line += unknownDone ? std::format("{}{} ?/{}", line.empty() ? "" : ", ", kCats[i].shortLabel, c[i].total)
-                                    : std::format("{}{} {}/{}", line.empty() ? "" : ", ", kCats[i].shortLabel, c[i].done,
-                                                  c[i].total);
+                                    : std::format("{}{} {}/{}{}", line.empty() ? "" : ", ", kCats[i].shortLabel,
+                                                  c[i].done, c[i].total, c[i].partial ? "*" : "");
             }
+            auto g = zoneGroups_.find(z);
+            if (g != zoneGroups_.end())
+                line += std::format("{}scene groups {}", line.empty() ? "" : ", ",
+                                    g->second < 0 ? std::string("list") : std::to_string(g->second));
             if (!line.empty()) out += std::format(" | '{}': {}", unity::GetName(z), line);
         }
         std::string icons;
@@ -1081,7 +1113,7 @@ private:
                 ++k.total;
                 ++k.discovered;
                 if (d.read) ++k.done;
-                k.partial = true;
+                k.partial = !dronesComplete_.count(zone);
             }
         }
         if (!hasCounter[kGhostDrones] && (forLog || cfg_.cats[kGhostDrones])) {
@@ -1095,7 +1127,7 @@ private:
                 ++k.total;
                 ++k.discovered;
                 if (g.done) ++k.done;
-                k.partial = true;
+                k.partial = !ghostsComplete_.count(zone);
             }
         }
     }
@@ -1173,6 +1205,39 @@ private:
             SR2_DEBUG("collectibles: ghostly drone '{}' in '{}' ({}), opened {}", id, unity::GetName(z), how, known && done);
             return true;
         });
+        if (CurrentZoneFullyLoaded() && ghostsComplete_.insert(zone_.get()).second)
+            SR2_DEBUG("collectibles: ghostly drones of '{}' complete (zone scenes loaded)", unity::GetName(zone_.get()));
+    }
+
+    // A scan of the loaded scenes saw every object of the current zone: the zone maps to exactly one
+    // scene group (loaded as a whole) and the player has been in it for kZoneSettle seconds.
+    bool CurrentZoneFullyLoaded() const {
+        if (!zone_ || zoneAge_ < kZoneSettle) return false;
+        auto it = zoneGroups_.find(zone_.get());
+        return it != zoneGroups_.end() && it->second == 1;
+    }
+
+    void ReadZoneGroups() {
+        zoneGroups_.clear();
+        if (!s_.zoneSgMapping || !Has(s_.sgMappings)) return;
+        ugui::ForEachOfType(s_.zoneSgMapping, [&](Il2CppObject* m) {
+            if (!ugui::IsA(m, s_.zoneSgMapping)) return true;
+            Il2CppObject* list = F<Il2CppObject*>(m, s_.sgMappings);
+            if (!list || !ugui::PlausiblePointer(list)) return true;
+            ugui::ForEachListStructPair(list, "Zone", "SceneGroups", [&](Il2CppObject* zone, Il2CppObject* groups) {
+                Il2CppObject* z = PinZone(zone);
+                if (!z) return true;
+                int n = groups ? static_cast<int>(ugui::ArrayCount(reinterpret_cast<Il2CppArray*>(groups))) : 0;
+                int& slot = zoneGroups_[z];
+                slot = slot < 0 ? -1 : slot + n;
+                return true;
+            });
+            ugui::ForEachListStructPair(list, "Zone", "SceneGroupListAsset", [&](Il2CppObject* zone, Il2CppObject* lst) {
+                if (lst && zoneSet_.count(zone)) zoneGroups_[zone] = -1;  // groups from a list asset: not counted
+                return true;
+            });
+            return true;
+        });
     }
 
     void ScanDrones(Il2CppObject* gm) {
@@ -1207,6 +1272,8 @@ private:
             return true;
         });
         (void)seen;
+        if (CurrentZoneFullyLoaded() && dronesComplete_.insert(zone_.get()).second)
+            SR2_DEBUG("collectibles: research drones of '{}' complete (zone scenes loaded)", unity::GetName(zone_.get()));
     }
 
     void Recompute(Il2CppObject* gm) {
@@ -1510,6 +1577,8 @@ private:
             ghosts_.clear();
             ghostIcon_.Reset(nullptr);
         });
+        dronesComplete_.clear();
+        ghostsComplete_.clear();
         lastGameModel_ = nullptr;
         shownSig_.clear();
         lastSize_ = -1;
