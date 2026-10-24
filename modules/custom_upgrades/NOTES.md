@@ -181,9 +181,10 @@ replaced (old type T, stored type T): dropped owned [...], values [...]`.
   (`LayoutManager`, `HorizontalLayout`, `EncapsulateChildren` -> `SetSizeWithCurrentAnchors` in
   LateUpdate; the label has `ResizeToPreferred`), so the old half-width split was overwritten and the
   buttons grew back to full width. Now (sell_upgrades `PlaceButtons`) only pivots / positions are
-  set: owned card -> PURCHASED hidden, Sell alone in its place; tier card -> Purchase pivot x 1 left
-  of the old centre, Sell pivot x 0 right of it (16 px gap), re-centred for a few ticks once the
-  layout has given them their widths. Applies to every plot menu.
+  set: owned card -> PURCHASED hidden, Sell alone in its place; tier card -> Sell pivot x 1 left
+  of the old centre, Purchase pivot x 0 right of it (16 px gap; swapped in plot-polish-7, user request
+  "switch sell and buy button positions"), re-centred for a few ticks once the layout has given them
+  their widths. Applies to every plot menu.
 - **Sell also bought the next tier.** The prefab's `InputEventButton` performs the menu's submit on
   pointer down / up (before the Button click reaches the Press detour): on a tier card that opened
   the purchase prompt of the shown tier and the same click confirmed it (log: "sold Music Box" and
@@ -198,9 +199,27 @@ replaced (old type T, stored type T): dropped owned [...], values [...]`.
   `LocalizeStringEvent.UpdateString` with no override yet and showed its template's text (the corral
   clones' template is `Walls Upgrade`). Texts are now registered in the pre hook too.
 
+- **Maxed tier showed Purchase and no checkmark** (user report after round 4: "upgrade tier II doesn't put
+  it as checked and shows the buy button"; "a checkbox on the icon if upgrades are on max tier"). A card's
+  greyed icon + checkmark and its Purchase button come from the item's `IsAvailable` Func (`() =>
+  !plot.HasUpgrade(_upgrade)`), which only `PlotUpgradePurchaseItemModel.UpdateAvailability(plot)` sets -
+  called by `UpdateMenuItemAvailabilityAndHidden` for the items in the list on a menu OPEN. A purchase or
+  sale with the menu open goes through `RebuildUI`, which does not call it. A clone is a fresh
+  ScriptableObject whose constructor Func says "available", so a tier card we swap in there (Faster Hens II
+  after buying I, Silo Capacity V after IV, the next Additional Storage section) showed Purchase and no
+  checkmark until the menu was opened again (or used the Func of the last plot it was bound for). Now
+  `RefreshAvailability` calls `UpdateAvailability` / `UpdateHidden` with the plot for every item in the
+  list at the end of `BeforeMenuUpdate`, before the original rebinds the views (on a menu open the
+  original does it once more). The checkmark itself is the game's: `GenericViewHolder.BindData`
+  (0x83C900) enables its `unavailableIcon` image with the item's `_unavailableIcon` sprite while
+  IsAvailable is false; our clones copy that sprite from their icon source / template.
+- **Coop Air Net icon**: the corral's own Air Net upgrade icon (`iconFrom` = Air Net, found in the corral
+  menu's items by `GlobalUpgradeItem`), no mod icon any more (user: "use the air net icon from corrals").
+
 Not checked in game yet: all of the above (layout and centring, the hidden icon, that selling no longer
 buys, the label, the Activate button's position, prompt and
-animation).
+animation), and from plot-polish-7: Sell left / Purchase right, buying the last tier with the menu open
+showing the checkmark and no Purchase button at once, the Coop Air Net icon.
 
 ## Sell-All receipt
 
@@ -261,8 +280,9 @@ dialog.
   prefab size and the glyph left over the label. Now each clone gets its own `LayoutManager` (the glyph
   on the left inside the pill, as in the game), sits in a zero-size slot scaled 0.72 (the receipt's 40 pt
   title vs the popup's 55 pt; on the slot, not the button, whose ButtonAnimator may animate its scale),
-  and hangs off its outer edge: Sell's left edge at the left padding, Cancel's right edge at the right
-  padding (pivot 0 / 1, re-placed for 30 frames). Game order: Sell left, Cancel right. Not focusable
+  and hangs off its outer edge: Cancel's left edge at the left padding, Sell's right edge at the right
+  padding (pivot 0 / 1, re-placed for 30 frames). Cancel left, Sell right (plot-polish-7, user request "switch
+  sell and cancel button locations"; the game's popup has the positive button on the left). Not focusable
   (TextButton_**NoneSelectable**): no focus ring any more. Log once: `Sell button laid out W x H (x0.72 on
   screen)` and the key line below. Fallback (no LayoutManager class): prefab layout, unscaled.
 - **Keys** (polled, nothing hooked). Sell: the popup's positive `InputEvent` (`PopupPrompt._positiveInput`,
@@ -285,6 +305,16 @@ dialog.
   (`AddResourceCollected`, the drones' cloud-upload notice, "... sent to the Quantum Cloud"). The
   sandbox used it for its spawns and crafts at first; since 2026-10-24 it queues its own free-text
   notices instead (`QueueText`, "Spawned 5 Pink Plort"). The Sell-All keeps `kPlortSold`, unchanged.
+- **Gold Sell-All button** (plot-polish-7, user: "modify the sell button model colors so I can see it's not
+  the menu-open one"). The clone of the corral collector button looks like the plot menu terminal's, so its
+  cap (renderers whose GameObject name has `button_button`) is tinted towards gold (60 %); without a cap
+  the whole button 30 %. Done one tick after the build, after the prefab's `ApplyPalette.Start` has swapped
+  in the palette's materials: `Renderer.get_materials` (instanced copies), every Color property of each
+  shader (`Shader.GetPropertyCount` / `GetPropertyType` / `GetPropertyNameId`, `Material.GetColor` /
+  `SetColor`), HDR intensity kept, alpha kept. Shader-agnostic because the tech shaders' property names
+  are unknown. Log once: `silo sell button on plot '...' tinted gold (cap): N colour(s) on <renderer> (k),
+  ...` - if it says `no cap found` or 0 colours, the renderer names / shader need a look. A later palette
+  change leaves our instanced materials alone (they are in no palette map).
 - Log: `silo receipt ready`, `sell all (plot '...'): receipt shown, N plort(s) in T type(s) for V`,
   `receipt cancelled, nothing sold`, `receipt changed before the sale (...) - refreshed`, then the
   usual `sell all (receipt, plot '...'): sold ...`. Without the dialog parts (setup failed) the button
@@ -337,6 +367,10 @@ Storage per silo slot: 100 -> 200 (vanilla) -> 300 -> 400 -> 500 -> 600 (ours).
   Capacity -> II -> ... -> V). So the silo menu has two storage cards: Additional Storage (more
   sections) and Storage Capacity (more per slot); they are different upgrades with different
   purchases, so they stay two cards.
+- **Tier labels** (plot-polish-7, user: "add additional storage tier labels"): the three vanilla cards'
+  titles read "Additional Storage II / III / IV" (STORAGE2 / 3 / 4, the section each one adds), like
+  our tier cards; a text_override on each vanilla item's own `_title` (pinned items), removed in Cleanup.
+  Log once per menu: `silo: 3 Additional Storage card(s) labelled with their section (II / III / IV)`.
 - **Not sellable**, like the vanilla silo storage upgrades: `CanSell` gives the same permanent reason
   ("silo storage"), so sell_upgrades shows no Sell button and no alt-action prompt.
 
