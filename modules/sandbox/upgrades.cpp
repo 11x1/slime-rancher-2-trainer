@@ -39,6 +39,7 @@
 #include "core/il2cpp_api.h"
 #include "core/log.h"
 #include "core/module.h"
+#include "core/text_override.h"
 #include "core/unity.h"
 #include "modules/custom_upgrades/api.h"
 #include "modules/custom_upgrades/buildables.h"
@@ -255,7 +256,11 @@ Il2CppObject* LevelDef(Il2CppObject* def, int level) {
 }
 
 std::string Localized(Il2CppObject* ls) {
-    if (!ls || !g_locGet) return {};
+    if (!ls) return {};
+    // The mod's cloned upgrades (custom_upgrades: Drone Battery Saver) keep the template's table entry
+    // ("Tank Booster I") and register their own text for the instance; the game shows that one.
+    if (std::string own; sr2::core::text_override::Lookup(ls, own)) return CleanText(own);
+    if (!g_locGet) return {};
     auto* s = reinterpret_cast<Il2CppString*>(Call(g_locGet, ls, {}, "LocalizedString.GetLocalizedString"));
     std::string t = CleanText(Resolver::Get().ToUtf8(s));
     return t.rfind("!!", 0) == 0 ? std::string() : t;
@@ -405,42 +410,265 @@ void AfterChange() {
 }
 
 // --------------------------------------------------------------- levels ----
-// The level's effects once more, straight on every ActorUpgradeHandler of the model (UpgradeModel.
-// participants; the player's handler is one): ApplyUpgrade (0x8646B0, decompiled) removes what that upgrade
-// applied before and adds _levels[level].Effects (none at -1), so a second call changes nothing when the
-// event already did it. Needed when SetUpgradeLevel stored the level but an earlier subscriber of its
-// multicast OnUpgradeChanged threw, so the handler never heard of it (round 8: "Tank Booster max stayed at
-// 60"; the exact cause was not seen). Returns the number of handlers.
-int ApplyEffects(Il2CppObject* um, Il2CppObject* def, int level) {
-    if (!g_applyUpgrade || !g_handlerClass || !g_offUmParticipants) return 0;
-    void* list = unity::Field<void*>(um, g_offUmParticipants);
-    int n = 0;
-    for (size_t i = 0, c = unity::ListCount(list); i < c && i < 64; ++i) {
-        auto* h = static_cast<Il2CppObject*>(unity::ListAt(list, i));
-        if (!IsA(h, g_handlerClass)) continue;
-        int32_t v = level;
-        bool ok = false;
-        Call(g_applyUpgrade, h, {def, &v}, "ActorUpgradeHandler.ApplyUpgrade", &ok);
-        if (ok) ++n;
-    }
-    return n;
+// Upgrade effects, checked and repaired (round 8: "max tank booster gives me x1880 space").
+//
+// ActorUpgradeHandler.ApplyUpgrade(def, level) (0x8646B0, decompiled) collects _levels[level].Effects per
+// property, takes the nodes it applied before from _appliedModifiers[def._uniqueId] (List<AppliedModifier>
+// {ModifiableFloat Property @0, LinkedListNode<FloatModifier> Node @8}), calls ModifiableFloat.
+// BatchModifiers(add, remove) per property and only at the very end stores the new nodes in
+// _appliedModifiers. When anything in between throws (the round-8 log: a NullReferenceException on every
+// Tank Booster / Extra Tank change in that session, from inside the game's property update; cause not
+// seen), the new modifiers stay on the property but are not remembered: the next level change adds the
+// next level's modifier on top (Tank Booster XII is ADD 180: 20 + 180 + 180 + ... = 1880), and nodes that
+// were removed but are still remembered make every later ApplyUpgrade of that upgrade throw "The
+// LinkedList node does not belong to current LinkedList" (the Drone Battery Saver's errors). The old
+// backstop here called ApplyUpgrade a second time after a throwing SetUpgradeLevel, which doubled every
+// leak (Extra Tank I from "not bought" unlocked two slots in that log).
+//
+// Heal, per handler of the model (UpgradeModel.participants; the player's is one), using only what the
+// upgrade definitions say: every FloatModifier in any level's Effects belongs to (upgrade, level). On every
+// property those modifiers target (UnitPropertyTracker.TryGetProperty), each node of an upgrade modifier
+// stays only if its level is the upgrade's current level and it is the only node of that modifier (a
+// remembered node wins); the rest go with ModifiableFloat.RemoveModifier. Then remembered nodes that are no
+// longer in a list are dropped from _appliedModifiers (List.RemoveAt), and an upgrade whose current level
+// has a modifier on no property gets ApplyUpgrade once (safe now: nothing stale to remove). Modifiers of
+// anything else (not in an upgrade level) are never touched. So a property always ends at its default plus
+// the current levels' values, whatever threw before. Runs after each level change and every few seconds.
+// The values are runtime only: a load rebuilds them from the saved levels, so a save never keeps them.
+constexpr unsigned long long kHealMs = 3000;
+unsigned long long g_lastHeal = 0;
+std::string g_healWhy;                         // "" = heal available
+size_t g_offHandlerTracker = 0;                // ActorUpgradeHandler._unitPropertyTracker
+size_t g_offHandlerApplied = 0;                // ActorUpgradeHandler._appliedModifiers
+const MethodInfo* g_tryGetProperty = nullptr;  // UnitPropertyTracker.TryGetProperty(PropertyDefinition, out ModifiableFloat)
+size_t g_offUlEffects = 0;                     // UpgradeLevelDefinition.Effects (nested class: from a live object)
+size_t g_offModTarget = 0;                     // Modifier<float>.TargetProperty (from a live modifier)
+constexpr size_t kAppliedStride = 16;          // AppliedModifier {Property @0, Node @8}
+constexpr size_t kAppliedNode = 8;
+
+// Field offset / method on a live object's class (generic BCL types), cached per class.
+size_t LiveOffset(Il2CppObject* obj, const char* name) {
+    static std::unordered_map<std::string, size_t> cache;
+    Il2CppClass* k = obj ? api().il2cpp_object_get_class(obj) : nullptr;
+    if (!k) return 0;
+    const std::string key = std::format("{}|{}", static_cast<const void*>(k), name);
+    if (auto it = cache.find(key); it != cache.end()) return it->second;
+    const auto o = Resolver::Get().FieldOffset(k, name);
+    return cache[key] = o ? *o : 0;
+}
+const MethodInfo* LiveMethod(Il2CppObject* obj, const char* name, int argc) {
+    static std::unordered_map<std::string, const MethodInfo*> cache;
+    Il2CppClass* k = obj ? api().il2cpp_object_get_class(obj) : nullptr;
+    if (!k) return nullptr;
+    const std::string key = std::format("{}|{}|{}", static_cast<const void*>(k), name, argc);
+    if (auto it = cache.find(key); it != cache.end()) return it->second;
+    const MethodInfo* m = nullptr;
+    for (Il2CppClass* c = k; c && !m; c = api().il2cpp_class_get_parent ? api().il2cpp_class_get_parent(c) : nullptr)
+        m = Resolver::Get().Method(c, name, argc);
+    return cache[key] = m;
 }
 
-// SetUpgradeLevel(def, to), then the effects applied directly too (ApplyEffects); for a discoverable upgrade
-// reset to -1, level 0's components come back if missing (it stays discovered). `note` gets what happened
-// besides the level.
-bool SetLevel(Il2CppObject* um, Il2CppObject* spend, Il2CppObject* def, int to, std::string& note) {
+void* LevelEffects(Il2CppObject* lvl) {
+    if (!lvl) return nullptr;
+    if (!g_offUlEffects) g_offUlEffects = LiveOffset(lvl, "Effects");
+    return g_offUlEffects ? unity::Field<void*>(lvl, g_offUlEffects) : nullptr;
+}
+
+// _appliedModifiers[uid] (List<AppliedModifier>) or nullptr.
+Il2CppObject* AppliedList(Il2CppObject* applied, int32_t uid) {
+    const MethodInfo* tryGet = LiveMethod(applied, "TryGetValue", 2);
+    Il2CppObject* list = nullptr;
+    bool found = false;
+    if (!tryGet || !CallValue(tryGet, applied, {&uid, &list}, "Dictionary.TryGetValue", found) || !found) return nullptr;
+    return list;
+}
+// The remembered nodes of a List<AppliedModifier>, by index (a null node stays in).
+std::vector<Il2CppObject*> AppliedNodes(Il2CppObject* list) {
+    std::vector<Il2CppObject*> out;
+    const size_t itemsOff = LiveOffset(list, "_items"), sizeOff = LiveOffset(list, "_size");
+    if (!list || !itemsOff || !sizeOff) return out;
+    void* items = unity::Field<void*>(list, itemsOff);
+    const int n = unity::Field<int32_t>(list, sizeOff);
+    if (!items || n <= 0 || static_cast<size_t>(n) > unity::ArrayLength(items)) return out;
+    char* data = unity::ArrayData<char>(items);
+    for (int i = 0; i < n && i < 256; ++i)
+        out.push_back(*reinterpret_cast<Il2CppObject**>(data + static_cast<size_t>(i) * kAppliedStride + kAppliedNode));
+    return out;
+}
+bool Listed(Il2CppObject* node) {  // LinkedListNode.list: null once removed
+    const size_t off = node ? LiveOffset(node, "list") : 0;
+    return off && unity::Field<void*>(node, off);
+}
+
+// Every node of a ModifiableFloat: Modifiers (SortedList<int, SortedList<int, LinkedList<FloatModifier>>>).
+std::vector<Il2CppObject*> PropertyNodes(Il2CppObject* prop) {
+    std::vector<Il2CppObject*> out;
+    auto sortedValues = [](Il2CppObject* sl, std::vector<Il2CppObject*>& vals) {
+        const size_t vOff = LiveOffset(sl, "values"), nOff = LiveOffset(sl, "_size");
+        void* arr = sl && vOff && nOff ? unity::Field<void*>(sl, vOff) : nullptr;
+        const int n = arr ? unity::Field<int32_t>(sl, nOff) : 0;
+        for (int i = 0; i < n && static_cast<size_t>(i) < unity::ArrayLength(arr) && i < 64; ++i)
+            if (auto* v = static_cast<Il2CppObject*>(unity::ArrayAt(arr, static_cast<size_t>(i)))) vals.push_back(v);
+    };
+    const size_t modsOff = LiveOffset(prop, "Modifiers");
+    Il2CppObject* outer = modsOff ? unity::Field<Il2CppObject*>(prop, modsOff) : nullptr;
+    std::vector<Il2CppObject*> inner, lists;
+    if (outer) sortedValues(outer, inner);
+    for (Il2CppObject* sl : inner) sortedValues(sl, lists);
+    for (Il2CppObject* ll : lists) {
+        const size_t headOff = LiveOffset(ll, "head"), countOff = LiveOffset(ll, "count");
+        Il2CppObject* node = headOff ? unity::Field<Il2CppObject*>(ll, headOff) : nullptr;
+        const int count = countOff ? unity::Field<int32_t>(ll, countOff) : 0;
+        const size_t nextOff = node ? LiveOffset(node, "next") : 0;
+        for (int i = 0; i < count && i < 512 && node && nextOff; ++i) {  // circular: count nodes from head
+            out.push_back(node);
+            node = unity::Field<Il2CppObject*>(node, nextOff);
+        }
+    }
+    return out;
+}
+
+struct HealResult {
+    int stray = 0, stale = 0, reapplied = 0;
+    std::string detail;
+    void Add(const std::string& s) { detail += (detail.empty() ? "" : "; ") + s; }
+};
+
+void HealHandler(Il2CppObject* um, Il2CppObject* h, const std::vector<Il2CppObject*>& defs, HealResult& r) {
+    Il2CppObject* tracker = unity::Field<Il2CppObject*>(h, g_offHandlerTracker);
+    Il2CppObject* applied = unity::Field<Il2CppObject*>(h, g_offHandlerApplied);
+    if (!tracker || !applied) return;
+    struct Owner {
+        int level, current;
+    };
+    std::unordered_map<Il2CppObject*, Owner> owner;  // upgrade modifier -> its level and the upgrade's level
+    std::vector<Il2CppObject*> propDefs;
+    std::vector<int> current(defs.size(), -1);
+    for (size_t d = 0; d < defs.size(); ++d) {
+        current[d] = Level(um, defs[d]);
+        for (int l = 0, n = LevelCount(defs[d]); l < n; ++l) {
+            void* fx = LevelEffects(LevelDef(defs[d], l));
+            for (size_t e = 0, ne = unity::ListCount(fx); e < ne; ++e) {
+                auto* mod = static_cast<Il2CppObject*>(unity::ListAt(fx, e));
+                if (!mod) continue;
+                if (!g_offModTarget) g_offModTarget = LiveOffset(mod, "TargetProperty");
+                if (!g_offModTarget) return;
+                owner[mod] = {l, current[d]};
+                Il2CppObject* pd = unity::Field<Il2CppObject*>(mod, g_offModTarget);
+                if (pd && std::find(propDefs.begin(), propDefs.end(), pd) == propDefs.end()) propDefs.push_back(pd);
+            }
+        }
+    }
+    std::vector<Il2CppObject*> remembered;
+    for (Il2CppObject* def : defs)
+        if (Il2CppObject* list = AppliedList(applied, unity::Field<int32_t>(def, g_offUdId)))
+            for (Il2CppObject* n : AppliedNodes(list)) remembered.push_back(n);
+    auto isRemembered = [&](Il2CppObject* n) { return std::find(remembered.begin(), remembered.end(), n) != remembered.end(); };
+
+    std::vector<Il2CppObject*> present;  // upgrade modifiers that stay on a property
+    for (Il2CppObject* pd : propDefs) {
+        Il2CppObject* prop = nullptr;
+        bool has = false;
+        if (!CallValue(g_tryGetProperty, tracker, {pd, &prop}, "UnitPropertyTracker.TryGetProperty", has) || !has || !prop)
+            continue;
+        const auto nodes = PropertyNodes(prop);
+        const size_t itemOff = nodes.empty() ? 0 : LiveOffset(nodes.front(), "item");
+        if (!itemOff) continue;
+        std::vector<Il2CppObject*> drop;
+        std::unordered_map<Il2CppObject*, Il2CppObject*> keep;  // modifier -> the node kept
+        for (Il2CppObject* node : nodes) {
+            Il2CppObject* mod = unity::Field<Il2CppObject*>(node, itemOff);
+            auto it = owner.find(mod);
+            if (it == owner.end()) continue;  // not an upgrade's modifier: never touched
+            if (it->second.level != it->second.current) {
+                drop.push_back(node);
+                continue;
+            }
+            auto k = keep.find(mod);
+            if (k == keep.end()) {
+                keep[mod] = node;
+            } else if (isRemembered(node) && !isRemembered(k->second)) {
+                drop.push_back(k->second);
+                k->second = node;
+            } else {
+                drop.push_back(node);
+            }
+        }
+        for (const auto& kv : keep) present.push_back(kv.first);
+        if (drop.empty()) continue;
+        const MethodInfo* remove = LiveMethod(prop, "RemoveModifier", 1);
+        int removed = 0;
+        for (Il2CppObject* node : drop) {
+            Call(remove, prop, {node}, "ModifiableFloat.RemoveModifier");
+            removed += Listed(node) ? 0 : 1;  // the removal comes before the re-evaluation that may throw
+        }
+        r.stray += removed;
+        r.Add(std::format("{}: {} of {} stray modifier(s) removed", unity::GetName(pd), removed, drop.size()));
+    }
+
+    for (size_t d = 0; d < defs.size(); ++d) {
+        Il2CppObject* list = AppliedList(applied, unity::Field<int32_t>(defs[d], g_offUdId));
+        const MethodInfo* removeAt = list ? LiveMethod(list, "RemoveAt", 1) : nullptr;
+        const auto nodes = list ? AppliedNodes(list) : std::vector<Il2CppObject*>();
+        int dropped = 0;
+        for (int i = static_cast<int>(nodes.size()) - 1; i >= 0 && removeAt; --i) {
+            if (Listed(nodes[static_cast<size_t>(i)])) continue;
+            int32_t idx = i;
+            bool ok = false;
+            Call(removeAt, list, {&idx}, "List.RemoveAt", &ok);
+            dropped += ok ? 1 : 0;
+        }
+        if (dropped) {
+            r.stale += dropped;
+            r.Add(std::format("'{}': {} stale entr{} dropped", unity::GetName(defs[d]), dropped, dropped == 1 ? "y" : "ies"));
+        }
+        if (current[d] < 0 || !g_applyUpgrade) continue;
+        void* fx = LevelEffects(LevelDef(defs[d], current[d]));
+        bool missing = false;
+        for (size_t e = 0, ne = unity::ListCount(fx); e < ne && !missing; ++e) {
+            auto* mod = static_cast<Il2CppObject*>(unity::ListAt(fx, e));
+            missing = mod && std::find(present.begin(), present.end(), mod) == present.end();
+        }
+        if (!missing) continue;
+        int32_t v = current[d];
+        Call(g_applyUpgrade, h, {defs[d], &v}, "ActorUpgradeHandler.ApplyUpgrade");
+        ++r.reapplied;
+        r.Add(std::format("'{}' level {} applied again", unity::GetName(defs[d]), Roman(current[d] + 1)));
+    }
+}
+
+// Every handler of the model. `why`: for the log ("after a level change", "check").
+HealResult Heal(Il2CppObject* um, const char* why) {
+    HealResult r;
+    g_lastHeal = GetTickCount64();
+    if (!g_healWhy.empty() || !um || sr2::core::ModuleFaulted(kModule)) return r;
+    const auto defs = Definitions(um);
+    void* list = unity::Field<void*>(um, g_offUmParticipants);
+    for (size_t i = 0, c = unity::ListCount(list); i < c && i < 64; ++i) {
+        auto* h = static_cast<Il2CppObject*>(unity::ListAt(list, i));
+        if (IsA(h, g_handlerClass)) HealHandler(um, h, defs, r);
+    }
+    if (r.stray || r.stale || r.reapplied) {
+        SR2_WARN("[{}] upgrade effects repaired ({}): {}", kModule, why, r.detail);
+        if (g_host.vacpackState) SR2_INFO("[{}] vacpack after the repair: {}", kModule, g_host.vacpackState(true));
+    }
+    return r;
+}
+
+// SetUpgradeLevel(def, to), then the effects checked (Heal; heal = false when the caller heals once after
+// several changes); for a discoverable upgrade reset to -1, level 0's components come back if missing (it
+// stays discovered). `note` gets what happened besides the level. True once the level is stored: a
+// subscriber of OnUpgradeChanged that threw (logged) no longer counts as refused, the heal puts the effects
+// right.
+bool SetLevel(Il2CppObject* um, Il2CppObject* spend, Il2CppObject* def, int to, std::string& note, bool heal = true) {
     int32_t v = to;
     bool ok = false;
     Call(g_setLevel, um, {def, &v}, "UpgradeModel.SetUpgradeLevel", &ok);
     if (Level(um, def) != to) return false;
-    const int handlers = ApplyEffects(um, def, to);
-    if (!ok) {
-        // The level is stored; the exception came from a subscriber of OnUpgradeChanged (logged above).
-        SR2_WARN("[{}] '{}': SetUpgradeLevel stored level {} but threw; effects applied directly on {} handler(s)",
-                 kModule, unity::GetName(def), to + 1, handlers);
-        if (!handlers) return false;
-    }
+    if (!ok)
+        SR2_WARN("[{}] '{}': SetUpgradeLevel stored level {} but threw (logged above); its effects are checked", kModule,
+                 unity::GetName(def), to + 1);
+    if (heal) Heal(um, "after a level change");
     if (to < 0 && spend) {
         const auto gate = GateComponents(def);
         int given = 0;
@@ -481,7 +709,7 @@ void DoMaxAll() {
     for (Il2CppObject* def : Definitions(um)) {
         const int last = LevelCount(def) - 1, from = Level(um, def);
         if (last < 0 || from >= last) continue;
-        if (SetLevel(um, nullptr, def, last, note)) {
+        if (SetLevel(um, nullptr, def, last, note, false)) {
             ++raised;
             list += std::format("{}{} {} -> {}", list.empty() ? "" : ", ", Info(def).name, from < 0 ? "-" : Roman(from + 1),
                                 Roman(last + 1));
@@ -489,6 +717,7 @@ void DoMaxAll() {
             ++failed;
         }
     }
+    Heal(um, "after Max");
     if (!raised) return Done(failed == 0, failed ? "Upgrades not raised: the game refused them (see the log)"
                                                  : "Every upgrade is at its last level already");
     Done(failed == 0, std::format("Maxed {} upgrade(s), free: {}{}", raised, list,
@@ -763,13 +992,17 @@ void SetupUpgrades(sr2::core::ModuleContext& ctx, UpgradesHost host) {
         g_setLevel = method(upModel, "SetUpgradeLevel", 2, w);
         g_locGet = method(loc, "GetLocalizedString", 0, w);
         {
-            std::string optional;  // the direct re-apply is a backstop only
-            g_handlerClass = cls(kImage, "", "ActorUpgradeHandler", optional);
-            g_applyUpgrade = method(g_handlerClass, "ApplyUpgrade", 2, optional);
-            off(upModel, "participants", g_offUmParticipants, optional);
-            if (!optional.empty()) {
+            std::string& h = g_healWhy;  // the effects repair is optional (see Heal)
+            g_handlerClass = cls(kImage, "", "ActorUpgradeHandler", h);
+            Il2CppClass* tracker = cls(kImage, "MonomiPark.UnitPropertySystem", "UnitPropertyTracker", h);
+            g_applyUpgrade = method(g_handlerClass, "ApplyUpgrade", 2, h);
+            g_tryGetProperty = method(tracker, "TryGetProperty", 2, h);
+            off(upModel, "participants", g_offUmParticipants, h);
+            off(g_handlerClass, "_unitPropertyTracker", g_offHandlerTracker, h);
+            off(g_handlerClass, "_appliedModifiers", g_offHandlerApplied, h);
+            if (!h.empty()) {
                 g_applyUpgrade = nullptr;
-                SR2_WARN("[{}] upgrades manager: effects are applied by the game's event only ({})", kModule, optional);
+                SR2_WARN("[{}] upgrades manager: upgrade effects are not checked or repaired ({})", kModule, h);
             }
         }
         off(g_playerStateClass, "_model", g_offPlayerModel, w);
@@ -858,7 +1091,14 @@ void UpgradesEnabled(bool on) {
 }
 
 void UpgradesTick(bool snapshot) {
-    if (!Live() || !snapshot) return;
+    if (!Live()) return;
+    // The effects check every few seconds while a save is loaded (also right after a load, and after a
+    // Fabricator purchase or the custom upgrades' sidecar levels, which change levels without this page).
+    if (g_why.empty() && g_healWhy.empty() && GetTickCount64() - g_lastHeal >= kHealMs) {
+        g_lastHeal = GetTickCount64();
+        if (Il2CppObject* um = UpgradeModel()) Heal(um, "check");
+    }
+    if (!snapshot) return;
     if (GetTickCount64() - g_lastPublish >= kPublishMs) Publish();
 }
 
