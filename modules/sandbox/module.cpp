@@ -334,7 +334,7 @@ private:
     void Notify(Il2CppObject* type, NoticeKind kind, int count, const std::string& name, const std::string& text);
     Il2CppObject* NoticeIcon(Il2CppObject* type);
     static std::string NoticeText(NoticeKind kind, int count, const std::string& name);
-    void ShowNotice(Il2CppObject* icon, const std::string& notice);
+    bool ShowNotice(Il2CppObject* icon, const std::string& notice, bool flushNow = true);
     void FlushNotices();
     void EnsureCrateAreas();
 
@@ -2330,13 +2330,14 @@ Il2CppObject* Sandbox::NoticeIcon(Il2CppObject* type) {
     return icon;
 }
 
-void Sandbox::ShowNotice(Il2CppObject* icon, const std::string& notice) {
+bool Sandbox::ShowNotice(Il2CppObject* icon, const std::string& notice, bool flushNow) {
     if (icon && ((spriteClass_ && !IsA(icon, spriteClass_)) || !unity::IsAlive(icon))) icon = nullptr;
-    if (notices_.TextReady() && notices_.Available() && notices_.QueueText(icon, notice)) {
+    if (notices_.TextReady() && notices_.Available() && notices_.QueueText(icon, notice, flushNow)) {
         bridge::SetStatus("", false);  // no stale line from an earlier request
-        return;
+        return true;
     }
     bridge::SetStatus(notice, false);
+    return false;
 }
 
 // The collected notices of a multi-item request: one per item type and kind (the same type twice, e.g.
@@ -2351,8 +2352,12 @@ void Sandbox::FlushNotices() {
         if (it != merged.end()) it->count += l.count;
         else merged.push_back(l);
     }
-    for (const NoticeLine& l : merged) ShowNotice(l.icon, NoticeText(l.kind, l.count, l.name));
-    if (merged.size() > 1) SR2_INFO("[{}] {} HUD notices queued (shown in sequence)", kModule, merged.size());
+    // All queued first, then handed over together: the first page holds as many as the HUD shows at once
+    // (one by one, the first notice took a page of its own and the rest waited for it to fade out).
+    bool queued = false;
+    for (const NoticeLine& l : merged) queued = ShowNotice(l.icon, NoticeText(l.kind, l.count, l.name), false) || queued;
+    if (queued) notices_.FlushText();
+    if (merged.size() > 1) SR2_INFO("[{}] {} HUD notices queued (one per item)", kModule, merged.size());
 }
 
 // ---------------------------------------------------------------- actions ----
@@ -2445,6 +2450,11 @@ void Sandbox::Handle(const bridge::Action& a) {
         case bridge::Op::DiscoverUpgrades: DoDiscoverUpgrades(c); break;
         case bridge::Op::InfiniteEnergy: break;  // handled above
     }
+    // A batch's notices go to the HUD before the refreshes below (they used to wait for them). The items
+    // before a batch's last one skip the refreshes: the last one does them once.
+    const bool batchMid = batchSize_ > 1 && batchIdx_ < batchSize_;
+    if (!batchMid && !batchNotices_.empty()) FlushNotices();
+    if (batchMid) return;
     // An open Fabricator shows the new counts at once (else only after selecting another recipe and back).
     if (a.op == bridge::Op::AddMaterial || a.op == bridge::Op::Craft || a.op == bridge::Op::SetNewbucks ||
         a.op == bridge::Op::AddNewbucks)
