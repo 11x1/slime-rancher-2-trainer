@@ -435,8 +435,8 @@ Placement Shown(Element e) {
 
 }  // namespace
 
-float DrawKeycap(ImDrawList* dl, float x, float cy, const char* key, float uiScale) {
-    return KeyChip(dl, ImVec2(x, cy), key, Metrics(uiScale), 1.0f);
+float DrawKeycap(ImDrawList* dl, float x, float cy, const char* key, float uiScale, float alpha) {
+    return KeyChip(dl, ImVec2(x, cy), key, Metrics(uiScale), alpha);
 }
 
 float KeycapWidth(const char* key, float uiScale) {

@@ -223,7 +223,7 @@ private:
     void Refresh();
     void TopUpEnergy();
     void Done(bool ok, const std::string& text);
-    void Notify(Il2CppObject* type, int count, const std::string& text);
+    void Notify(Il2CppObject* type, const std::string& notice, const std::string& text);
 
     void DoNewbucks(const Ctx& c, int64_t target, const char* how);
     void DoSlotCount(const Ctx& c, int idx, int64_t value);
@@ -590,9 +590,10 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
         std::string pw;
         if (!prefabIcons_.Setup(R, kModule, pw)) SR2_WARN("[{}] no icons rendered from prefabs ({})", kModule, pw);
         std::string nw;
-        if (!notices_.Setup(R, kModule, nw, "sandbox") || !notices_.CanCollect())
-            SR2_WARN("[{}] no HUD notices for spawns / crafts ({}): the tab's status line instead", kModule,
-                     nw.empty() ? "DroneActivitySceneNotifications.AddResourceCollected not found" : nw);
+        // Spawn / craft / refinery feedback: free-text HUD notices with the item's icon ("Spawned 5 Pink
+        // Plort"), not the drones' "sent to the Quantum Cloud" notice (Notify).
+        if (!notices_.Setup(R, kModule, nw, "sandbox") || !notices_.SetupText(R, nw))
+            SR2_WARN("[{}] no HUD notices for spawns / crafts ({}): the tab's status line instead", kModule, nw);
         std::string bw;
         off(slimeDefClass_, "BaseSlimes", offSlimeBases_, bw);
         if (!bw.empty()) SR2_WARN("[{}] no composed largo icons ({})", kModule, bw);
@@ -1140,6 +1141,11 @@ void Sandbox::EnsureRelations() {
             for (uintptr_t p : r.plorts) (*rel)[p].plortOf.push_back(it.id);
         }
     }
+    // Slime -> the largos it is a base slime of (the context menu's "Spawn: <slime> <other> Largo").
+    for (const bridge::Item& it : *spawnables_)
+        if (it.kind == bridge::Kind::Largo)
+            for (uintptr_t b : {it.base, it.base2})
+                if (b) (*rel)[b].largos.push_back(it.id);
     SR2_INFO("[{}] slime diets: {} related item(s)", kModule, rel->size());
     relations_ = std::move(rel);
 }
@@ -1420,7 +1426,9 @@ bool Sandbox::EnsureSpawnables() {
             std::vector<std::string> names;
             for (size_t i = 0, n = unity::ArrayLength(bases); i < n && names.size() < 2; ++i) {
                 auto* b = static_cast<Il2CppObject*>(unity::ArrayAt(bases, i));
-                if (b && b != o && IsA(b, slimeDefClass_) && unity::IsAlive(b)) names.push_back(ItemName(b));
+                if (!b || b == o || !IsA(b, slimeDefClass_) || !unity::IsAlive(b)) continue;
+                names.push_back(ItemName(b));
+                (names.size() == 1 ? item.base : item.base2) = reinterpret_cast<uintptr_t>(b);
             }
             std::sort(names.begin(), names.end());
             if (!names.empty()) item.family = names[0];
@@ -1905,15 +1913,21 @@ void Sandbox::Done(bool ok, const std::string& text) {
     bridge::SetStatus(text, !ok);
 }
 
-// A spawn / craft / refinery add that worked: logged, and shown as the game's own HUD notice (the
-// quantum drones' "collected" popup: the type's icon, name and count) instead of the tab's status
-// line. Without the HUD notices the status line says it as before.
-void Sandbox::Notify(Il2CppObject* type, int count, const std::string& text) {
+// A spawn / craft / refinery add that worked: `text` is logged, and `notice` ("Spawned 5 Pink Plort")
+// shows as a HUD pop-up in the game's notification list with the type's icon, instead of the tab's
+// status line. It is our own text entry (SaleNotices::QueueText), not the drones' cloud-upload notice
+// (AddResourceCollected reads "... sent to the Quantum Cloud"). Without the HUD list or the UI's text
+// sink the status line says it.
+void Sandbox::Notify(Il2CppObject* type, const std::string& notice, const std::string& text) {
     SR2_INFO("[{}] {}", kModule, text);
-    if (type && count > 0 && notices_.CanCollect() && notices_.Available()) {
-        notices_.Queue({{type, count}}, sr2::modules::custom_upgrades::ui::SaleNotices::Notice::kCollected);
-        bridge::SetStatus("", false);  // no stale line from an earlier request
-        return;
+    if (notices_.TextReady() && notices_.Available()) {
+        Il2CppObject* icon = type && offIdentIcon_ ? unity::Field<Il2CppObject*>(type, offIdentIcon_) : nullptr;
+        if ((!icon || !unity::IsAlive(icon)) && type) icon = VirtualIcon(type);
+        if (icon && ((spriteClass_ && !IsA(icon, spriteClass_)) || !unity::IsAlive(icon))) icon = nullptr;
+        if (notices_.QueueText(icon, notice)) {
+            bridge::SetStatus("", false);  // no stale line from an earlier request
+            return;
+        }
     }
     bridge::SetStatus(text, false);
 }
@@ -2344,7 +2358,7 @@ int Sandbox::DoSpawn(const Ctx& c, uintptr_t item, int64_t count, int limit) {
         if (!ok || !go) break;
         ++spawned;
     }
-    if (spawned == n) Notify(ident, n, std::format("Spawned {} x {}", n, name));
+    if (spawned == n) Notify(ident, std::format("Spawned {} {}", n, name), std::format("Spawned {} x {}", n, name));
     else Done(spawned > 0, spawned > 0 ? std::format("Spawned {} of {} x {} (the game refused the rest)", spawned, n, name)
                                        : std::format("{} not spawned: the game refused it", name));
     return spawned;
@@ -2394,7 +2408,7 @@ void Sandbox::DoCraft(uintptr_t item, int64_t count) {
     Call(gadgetAddItem_, dir, {def, &amount}, "GadgetDirector.AddItem", &ok);
     CallValue(gadgetCount_, dir, {def}, "GadgetDirector.GetItemCount", after);
     if (ok && after > before)
-        Notify(def, after - before,
+        Notify(def, std::format("Crafted {} {}", after - before, name),
                std::format("Crafted {} x {} for free (inventory {} -> {}){}", after - before, name, before, after,
                            unlocked ? "" : "; its blueprint is still locked"));
     else
@@ -2430,7 +2444,8 @@ void Sandbox::DoAddMaterial(uintptr_t item, int64_t count) {
     bool ok = false;
     Call(gadgetAddItem_, dir, {t, &amount}, "GadgetDirector.AddItem", &ok);
     CallValue(gadgetCount_, dir, {t}, "GadgetDirector.GetItemCount", after);
-    if (ok && after > before) Notify(t, after - before, std::format("Refinery: {} {} -> {}", name, before, after));
+    if (ok && after > before)
+        Notify(t, std::format("+{} {} (refinery)", after - before, name), std::format("Refinery: {} {} -> {}", name, before, after));
     else Done(false, std::format("{} not added: the game refused it", name));
 }
 

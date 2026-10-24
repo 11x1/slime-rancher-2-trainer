@@ -15,6 +15,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/build_info.h"
@@ -1393,46 +1394,78 @@ bool InGroup(sbx::Kind k, int group) {
         case sbx::kGroupFood: return k == sbx::Kind::Food || k == sbx::Kind::Animal;
         case sbx::kGroupResources: return k == sbx::Kind::Resource;
         case sbx::kGroupContainers: return k == sbx::Kind::Container;
+        case sbx::kGroupOther:  // fits none of the tabs above (toys, unsorted types)
+            return k == sbx::Kind::Other || k == sbx::Kind::Toy || k == sbx::Kind::Liquid || k == sbx::Kind::Gadget;
         default: return true;
     }
+}
+
+// A crate's area: its name without "Crate" / "Gold" / "Shadow" ("Bluffs Gold Crate" -> "Bluffs").
+std::string CrateArea(const std::string& name) {
+    std::string out, word;
+    auto flush = [&] {
+        if (!word.empty() && word != "Crate" && word != "Gold" && word != "Shadow") out += (out.empty() ? "" : " ") + word;
+        word.clear();
+    };
+    for (char c : name) {
+        if (c == ' ') flush();
+        else word += c;
+    }
+    flush();
+    return out.empty() ? std::string("Other") : out;
 }
 
 // One group tab: the game's icon from the snapshot, else the first listed item's icon of that
 // group, else a coloured letter.
 item_grid::Tab GroupTab(const sbx::Snapshot& s, int group, const std::vector<sbx::Item>* items) {
-    static const char* const kTips[sbx::kGroupCount] = {"All", "Plorts", "Slimes", "Food", "Resources", "Largos", "Crates"};
-    static const char kGlyph[sbx::kGroupCount] = {0, 'P', 'S', 'F', 'R', 'L', 'C'};
+    static const char* const kTips[sbx::kGroupCount] = {"All",    "Plorts", "Slimes", "Food",
+                                                        "Resources", "Largos", "Crates", "Other"};
+    static const int kGlyph[sbx::kGroupCount] = {0, 'P', 'S', 'F', 'R', 'L', 'C', item_grid::kGlyphOther};
     static const sbx::Kind kTint[sbx::kGroupCount] = {sbx::Kind::Other, sbx::Kind::Plort,    sbx::Kind::Slime,
                                                       sbx::Kind::Food,  sbx::Kind::Resource, sbx::Kind::Largo,
-                                                      sbx::Kind::Container};
+                                                      sbx::Kind::Container, sbx::Kind::Other};
     item_grid::Tab t;
     t.icon = s.groupIcons[group];
-    if (!t.icon && group != sbx::kGroupAll && items)
+    // Other: always the drawn dots (its first item's icon would say "toys" or the like).
+    if (!t.icon && group != sbx::kGroupAll && group != sbx::kGroupOther && items)
         for (const sbx::Item& it : *items)
             if (it.icon && !it.icon2 && InGroup(it.kind, group)) {
                 t.icon = it.icon;
                 break;
             }
     t.glyph = kGlyph[group];
-    t.tint = group == sbx::kGroupAll ? 0 : KindAccent(kTint[group]);
+    t.tint = group == sbx::kGroupAll || group == sbx::kGroupOther ? 0 : KindAccent(kTint[group]);
     t.tip = kTips[group];
     return t;
 }
 
-// The vacpack tabs: All, Plorts, Slimes, Food, Resources (tab index = sbx::Group).
-const std::vector<item_grid::Tab>& GroupTabs(const sbx::Snapshot& s) {
+// The vacpack tabs: All, Plorts, Slimes, Food, Resources, and Other while the list has items that
+// fit none of them. `groups` gets the sbx::Group of each tab.
+const std::vector<item_grid::Tab>& GroupTabs(const sbx::Snapshot& s, std::vector<int>& groups) {
     static std::vector<item_grid::Tab> tabs;
     tabs.clear();
-    for (int g = sbx::kGroupAll; g <= sbx::kGroupResources; ++g) tabs.push_back(GroupTab(s, g, s.catalog.get()));
+    groups.clear();
+    for (int g = sbx::kGroupAll; g <= sbx::kGroupResources; ++g) {
+        tabs.push_back(GroupTab(s, g, s.catalog.get()));
+        groups.push_back(g);
+    }
+    bool other = false;
+    if (s.catalog)
+        for (size_t i = 0; i < s.catalog->size() && !other; ++i) other = InGroup((*s.catalog)[i].kind, sbx::kGroupOther);
+    if (other) {
+        tabs.push_back(GroupTab(s, sbx::kGroupOther, s.catalog.get()));
+        groups.push_back(sbx::kGroupOther);
+    }
     return tabs;
 }
 
-// The spawner tabs: All, then each group that has items, slimes and largos side by side.
+// The spawner tabs: All, then each group that has items, slimes and largos side by side, Other last.
 // `groups` gets the sbx::Group of each tab.
 const std::vector<item_grid::Tab>& SpawnTabs(const sbx::Snapshot& s, std::vector<int>& groups) {
     static std::vector<item_grid::Tab> tabs;
-    static const int kOrder[] = {sbx::kGroupAll,  sbx::kGroupPlorts,    sbx::kGroupSlimes,    sbx::kGroupLargos,
-                                 sbx::kGroupFood, sbx::kGroupResources, sbx::kGroupContainers};
+    static const int kOrder[] = {sbx::kGroupAll,       sbx::kGroupPlorts,    sbx::kGroupSlimes,
+                                 sbx::kGroupLargos,    sbx::kGroupFood,      sbx::kGroupResources,
+                                 sbx::kGroupContainers, sbx::kGroupOther};
     tabs.clear();
     groups.clear();
     for (int g : kOrder) {
@@ -1625,7 +1658,8 @@ void ItemTooltip(const sbx::Snapshot& s, const std::string& name, sbx::Kind kind
 }
 
 // Control hints under a grid: each a keycap (or several joined by '+') and what it does,
-// wrapped onto as many lines as the width needs. The keycaps are the HUD edit help bar's.
+// wrapped onto as many lines as the width needs. The keycaps are the HUD edit help bar's, drawn
+// at 70 % of its size and faded, with small dim labels: the hints are secondary to the grid.
 struct KeyHint {
     const char* keys;  // "Ctrl+Click": one keycap per part
     const char* text;
@@ -1634,11 +1668,13 @@ struct KeyHint {
 void KeyHints(std::initializer_list<KeyHint> hints) {
     const Palette& P = theme::Colors();
     ImFont* f = theme::Body();
-    const float fs = theme::kSmallSize;
+    constexpr float kCapScale = 0.7f, kCapAlpha = 0.7f;
+    const float capScale = g_scale * kCapScale;
+    const float fs = theme::kSmallSize * 0.75f;
     const ImVec2 ts = TextSize(f, fs, "Ag");
-    const float lineH = std::max(ts.y + U(10), U(24));
+    const float lineH = std::max(ts.y + U(6), U(17));
     const float avail = ImGui::GetContentRegionAvail().x;
-    const float plusW = TextSize(f, fs, "+").x + U(6);
+    const float plusW = TextSize(f, fs, "+").x + U(4);
     auto parts = [](const char* keys) {
         std::vector<std::string> out(1);
         for (const char* c = keys; *c; ++c) {
@@ -1650,13 +1686,13 @@ void KeyHints(std::initializer_list<KeyHint> hints) {
     auto width = [&](const KeyHint& h) {
         float w = 0;
         const auto ks = parts(h.keys);
-        for (size_t i = 0; i < ks.size(); ++i) w += hud_edit::KeycapWidth(ks[i].c_str(), g_scale) + (i ? plusW : 0.0f);
-        return w + U(6) + TextSize(f, fs, h.text).x;
+        for (size_t i = 0; i < ks.size(); ++i) w += hud_edit::KeycapWidth(ks[i].c_str(), capScale) + (i ? plusW : 0.0f);
+        return w + U(4) + TextSize(f, fs, h.text).x;
     };
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 o = ImGui::GetCursorScreenPos();
     float x = 0, y = 0;
-    const float gap = U(16);
+    const float gap = U(12);
     for (const KeyHint& h : hints) {
         const float w = width(h);
         if (x > 0 && x + w > avail) x = 0, y += lineH;
@@ -1665,12 +1701,12 @@ void KeyHints(std::initializer_list<KeyHint> hints) {
         const auto ks = parts(h.keys);
         for (size_t i = 0; i < ks.size(); ++i) {
             if (i) {
-                Text(dl, f, fs, ImVec2(cx + U(3), std::round(cy - ts.y * 0.5f)), P.dim, "+");
+                Text(dl, f, fs, ImVec2(cx + U(2), std::round(cy - ts.y * 0.5f)), P.dim, "+");
                 cx += plusW;
             }
-            cx += hud_edit::DrawKeycap(dl, cx, cy, ks[i].c_str(), g_scale);
+            cx += hud_edit::DrawKeycap(dl, cx, cy, ks[i].c_str(), capScale, kCapAlpha);
         }
-        Text(dl, f, fs, ImVec2(cx + U(6), std::round(cy - ts.y * 0.5f)), P.soft, h.text);
+        Text(dl, f, fs, ImVec2(cx + U(4), std::round(cy - ts.y * 0.5f)), P.dim, h.text);
         x += w + gap;
     }
     ImGui::Dummy(ImVec2(avail, y + lineH));
@@ -1725,10 +1761,13 @@ void StowItem(int sel, uintptr_t id, int amount, bool replace) {
     sbx::Request(a);
 }
 
-// Right-click menu for an item (picker tiles, vacpack slots, spawner tiles): "Give slime /
-// food / plort" from the diets, done the grid's way (vacpack: into a slot that holds it or an
-// empty one, the slot's maximum, nothing is replaced; spawner: spawn the current count in front
-// of you). Largos are not listed directly: one "Largos" row opens them in a submenu. That is
+// Right-click menu for an item (picker tiles, vacpack slots, spawner tiles): "Give: X" (vacpack)
+// or "Spawn: X" (spawner) for the related slimes, foods and plorts from the diets, done the grid's
+// way (vacpack: into a slot that holds it or an empty one, the slot's maximum, nothing is replaced;
+// spawner: spawn the current count in front of you). Largos (of a slime, of a plort, or loving a
+// food) are always spawned with the spawner's count, since the vacpack can't hold them, and read
+// "Spawn: <this item's slime> <other> Largo". They are not listed directly: one "Largos" row opens
+// them in a submenu. That is
 // ImGui's BeginMenu, so the first menu stays open while the submenu is used, and its safe
 // triangle (from the cursor to the submenu's near edge) keeps the submenu open while the mouse
 // moves diagonally into it across the other rows.
@@ -1750,12 +1789,20 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                 ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.soft), "%s", self->name.c_str());
             }
             struct Give {
-                const char* verb;
+                std::string label;
                 const sbx::Item* it;
                 bool can;
+                bool spawn;        // spawned in front of the player (largos always: the vacpack can't hold them)
+                std::string sort;  // largos: the other slime's short name
             };
             std::vector<Give> gives, largos;
-            auto collect = [&](const char* verb, uintptr_t id) {
+            auto spawnable = [&](uintptr_t id) -> const sbx::Item* {
+                if (s.spawnables)
+                    for (const sbx::Item& c : *s.spawnables)
+                        if (c.id == id) return &c;
+                return nullptr;
+            };
+            auto collect = [&](uintptr_t id) {
                 // Vacpack: it must be in the vacpack list with room in a slot; spawner: in the spawn list.
                 const sbx::Item* it = nullptr;
                 bool can = false;
@@ -1766,30 +1813,67 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                             can = HasRoomFor(s, c);
                             break;
                         }
-                } else if (!vac && s.spawnables) {
-                    for (const sbx::Item& c : *s.spawnables)
-                        if (c.id == id) {
-                            it = &c;
-                            can = !(c.tarr && s.tarrsOff);
-                            break;
-                        }
+                } else if (!vac) {
+                    if ((it = spawnable(id))) can = !(it->tarr && s.tarrsOff);
                 }
                 if (!it) it = FindItem(s, id);  // known from the other list: shown grayed out
-                if (!it) return;
-                (it->kind == sbx::Kind::Largo ? largos : gives).push_back({verb, it, can});
+                if (!it || it->kind == sbx::Kind::Largo) return;
+                for (const Give& g : gives)
+                    if (g.it == it) return;
+                gives.push_back({std::format("{}: {}", vac ? "Give" : "Spawn", it->name), it, can, !vac, {}});
+            };
+            // Largos are always spawned (they can't go in the vacpack), labelled "Spawn: <this item's base
+            // slime> <other> Largo" whatever order the game's own name has, sorted by the other slime.
+            auto shortName = [&](uintptr_t id, const std::string& fallback) {
+                const sbx::Item* b = id ? FindItem(s, id) : nullptr;
+                std::string n = b ? b->name : fallback;
+                constexpr std::string_view kSuffix = " Slime";
+                if (n.size() > kSuffix.size() && n.ends_with(kSuffix)) n.resize(n.size() - kSuffix.size());
+                return n;
+            };
+            uintptr_t baseOf = 0;  // the hovered item's base slime: the slime itself, or the slime a plort comes from
+            if (self->kind == sbx::Kind::Slime) baseOf = self->id;
+            else if (self->kind == sbx::Kind::Plort && r)
+                for (uintptr_t id : r->plortOf)
+                    if (const sbx::Item* m = FindItem(s, id); m && m->kind == sbx::Kind::Slime) {
+                        baseOf = id;
+                        break;
+                    }
+            auto collectLargo = [&](uintptr_t id) {
+                const sbx::Item* it = spawnable(id);
+                const bool can = it && !(it->tarr && s.tarrsOff);
+                if (!it) it = FindItem(s, id);
+                if (!it || it->kind != sbx::Kind::Largo) return;
+                for (const Give& g : largos)
+                    if (g.it == it) return;
+                std::string first, other;
+                if (baseOf && (it->base == baseOf || it->base2 == baseOf)) {
+                    first = shortName(baseOf, {});
+                    other = it->base == baseOf ? shortName(it->base2, it->family2) : shortName(it->base, it->family);
+                } else {
+                    first = shortName(0, it->family);
+                    other = shortName(0, it->family2);
+                }
+                std::string label = first.empty() || other.empty() ? "Spawn: " + it->name
+                                                                   : std::format("Spawn: {} {} Largo", first, other);
+                largos.push_back({std::move(label), it, can, true, other.empty() ? it->name : other});
             };
             if (r) {
-                for (uintptr_t id : r->favouriteOf) collect("Give slime", id);
-                for (uintptr_t id : r->favourites) collect("Give food", id);
-                for (uintptr_t id : r->plorts) collect("Give plort", id);
-                for (uintptr_t id : r->plortOf) collect("Give slime", id);
+                for (uintptr_t id : r->favouriteOf) collect(id);
+                for (uintptr_t id : r->favourites) collect(id);
+                for (uintptr_t id : r->plorts) collect(id);
+                for (uintptr_t id : r->plortOf) collect(id);
+                for (uintptr_t id : r->largos) collectLargo(id);
+                for (uintptr_t id : r->plortOf) collectLargo(id);
+                for (uintptr_t id : r->favouriteOf) collectLargo(id);
             }
-            const float e = U(22), rowW = U(240), fs = theme::kSmallSize + 0.5f;
+            std::stable_sort(largos.begin(), largos.end(), [](const Give& a, const Give& b) { return a.sort < b.sort; });
+            const float e = U(22), rowW = U(250), fs = theme::kSmallSize + 0.5f;
             int row = 0;
             auto entry = [&](const Give& g) {
                 ImGui::PushID(++row);
                 const ImVec2 p = ImGui::GetCursorScreenPos();
-                const std::string label = std::format("{}: {}", g.verb, g.it->name);
+                const std::string& label = g.label;
                 ImGui::BeginDisabled(!g.can);
                 const bool hit = ImGui::Selectable("##give", false, 0, ImVec2(rowW, e));
                 ImGui::EndDisabled();
@@ -1798,13 +1882,12 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                 const ImVec2 ts = TextSize(theme::Body(), fs, label.c_str());
                 Text(dl, theme::Body(), fs, ImVec2(p.x + e + U(8), p.y + (e - ts.y) * 0.5f), g.can ? P.text : P.dim, label.c_str());
                 if (!g.can && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    Tooltip(vac ? "No unlocked vacpack slot holds this or is empty. Empty a slot first." : "Not available here.");
+                    Tooltip(g.it->tarr && s.tarrsOff ? "Tarrs are disabled in this save's game settings."
+                            : g.spawn        ? "Not in the spawn list."
+                                             : "No unlocked vacpack slot holds this or is empty. Empty a slot first.");
                 if (hit && g.can) {
-                    if (vac) {
-                        StowItem(g_sbxSlot, g.it->id, 0, false);
-                    } else {
-                        SbxRequest(sbx::Op::Spawn, g_spawnCount, -1, g.it->id);
-                    }
+                    if (g.spawn) SbxRequest(sbx::Op::Spawn, g_spawnCount, -1, g.it->id);
+                    else StowItem(g_sbxSlot, g.it->id, 0, false);
                 }
                 ImGui::PopID();
             };
@@ -2019,7 +2102,10 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     // ---- items the selected slot accepts ----
     ImGui::Dummy(ImVec2(0, U(2)));
     const uint32_t bit = 1u << g_sbxSlot;
-    const auto& tabs = GroupTabs(s);
+    static std::vector<int> vacGroups;  // sbx::Group per tab
+    const auto& tabs = GroupTabs(s, vacGroups);
+    g_vacGrid.tab = std::clamp(g_vacGrid.tab, 0, static_cast<int>(vacGroups.size()) - 1);
+    const int vacGroup = vacGroups[static_cast<size_t>(g_vacGrid.tab)];
     const sbx::Relation* hoverRel = nullptr;
     static uintptr_t lastHover = 0;  // hovered last frame (related tiles light up)
     if (lastHover) hoverRel = FindRelation(s, lastHover);
@@ -2028,7 +2114,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     if (s.catalog) {
         tiles.reserve(s.catalog->size());
         for (const sbx::Item& it : *s.catalog) {
-            if (!(it.slotMask & bit) || !InGroup(it.kind, g_vacGrid.tab)) continue;
+            if (!(it.slotMask & bit) || !InGroup(it.kind, vacGroup)) continue;
             item_grid::Tile t;
             t.id = it.id;
             t.name = &it.name;
@@ -2158,15 +2244,25 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
         if (InGroup(it.kind, group)) order.push_back(&it);
     // Largos tab: grouped by base slime (a section per slime, each largo under the alphabetically
     // first of its two), then by the other one.
+    // Crates tab: a section per area ("Bluffs Gold Crate" -> "Bluffs"), sorted by area, then name.
     static std::vector<std::string> families;
     families.clear();
-    const bool byFamily = group == sbx::kGroupLargos;
+    const bool byFamily = group == sbx::kGroupLargos, byArea = group == sbx::kGroupContainers;
+    std::map<const sbx::Item*, std::string> areas;
     if (byFamily) {
         std::stable_sort(order.begin(), order.end(), [](const sbx::Item* a, const sbx::Item* b) {
             return a->family != b->family ? a->family < b->family : a->family2 < b->family2;
         });
         for (const sbx::Item* it : order)
             if (families.empty() || families.back() != it->family) families.push_back(it->family);
+    } else if (byArea) {
+        for (const sbx::Item* it : order) areas[it] = CrateArea(it->name);
+        std::stable_sort(order.begin(), order.end(), [&](const sbx::Item* a, const sbx::Item* b) {
+            const std::string &x = areas[a], &y = areas[b];
+            return x != y ? x < y : a->name < b->name;
+        });
+        for (const sbx::Item* it : order)
+            if (families.empty() || families.back() != areas[it]) families.push_back(areas[it]);
     }
     std::vector<item_grid::Tile> tiles;
     tiles.reserve(order.size());
@@ -2181,14 +2277,17 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
         t.accent = KindAccent(it.kind);
         t.dimmed = it.tarr && s.tarrsOff;
         t.related = Related(hoverRel, it.id);
-        if (byFamily) t.section = static_cast<int>(std::find(families.begin(), families.end(), it.family) - families.begin());
+        if (byFamily || byArea) {
+            const std::string& key = byFamily ? it.family : areas[ip];
+            t.section = static_cast<int>(std::find(families.begin(), families.end(), key) - families.begin());
+        }
         tiles.push_back(t);
         src.push_back(&it);
     }
     item_grid::Options o = GridOptions(250);
     o.tabs = &tabs;
     o.tabsBelow = true;
-    if (byFamily) o.sections = &families;
+    if (byFamily || byArea) o.sections = &families;
     const item_grid::Result r = item_grid::Draw("spawn", tiles, g_spawnGrid, o);
     lastHover = r.hovered >= 0 ? tiles[static_cast<size_t>(r.hovered)].id : 0;
     TabTip(r, tabs);
