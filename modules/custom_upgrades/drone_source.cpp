@@ -71,6 +71,7 @@
 #include "core/text_override.h"
 #include "core/unity.h"
 #include "modules/custom_upgrades/api.h"
+#include "modules/custom_upgrades/drone_icon.h"
 
 namespace sr2::modules::custom_upgrades::drones {
 namespace {
@@ -84,6 +85,7 @@ constexpr const char* kImage = "Assembly-CSharp";
 constexpr const char* kDroneNs = "MonomiPark.SlimeRancher.Drone";
 constexpr const char* kDataNs = "MonomiPark.SlimeRancher.DataModel";
 constexpr int32_t kSourceCoop = 5;  // DroneTaskSourceType.COOP
+constexpr int32_t kSourcePlortCollector = 7;  // DroneTaskSourceType.PLORT_COLLECTOR (its icon is our base)
 constexpr const char* kStationsKey = "drone_hen_source.stations";
 constexpr const char* kDisplayName = "Hen Collector";
 
@@ -200,6 +202,9 @@ struct Impl {
     bool HenOnly(Il2CppObject* program);
     Il2CppObject* Sources(Il2CppObject* program, Il2CppObject* predicate);
     Il2CppObject* Definition(Il2CppObject* defSource, const MethodInfo* mi);
+    void ComposeIcon(Il2CppObject* defSource, const MethodInfo* mi);
+    HenSourceIcon icon;     // the composed icon's builder (optional)
+    bool iconTried = false;  // composed (or failed) once per session
     Il2CppObject* CopyAsCoop(Il2CppObject* data);
     bool Switch(Il2CppObject* model, int64_t id, bool toHen, const char* why);
     bool Stations(std::vector<Il2CppObject*>& out);
@@ -310,10 +315,11 @@ Il2CppObject* Impl::BuildSource(Il2CppObject* drone) {
     if (!henIcon) {
         Il2CppObject* cfg = unity::Field<Il2CppObject*>(drone, offDroneCfg);
         Il2CppObject* hen = cfg ? unity::Field<Il2CppObject*>(cfg, offCfgHen) : nullptr;
-        Il2CppObject* icon = unity::IsAlive(hen) ? unity::Field<Il2CppObject*>(hen, offIdentIcon) : nullptr;
-        if (unity::IsAlive(icon) && unity::NewGCHandle(icon)) {
-            henIcon = icon;
-            if (definition && offDefIcon) SetRef(definition, reinterpret_cast<void**>(reinterpret_cast<char*>(definition) + offDefIcon), icon);
+        Il2CppObject* henSprite = unity::IsAlive(hen) ? unity::Field<Il2CppObject*>(hen, offIdentIcon) : nullptr;
+        if (unity::IsAlive(henSprite) && unity::NewGCHandle(henSprite)) {
+            henIcon = henSprite;  // the definition gets the composed icon at its next lookup
+            if (definition && offDefIcon && !iconTried)
+                SetRef(definition, reinterpret_cast<void**>(reinterpret_cast<char*>(definition) + offDefIcon), henSprite);
         }
     }
     NoteKnown(model);  // it may be applied: Revert must know the model
@@ -399,8 +405,31 @@ Il2CppObject* Impl::Sources(Il2CppObject* program, Il2CppObject* predicate) {
     return out;
 }
 
+// Once both are known (the Hen icon comes from the first drone source built): the composed
+// Plort Collector + Hen icon, else the plain Hen icon (logged).
+void Impl::ComposeIcon(Il2CppObject* defSource, const MethodInfo* mi) {
+    if (iconTried || !definition || !henIcon || !offDefIcon) return;
+    iconTried = true;
+    std::string why;
+    Il2CppObject* composed = nullptr;
+    Il2CppObject* collector = g_origFindDef(defSource, kSourcePlortCollector, mi);
+    Il2CppObject* base = collector && api().il2cpp_object_get_class(collector) == api().il2cpp_object_get_class(definition)
+                             ? unity::Field<Il2CppObject*>(collector, offDefIcon)
+                             : nullptr;
+    if (!icon.Ready()) why = "icon builder unavailable";
+    else if (!base) why = "no Plort Collector source icon";
+    else composed = icon.Compose(base, henIcon, why);
+    Il2CppObject* use = composed ? composed : henIcon;
+    SetRef(definition, reinterpret_cast<void**>(reinterpret_cast<char*>(definition) + offDefIcon), use);
+    if (composed) SR2_INFO("[{}] drone source: Hen Collector icon composed (Plort Collector icon + Hen)", module);
+    else SR2_WARN("[{}] drone source: Hen Collector icon not composed ({}) - plain Hen icon", module, why);
+}
+
 Il2CppObject* Impl::Definition(Il2CppObject* defSource, const MethodInfo* mi) {
-    if (definition) return definition;
+    if (definition) {
+        ComposeIcon(defSource, mi);
+        return definition;
+    }
     auto fail = [&](const char* what) -> Il2CppObject* {
         if (!loggedDefFail) SR2_WARN("[{}] drone source: Hen Collector definition not built ({})", module, what);
         loggedDefFail = true;
@@ -430,13 +459,14 @@ Il2CppObject* Impl::Definition(Il2CppObject* defSource, const MethodInfo* mi) {
     *reinterpret_cast<int32_t*>(base + *oType) = kHenSourceType;
     *reinterpret_cast<int32_t*>(base + *oSort) = unity::Field<int32_t>(tmpl, *oSort) + 1;
     SetRef(d, reinterpret_cast<void**>(base + *oName), name);
-    Il2CppObject* icon = henIcon ? henIcon : unity::Field<Il2CppObject*>(tmpl, *oIcon);
-    SetRef(d, reinterpret_cast<void**>(base + *oIcon), icon);
+    Il2CppObject* firstIcon = henIcon ? henIcon : unity::Field<Il2CppObject*>(tmpl, *oIcon);
+    SetRef(d, reinterpret_cast<void**>(base + *oIcon), firstIcon);
     sr2::core::text_override::Set(name, kDisplayName);
     offDefIcon = *oIcon;
     definition = d;
     SR2_INFO("[{}] drone source: \"{}\" definition built from Coop ({} icon{})", module, kDisplayName,
              henIcon ? "Hen" : "Coop", sr2::core::text_override::SinkActive() ? "" : "; text sink off: shows Coop's name");
+    ComposeIcon(defSource, mi);
     return d;
 }
 
@@ -657,6 +687,11 @@ bool HenSource::Setup(sr2::core::ModuleContext& ctx, const char* module, std::st
     const MethodInfo* pullMi = method(p->stationModelClass, "Pull", 9);
     if (!getSourcesMi && why.empty()) why = "RanchDroneSourceProgramElderCollector.GetSources not found";
     if (!why.empty()) return fail();
+    {
+        std::string ierr;  // optional: without it the option shows the plain Hen icon
+        if (!p->icon.Setup(R, module, ierr))
+            SR2_WARN("[{}] drone source: icon builder unavailable ({}) - plain Hen icon", module, ierr);
+    }
 
     struct H {
         const char* name;
