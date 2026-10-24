@@ -512,7 +512,8 @@ card could be bought with Tank Booster III. Now:
   ids 20 / 40 to the vanilla max (7 = VIII, 1 = II). The real level is a per-save sidecar value
   (`custom_upgrades.vacpack.tank_booster_level` / `.extra_tank_level`, absolute 0-based level, only written past the
   vanilla max) set by the `SetUpgradeLevel` detour on a purchase (and by Sandbox's unlock-all, which goes through the
-  same call); a level below the vanilla max clears it. `UpgradeModel.Push` writes saved levels straight into the
+  same call); a level at or below the vanilla max clears it (at exactly the max since the Sandbox upgrades
+  manager can lower levels: Tank Booster X -> VIII kept the old value, which the tick would have put back after a load). `UpgradeModel.Push` writes saved levels straight into the
   dictionary (no `SetUpgradeLevel`), so a load gives VIII / II; the tick then sets the sidecar level (`'AmmoCapacity'
   level 8 -> 10 (Tank Booster X, from the sidecar)`) - only when the save holds exactly the vanilla max (a save that
   disagrees wins). A mod-free load sees a valid vanilla value (a level past `LevelCount` would throw in

@@ -1,0 +1,449 @@
+// The Sandbox page's "Upgrades & Blueprints" card and the vacpack slot row's tier menu
+// (sandbox_upgrades.h). Built only with Dear ImGui, like menu.cpp.
+#if defined(SR2_HAVE_IMGUI)
+
+#include "sandbox_upgrades.h"
+
+#include <windows.h>
+
+#include <algorithm>
+#include <cmath>
+#include <format>
+#include <map>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "item_grid.h"
+#include "sandbox_upgrades_bridge.h"
+#include "theme.h"
+
+namespace sr2::ui::sandbox_upgrades {
+namespace {
+
+namespace sbx = ::sr2::ui::sandbox;
+namespace ub = ::sr2::ui::sandbox::upgrades;
+using theme::Palette;
+
+constexpr const char* kUpgradeCtx = "##sbx_upg_ctx";
+constexpr const char* kBlueprintCtx = "##sbx_bp_ctx";
+constexpr const char* kSlotTierCtx = "##sbx_slot_tier";
+constexpr double kPendingSeconds = 0.8;  // a requested change shown until the state has it
+
+float g_scale = 1.0f;
+float U(float v) { return v * g_scale; }
+
+int g_tab = 0;                                  // 0 = Upgrades, 1 + i = recipe category i
+std::map<int, item_grid::State> g_bpGrid;       // search text per blueprint tab
+uintptr_t g_ctxUpgrade = 0;                     // right-clicked upgrade
+uintptr_t g_ctxBlueprint = 0;                   // right-clicked blueprint
+int g_ctxCategory = -1;                         // its category
+
+// Changes asked for but not in a state yet, so quick wheel notches add up and tiles don't flicker.
+struct Pending {
+    int value = 0;
+    double until = 0;  // ImGui::GetTime() deadline
+};
+std::unordered_map<uintptr_t, Pending> g_levelPending, g_bpPending;
+
+ImU32 Mix(ImU32 a, ImU32 b, float t) {
+    const ImVec4 x = ImGui::ColorConvertU32ToFloat4(a), y = ImGui::ColorConvertU32ToFloat4(b);
+    return ImGui::ColorConvertFloat4ToU32(ImVec4(x.x + (y.x - x.x) * t, x.y + (y.y - x.y) * t, x.z + (y.z - x.z) * t,
+                                                 x.w + (y.w - x.w) * t));
+}
+
+void Text(ImDrawList* dl, float size, ImVec2 pos, ImU32 col, const char* text) {
+    dl->AddText(theme::Body(), U(size), pos, col, text);
+}
+
+ImVec2 TextSize(float size, const char* text) { return theme::Body()->CalcTextSizeA(U(size), FLT_MAX, 0.0f, text); }
+
+void DimText(const std::string& text) {
+    ImGui::PushFont(theme::Body(), theme::kSmallSize);
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::Colors().dim);
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextUnformatted(text.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
+    ImGui::PopFont();
+}
+
+void HoverTip(const Helpers& h, const std::string& text) {
+    if (!text.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled))
+        h.tooltip(text);
+}
+
+std::string Roman(int n) {
+    static const char* const kTens[] = {"", "X", "XX", "XXX"};
+    static const char* const kOnes[] = {"", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX"};
+    if (n <= 0 || n >= 40) return std::to_string(n);
+    return std::string(kTens[n / 10]) + kOnes[n % 10];
+}
+
+int Level(const ub::Upgrade& u) {
+    auto it = g_levelPending.find(u.id);
+    if (it == g_levelPending.end()) return u.level;
+    if (ImGui::GetTime() < it->second.until && it->second.value != u.level) return it->second.value;
+    g_levelPending.erase(it);
+    return u.level;
+}
+
+// "III of XII", "Not bought", "Hidden until found".
+std::string TierText(const ub::Upgrade& u, int level) {
+    if (level < 0) return u.discovered ? "Not bought" : "Hidden until found";
+    std::string t = std::format("{} of {}", Roman(level + 1), Roman(u.levels));
+    if (u.vanillaLevels > 0 && level >= u.vanillaLevels) t += " (custom tier)";
+    return t;
+}
+
+void RequestLevel(const ub::Upgrade& u, int to) {
+    to = std::clamp(to, -1, u.levels - 1);
+    if (to == Level(u)) return;
+    g_levelPending[u.id] = {to, ImGui::GetTime() + kPendingSeconds};
+    ub::Action a;
+    a.op = ub::Op::SetLevel;
+    a.id = u.id;
+    a.value = to;
+    ub::Request(a);
+}
+
+void RequestOp(ub::Op op, uintptr_t id = 0) {
+    ub::Action a;
+    a.op = op;
+    a.id = id;
+    ub::Request(a);
+}
+
+bool Unlocked(const sbx::Recipe& r) {
+    auto it = g_bpPending.find(r.id);
+    if (it == g_bpPending.end()) return r.unlocked;
+    if (ImGui::GetTime() < it->second.until && (it->second.value != 0) != r.unlocked) return it->second.value != 0;
+    g_bpPending.erase(it);
+    return r.unlocked;
+}
+
+void RequestBlueprints(std::vector<uintptr_t> ids, bool unlock) {
+    if (ids.empty()) return;
+    for (uintptr_t id : ids) g_bpPending[id] = {unlock ? 1 : 0, ImGui::GetTime() + 2.5};  // the recipe state lags a bit more
+    ub::Action a;
+    a.op = ub::Op::SetBlueprints;
+    a.ids = std::move(ids);
+    a.value = unlock ? 1 : 0;
+    ub::Request(a);
+}
+
+const ub::Upgrade* FindUpgrade(const ub::State& st, uintptr_t id) {
+    for (const ub::Upgrade& u : st.upgrades)
+        if (u.id == id) return &u;
+    return nullptr;
+}
+
+// The level circles, as the Fabricator draws them: filled up to the owned level; custom_upgrades' tiers
+// past the vanilla max ringed in the warning colour. Fitted into `w`.
+void Circles(ImDrawList* dl, ImVec2 p, float w, const ub::Upgrade& u, int level) {
+    const Palette& P = theme::Colors();
+    const int n = std::max(1, u.levels);
+    const float r = std::clamp(w / (static_cast<float>(n) * 2.9f), U(2.5f), U(5.0f));
+    const float step = r * 2.9f;
+    for (int i = 0; i < n; ++i) {
+        const ImVec2 c(p.x + r + step * static_cast<float>(i), p.y + r);
+        const bool custom = u.vanillaLevels > 0 && i >= u.vanillaLevels;
+        const ImU32 ring = custom ? P.warn : P.dim;
+        if (i <= level) dl->AddCircleFilled(c, r, custom ? P.warn : (theme::Current() == theme::Mode::Dark ? P.grab : P.accent));
+        else dl->AddCircle(c, r, ring, 0, std::max(1.0f, U(1.2f)));
+    }
+}
+
+// Shift + wheel: one level up / down; Ctrl + wheel: to the last level / not bought. Over the last item.
+void WheelLevels(const ub::Upgrade& u) {
+    const ImGuiIO& io = ImGui::GetIO();
+    if (!ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) || !(io.KeyShift || io.KeyCtrl)) return;
+    ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+    ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelX);
+    const float wheel = io.MouseWheel != 0.0f ? io.MouseWheel : io.MouseWheelH;
+    if (wheel == 0.0f) return;
+    const int cur = Level(u);
+    if (io.KeyCtrl) RequestLevel(u, wheel > 0 ? u.levels - 1 : -1);
+    else RequestLevel(u, cur + (wheel > 0 ? 1 : -1));
+}
+
+// The entries shared by the upgrade's right-click menu and the slot tier menu.
+void LevelMenuItems(const ub::Upgrade& u, bool discovery) {
+    const int cur = Level(u), last = u.levels - 1;
+    if (ImGui::MenuItem("Upgrade", "Shift+wheel up", false, cur < last)) RequestLevel(u, cur + 1);
+    if (ImGui::MenuItem("Downgrade", "Shift+wheel down", false, cur >= 0)) RequestLevel(u, cur - 1);
+    if (ImGui::MenuItem("Max", "Ctrl+wheel up", false, cur < last)) RequestLevel(u, last);
+    if (ImGui::MenuItem("Reset (not bought)", "Ctrl+wheel down", false, cur >= 0)) RequestLevel(u, -1);
+    if (!discovery || !u.discoverable) return;
+    ImGui::Separator();
+    if (ImGui::MenuItem("Discover", nullptr, false, !u.discovered)) RequestOp(ub::Op::Discover, u.id);
+    if (ImGui::MenuItem("Undiscover", nullptr, false, u.discovered || cur >= 0)) RequestOp(ub::Op::Undiscover, u.id);
+}
+
+void MenuTitle(const std::string& name, const std::string& tier) {
+    const Palette& P = theme::Colors();
+    ImGui::PushFont(theme::Body(), theme::kSmallSize);
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.soft), "%s", name.c_str());
+    if (!tier.empty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.dim), "%s", tier.c_str());
+    }
+    ImGui::PopFont();
+    ImGui::Separator();
+}
+
+template <class F>
+void Popup(const Helpers& h, const char* id, F&& body) {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(10), U(8)));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(8), U(5)));
+    h.pushFloating();
+    if (ImGui::BeginPopup(id)) {
+        h.surface(true);
+        body();
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    h.popFloating();
+    ImGui::PopStyleVar(2);
+}
+
+// ------------------------------------------------------------- upgrades ----
+// Each upgrade: icon, name, tier and level circles, - / + at the right. Right-click: menu; Shift / Ctrl +
+// wheel: levels.
+void UpgradesTab(const Helpers& h, const ub::State& st) {
+    const Palette& P = theme::Colors();
+    int hidden = 0, left = 0;
+    for (const ub::Upgrade& u : st.upgrades) {
+        hidden += u.discoverable && !u.discovered;
+        left += std::max(0, u.levels - 1 - std::max(Level(u), -1));
+    }
+    // Header: counts, then Discover all / Max at the right.
+    const float sp = ImGui::GetStyle().ItemSpacing.x, bh = U(30);
+    const float bw1 = std::max(U(120), ImGui::CalcTextSize("Discover all (00)").x + U(20)), bw2 = U(84);
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float x0 = ImGui::GetCursorPosX();
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushFont(theme::Body(), theme::kSmallSize);
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.dim), "%s",
+                       std::format("{} upgrades, {} level(s) to go{}", st.upgrades.size(), left,
+                                   hidden ? std::format(", {} hidden until found", hidden) : std::string())
+                           .c_str());
+    ImGui::PopFont();
+    ImGui::SameLine(x0 + avail - bw1 - bw2 - sp);
+    ImGui::BeginDisabled(hidden == 0);
+    if (ImGui::Button(std::format("Discover all ({})###disc", hidden).c_str(), ImVec2(bw1, bh))) RequestOp(ub::Op::DiscoverAll);
+    ImGui::EndDisabled();
+    HoverTip(h, hidden ? "Makes the hidden upgrades available to buy, as if found. Buys no level."
+                       : "Every upgrade is discovered already.");
+    ImGui::SameLine(0, sp);
+    ImGui::BeginDisabled(left == 0);
+    if (ImGui::Button("Max###max", ImVec2(bw2, bh))) RequestOp(ub::Op::MaxAll);
+    ImGui::EndDisabled();
+    HoverTip(h, left ? std::format("Raises every upgrade to its last level for free ({} level(s) to go).", left)
+                     : "Every upgrade is at its last level already.");
+
+    // Entries, in two columns when the card is wide enough.
+    const int cols = avail >= U(560) ? 2 : 1;
+    const float gap = U(8);
+    const float colW = std::floor((avail - gap * static_cast<float>(cols - 1)) / static_cast<float>(cols));
+    const float eh = U(58), pad = U(7), icon = eh - 2 * pad, btn = U(26);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    uintptr_t openMenu = 0;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const size_t n = st.upgrades.size(), rows = (n + static_cast<size_t>(cols) - 1) / static_cast<size_t>(cols);
+    for (size_t i = 0; i < n; ++i) {
+        const ub::Upgrade& u = st.upgrades[i];
+        const int level = Level(u);
+        ImGui::PushID(static_cast<int>(i));
+        const float col = static_cast<float>(i % static_cast<size_t>(cols));
+        const float row = static_cast<float>(i / static_cast<size_t>(cols));
+        const ImVec2 a(origin.x + col * (colW + gap), origin.y + row * (eh + gap)), b(a.x + colW, a.y + eh);
+        ImGui::SetCursorScreenPos(a);
+        ImGui::SetNextItemAllowOverlap();
+        const bool pressed = ImGui::InvisibleButton("##entry", ImVec2(colW, eh), ImGuiButtonFlags_MouseButtonRight);
+        const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem | ImGuiHoveredFlags_AllowWhenOverlappedByItem);
+        if (pressed) openMenu = u.id;
+        WheelLevels(u);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort) && !ImGui::IsPopupOpen(kUpgradeCtx))
+            h.tooltip(std::format("{}: {}{}\nShift+wheel: +-1 level, Ctrl+wheel: max / none. Right-click: more.", u.name,
+                                  TierText(u, level), u.discoverable ? "\nHidden in the Fabricator until found." : ""));
+        dl->AddRectFilled(a, b, hovered ? P.frameHover : P.frame, U(8));
+        // Icon tile, dimmed while not bought.
+        item_grid::Tile t;
+        t.id = u.id;
+        t.name = &u.name;
+        t.icon = u.icon;
+        t.dimmed = level < 0;
+        const ImVec2 ia(a.x + pad, a.y + pad);
+        item_grid::DrawTile(dl, ia, ImVec2(ia.x + icon, ia.y + icon), t, hovered, false, g_scale);
+        // Name, tier, circles.
+        const float tx = ia.x + icon + U(10), textW = b.x - tx - 2 * btn - U(14);
+        dl->PushClipRect(ImVec2(tx, a.y), ImVec2(tx + std::max(0.0f, textW), b.y), true);
+        Text(dl, theme::kBodySize, ImVec2(tx, a.y + U(6)), u.discovered || level >= 0 ? P.text : P.dim, u.name.c_str());
+        const std::string tier = TierText(u, level);
+        Text(dl, theme::kSmallSize, ImVec2(tx, a.y + U(25)), level < 0 ? P.dim : P.soft, tier.c_str());
+        dl->PopClipRect();
+        Circles(dl, ImVec2(tx, b.y - U(15)), std::max(U(40), textW), u, level);
+        // - / +
+        const float by = a.y + (eh - btn) * 0.5f;
+        ImGui::SetCursorScreenPos(ImVec2(b.x - pad - 2 * btn - U(4), by));
+        ImGui::BeginDisabled(level < 0);
+        if (ImGui::Button("-##dn", ImVec2(btn, btn))) RequestLevel(u, level - 1);
+        ImGui::EndDisabled();
+        HoverTip(h, level == 0 ? "Back to not bought." : "One level down.");
+        ImGui::SameLine(0, U(4));
+        ImGui::BeginDisabled(level >= u.levels - 1);
+        if (ImGui::Button("+##up", ImVec2(btn, btn))) RequestLevel(u, level + 1);
+        ImGui::EndDisabled();
+        HoverTip(h, "One level up, free.");
+        ImGui::PopID();
+    }
+    ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + static_cast<float>(rows) * (eh + gap) - gap));
+    ImGui::Dummy(ImVec2(avail, 0));  // the entries' extent (the card sizes itself to it)
+    if (openMenu) {
+        g_ctxUpgrade = openMenu;
+        ImGui::OpenPopup(kUpgradeCtx);
+    }
+    Popup(h, kUpgradeCtx, [&] {
+        const ub::Upgrade* u = FindUpgrade(st, g_ctxUpgrade);
+        if (!u) return ImGui::CloseCurrentPopup();
+        MenuTitle(u->name, TierText(*u, Level(*u)));
+        LevelMenuItems(*u, true);
+    });
+}
+
+// ----------------------------------------------------------- blueprints ----
+// One Fabricator gadget category: the crafter's recipes in it as tiles, faded while the blueprint is locked.
+// Click toggles, right-click: menu; "Unlock all" for the tab.
+void BlueprintTab(const Helpers& h, const sbx::Snapshot& s, int cat, const std::string& title) {
+    std::vector<const sbx::Recipe*> list;
+    if (s.recipes)
+        for (const sbx::Recipe& r : *s.recipes)
+            if (r.category == cat) list.push_back(&r);
+    std::vector<item_grid::Tile> tiles;
+    std::vector<uintptr_t> locked, unlocked;
+    tiles.reserve(list.size());
+    for (const sbx::Recipe* r : list) {
+        const bool on = Unlocked(*r);
+        (on ? unlocked : locked).push_back(r->id);
+        item_grid::Tile t;
+        t.id = r->id;
+        t.name = &r->name;
+        t.icon = r->icon;
+        t.dimmed = !on;
+        t.accent = on ? theme::Colors().ok : 0;
+        tiles.push_back(t);
+    }
+    item_grid::Options o;
+    o.scale = g_scale;
+    o.tile = 54.0f;
+    o.height = 206.0f;
+    o.hint = "Search blueprints...";
+    o.empty = list.empty() ? "No blueprints in this category." : "No matching blueprints.";
+    const std::string button = std::format("Unlock all ({})", locked.size());
+    o.button = button.c_str();
+    o.buttonEnabled = !locked.empty();
+    const item_grid::Result r = item_grid::Draw(("##bp" + std::to_string(cat)).c_str(), tiles, g_bpGrid[cat], o);
+    if (r.button) RequestBlueprints(locked, true);
+    if (r.buttonHovered)
+        h.tooltip(locked.empty() ? "Every blueprint of " + title + " is unlocked already."
+                                 : std::format("Unlocks the {} locked blueprint(s) of {}, as if found.", locked.size(), title));
+    if (r.clicked >= 0) {
+        const sbx::Recipe* rec = list[static_cast<size_t>(r.clicked)];
+        RequestBlueprints({rec->id}, !Unlocked(*rec));
+    }
+    if (r.rightClicked >= 0) {
+        g_ctxBlueprint = list[static_cast<size_t>(r.rightClicked)]->id;
+        g_ctxCategory = cat;
+        ImGui::OpenPopup(kBlueprintCtx);
+    }
+    if (r.hovered >= 0 && !ImGui::IsPopupOpen(kBlueprintCtx)) {
+        const sbx::Recipe* rec = list[static_cast<size_t>(r.hovered)];
+        h.tooltip(std::format("{}\n{}{}\nClick: {}. Right-click: more.", rec->name,
+                              Unlocked(*rec) ? "Blueprint unlocked" : "Blueprint locked",
+                              rec->owned > 0 ? std::format(" ({} owned)", rec->owned) : std::string(),
+                              Unlocked(*rec) ? "lock" : "unlock"));
+    }
+    Popup(h, kBlueprintCtx, [&] {
+        const sbx::Recipe* rec = nullptr;
+        for (const sbx::Recipe* x : list)
+            if (x->id == g_ctxBlueprint) rec = x;
+        if (!rec || g_ctxCategory != cat) return ImGui::CloseCurrentPopup();
+        const bool on = Unlocked(*rec);
+        MenuTitle(rec->name, on ? "unlocked" : "locked");
+        if (ImGui::MenuItem("Unlock blueprint", nullptr, false, !on)) RequestBlueprints({rec->id}, true);
+        if (ImGui::MenuItem("Lock blueprint", nullptr, false, on)) RequestBlueprints({rec->id}, false);
+        ImGui::Separator();
+        if (ImGui::MenuItem(std::format("Unlock all {} ({})", title, locked.size()).c_str(), nullptr, false, !locked.empty()))
+            RequestBlueprints(locked, true);
+        if (ImGui::MenuItem(std::format("Lock all {} ({})", title, unlocked.size()).c_str(), nullptr, false, !unlocked.empty()))
+            RequestBlueprints(unlocked, false);
+    });
+    DimText("Lock takes a blueprint off your list again; gadgets you already have stay.");
+}
+
+}  // namespace
+
+void DrawCard(const Helpers& h, const sbx::Snapshot& s, float w) {
+    g_scale = h.scale;
+    const Palette& P = theme::Colors();
+    h.beginCard("sbx_upgrades", w);
+    h.heading("Upgrades & Blueprints", P.head);
+    const auto st = ub::Get();
+    const int nCats = s.recipeCategories ? static_cast<int>(s.recipeCategories->size()) : 0;
+    if (ImGui::BeginTabBar("##sbx_upg_tabs")) {
+        auto tab = [&](int index, const char* label) {
+            const bool open = ImGui::BeginTabItem(label);
+            if (open) {
+                g_tab = index;
+                ImGui::EndTabItem();
+            }
+        };
+        tab(0, "Upgrades");
+        for (int i = 0; i < nCats; ++i) tab(1 + i, std::format("{}###cat{}", (*s.recipeCategories)[static_cast<size_t>(i)], i).c_str());
+        ImGui::EndTabBar();
+    }
+    if (g_tab > nCats) g_tab = 0;
+    if (g_tab == 0) {
+        if (!st || GetTickCount64() - st->tick > 3000) DimText("Reading your upgrades...");
+        else if (!st->inGame || st->upgrades.empty()) DimText(st->why.empty() ? "No upgrades found." : st->why);
+        else UpgradesTab(h, *st);
+    } else if (!s.craftWhy.empty()) {
+        DimText("Blueprints unavailable: " + s.craftWhy);
+    } else if (st && !st->blueprintWhy.empty()) {
+        DimText("Blueprints unavailable: " + st->blueprintWhy);
+    } else {
+        BlueprintTab(h, s, g_tab - 1, (*s.recipeCategories)[static_cast<size_t>(g_tab - 1)]);
+    }
+    h.endCard();
+}
+
+void SlotTierMenu(const Helpers& h, bool open) {
+    g_scale = h.scale;
+    if (open) ImGui::OpenPopup(kSlotTierCtx);
+    Popup(h, kSlotTierCtx, [&] {
+        const auto st = ub::Get();
+        const ub::Upgrade* u = nullptr;
+        if (st)
+            for (const ub::Upgrade& x : st->upgrades)
+                if (x.slotTier) u = &x;
+        const ImVec4 dim = ImGui::ColorConvertU32ToFloat4(theme::Colors().dim);
+        if (!u) {
+            ImGui::TextColored(dim, "%s", "The vacpack slot upgrade (Extra Tank) was not found.");
+            return;
+        }
+        MenuTitle(u->name, TierText(*u, Level(*u)));
+        LevelMenuItems(*u, false);
+        ImGui::PushFont(theme::Body(), theme::kSmallSize);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + U(280));
+        ImGui::TextColored(dim, "%s",
+                           "Each tier opens one more vacpack slot. Lowering it locks the last slots again; what they hold "
+                           "stays in them and is back with the tier.");
+        ImGui::PopTextWrapPos();
+        ImGui::PopFont();
+    });
+}
+
+}  // namespace sr2::ui::sandbox_upgrades
+
+#endif  // SR2_HAVE_IMGUI

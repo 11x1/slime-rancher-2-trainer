@@ -29,6 +29,7 @@
 #include "item_grid.h"
 #include "sandbox_bridge.h"
 #include "sandbox_extras_bridge.h"
+#include "sandbox_upgrades.h"
 #include "slime_dj_bridge.h"
 #include "slime_icons.h"
 #include "theme.h"
@@ -1281,6 +1282,11 @@ void DimText(const std::string& text, float size = theme::kSmallSize) {
     ImGui::PopStyleColor();
 }
 
+// This file's card / tooltip / popup helpers for the Upgrades & Blueprints card (sandbox_upgrades.cpp).
+sandbox_upgrades::Helpers SbxHelpers() {
+    return {g_scale, &BeginCard, &EndCard, &CardHeading, &Tooltip, &PushFloatingStyle, &PopFloatingStyle, &FloatingSurface};
+}
+
 // "Enable sandbox?": the only way the overlay turns the module on. Cancel (or Esc) does nothing.
 void SandboxConfirm(const ModuleView& mv) {
     const Palette& P = theme::Colors();
@@ -2039,6 +2045,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     const float gap = U(8), avail = ImGui::GetContentRegionAvail().x;
     const float e = std::max(U(24), std::floor(std::min(U(92), (avail - gap * static_cast<float>(n - 1)) / static_cast<float>(n))));
     uintptr_t slotMenu = 0;  // right-clicked slot's item: its give menu opens after the loop (popup id outside the slot's id)
+    bool tierMenu = false;   // an empty / locked slot was right-clicked (sandbox_upgrades::SlotTierMenu)
     for (int i = 0; i < n; ++i) {
         const sbx::Slot& sl = s.slots[static_cast<size_t>(i)];
         const int count = SlotCount(sl, i);
@@ -2056,6 +2063,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
             else if (sl.unlockable) SbxRequest(sbx::Op::UnlockSlot, 0, i);
         }
         if (right && sl.unlocked && sl.item) slotMenu = sl.item;
+        else if (right) tierMenu = true;  // empty / locked: the slot-count upgrade's tier menu
         if (sl.unlocked) {
             // Shift / Ctrl + wheel over a slot: its count +-1 / +-10; an empty slot takes the last
             // picked item. A plain wheel is left alone, so the page scrolls.
@@ -2126,7 +2134,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort) && !ImGui::GetDragDropPayload() && !ImGui::IsPopupOpen(kSbxCtx)) {
             // The item's name, group and favourites only; the controls are in the hint bar.
             if (!sl.unlocked)
-                Tooltip(sl.unlockable ? "Locked. Click to unlock it (applies the vacpack upgrade, free)."
+                Tooltip(sl.unlockable ? "Locked. Click to unlock it for free. Right-click: Extra Tank tier."
                                       : "Locked. No vacpack upgrade for it was found.");
             else if (sl.item)
                 ItemTooltip(s, sl.name, sl.kind, sl.item);
@@ -2134,6 +2142,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
         ImGui::PopID();
     }
     if (slotMenu) OpenItemContext(slotMenu, SbxGrid::Vacpack);
+    sandbox_upgrades::SlotTierMenu(SbxHelpers(), tierMenu);
     // A dragged slot: its icon follows the cursor.
     int draggedSlot = -1;
     if (const ImGuiPayload* p = ImGui::GetDragDropPayload(); p && p->IsDataType(kSlotDrag) && p->DataSize == sizeof(int)) {
@@ -2665,11 +2674,7 @@ void SandboxStatus(const Host& h) {
 // the map marker and unlocking the ranch expansions (after a confirmation, it is a permanent save change).
 namespace sbxx = ::sr2::ui::sandbox::extras;
 constexpr const char* kSbxExpPopup = "##sandbox_expansions";
-constexpr const char* kSbxUpgPopup = "##sandbox_upgrades";
-constexpr const char* kSbxDiscPopup = "##sandbox_discover";
 bool g_sbxExpConfirm = false;
-bool g_sbxUpgConfirm = false;
-bool g_sbxDiscConfirm = false;
 
 // A Sandbox confirmation modal (Cancel / `ok`, Esc cancels; Cancel first, so focus never starts on
 // `ok`). `open` opens it once. True on the frame `ok` is clicked.
@@ -2729,26 +2734,6 @@ void SandboxExpansionsConfirm(const sbxx::State& st) {
         sbxx::Request(sbxx::Op::UnlockExpansions);
 }
 
-void SandboxUpgradesConfirm(const sbx::Snapshot& s) {
-    if (SandboxConfirmModal(kSbxDiscPopup, g_sbxDiscConfirm, "Discover all upgrades?",
-                            std::format("Makes the {} upgrade(s) the Fabricator still hides available to buy, as if "
-                                        "you had found them in the world. You still buy each level at its normal "
-                                        "cost.",
-                                        std::max(0, s.upgradesHidden)),
-                            "Each one gets the upgrade component that finding it gives you (the first level uses it "
-                            "up when you buy it). The game saves the components; there is no way to take them back.",
-                            "Discover"))
-        SbxRequest(sbx::Op::DiscoverUpgrades);
-    if (SandboxConfirmModal(kSbxUpgPopup, g_sbxUpgConfirm, "Max all upgrades?",
-                            std::format("Raises every vacpack and player upgrade the Fabricator sells to its last "
-                                        "level ({} level(s) to go), as if you had bought them, for free.",
-                                        std::max(0, s.upgradeLevelsLeft)),
-                            "This changes your save for good: the game saves the upgrade levels, and there is no way "
-                            "to take them back.",
-                            "Max"))
-        SbxRequest(sbx::Op::UnlockUpgrades);
-}
-
 void SandboxPlayer(const Host& h, const sbx::Snapshot& s, float w) {
     const Palette& P = theme::Colors();
     BeginCard("sbx_player", w);
@@ -2774,36 +2759,11 @@ void SandboxPlayer(const Host& h, const sbx::Snapshot& s, float w) {
     ImGui::SameLine(x0 + avail - U(kSwitchW));
     if (Switch("##infenergy", s.infiniteEnergy)) SbxRequest(sbx::Op::InfiniteEnergy, s.infiniteEnergy ? 0 : 1);
     HoverTip("Keeps energy at its maximum. Kept per save.");
-    // Discover all upgrades (Op::DiscoverUpgrades) and, smaller beside it, Max all upgrades (Op::UnlockUpgrades):
-    // under the extras' buttons.
-    auto upgradesButton = [&] {
-        const float sp = ImGui::GetStyle().ItemSpacing.x;
-        const float maxW = std::min(std::floor(avail * 0.36f), U(150));
-        const bool canFind = s.upgradesHidden > 0;
-        ImGui::BeginDisabled(!canFind);
-        if (ImGui::Button("Discover all upgrades", ImVec2(avail - maxW - sp, U(32)))) g_sbxDiscConfirm = true;
-        ImGui::EndDisabled();
-        HoverTip(canFind ? std::format("Makes the {} hidden Fabricator upgrade(s) available to buy. Asks first.",
-                                       s.upgradesHidden)
-                 : s.upgradesHidden == 0 ? std::string("Every upgrade is discovered already.")
-                                         : std::string("Not available: the game's upgrade functions were not found."));
-        ImGui::SameLine(0, sp);
-        const bool can = s.upgradeLevelsLeft > 0;
-        ImGui::BeginDisabled(!can);
-        if (ImGui::Button("Max all", ImVec2(maxW, U(32)))) g_sbxUpgConfirm = true;
-        ImGui::EndDisabled();
-        HoverTip(can ? std::format("Raises every Fabricator upgrade to its last level for free ({} upgrade(s), {} "
-                                   "level(s) to go). Asks first.",
-                                   s.upgradeCount, s.upgradeLevelsLeft)
-                     : s.upgradeWhy.empty() ? std::string("Every upgrade is at its last level already.")
-                                            : s.upgradeWhy);
-        SandboxUpgradesConfirm(s);
-    };
-    // Infinite health and the two buttons come from the extras bridge (player_extras.cpp).
+    // Infinite health and the two buttons come from the extras bridge (player_extras.cpp). Discover all / Max all
+    // are per tab on the Upgrades & Blueprints card (sandbox_upgrades.cpp).
     const auto st = sbxx::Get();
     if (!st || h.nowMs - st->tick > 10000) {
         DimText("Reading...");
-        upgradesButton();
         EndCard();
         return;
     }
@@ -2835,7 +2795,6 @@ void SandboxPlayer(const Host& h, const sbx::Snapshot& s, float w) {
     HoverTip(canUnlock ? std::format("Unlocks the {} locked ranch expansion(s) for free. Asks first.",
                                      st->lockedExpansions)
                        : st->expansionWhy);
-    upgradesButton();
     EndCard();
     SandboxExpansionsConfirm(*st);
 }
@@ -2904,6 +2863,8 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
     ImGui::SameLine(0, U(kGap));
     SandboxCrafter(*snap, w);
     hoverCard(SbxHover::Crafter);
+    ImGui::Dummy(ImVec2(0, gapY));
+    sandbox_upgrades::DrawCard(SbxHelpers(), *snap, full);  // Upgrades & Blueprints (sandbox_upgrades.cpp)
     if (!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) && !ImGui::GetDragDropPayload()) g_sbxHover = hover;
     SandboxStatus(h);
 }

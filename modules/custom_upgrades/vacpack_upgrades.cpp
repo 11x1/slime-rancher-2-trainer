@@ -1111,8 +1111,12 @@ void SetLevelDetour(Il2CppObject* self, Il2CppObject* def, int32_t level, const 
             g.host.setValue(t->spec->key, std::to_string(level));
             SR2_INFO("[{}] vacpack: '{}' -> {} (level {}), kept in the sidecar (the save gets level {})", kModule,
                      unity::GetName(def), RomanTitle(*t->spec, level - vmax - 1), level + 1, vmax + 1);
-        } else if (level < vmax && SavedInt(t->spec->key) >= 0) {
-            g.host.setValue(t->spec->key, std::string());  // reset below the vanilla max: nothing of ours owned
+        } else if (level <= vmax && SavedInt(t->spec->key) >= 0) {
+            // Back to the vanilla max or below (a Sandbox downgrade): nothing of ours owned. At exactly the
+            // vanilla max the old value would otherwise be put back by the tick after the next load.
+            g.host.setValue(t->spec->key, std::string());
+            SR2_INFO("[{}] vacpack: '{}' -> level {}, the sidecar's tier level cleared", kModule, unity::GetName(def),
+                     level + 1);
         }
     });
 }
