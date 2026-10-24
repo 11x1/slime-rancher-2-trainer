@@ -227,6 +227,7 @@
 #include "modules/custom_upgrades/sale_notify.h"
 #include "modules/custom_upgrades/silo_receipt.h"
 #include "modules/custom_upgrades/silo_world.h"
+#include "modules/custom_upgrades/vacpack_upgrades.h"
 #include "ui/mod_icons.h"
 
 namespace sr2::modules {
@@ -674,6 +675,7 @@ private:
     custom_upgrades::drones::HenSource drones_;
     custom_upgrades::world::SiloButtons silo_;  // Sell-All Button world button
     custom_upgrades::world::PlotProps props_;   // decorative props of owned tiers (plot_props.h)
+    custom_upgrades::vacpack::VacpackUpgrades vacpack_;  // Fabricator vacpack upgrades (vacpack_upgrades.h)
     std::vector<custom_upgrades::world::PropRequest> WantedProps() const;
     custom_upgrades::ui::PlotMenuSlider sliderHens_;      // Hen Collector limits, side by side (one pair
     custom_upgrades::ui::PlotMenuSlider sliderRoosters_;  // at a time; the hens slider builds the row)
@@ -1071,6 +1073,7 @@ void CustomUpgrades::ResetState(const char* why) {
 void CustomUpgrades::OnLoad(Il2CppObject* asd, const void* identifier) {
     resync_.store(false);  // this load names the file exactly
     ResetState("save game load");
+    vacpack_.Reset();  // the loaded player gets its extra slots' contents back once
     pendingLoadGame_.clear();
     pendingLoadSave_.clear();
     pendingLoadNumber_ = 0;
@@ -1099,6 +1102,7 @@ void CustomUpgrades::AfterLoad(Il2CppObject* asd) {
 void CustomUpgrades::OnNewGame() {
     resync_.store(false);
     ResetState("new game");
+    vacpack_.Reset();
     pendingLoadGame_.clear();
     pendingLoadSave_.clear();
     pendingLoadNumber_ = 0;
@@ -1962,6 +1966,7 @@ void CustomUpgrades::Cleanup(const char* why) {
         SR2_INFO("[{}] {}: plot props removed", kModule, why);
     }
     RestoreCapacities(why);  // silos back to their vanilla capacity per slot (contents stay)
+    vacpack_.Cleanup(why);   // vacpack upgrade levels off, our definitions out of the game's lists
     int removed = 0, restored = 0;
     for (auto& inj : injections_) {
         for (Injected& in : inj->items) {
@@ -1994,7 +1999,7 @@ void CustomUpgrades::FrameCheck(float dt) {
     if (On() && silo_.Ready()) g_siloGuard.Run([&] { silo_.Frame(); });  // button message (cheap when none)
     if (On() && notices_.Ready()) g_siloGuard.Run([&] { notices_.Frame(dt); });  // queued sale notices
     if (On() && receipt_.IsOpen()) g_siloGuard.Run([&] { ReceiptTick(dt); });   // Sell-All receipt input
-    if (!On() || (!world_.Ready() && !silo_.Ready() && !props_.Ready() && !capacityOk_)) return;
+    if (!On() || (!world_.Ready() && !silo_.Ready() && !props_.Ready() && !capacityOk_ && !vacpack_.Ready())) return;
     if (std::isfinite(dt) && dt > 0.0f) worldAccum_ += std::min(dt, 1.0f);
     if (worldAccum_ < kWorldTickSeconds) return;
     worldAccum_ = 0.0f;
@@ -2143,6 +2148,7 @@ void CustomUpgrades::WorldTick() {
     if (props_.Ready() && !sr2::core::ModuleFaulted(kModule))
         props_.Tick(WantedProps(), [&]() { return LookupDirector(); });
     if (capacityOk_ && !sr2::core::ModuleFaulted(kModule)) CapacityTick();
+    if (vacpack_.Ready() && !sr2::core::ModuleFaulted(kModule)) vacpack_.Tick();
 }
 
 // Plots whose owned tiers have props: Faster Hens I / II (hay; II adds nests), Fast Growth I / II
@@ -3305,6 +3311,20 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         else
             SR2_WARN("[{}] FileStorageProvider.StoreGameData not hooked ({}) - one sidecar per game instead of per save "
                      "file", kModule, serr);
+    }
+
+    // Vacpack upgrades in the Fabricator (optional; missing -> not offered, nothing else changes).
+    {
+        custom_upgrades::vacpack::Host host;
+        host.on = [this] { return On(); };
+        host.saveReady = [this] { return InGame() && EnsureLoaded(); };
+        host.value = [this](const std::string& k) { return SaveValueOf(k); };
+        host.setValue = [this](const std::string& k, const std::string& v) { return SetSaveValueOf(k, v); };
+        host.lookup = [this] { return LookupDirector(); };
+        std::string verr, vreport;
+        if (vacpack_.Setup(ctx, std::move(host), verr, vreport)) report += vreport;
+        else SR2_WARN("[{}] vacpack upgrades unavailable ({}) - Tank Booster IX-XII and Extra Tank III-IV are not offered",
+                      kModule, verr);
     }
 
     main_thread::AddFrameCallback(kModule, [](float dt) {
