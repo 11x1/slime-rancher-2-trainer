@@ -32,6 +32,7 @@
 #include "sandbox_upgrades.h"
 #include "slime_dj_bridge.h"
 #include "slime_icons.h"
+#include "spotlight.h"
 #include "theme.h"
 
 namespace sr2::ui::menu {
@@ -603,6 +604,75 @@ void KeyDef(const Host& h, const settings::Def& d, double cur, float w) {
     HoverTip(capturing ? "Esc cancels, Backspace/Delete clears the bind." : "Click, then press a key or mouse button 3/4/5.");
 }
 
+// ------------------------------------------------------------ highlight ----
+// A search result (spotlight.cpp) that was opened: the page scrolls to its row and the row pulses.
+// The row is looked for while the page is drawn (PulseRow); once it was seen on two frames (the first
+// frame of a new page only measures it), the page scrolls it into view (ScrollToHighlight), then it
+// pulses twice. Given up after 1 s if the page never draws it (a setting without a row).
+struct Highlight {
+    std::string module, key;  // empty: none
+    double requested = 0;     // ImGui::GetTime() of the jump
+    double start = -1;        // pulse start (< 0: still scrolling)
+    int seen = 0;             // frames the row was drawn while scrolling
+    float top = 0, bottom = 0;  // the row's screen rect this frame
+} g_hl;
+constexpr float kPulseSec = 1.6f;
+
+void PulseRow(const settings::Def& d, ImVec2 a, ImVec2 b) {
+    if (g_hl.key.empty() || d.key != g_hl.key || d.module != g_hl.module) return;
+    if (g_hl.start < 0) {  // ScrollToHighlight uses it after the page
+        ++g_hl.seen;
+        g_hl.top = a.y;
+        g_hl.bottom = b.y;
+        return;
+    }
+    const float t = static_cast<float>(ImGui::GetTime() - g_hl.start);
+    if (t < 0.0f) return;
+    if (t >= kPulseSec) {
+        g_hl = Highlight{};
+        return;
+    }
+    const float k = 0.5f - 0.5f * std::cos(t * 2.0f * kPi / (kPulseSec * 0.5f));  // two pulses
+    const Palette& P = theme::Colors();
+    const ImU32 col = theme::Current() == theme::Mode::Dark ? P.grab : P.accent;
+    const ImVec2 pa(a.x - U(6), a.y - U(3)), pb(b.x + U(6), b.y + U(3));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(pa, pb, WithAlpha(col, 0.16f * k), U(8));
+    dl->AddRect(pa, pb, WithAlpha(col, 0.9f * k), U(8), 0, U(2));
+}
+
+// Called in "##body" after the page: scroll the found row into view (also as the page's saved
+// scroll position, so KeepPageScroll keeps it), then start the pulse.
+void ScrollToHighlight(const std::string& page) {
+    if (g_hl.key.empty() || g_hl.start >= 0) return;
+    const double now = ImGui::GetTime();
+    if (g_hl.seen < 2) {
+        if (now - g_hl.requested > 1.0) g_hl = Highlight{};
+        return;
+    }
+    const float top = ImGui::GetWindowPos().y, h = ImGui::GetWindowHeight(), margin = U(24);
+    if (g_hl.top < top + margin || g_hl.bottom > top + h - margin) {
+        const float target =
+            std::clamp(ImGui::GetScrollY() + g_hl.top - top - h * 0.3f, 0.0f, std::max(0.0f, ImGui::GetScrollMaxY()));
+        ImGui::SetScrollY(target);
+        PageScroll& ps = g_pageScroll[page];
+        ps.want = target;
+        ps.pending = true;
+        ps.since = now;
+    }
+    g_hl.start = now + 0.1;  // after the scroll has landed
+}
+
+void JumpTo(const spotlight::Target& t) {
+    g_cat = t.cat;
+    g_tab[t.cat] = t.tab;
+    g_hl = Highlight{};
+    if (t.key.empty()) return;
+    g_hl.module = t.module;
+    g_hl.key = t.key;
+    g_hl.requested = ImGui::GetTime();
+}
+
 // One setting: label on the left (dim while its switch is off), control on the right.
 void DrawRow(const Host& h, const settings::Def& d, const std::string& label, bool nested) {
     const Palette& P = theme::Colors();
@@ -654,6 +724,7 @@ void DrawRow(const Host& h, const settings::Def& d, const std::string& label, bo
         case settings::Kind::Enum: ComboDef(d, cur, ctlW); break;
         case settings::Kind::Key: KeyDef(h, d, cur, ctlW); break;
     }
+    PulseRow(d, rowStart, ImVec2(rowStart.x + avail, std::max(labelBottom, ImGui::GetItemRectMax().y)));
     ImGui::PopID();
 }
 
@@ -678,6 +749,8 @@ void DrawMoveRow(const settings::Def& d, hud_edit::Element e) {
     if (ImGui::Button("Move", ImVec2(ctlW, 0))) hud_edit::Begin(e);
     ImGui::EndDisabled();
     HoverTip(menuOpen ? std::string("Close the game's menu first; it covers the HUD.") : tip);
+    PulseRow(d, ImVec2(ImGui::GetWindowPos().x + x0 - ImGui::GetScrollX(), ImGui::GetItemRectMin().y),
+             ImVec2(ImGui::GetItemRectMax().x, ImGui::GetItemRectMax().y));
     ImGui::PopID();
 }
 
@@ -910,6 +983,8 @@ void DrawNested(const Host& h, const ModuleView& nmv) {
         if (Switch("##enabled", on)) Write(nmv.enabled, on ? 0.0 : 1.0);
         ImGui::PopID();
         HoverTip(nmv.enabled.tooltip);
+        PulseRow(nmv.enabled, ImVec2(ImGui::GetWindowPos().x + x0 - ImGui::GetScrollX(), ImGui::GetItemRectMin().y),
+                 ImGui::GetItemRectMax());
     }
     ImGui::Dummy(ImVec2(0, U(4)));
     FailedBanner(nmv);
@@ -948,6 +1023,8 @@ void DrawCardsPage(const Host& h, const Tab& tab, const std::vector<ModuleView>&
                 ImGui::EndDisabled();
                 const auto help = tab.cardHelp.find(m);
                 HoverTip(!lock.empty() ? lock : help != tab.cardHelp.end() ? help->second : mv->enabled.tooltip);
+                PulseRow(mv->enabled, ImVec2(ImGui::GetWindowPos().x + x0 - ImGui::GetScrollX(), ImGui::GetItemRectMin().y),
+                         ImGui::GetItemRectMax());
             }
             bool failed = false;
             const std::string status = ModuleStatus(mv->module, &failed);
@@ -3889,6 +3966,7 @@ void SyncTheme(float scale) {
 
 void OnOpened() {
     slime_icons::OnOpen();
+    spotlight::Close();  // the search box starts closed
     g_lastPage.clear();  // restore the page's saved scroll position
 }
 
@@ -3971,6 +4049,7 @@ bool Draw(const Host& h) {
                 if (const ModuleView* mv = FindView(views, tab.module)) DrawSlimeDjPage(h, *mv);
                 break;
         }
+        ScrollToHighlight(page);  // a search result opened on this page
         ImGui::Dummy(ImVec2(0, U(18)));
         ImGui::EndChild();
         ImGui::PopStyleVar();
@@ -3980,6 +4059,9 @@ bool Draw(const Host& h) {
         ImGui::PopStyleVar(2);
     }
     ImGui::End();
+    // Ctrl+Space / Alt+Space: the search box over the window (spotlight.cpp).
+    spotlight::Target jump;
+    if (spotlight::Draw({g_scale, g_winMin, g_winMax, &DrawIcon, &Switch, &SoftShadow}, cats, views, jump)) JumpTo(jump);
     DrawPeel();
     return !closed;
 }
