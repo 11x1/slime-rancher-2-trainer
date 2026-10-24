@@ -34,12 +34,28 @@ struct Upgrade {
     bool slotTier = false;      // the vacpack slot count upgrade ("AmmoSlots", Extra Tank)
 };
 
+// One of the mod's own buildables (custom_upgrades/buildables.h: Quantum Storage Link, DJ Booth, DJ Speaker,
+// Slime Radio). Their Fabricator card follows the base gadget's blueprint unless the save's sidecar overrides it.
+struct ModBlueprint {
+    std::string id;           // buildables.h id ("dj_booth")
+    std::string name;         // "DJ Booth"
+    std::string base;         // the vanilla base gadget ("Scientist Desk")
+    std::string hint;         // "Unlocked with the Scientist Desk blueprint."
+    uint32_t icon = 0;        // ui/item_icons.h id (the base's icon), 0 = none
+    bool unlocked = false;    // the card is unlocked now
+    bool baseUnlocked = false;  // the base gadget's blueprint is owned
+    int mode = 0;             // 0 = follows the base blueprint, 1 = unlocked (override), 2 = locked (override)
+    int owned = 0;            // unplaced kits (radio: radios in the save)
+};
+
 struct State {
     unsigned long long tick = 0;  // GetTickCount64 when it was taken
     bool inGame = false;
     std::string why;              // !inGame / no upgrade list: what is missing
     std::vector<Upgrade> upgrades;  // in the Fabricator's order
     std::string blueprintWhy;     // blueprint lock / unlock unavailable: why ("" = available)
+    std::vector<ModBlueprint> mods;  // the mod's buildables (the "Mod buildables" tab)
+    std::string modWhy;           // mods empty: why
 };
 
 enum class Op {
@@ -49,6 +65,7 @@ enum class Op {
     DiscoverAll,    // every discoverable upgrade
     MaxAll,         // every upgrade to its last level
     SetBlueprints,  // ids (recipe ids), value = 1 unlock / 0 lock
+    SetModBlueprint,  // key (ModBlueprint::id), value = ModBlueprint::mode (0 follow the base, 1 unlock, 2 lock)
 };
 
 struct Action {
@@ -56,6 +73,7 @@ struct Action {
     uintptr_t id = 0;
     long long value = 0;
     std::vector<uintptr_t> ids;
+    std::string key;
 };
 
 // ---- module side (Unity main thread) ----

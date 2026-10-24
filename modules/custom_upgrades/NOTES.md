@@ -208,13 +208,14 @@ Elder Collector hooks). Findings with RVAs are in the header comments of both fi
     `SaveReferenceTranslation.GetPersistenceId(IdentifiableType)` detour maps our definition to the Refinery Link.
     Cleanup (module off / faulted) also puts the Refinery Link into those slots. After a load the slot shows the
     Refinery Link (toggle the variant again).
-- **Fabricator**: its own card right after the Refinery Link (`GadgetFabricateCategory.GetItems` detour). Cost =
+- **Fabricator**: its own card right after the Refinery Link (Warp Tech; `GadgetFabricateCategoryRuntime..ctor`
+  detour, see "Mod buildables" below: the old `GetItems` detour never ran). Cost =
   the Refinery Link's with 3x the Newbucks and 2x the items (log `Fabricator cost ...`). Fabricating it never runs the
   vanilla body (it would `AddItem` our type): the card's own `CheckCanFabricate`, `SpendableDirector.Spend(our cost)`,
-  `AddItem(Refinery Link, n)`, kits += n. The card is unlocked with the Refinery Link blueprint (helper `HasBlueprint`
-  detour); its owned count is `min(kits, Refinery Links)` (`GetItemCount` detour).
+  `AddItem(Refinery Link, n)`, kits += n. The card is unlocked with the Refinery Link blueprint unless the sidecar
+  overrides it (helper `HasBlueprint` detour); its owned count is `min(kits, Refinery Links)` (`GetItemCount` detour).
 - **Placing**: hold a Refinery Link, press the toggle-variant key -> Quantum Storage Link (offered while a kit is left:
-  `GadgetDirector.HasBlueprint(ours)` = kits > 0 and the Refinery Link blueprint), place. `PlaceGadgetEvent` detour: the
+  `GadgetDirector.HasBlueprint(ours)` = kits > 0 and the card unlocked), place. `PlaceGadgetEvent` detour: the
   new gadget's actor id is listed and a kit used (log `Quantum Storage Link placed`). No kit left: the held gadget
   becomes the Refinery Link first (a plain one is placed, logged).
 - **Picking up** a quantum link (`PickupGadget` detour) gives its kit back and holds the variant, so placing it again
@@ -305,7 +306,7 @@ of it is offered. Slime DJ plays the song through `slime_dj/api.h` emitters.
   the hooks the DJ gadgets need anyway.
 - **Fabricator** (Decorations): DJ Booth after the Scientist Desk (cost: the desk's Newbucks x2.5, items x2), DJ
   Speaker after the Boombox (x1.5 / x1.5), Slime Radio after the DJ Speaker (x0.5 / x0.5); Newbucks rounded to 5.
-  Unlocked with the base's blueprint (radio: the Boombox's). Owned count: kits (booth / speaker), radios in the save.
+  Unlocked with the base's blueprint (radio: the Boombox's) unless the sidecar overrides it (see "Mod buildables"). Owned count: kits (booth / speaker), radios in the save.
   Fabricating a booth / speaker adds the vanilla decoration and one kit (`dj.booth_kits` / `dj.speaker_kits`),
   never our definition. Placing the variant uses a kit (no kit: a plain decoration is placed, logged), picking one up
   gives it back and holds the variant again; removed any other way (stored, picked up with a stack) the tick gives the
@@ -329,6 +330,52 @@ side), a slime sitting on the pillow, the speaker tilt direction (front up, not 
 speakers, the dance and notes while a song plays (log `boombox dance animator parameter hash ...`), the radio spawn
 (in front of you, not inside the Fabricator) and its look, slimes playing with the radio, the emitters playing,
 save + reload (rebuilt from the sidecar), turning custom upgrades off (plain again, favourites back), a mod-free load.
+
+## Mod buildables: Fabricator cards, unlock, API (round 7 fix)
+
+Round 7: "no DJ booth in fabricator", "cant unlock the booth / speakers", "Slime Radio: where can I craft that?",
+"Quantum Storage Link: can't see it in Warp tech". None of the four cards was ever in the Fabricator.
+
+- **Why.** The cards were inserted by a `GadgetFabricateCategory.GetItems` detour. In 1.3.0 nothing calls `GetItems`
+  natively (its only references are metadata tables): `GadgetFabricateCategoryRuntime..ctor(category, helper,
+  recipeFactory)` (0x8287D0) has the same LINQ code inlined (`_gadgetSubGroup.GetAllMembers().Cast<GadgetDefinition>()
+  .Select(new GadgetFabricatableItem(...)).ToList()`) and passes the list to `FabricateCategoryRuntime<T>..ctor`
+  (0x20F5F80: `Category` @0x10, `_categoryCount` = `category.TotalCount()` @0x18, `_itemList` @0x20).
+  `FabricatorCategoryList.FindCategoriesToShow` builds one runtime per category each time the Fabricator opens
+  (also the Sandbox's rebuild). The same holds for `PlayerUpgradeFabricateCategory.GetItems` (0x82C000, no native
+  caller), which `vacpack_upgrades.cpp` hooks for the Drone Battery Saver card: not changed here, worth checking.
+- **Fix.** The quantum hook is now on that constructor: after the original, `quantum::InsertItem` and the DJ
+  extension's `InsertCards` insert into the runtime's `_itemList` (same anchors: Refinery Link in `GadgetWarpGroup`,
+  Scientist Desk and Boombox in `GadgetDecorGroup`, 241 members; checked with UnityPy on
+  `identifiabletypegroups_assets_*.bundle`). `FabricatorItemGrid.SetCategory` (0x80A170) sizes its pages from
+  `TotalCount` (ceil(TotalCount / 36 or 16)) while the page contents come from `Items`, so `_categoryCount` is raised
+  only when our cards would fall onto a missing page (else the title's "unlocked / total" stays vanilla). Log
+  `Fabricator category '...': page count raised ...`.
+- **Locked look.** `GadgetFabricatableItem.get_IsMissingBlueprint` = recipe has items and `!helper.HasBlueprint(def)`
+  (our helper detour), so a card whose rule says locked looks like a vanilla locked card. `get_ShouldShowPlaceholder`
+  (0x828470) = the definition's pedia entry is not unlocked; our clones share the base's pedia link, so a player who
+  never met a Boombox would see a "?" tile. A new detour (pointer compares only) returns false for our cards: they
+  always show name and icon, and the description ends with what unlocks them ("Unlocked with the Boombox
+  blueprint.").
+- **Unlock rule.** Card unlocked = the base gadget's blueprint (Refinery Link, Scientist Desk, Boombox; the radio
+  follows the Boombox), unless the sidecar has `buildables.unlock.<id>` = `1` (unlocked) / `0` (locked). The variant
+  (toggle-variant) is offered while the card is unlocked and a kit is left. Nothing of it is in the vanilla save.
+- **Log** (when the state changes, at each Fabricator opening): `quantum link: Fabricator card added after the
+  Refinery Link (Warp Tech, position N): LOCKED (unlocked with the Refinery Link blueprint; Refinery Link blueprint
+  not owned), 0 kit(s)`, `dj buildables: Fabricator card 'DJ Booth' added after 'ScientistDesk' (position N): ...`;
+  `Fabricator opened before the definition(s) were built ...` when the Fabricator is opened before the first tick of
+  a loaded save.
+- **API** (`buildables.h`, for the Sandbox crafter and blueprint manager): `buildables::List()` (id, name, base
+  display / asset name, hint, our card definition, the vanilla definition, icon sprite, unlocked, base blueprint owned,
+  override, owned kits / radios), `Grant(id, n, result)` (save-safe: n vanilla base gadgets + n kits, as fabricating
+  without the cost; radio: n spawned toys, at most 5 per call), `SetUnlock(id, Unlock, result)` (sidecar override,
+  `kFollowBase` clears it). Ids `quantum_link`, `dj_booth`, `dj_speaker`, `slime_radio`. Never `AddItem` /
+  `AddBlueprint` our definitions (the save would get a duplicate / unknown persistence id).
+- **Sandbox**: the Upgrades & Blueprints card has a "Mod buildables" tab (`modules/sandbox/NOTES.md`).
+
+Not checked in game yet: the four cards appearing (position, locked look with name / icon, the hint in the details
+panel), unlocking with the base blueprint (buy / find a Boombox blueprint), the Sandbox override, the page count of
+Decorations (244 entries: 7 pages of 36 either way, no raise expected).
 
 ## Demolish clears the plot (user report round 4)
 

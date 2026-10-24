@@ -22,6 +22,9 @@
 
 #include <functional>
 #include <string>
+#include <vector>
+
+#include "modules/custom_upgrades/buildables.h"
 
 struct Il2CppObject;
 
@@ -57,5 +60,11 @@ private:
 
 // Any thread: `def` is one of our runtime definitions (never saved as itself).
 bool Owns(Il2CppObject* def);
+
+// ---- for buildables.cpp (main thread) ----
+// Appends the DJ Booth, DJ Speaker and Slime Radio once their definitions are built.
+void Describe(std::vector<buildables::Info>& out);
+// kDjBooth / kDjSpeaker: `count` Scientist Desks / Boomboxes and kits; kSlimeRadio: `count` radios spawned.
+bool Grant(const std::string& id, int count, std::string& result);
 
 }  // namespace sr2::modules::custom_upgrades::dj
