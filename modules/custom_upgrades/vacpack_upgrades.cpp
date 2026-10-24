@@ -110,7 +110,7 @@ struct LevelSpec {
 enum class Kind {
     kCapacity,      // more levels of Tank Booster (ADD on AmmoLimit)
     kSlots,         // more levels of Extra Tank (ADD on AmmoSlotsAvailable)
-    kDroneBattery,  // own card, no vacpack effect (ADD 0); drone_battery.cpp reads the level
+    kDroneBattery,  // own card, no modifier (empty effect list); drone_battery.cpp reads the level
 };
 struct Spec {
     int32_t id;         // own card: our _uniqueId (custom range); tiers: 0 (they are vanilla levels)
@@ -545,8 +545,7 @@ bool CreateDefs(Il2CppObject* items) {
             Il2CppObject* effects = unity::Field<Il2CppObject*>(lvl, g.offUlEffects);
             ListRemoveRange(effects, 1, static_cast<int32_t>(unity::ListCount(effects)) - 1);  // vanilla has one
             // Levels replace each other (vanilla), so a tier's value is absolute: the vanilla max
-            // level's value plus ours. The battery saver changes nothing on the vacpack: ADD 0 on
-            // AmmoLimit (the level's effect list stays as the game expects it, one modifier).
+            // level's value plus ours.
             float value = 0.0f;
             if (s.kind == Kind::kCapacity) value = capMax + s.level[k].value;
             if (s.kind == Kind::kSlots) {
@@ -554,6 +553,15 @@ bool CreateDefs(Il2CppObject* items) {
                 value = slotMax + s.level[k].value;
             }
             unity::Field<float>(mod, g.offModValue) = value;
+            // The battery saver has no modifier at all (ActorUpgradeHandler.ApplyUpgrade walks an empty
+            // list). It used to keep the cloned one as ADD 0 on AmmoLimit, so each of its level changes
+            // re-evaluated the vacpack capacity and, when that threw (round 8), left Tank Booster-sized
+            // modifiers behind (x1880 slots) - see NOTES.md "Drone Battery Saver".
+            if (s.kind == Kind::kDroneBattery &&
+                (!ListRemoveRange(effects, 0, static_cast<int32_t>(unity::ListCount(effects))) || unity::ListCount(effects))) {
+                SR2_WARN("[{}] vacpack: {} level {} kept its vacpack modifier - no vacpack upgrades", kModule, s.name, k + 1);
+                return false;
+            }
             // costs: Newbucks, refinery items, upgrade component
             char* pc = reinterpret_cast<char*>(lvl) + g.offUlCosts;
             void* currency = *reinterpret_cast<void**>(pc + g.offPcCurrency);
@@ -1099,9 +1107,18 @@ void SelectExtra(int k) {
 
 // Every level change of every upgrade. Not our own restore: an own card's purchase goes to the
 // sidecar; a tier upgrade's level past its vanilla max too (the save only gets the vanilla max).
+// Before the original: SetUpgradeLevel stores any level in -1 .. LevelCount - 1 before it raises
+// OnUpgradeChanged, and a subscriber that throws unwinds through this frame, so bookkeeping after the
+// call was skipped (round 8: the Sandbox lowered the battery saver, the throw kept the sidecar at IV
+// and the tick set IV again every second, each time throwing again). Out of range: the game throws
+// before storing, so nothing is written.
+void SidecarLevel(Il2CppObject* def, int32_t level);
 void SetLevelDetour(Il2CppObject* self, Il2CppObject* def, int32_t level, const MethodInfo* mi) {
+    if (!g.applying && def && On() && g.offUdLevels && level >= -1 && level < LevelCount(def)) SidecarLevel(def, level);
     g.origSetLevel(self, def, level, mi);
-    if (g.applying || !def || !On()) return;
+}
+
+void SidecarLevel(Il2CppObject* def, int32_t level) {
     g_levelGuard.Run([&] {
         if (!main_thread::IsMainThread() || !g.host.saveReady || !g.host.saveReady()) return;
         if (const Ours* o = FindOurs(def)) {
