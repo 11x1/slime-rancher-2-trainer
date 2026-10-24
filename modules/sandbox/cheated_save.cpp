@@ -106,6 +106,9 @@ unsigned long long g_pendingSince = 0, g_lastPoll = 0;
 bool g_startupDone = false;
 bool g_lastOn = false;  // Sandbox on at the last poll
 bool g_armed = false;   // switched on while no save was running: applies to the next save loaded
+bool g_pinned = false;  // sandbox.enabled pinned on (settings::Lock) because the running save is marked
+constexpr const char* kPinReason =
+    "Sandbox was used in this save, so it stays on here. Saves without Sandbox keep their own switch.";
 // The loaded save's Sandbox toggles (SaveToggle); all off for a save without the mark.
 constexpr const char* kToggleKeys[] = {kToggleInfiniteEnergy, kToggleInfiniteHealth};
 std::map<std::string, bool> g_toggles;
@@ -379,16 +382,33 @@ void SetSandbox(bool on, const std::string& why, bool now) {
     else main_thread::Post(apply);
 }
 
-// A save is being loaded or found running: Sandbox as that save had it. A marked save gets its last state
-// back (older marks without it keep the current state); a save without the mark starts with Sandbox off,
-// unless Sandbox was switched on on the title screen for it (g_armed).
-void ApplySaveState(bool cheated, int markEnabled, const std::string& file, bool now) {
+// Round 8 ("once sandbox is enabled for a save, it shouldn't be able to be turned off"): while a marked save
+// runs, sandbox.enabled is pinned on with settings::Lock (the overlay's tab switch is drawn disabled with
+// kPinReason as its tooltip; Set with 0 is ignored, also from profiles or the Options tab). Pinning sets the
+// value to 1, which turns Sandbox on through the usual settings path. Unpinned when the save is left, when
+// an unmarked save is loaded and when the mark turns out not to belong to the loaded file. `now` false:
+// posted (from inside a hook).
+void PinSandbox(bool pin, const std::string& why, bool now) {
+    auto apply = [pin, why] {
+        if (pin == g_pinned) return;
+        g_pinned = pin;
+        if (pin) sr2::core::settings::Lock(kModule, "enabled", 1.0, kPinReason);
+        else sr2::core::settings::Unlock(kModule, "enabled");
+        SR2_INFO("[{}] Sandbox switch {}: {}", kModule, pin ? "pinned on" : "free again", why);
+        g_lastOn = AchievementsPaused();
+    };
+    if (now) apply();
+    else main_thread::Post(apply);
+}
+
+// A save is being loaded or found running: Sandbox as that save had it. A marked save always runs with
+// Sandbox on and pinned (round 8; the mark's `enabled` no longer starts it off); a save without the mark
+// starts with Sandbox off, unless Sandbox was switched on on the title screen for it (g_armed).
+void ApplySaveState(bool cheated, const std::string& file, bool now) {
     if (cheated) {
-        if (markEnabled >= 0)
-            SetSandbox(markEnabled == 1, std::format("save '{}' had it {} when it was last saved", file,
-                                                     markEnabled == 1 ? "on" : "off"),
-                       now);
+        PinSandbox(true, std::format("save '{}' is marked as cheated (Sandbox was used in it)", file), now);
     } else if (!g_armed) {
+        PinSandbox(false, std::format("save '{}' has no Sandbox mark", file), now);
         SetSandbox(false, std::format("save '{}' has no Sandbox mark, so it starts with Sandbox off (each save keeps "
                                       "its own Sandbox switch)",
                                       file),
@@ -453,7 +473,7 @@ void Evaluate(Il2CppObject* asd, const std::string& game, unsigned long long num
              cheated ? std::format("marked as cheated (Sandbox used since {})", found.since)
                      : std::string("no Sandbox mark"));
     if (fresh) {
-        ApplySaveState(cheated, found.enabled, g_s.file.empty() ? game : g_s.file, /*now=*/true);
+        ApplySaveState(cheated, g_s.file.empty() ? game : g_s.file, /*now=*/true);
         LoadToggles(cheated ? &found : nullptr, std::format("save '{}'", g_s.file.empty() ? game : g_s.file));
     }
 }
@@ -479,7 +499,7 @@ void OnBeginLoad(const void* identifier) {
     SR2_INFO("[{}] loading save '{}' (game '{}'): {}", kModule, file, game,
              cheated ? std::format("marked as cheated (Sandbox used since {}) - achievements stay blocked", m.since)
                      : std::string("no Sandbox mark"));
-    ApplySaveState(cheated, cheated ? m.enabled : -1, file, /*now=*/false);  // posted: we are inside the hook
+    ApplySaveState(cheated, file, /*now=*/false);  // posted: we are inside the hook
     LoadToggles(cheated ? &m : nullptr, std::format("save '{}'", file));
 }
 
@@ -538,6 +558,7 @@ void Poll() {
             g_s = {};
             SetSaveCheated(false);
             g_armed = false;
+            PinSandbox(false, std::format("left save game '{}'", left), true);
             SetSandbox(false, std::format("left save game '{}' (each save keeps its own Sandbox switch)", left), true);
             LoadToggles(nullptr, "the title screen");
         } else if (on && !g_lastOn) {
@@ -565,6 +586,7 @@ void Poll() {
                 g_s.since.clear();
                 g_s.markNumber = 0;
                 SetSaveCheated(false);
+                PinSandbox(false, std::format("save '{}' has no valid Sandbox mark", g_s.file), true);
                 SetSandbox(false, std::format("save '{}' has no valid Sandbox mark", g_s.file), true);
                 LoadToggles(nullptr, std::format("save '{}'", g_s.file));
             }
@@ -575,9 +597,11 @@ void Poll() {
         Evaluate(asd, game, number);
     }
     const bool nowOn = AchievementsPaused();
-    if (nowOn && !SaveCheated()) {
-        MarkNow(asd, "Sandbox is on");
-    } else if (nowOn != g_lastOn && SaveCheated() && g_s.known && !g_s.file.empty()) {
+    const bool wasMarked = SaveCheated();
+    if (nowOn && !wasMarked) MarkNow(asd, "Sandbox is on");
+    if (SaveCheated() && !g_pinned)  // marked just now (switched on in this save), or found running
+        PinSandbox(true, std::format("save '{}' is marked as cheated", g_s.file.empty() ? game : g_s.file), true);
+    if (wasMarked && nowOn != g_lastOn && g_s.known && !g_s.file.empty()) {
         // Switched in a marked save: its sidecar records the new state, restored when it is loaded again.
         if (WriteMark(g_s.file, g_s.game, g_s.number, g_s.since, nowOn))
             SR2_INFO("[{}] save '{}': Sandbox {} - kept for this save", kModule, g_s.file, nowOn ? "on" : "off");

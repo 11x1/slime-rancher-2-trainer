@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 
 struct Il2CppObject;
 
@@ -25,6 +26,7 @@ struct UpgradesHost {
     std::function<Il2CppObject*(uintptr_t)> recipe;  // crafter recipe id -> its live GadgetDefinition (nullptr: unknown)
     std::function<void(bool)> refreshFabricator;     // the open Fabricator (true: rebuild its grid, RebuildFabricator)
     std::function<void()> changed;                   // levels / blueprints changed: the main snapshot's counts now
+    std::function<std::string(bool)> vacpackState;   // "slot 1 holds up to 60, ..." (log; true: maxima follow AmmoLimit)
 };
 
 // Worker thread, from Sandbox::Setup. Never fails the module.

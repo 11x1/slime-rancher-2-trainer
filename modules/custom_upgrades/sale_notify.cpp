@@ -31,6 +31,7 @@ constexpr const char* kImage = "Assembly-CSharp";
 constexpr const char* kHudNs = "MonomiPark.SlimeRancher.UI.HUD";
 constexpr const char* kNotifNs = "MonomiPark.SlimeRancher.UI.HUD.Notification";
 constexpr float kRetrySeconds = 0.25f;
+constexpr float kTextRetrySeconds = 0.05f;  // queued text notices, checked on the cached list (field reads only)
 constexpr float kMaxWaitSeconds = 120.0f;
 constexpr size_t kMaxQueued = 64;
 
@@ -78,7 +79,9 @@ struct SaleNotices::Impl {
     static constexpr size_t kNames = 16;  // more than a page plus the next one (each entry keeps its string until shown)
     Name names[kNames];
     size_t nextName = 0;
+    Il2CppGCHandle zoneTpl = nullptr;     // the ZoneDefinition the LocalizedStrings are cloned from (one scan)
     bool loggedText = false, loggedNoSink = false;
+    int pagesLogged = 0;  // the first few page hand-overs are logged
     Il2CppClass* gadgetClass = nullptr;  // GadgetDefinition
     size_t offGadgetType = 0, offIdentIcon = 0;
     Il2CppGCHandle teleIcon = nullptr;
@@ -89,6 +92,7 @@ struct SaleNotices::Impl {
     bool loggedMissing = false;
     bool loggedScan = false;
     unsigned long long lastScan = 0;  // GetTickCount64 of the last all-instances scan
+    Il2CppGCHandle cached = nullptr;  // the list last found with the drone provider (no FindObjectOfType per call)
 
     bool IsA(Il2CppObject* obj, Il2CppClass* k) const {
         const auto& a = api();
@@ -116,8 +120,17 @@ struct SaleNotices::Impl {
     // (active ones first, then a started inactive one), at most once per second (a press, or the
     // 0.25 s retry while something is queued). Why nothing was found is logged once.
     Il2CppObject* List(bool allowInactive) {
+        if (cached) {
+            Il2CppObject* l = unity::GCHandleTarget(cached);
+            if (l && unity::IsAlive(l) && IsA(l, listClass) && Provider(l)) {
+                if (allowInactive || unity::ActiveInHierarchy(unity::GameObjectOf(l))) return l;
+            } else {
+                unity::FreeGCHandle(cached);
+                cached = nullptr;
+            }
+        }
         Il2CppObject* first = unity::FindObjectOfType(listClass);
-        if (unity::IsAlive(first) && IsA(first, listClass) && Provider(first)) return first;
+        if (unity::IsAlive(first) && IsA(first, listClass) && Provider(first)) return Cache(first);
         const unsigned long long now = GetTickCount64();
         if (now - lastScan < 1000) return nullptr;
         lastScan = now;
@@ -129,13 +142,13 @@ struct SaleNotices::Impl {
             const bool on = unity::ActiveInHierarchy(unity::GameObjectOf(l));
             active += on ? 1 : 0;
             if (!Provider(l)) continue;  // prefabs / lists whose Start never ran have no providers
-            if (on) return Found(l, true, seen);
+            if (on) return Cache(Found(l, true, seen));
             if (!inactive) inactive = l;
         }
         // Inactive but started (its HUD canvas hidden for now): the notices wait in its pending
         // queue and show when it is active again. Not for Available(): the world button then shows
         // its text, since such a list may stay hidden.
-        if (inactive && allowInactive) return Found(inactive, false, seen);
+        if (inactive && allowInactive) return Found(inactive, false, seen);  // not cached: an active one may come
         if (!loggedMissing) {
             loggedMissing = true;
             std::string providers;
@@ -150,6 +163,12 @@ struct SaleNotices::Impl {
                      module, label, unity::IsAlive(first) ? "found" : "none", providers, seen, active);
         }
         return nullptr;
+    }
+    Il2CppObject* Cache(Il2CppObject* list) {
+        if (cached && unity::GCHandleTarget(cached) == list) return list;
+        if (cached) unity::FreeGCHandle(cached);
+        cached = unity::NewGCHandle(list, false);
+        return list;
     }
     Il2CppObject* Found(Il2CppObject* list, bool active, size_t seen) {
         if (!loggedScan) {
@@ -225,13 +244,20 @@ Il2CppObject* NextName(SaleNotices::Impl& p) {
     if (n.owner) unity::FreeGCHandle(n.owner);
     if (n.str) unity::FreeGCHandle(n.str);
     n = {};
-    Il2CppObject* tpl = nullptr;
-    for (Il2CppObject* z : unity::FindObjectsOfTypeAll(p.zoneClass))
-        if (unity::IsAlive(z) && p.IsA(z, p.zoneClass) && unity::Field<Il2CppObject*>(z, p.offZoneName)) {
-            tpl = z;
-            break;
-        }
-    if (!tpl) return nullptr;
+    // The template is found once (FindObjectsOfTypeAll is slow) and kept; the pool fills on first use.
+    Il2CppObject* tpl = p.zoneTpl ? unity::GCHandleTarget(p.zoneTpl) : nullptr;
+    if (!tpl || !unity::IsAlive(tpl) || !unity::Field<Il2CppObject*>(tpl, p.offZoneName)) {
+        if (p.zoneTpl) unity::FreeGCHandle(p.zoneTpl);
+        p.zoneTpl = nullptr;
+        tpl = nullptr;
+        for (Il2CppObject* z : unity::FindObjectsOfTypeAll(p.zoneClass))
+            if (unity::IsAlive(z) && p.IsA(z, p.zoneClass) && unity::Field<Il2CppObject*>(z, p.offZoneName)) {
+                tpl = z;
+                break;
+            }
+        if (!tpl) return nullptr;
+        p.zoneTpl = unity::NewGCHandle(tpl, false);
+    }
     Il2CppObject* clone = unity::Instantiate(tpl, nullptr);  // a fresh ScriptableObject: its own LocalizedString
     if (!unity::IsAlive(clone) || !p.IsA(clone, p.zoneClass)) return nullptr;
     Il2CppObject* ls = unity::Field<Il2CppObject*>(clone, p.offZoneName);
@@ -245,11 +271,16 @@ Il2CppObject* NextName(SaleNotices::Impl& p) {
 }
 
 // true = done with the text queue (shown or given up), false = try again later.
-// The list shows its pending entries a page at a time (ShowNextPage takes up to one page once every
-// shown entry has faded out), and an entry's text is read from its LocalizedString only when it is shown.
-// So notices are handed over a page at a time, only while the list is idle (nothing pending, every display
-// slot free): each page's strings stay untouched until it was shown, and a burst of notices (one per
-// spawned item type) shows page after page instead of reusing strings that are still waiting.
+// The list shows its pending entries a page at a time: Update (0x76CF10) calls ShowNextPage (0x76C040)
+// once every display slot is free again (`_availableDisplayCount == _displayEntries.Length`, given back by
+// HandleEntryFadeOutComplete, 0x76B680), and ShowNextPage takes up to one page of pending entries,
+// copying each entry's LocalizedString into its slot; the text is read when the slot starts. So notices
+// are handed over a page at a time, whenever nothing is pending: at most one page waits behind the one
+// on screen, and the game chains the pages itself (with its longer multi-page duration while more is
+// pending). With a page of at most kNames / 2 the round-robin strings of a waiting page never overwrite
+// the ones of the page on screen. Round 8: a burst used to go over one notice at a time (the first one
+// was handed over alone and got a page of its own) and only while every slot was free; now the caller
+// queues the whole burst first (QueueText(..., false), then FlushText) so it fills the first page.
 bool TryFlushText(SaleNotices::Impl& p) {
     Il2CppObject* list = p.List(true);
     if (!list) return false;
@@ -259,16 +290,14 @@ bool TryFlushText(SaleNotices::Impl& p) {
     if (can < 0) return true;
     if (can == 0) return false;  // HUD suppressed (menu open)
     auto* pending = unity::Field<Il2CppObject*>(list, p.offPending);
-    if (pending && unity::ListCount(pending) > 0) return false;  // the list is still busy with earlier entries
+    if (pending && unity::ListCount(pending) > 0) return false;  // a page is still waiting for its turn
     size_t page = 4;
+    int32_t free = -1;
     if (p.offDisplay) {
         void* slots = unity::Field<void*>(list, p.offDisplay);
         const size_t n = slots ? unity::ArrayLength(slots) : 0;
-        if (n > 0) {
-            page = n;
-            if (p.offAvailable && unity::Field<int32_t>(list, p.offAvailable) < static_cast<int32_t>(n))
-                return false;  // a page is still showing
-        }
+        if (n > 0) page = n;
+        if (p.offAvailable) free = unity::Field<int32_t>(list, p.offAvailable);
     }
     page = std::min(page, SaleNotices::Impl::kNames / 2);
     const auto& a = api();
@@ -302,11 +331,14 @@ bool TryFlushText(SaleNotices::Impl& p) {
         if (!ok) return true;
         ++added;
     }
-    if (!p.loggedText && added) {
-        p.loggedText = true;
-        SR2_INFO("[{}] text notices: {} notice(s) added to the HUD's pending notifications", p.module, added);
-    }
     p.texts.erase(p.texts.begin(), p.texts.begin() + static_cast<std::ptrdiff_t>(used));
+    if (added && (!p.loggedText || (p.texts.size() + static_cast<size_t>(added) > 1 && p.pagesLogged < 20))) {
+        p.loggedText = true;
+        ++p.pagesLogged;
+        SR2_INFO("[{}] text notices: {} notice(s) handed to the HUD as one page (page size {}, {} of its slots "
+                 "free right now), {} still queued",
+                 p.module, added, page, free, p.texts.size());
+    }
     if (added) p.waited = 0.0f;  // a long sequence is not dropped as "HUD not available"
     return p.texts.empty();
 }
@@ -381,7 +413,7 @@ void SaleNotices::Frame(float dt) {
     dt = dt > 1.0f ? 1.0f : dt;
     impl_->waited += dt;
     impl_->retry += dt;
-    if (impl_->retry < kRetrySeconds) return;
+    if (impl_->retry < (impl_->queue.empty() ? kTextRetrySeconds : kRetrySeconds)) return;
     impl_->retry = 0.0f;
     if (!impl_->texts.empty() && TryFlushText(*impl_)) impl_->texts.clear();
     if (impl_->queue.empty()) {
@@ -488,7 +520,7 @@ Il2CppObject* SaleNotices::TeleporterIcon() {
     return best;
 }
 
-bool SaleNotices::QueueText(Il2CppObject* icon, const std::string& text) {
+bool SaleNotices::QueueText(Il2CppObject* icon, const std::string& text, bool flushNow) {
     if (!textReady_ || text.empty()) return false;
     if (!sr2::core::text_override::SinkActive()) {
         if (!impl_->loggedNoSink) {
@@ -500,8 +532,14 @@ bool SaleNotices::QueueText(Il2CppObject* icon, const std::string& text) {
     if (impl_->texts.size() < kMaxQueued) impl_->texts.push_back({icon, text});
     impl_->waited = 0.0f;
     impl_->retry = 0.0f;
-    if (TryFlushText(*impl_)) impl_->texts.clear();
+    if (flushNow && TryFlushText(*impl_)) impl_->texts.clear();
     return true;
+}
+
+void SaleNotices::FlushText() {
+    if (!textReady_ || impl_->texts.empty()) return;
+    impl_->retry = 0.0f;
+    if (TryFlushText(*impl_)) impl_->texts.clear();
 }
 
 }  // namespace sr2::modules::custom_upgrades::ui

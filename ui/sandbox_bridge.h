@@ -88,6 +88,18 @@ struct CostLine {
     bool currency = false;
 };
 
+// A variant of a gadget recipe, for the crafter's right-click menu: one of the game's variants
+// (GadgetDefinition.VariantOf is the recipe's gadget; crafted like a recipe, Op::Craft with its id) or one of
+// custom_upgrades' buildables on that base gadget (`mod`: Op::Craft with its id goes to buildables::Grant,
+// the vanilla base gadget plus a kit in the mod's sidecar; the clone never enters the save).
+struct Variant {
+    uintptr_t id = 0;       // opaque, like Recipe::id
+    std::string name;
+    uint32_t icon = 0;
+    bool unlocked = false;  // its blueprint (vanilla: GadgetDirector.HasBlueprint; mod: its Fabricator card)
+    bool mod = false;       // a mod buildable (custom_upgrades)
+};
+
 // A fabricator gadget recipe (a GadgetDefinition with a crafting cost), or a
 // crafting material the refinery stores (Snapshot::materials).
 struct Recipe {
@@ -102,6 +114,7 @@ struct Recipe {
     int owned = 0;          // GadgetDirector.GetItemCount (gadget inventory; the refinery for materials)
     int perCraft = 1;       // 2 for gadgets the fabricator makes in pairs (GadgetDefinition.BuyInPairs)
     Kind kind = Kind::Gadget;  // materials: their item kind
+    std::vector<Variant> variants;  // the gadget's variants (game's first, then the mod's), for the right-click menu
 };
 
 struct Snapshot {

@@ -24,9 +24,10 @@
 // queues free-text notices (QueueText: "Spawned 5 Pink Plort" with the item's icon) instead.
 //
 // Main thread only; every game call through Resolver::Invoke (managed exceptions caught, a native
-// fault marks the module faulted). No GC handles: queued IdentifiableTypes are persistent assets
-// and are class- and IsAlive-checked again before use. While something is queued, one
-// FindObjectOfType(ItemAcquisitionNotificationList) every 0.25 s; nothing otherwise. If that first
+// fault marks the module faulted). Queued IdentifiableTypes are persistent assets and are class- and
+// IsAlive-checked again before use (no handles). The list found last is kept with a GC handle (round 8;
+// IsAlive, class and provider checked on every use), so queued notices cost field reads, and only a
+// lost list costs one FindObjectOfType(ItemAcquisitionNotificationList) per retry. If that first
 // active list lacks the drone provider, every loaded list is checked (FindObjectsOfTypeAll; active
 // ones first, else a started inactive one for queued notices, never for Available()), at most once
 // per second; why none fits is logged once.
@@ -75,14 +76,17 @@ public:
     // The same drone-style pop-up with any sprite and text: our own NotificationEntry(provider, null group,
     // icon, name, NotificationEntryStyle.Default) appended to the list's _pendingNotifications (its Update
     // shows pending entries page by page). The name is a LocalizedString of our own (the _localizedName of
-    // an Instantiate'd ZoneDefinition, a pool of 4) whose text core/text_override replaces, so it needs the
+    // an Instantiate'd ZoneDefinition, a pool of 16) whose text core/text_override replaces, so it needs the
     // UI's LocalizeStringEvent sink (text_override::SinkActive()).
     // Worker thread, after Setup: false = unavailable (`why`).
     bool SetupText(sr2::il2cpp::Resolver& R, std::string& why);
     bool TextReady() const { return textReady_; }
     // Main thread: queue one notice; false = not possible now (no text sink) - callers just log. Queued
-    // notices go to the list a page at a time, only while it is idle, so a burst shows page after page.
-    bool QueueText(Il2CppObject* icon, const std::string& text);
+    // notices go to the list a page at a time, whenever it has nothing pending, so a burst shows page after
+    // page. A burst: queue each with flushNow = false, then FlushText() once, so the first page is full
+    // (handed over one by one, the first notice would get a page of its own).
+    bool QueueText(Il2CppObject* icon, const std::string& text, bool flushNow = true);
+    void FlushText();
     // Main thread: the game's teleporter sprite for such notices (the icon of a TELEPORTER gadget definition,
     // home teleporter, found once among the loaded GadgetDefinitions and kept); nullptr if none.
     Il2CppObject* TeleporterIcon();

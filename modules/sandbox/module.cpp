@@ -32,6 +32,7 @@
 #include <initializer_list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -48,6 +49,7 @@
 #include "core/unity.h"
 #include "modules/common/legend_hint.h"
 #include "modules/custom_upgrades/api.h"
+#include "modules/custom_upgrades/buildables.h"
 #include "modules/custom_upgrades/sale_notify.h"
 #include "modules/minimap/ugui.h"
 #include "modules/sandbox/achievements.h"
@@ -274,6 +276,7 @@ private:
     }
     bool Context(Ctx& c, std::string& why);
     Il2CppObject* SlotAt(const Ctx& c, int idx);
+    std::string VacpackState(bool sync);  // for the upgrades manager (log line; sync: slot maxima follow AmmoLimit)
     std::string Localized(Il2CppObject* ls);
     std::string ItemName(Il2CppObject* ident);
     uint32_t ItemIcon(Il2CppObject* ident, uint32_t* second = nullptr);
@@ -334,7 +337,7 @@ private:
     void Notify(Il2CppObject* type, NoticeKind kind, int count, const std::string& name, const std::string& text);
     Il2CppObject* NoticeIcon(Il2CppObject* type);
     static std::string NoticeText(NoticeKind kind, int count, const std::string& name);
-    void ShowNotice(Il2CppObject* icon, const std::string& notice);
+    bool ShowNotice(Il2CppObject* icon, const std::string& notice, bool flushNow = true);
     void FlushNotices();
     void EnsureCrateAreas();
 
@@ -345,6 +348,8 @@ private:
     int DoSpawn(const Ctx& c, uintptr_t item, int64_t count, int limit = kMaxSpawn);
     void DoStow(const Ctx& c, int sel, uintptr_t item, int64_t amount, bool replace);
     void DoCraft(uintptr_t item, int64_t count);
+    bool DoCraftMod(uintptr_t item, int64_t count);              // a mod buildable from the variant menu
+    bool MergeModVariants(std::vector<bridge::Recipe>& list);   // custom_upgrades' buildables as variants
     void DoAddMaterial(uintptr_t item, int64_t count);
     void DoMoveSlot(const Ctx& c, int from, int to);
     void DoUnlockSlot(const Ctx& c, int idx);
@@ -513,6 +518,7 @@ private:
     size_t offIdentCostAmount_ = 0, offIdentCostType_ = 0, identCostStride_ = 0;  // IdentCostEntry (in the struct)
     size_t offCurCostCurrency_ = 0, offCurCostAmount_ = 0;  // CurrencyCostEntry._currency / _amount
     size_t offBuyInPairs_ = 0;                       // GadgetDefinition.BuyInPairs
+    size_t offVariantOf_ = 0;                        // GadgetDefinition.VariantOf (optional: no variant menu)
     Il2CppClass* fabMenuClass_ = nullptr;            // FabricateMenuConfiguration (optional, for categories)
     Il2CppClass* fabGadgetCatClass_ = nullptr;       // GadgetFabricateCategory
     size_t offFabCategories_ = 0, offFabCatTitle_ = 0;
@@ -584,6 +590,12 @@ private:
     const MethodInfo* acquireComponent_ = nullptr;     // static AcquisitionUtility.AcquireUpgradeComponent(component, int)
     const MethodInfo* fabGridSelected_ = nullptr;      // FabricatorItemGrid.TryGetSelectedItem(out IFabricatableItem)
     const MethodInfo* fabContentSelected_ = nullptr;   // FabricatorContent.OnItemSelected(IFabricatableItem, InteractionCause)
+    // The quantity popup (FabricatorUI._confirmPopup, a FabricatorConfirmPopup; optional, round 8).
+    size_t offFabUiPopup_ = 0, offPopupItem_ = 0, offPopupCount_ = 0;  // _confirmPopup / its _item / _countToMake
+    size_t offFabUiConfirming_ = 0, offPopupClosing_ = 0;              // FabricatorUI._confirming / popup _isClosing
+    const MethodInfo* popupUpdate_ = nullptr;    // FabricatorConfirmPopup.UpdateCountAndRecipeDisplay(FabricationBlockedReason)
+    const MethodInfo* checkGadget_ = nullptr;    // GadgetFabricatableItem's IFabricatableItem.CheckCanFabricate(int)
+    const MethodInfo* checkUpgrade_ = nullptr;   // PlayerUpgradeFabricatableItem's IFabricatableItem.CheckCanFabricate(int)
     unsigned long long lastFabPoll_ = 0;
     bool fabOpen_ = false, fabKeyDown_ = false;
     // "[G] Add materials" in the Fabricator's own key bar (modules/common/legend_hint.h), before "[Z] Pin"
@@ -603,6 +615,7 @@ private:
 
     Il2CppObject* OpenFabricator();                    // the open FabricatorUI, or nullptr
     Il2CppObject* FabricatorItem(Il2CppObject* ui, Il2CppObject** content, Il2CppObject** details);
+    Il2CppObject* FabricatorPopup(Il2CppObject* ui);  // the quantity popup while it is shown, else nullptr
     void RefreshFabricator(bool rebuild = false);  // rebuild: also the grid, as on opening (RebuildFabricator)
     Il2CppObject* SpendableDirector();
     bool UpgradeHidden(Il2CppObject* um, Il2CppObject* up, Il2CppObject* spend, std::vector<Il2CppObject*>* missing);
@@ -706,7 +719,8 @@ bool Sandbox::Setup(sr2::core::ModuleContext& ctx) {
     sandbox::SetupPlayerExtras(ctx);  // optional tools on the Extras card (player_extras.cpp)
     sandbox::SetupUpgrades(ctx, {[this](uintptr_t id) { return Lookup(recipeById_, id, gadgetDefClass_); },
                                  [this](bool rebuild) { RefreshFabricator(rebuild); },
-                                 [this] { lastRecipeState_ = lastUpgState_ = lastSnap_ = 0; }});  // upgrades.cpp
+                                 [this] { lastRecipeState_ = lastUpgState_ = lastSnap_ = 0; },
+                                 [this](bool sync) { return VacpackState(sync); }});  // upgrades.cpp
 
     g_self = this;
     if (!frameCb_) frameCb_ = main_thread::AddFrameCallback(kModule, [this](float dt) { Tick(dt); });
@@ -922,6 +936,8 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
     gadgetCount_ = method(gadgetDir, "GetItemCount", 1, cw);
     off(gadgetDefClass_, "CraftingCosts", offCraftCosts_, cw);
     off(gadgetDefClass_, "BuyInPairs", offBuyInPairs_, cw);
+    if (gadgetDefClass_)
+        if (auto o = R.FieldOffset(gadgetDefClass_, "VariantOf")) offVariantOf_ = *o;
     structOff(cost, "_currencyCosts", offCostCurrency_, cw);
     structOff(cost, "IdentCosts", offCostIdent_, cw);
     structOff(identCost, "Amount", offIdentCostAmount_, cw);
@@ -1059,6 +1075,62 @@ bool Sandbox::Context(Ctx& c, std::string& why) {
         }
     }
     return true;
+}
+
+// "slot 1 holds up to 60, 6 of 9 slots unlocked": what the Tank Booster / Extra Tank levels show, read the
+// way the page reads it (AmmoSlotManager.GetSlotMaxCount, AmmoSlot.IsUnlocked).
+// `sync` (after a Tank Booster / Extra Tank change): when slot 1's maximum is not what the AmmoLimit property
+// now says, every slot's maximum is set to it with AmmoSlotManager.UpdateMaxCount (0xA3AB70 -> AmmoModel.
+// UpdateMaxCount -> AmmoSlot.set_MaxCount, the NullableFloatProperty's DefaultValue; the call the silo
+// capacity upgrade uses). A backstop for "the Tank Booster max stayed at 60" (round 8), cause not seen.
+std::string Sandbox::VacpackState(bool sync) {
+    Ctx c;
+    std::string why;
+    if (!Context(c, why)) return "no player (" + why + ")";
+    const size_t n = c.slots ? unity::ArrayLength(c.slots) : 0;
+    int max0 = -1, unlocked = 0;
+    for (size_t i = 0; i < n; ++i) {
+        int idx = static_cast<int>(i);
+        Il2CppObject* a = SlotAt(c, idx);
+        if (!a) continue;
+        bool open = false;
+        CallValue(slotUnlocked_, a, {}, "AmmoSlot.IsUnlocked", open);
+        unlocked += open ? 1 : 0;
+        if (i == 0) CallValue(slotMax_, c.ammo, {&idx}, "AmmoSlotManager.GetSlotMaxCount", max0);
+    }
+    // Where slot 1's maximum comes from: AmmoSlot._maxCountValue (NullableFloatProperty: DefaultValue, or the
+    // bound ModifiableFloat "AmmoLimit" that the Tank Booster's modifiers change; AmmoSlot.Setup binds it).
+    std::string src;
+    Il2CppObject* a0 = n ? SlotAt(c, 0) : nullptr;
+    auto& R = Resolver::Get();
+    static std::optional<size_t> offNullable = R.FieldOffset(ammoSlotClass_, "_maxCountValue");
+    Il2CppObject* nullable = a0 && offNullable ? unity::Field<Il2CppObject*>(a0, *offNullable) : nullptr;
+    if (nullable) {
+        Il2CppClass* nk = api().il2cpp_object_get_class(nullable);
+        auto offDef = R.FieldOffset(nk, "DefaultValue"), offProp = R.FieldOffset(nk, "Property");
+        Il2CppObject* prop = offProp ? unity::Field<Il2CppObject*>(nullable, *offProp) : nullptr;
+        float value = -1.0f;
+        if (prop) {
+            const MethodInfo* get = nullptr;
+            for (Il2CppClass* k = api().il2cpp_object_get_class(prop); k && !get; k = api().il2cpp_class_get_parent(k))
+                get = R.Method(k, "get_Value", 0);
+            CallValue(get, prop, {}, "ModifiableFloat.get_Value", value);
+        }
+        src = std::format("; its default {}, AmmoLimit property {}", offDef ? unity::Field<float>(nullable, *offDef) : -1.0f,
+                          prop ? std::format("bound, value {}", value) : std::string("not bound"));
+        const int want = static_cast<int>(std::floor(value));
+        static const MethodInfo* updateMax = R.Method(ammoMgrClass_, "UpdateMaxCount", 1);
+        if (sync && prop && want > 0 && want != max0 && updateMax) {
+            int32_t v = want;
+            bool ok = false;
+            Call(updateMax, c.ammo, {&v}, "AmmoSlotManager.UpdateMaxCount", &ok);
+            int idx = 0, now = -1;
+            CallValue(slotMax_, c.ammo, {&idx}, "AmmoSlotManager.GetSlotMaxCount", now);
+            src += std::format("; slot maxima set to {} with UpdateMaxCount ({} -> {})", want, max0, now);
+            max0 = now;
+        }
+    }
+    return std::format("slot 1 holds up to {}{}, {} of {} slots unlocked", max0, src, unlocked, n);
 }
 
 Il2CppObject* Sandbox::SlotAt(const Ctx& c, int idx) {
@@ -2009,13 +2081,19 @@ bool Sandbox::EnsureRecipes() {
         catSource = "the gadget groups";
     }
     auto list = std::make_shared<std::vector<bridge::Recipe>>();
+    // The game's gadget variants (GadgetDefinition.VariantOf = the base gadget), per base, for the right-click
+    // menu. A variant with its own cost is a recipe as well (category -1: in no Fabricator tab).
+    std::unordered_map<uintptr_t, std::vector<bridge::Variant>> variantsOf;
+    size_t variantCount = 0;
     for (Il2CppObject* d : unity::FindObjectsOfTypeAll(gadgetDefClass_)) {
         if (sr2::core::ModuleFaulted(kModule)) break;
         if (!IsA(d, gadgetDefClass_) || !unity::IsAlive(d)) continue;
         char* costs = reinterpret_cast<char*>(d) + offCraftCosts_;
         const size_t nIdent = unity::ListCount(*reinterpret_cast<void**>(costs + offCostIdent_));
         const size_t nCur = unity::ListCount(*reinterpret_cast<void**>(costs + offCostCurrency_));
-        if (nIdent == 0 && nCur == 0) continue;  // not crafted at the fabricator
+        Il2CppObject* variantOf = offVariantOf_ ? unity::Field<Il2CppObject*>(d, offVariantOf_) : nullptr;
+        if (variantOf && (variantOf == d || !IsA(variantOf, gadgetDefClass_))) variantOf = nullptr;
+        if (nIdent == 0 && nCur == 0 && !variantOf) continue;  // not crafted at the fabricator
         if (!Saveable(index, d)) {
             leftOut.push_back(unity::GetName(d));
             continue;
@@ -2042,8 +2120,25 @@ bool Sandbox::EnsureRecipes() {
         Il2CppGCHandle h = unity::NewGCHandle(d);
         if (!h) continue;
         recipeById_[r.id] = CatalogEntry{h, d};
+        if (variantOf) {
+            variantsOf[reinterpret_cast<uintptr_t>(variantOf)].push_back({r.id, r.name, r.icon, false, false});
+            ++variantCount;
+            if (nIdent == 0 && nCur == 0) continue;  // crafted through its base gadget's menu only
+        }
         list->push_back(std::move(r));
     }
+    size_t withVariants = 0;
+    for (bridge::Recipe& r : *list) {
+        auto it = variantsOf.find(r.id);
+        if (it == variantsOf.end()) continue;
+        r.variants = std::move(it->second);
+        std::sort(r.variants.begin(), r.variants.end(),
+                  [](const bridge::Variant& a, const bridge::Variant& b) { return a.name < b.name; });
+        ++withVariants;
+    }
+    if (offVariantOf_)
+        SR2_INFO("[{}] crafter: {} gadget variant(s) of {} recipe(s) in the right-click menu", kModule, variantCount,
+                 withVariants);
     std::sort(list->begin(), list->end(), [](const bridge::Recipe& a, const bridge::Recipe& b) { return a.name < b.name; });
     recipes_ = std::move(list);
     recipeCats_ = std::move(titles);
@@ -2080,7 +2175,16 @@ void Sandbox::RefreshRecipeState() {
             if (unlocked != r.unlocked || owned != r.owned) changed = true;
             r.unlocked = unlocked;
             r.owned = owned;
+            for (bridge::Variant& v : r.variants) {
+                if (v.mod) continue;
+                Il2CppObject* vd = Lookup(recipeById_, v.id, gadgetDefClass_);
+                bool vu = false;
+                if (vd) CallValue(hasBlueprint_, dir, {vd}, "GadgetDirector.HasBlueprint", vu);
+                changed = changed || vu != v.unlocked;
+                v.unlocked = vu;
+            }
         }
+        changed = MergeModVariants(*next) || changed;
         if (changed) recipes_ = std::move(next);
     }
     if (materials_ && !materials_->empty()) {
@@ -2095,6 +2199,64 @@ void Sandbox::RefreshRecipeState() {
         }
         if (changed) materials_ = std::move(next);
     }
+}
+
+// custom_upgrades' buildables that are variants of a vanilla gadget (Quantum Storage Link on the Refinery Link,
+// DJ Booth on the Scientist Desk, DJ Speaker on the Boombox; buildables::List, Info.baseDef) go into that
+// recipe's variant list, marked `mod`, behind the game's variants. Their id is the buildable's definition
+// (opaque; DoCraftMod matches it against List() again and grants through buildables::Grant, never AddItem).
+// The Slime Radio is a toy of its own, not a variant. Empty while custom upgrades are off or the buildables
+// are not built yet (a moment after a save is loaded). True if anything changed.
+bool Sandbox::MergeModVariants(std::vector<bridge::Recipe>& list) {
+    namespace bld = sr2::modules::custom_upgrades::buildables;
+    std::unordered_map<uintptr_t, std::vector<bridge::Variant>> mods;
+    for (const bld::Info& i : bld::List()) {
+        if (!i.def || !i.baseDef || i.id == bld::kSlimeRadio) continue;
+        bridge::Variant v;
+        v.id = reinterpret_cast<uintptr_t>(i.def);
+        v.name = i.name;
+        v.icon = ItemIcon(i.def);
+        if (!v.icon && i.icon && unity::IsAlive(i.icon)) v.icon = sr2::ui::item_icons::Register(i.icon);
+        v.unlocked = i.unlocked;
+        v.mod = true;
+        mods[reinterpret_cast<uintptr_t>(i.baseDef)].push_back(std::move(v));
+    }
+    bool changed = false;
+    for (bridge::Recipe& r : list) {
+        const auto it = mods.find(r.id);
+        std::vector<bridge::Variant> want;
+        for (const bridge::Variant& v : r.variants)
+            if (!v.mod) want.push_back(v);
+        if (it != mods.end()) want.insert(want.end(), it->second.begin(), it->second.end());
+        const bool same = want.size() == r.variants.size() &&
+                          std::equal(want.begin(), want.end(), r.variants.begin(), [](const auto& a, const auto& b) {
+                              return a.id == b.id && a.unlocked == b.unlocked && a.icon == b.icon && a.name == b.name;
+                          });
+        if (same) continue;
+        r.variants = std::move(want);
+        changed = true;
+    }
+    return changed;
+}
+
+// A mod buildable picked in the crafter's variant menu (`item` is its definition, see MergeModVariants): given
+// through buildables::Grant (the vanilla base gadget into the inventory plus a kit in the mod's sidecar, as
+// fabricating it does). False if `item` is not one of them (then it is an ordinary recipe).
+bool Sandbox::DoCraftMod(uintptr_t item, int64_t count) {
+    namespace bld = sr2::modules::custom_upgrades::buildables;
+    if (!item || !custom_upgrades::IsModGadget(reinterpret_cast<Il2CppObject*>(item))) return false;
+    for (const bld::Info& i : bld::List()) {
+        if (reinterpret_cast<uintptr_t>(i.def) != item) continue;
+        const int n = static_cast<int>(std::clamp<int64_t>(count, 1, kMaxCraft));
+        std::string result;
+        if (bld::Grant(i.id, n, result))
+            Notify(i.def, NoticeKind::Craft, n, i.name, std::format("Crafted {} x {} for free: {}", n, i.name, result));
+        else
+            Done(false, std::format("{} not crafted: {}", i.name, result));
+        return true;
+    }
+    Done(false, "Not crafted: that mod buildable is not available right now (custom upgrades off, or no save loaded)");
+    return true;
 }
 
 // The recipe pinned in the game's Fabricator (PlayerModel.PinnedRecipe, an IRecipe whose ReferenceId is
@@ -2330,13 +2492,14 @@ Il2CppObject* Sandbox::NoticeIcon(Il2CppObject* type) {
     return icon;
 }
 
-void Sandbox::ShowNotice(Il2CppObject* icon, const std::string& notice) {
+bool Sandbox::ShowNotice(Il2CppObject* icon, const std::string& notice, bool flushNow) {
     if (icon && ((spriteClass_ && !IsA(icon, spriteClass_)) || !unity::IsAlive(icon))) icon = nullptr;
-    if (notices_.TextReady() && notices_.Available() && notices_.QueueText(icon, notice)) {
+    if (notices_.TextReady() && notices_.Available() && notices_.QueueText(icon, notice, flushNow)) {
         bridge::SetStatus("", false);  // no stale line from an earlier request
-        return;
+        return true;
     }
     bridge::SetStatus(notice, false);
+    return false;
 }
 
 // The collected notices of a multi-item request: one per item type and kind (the same type twice, e.g.
@@ -2351,8 +2514,12 @@ void Sandbox::FlushNotices() {
         if (it != merged.end()) it->count += l.count;
         else merged.push_back(l);
     }
-    for (const NoticeLine& l : merged) ShowNotice(l.icon, NoticeText(l.kind, l.count, l.name));
-    if (merged.size() > 1) SR2_INFO("[{}] {} HUD notices queued (shown in sequence)", kModule, merged.size());
+    // All queued first, then handed over together: the first page holds as many as the HUD shows at once
+    // (one by one, the first notice took a page of its own and the rest waited for it to fade out).
+    bool queued = false;
+    for (const NoticeLine& l : merged) queued = ShowNotice(l.icon, NoticeText(l.kind, l.count, l.name), false) || queued;
+    if (queued) notices_.FlushText();
+    if (merged.size() > 1) SR2_INFO("[{}] {} HUD notices queued (one per item)", kModule, merged.size());
 }
 
 // ---------------------------------------------------------------- actions ----
@@ -2432,7 +2599,7 @@ void Sandbox::Handle(const bridge::Action& a) {
         case bridge::Op::Spawn: DoSpawn(c, a.item, a.value, kMaxDrop); break;
         case bridge::Op::StowItem: DoStow(c, a.slot, a.item, a.value, a.replace); break;
         case bridge::Op::Craft:
-            DoCraft(a.item, a.value);
+            if (!DoCraftMod(a.item, a.value)) DoCraft(a.item, a.value);
             lastRecipeState_ = 0;  // show the new owned count at once
             break;
         case bridge::Op::AddMaterial:
@@ -2445,6 +2612,11 @@ void Sandbox::Handle(const bridge::Action& a) {
         case bridge::Op::DiscoverUpgrades: DoDiscoverUpgrades(c); break;
         case bridge::Op::InfiniteEnergy: break;  // handled above
     }
+    // A batch's notices go to the HUD before the refreshes below (they used to wait for them). The items
+    // before a batch's last one skip the refreshes: the last one does them once.
+    const bool batchMid = batchSize_ > 1 && batchIdx_ < batchSize_;
+    if (!batchMid && !batchNotices_.empty()) FlushNotices();
+    if (batchMid) return;
     // An open Fabricator shows the new counts at once (else only after selecting another recipe and back).
     if (a.op == bridge::Op::AddMaterial || a.op == bridge::Op::Craft || a.op == bridge::Op::SetNewbucks ||
         a.op == bridge::Op::AddNewbucks)
@@ -3108,6 +3280,24 @@ void Sandbox::SetupUnlocks(sr2::il2cpp::Resolver& R) {
     // (FabricatorContent.OnItemSelected: details SetItem, variants button, ItemSelected -> the key legend).
     fabGridSelected_ = method(grid, "TryGetSelectedItem", 1, fw);
     fabContentSelected_ = method(content, "OnItemSelected", 2, fw);
+    {
+        // The quantity popup that Fabricate opens for a gadget (optional): G then takes its item and count.
+        std::string pw;
+        Il2CppClass* popup = cls(kFabNs, "FabricatorConfirmPopup", pw);
+        off(fabUiClass_, "_confirmPopup", offFabUiPopup_, pw);
+        off(popup, "_item", offPopupItem_, pw);
+        off(popup, "_countToMake", offPopupCount_, pw);
+        off(fabUiClass_, "_confirming", offFabUiConfirming_, pw);
+        off(popup, "_isClosing", offPopupClosing_, pw);
+        popupUpdate_ = method(popup, "UpdateCountAndRecipeDisplay", 1, pw);
+        constexpr const char* kCheck = "MonomiPark.SlimeRancher.UI.Fabricator.IFabricatableItem.CheckCanFabricate";
+        checkGadget_ = method(fabGadgetItemClass_, kCheck, 1, pw);
+        checkUpgrade_ = method(fabUpgradeItemClass_, kCheck, 1, pw);
+        if (!pw.empty()) {
+            offFabUiPopup_ = 0;
+            SR2_WARN("[{}] Fabricator key: the quantity popup is not supported ({})", kModule, pw);
+        }
+    }
     // What it adds with: the crafter's refinery symbols and PurchaseCost layout, and the upgrade model.
     if (fw.empty() && (!gadgetAddItem_ || !refinerySpace_ || !offCraftCosts_ || !offCostIdent_ || !identCostStride_))
         fw = "the crafter's refinery / recipe-cost symbols are missing";
@@ -3382,6 +3572,20 @@ Il2CppObject* Sandbox::FabricatorItem(Il2CppObject* ui, Il2CppObject** contentOu
                : nullptr;
 }
 
+// The quantity popup (FabricatorUI._confirmPopup) while it is shown (FabricatorUI._confirming, the popup not
+// closing) with an item: Fabricate on a gadget opens it
+// (FabricatorConfirmPopup.Show; _countToMake is the chosen quantity, IncrementCount 0x800DB0 / DecrementCount
+// change it and call UpdateCountAndRecipeDisplay(item.CheckCanFabricate(count))).
+Il2CppObject* Sandbox::FabricatorPopup(Il2CppObject* ui) {
+    if (!ui || !offFabUiPopup_ || !unity::Field<bool>(ui, offFabUiConfirming_)) return nullptr;  // not confirming
+    Il2CppObject* popup = unity::Field<Il2CppObject*>(ui, offFabUiPopup_);
+    if (!popup || !unity::IsAlive(popup) || unity::Field<bool>(popup, offPopupClosing_) ||
+        !unity::ActiveInHierarchy(unity::GameObjectOf(popup)))
+        return nullptr;
+    Il2CppObject* item = unity::Field<Il2CppObject*>(popup, offPopupItem_);
+    return item && (IsA(item, fabGadgetItemClass_) || IsA(item, fabUpgradeItemClass_)) ? popup : nullptr;
+}
+
 // After anything that changes what the open Fabricator's selected recipe needs or has (G, refinery items,
 // crafts, Newbucks, upgrade levels, components): the refresh the game runs when the selection changes,
 // FabricatorContent.OnItemSelected(item, PROGRAMMATIC) (0x804700, decompiled: details SetItem -> recipe counts
@@ -3540,12 +3744,19 @@ void Sandbox::DoFabricatorMaterials() {
     Il2CppObject* content = nullptr;
     Il2CppObject* details = nullptr;
     Il2CppObject* item = FabricatorItem(ui, &content, &details);
+    Il2CppObject* recipe = details && unity::IsAlive(details) ? unity::Field<Il2CppObject*>(details, offFabDetailsRecipe_) : nullptr;
+    int count = recipe && unity::IsAlive(recipe) ? std::clamp(unity::Field<int32_t>(recipe, offFabRecipeCount_), 1, 999) : 1;
+    // On the quantity popup (round 8: "[G] should also work when choosing how much to fabricate"): its item and
+    // the quantity chosen there.
+    Il2CppObject* popup = FabricatorPopup(ui);
+    if (popup) {
+        item = unity::Field<Il2CppObject*>(popup, offPopupItem_);
+        count = std::clamp(unity::Field<int32_t>(popup, offPopupCount_), 1, 999);
+    }
     if (!item) {
         Done(false, "Fabricator: select a recipe first");
         return;
     }
-    Il2CppObject* recipe = details && unity::IsAlive(details) ? unity::Field<Il2CppObject*>(details, offFabDetailsRecipe_) : nullptr;
-    int count = recipe && unity::IsAlive(recipe) ? std::clamp(unity::Field<int32_t>(recipe, offFabRecipeCount_), 1, 999) : 1;
     // The cost: a gadget's CraftingCosts, or the next level's _costs of an upgrade.
     const char* costs = nullptr;
     std::string name;
@@ -3657,24 +3868,35 @@ void Sandbox::DoFabricatorMaterials() {
         const int maxBucks = unity::Field<int32_t>(c.model, offMaxCurrency_);
         int add = static_cast<int>(std::clamp<int64_t>(amount - have, 0, std::max(0, maxBucks - have)));
         if (add <= 0) continue;
-        bool popup = true, ok = false;
-        Call(addCurrency_, c.player, {c.currency, &add, &popup, nullptr}, "PlayerState.AddCurrency", &ok);
+        bool coinPopup = true, ok = false;
+        Call(addCurrency_, c.player, {c.currency, &add, &coinPopup, nullptr}, "PlayerState.AddCurrency", &ok);
         if (ok) added.push_back(std::format("{} Newbucks", Thousands(add)));
     }
     // Show the new counts: the game's selection-change refresh (it sets the recipe to 1 craft), then the
     // recipe again with the chosen count.
     if (!added.empty()) {
-        RefreshFabricator();
+        // With the popup up only the details panel behind it (no selection event: that would also switch the
+        // key bar to the recipe page's while the popup has its own).
+        if (!popup) RefreshFabricator();
+        else if (details && unity::IsAlive(details)) Call(fabDetailsSetItem_, details, {item}, "FabricatorItemDetails.SetItem");
         bool ok = false;
-        if (count > 1 && recipe && unity::IsAlive(recipe))
+        if (count > 1 && recipe && unity::IsAlive(recipe) && !popup)
             Call(fabRecipeSetItem_, recipe, {item, &count}, "FabricatorRecipe.SetItem", &ok);
+        // The popup's have / need counts and its confirm button, as its own +/- does.
+        if (popup && unity::IsAlive(popup)) {
+            const MethodInfo* check = IsA(item, fabGadgetItemClass_) ? checkGadget_ : checkUpgrade_;
+            int32_t reason = 0, n = count;
+            if (CallValue(check, item, {&n}, "IFabricatableItem.CheckCanFabricate", reason))
+                Call(popupUpdate_, popup, {&reason}, "FabricatorConfirmPopup.UpdateCountAndRecipeDisplay");
+        }
     }
     auto join = [](const std::vector<std::string>& v) {
         std::string s;
         for (const std::string& x : v) s += (s.empty() ? "" : ", ") + x;
         return s;
     };
-    const std::string what = count > 1 ? std::format("{} x {}", count, name) : name;
+    const std::string what = std::format("{}{}{}", count > 1 ? std::format("{} x ", count) : "", name,
+                                         popup ? " (quantity popup)" : "");
     if (added.empty() && missed.empty()) Done(true, std::format("Fabricator: you already have everything for {}", what));
     else if (missed.empty()) Done(true, std::format("Fabricator: added {} for {}", join(added), what));
     else Done(!added.empty(), std::format("Fabricator: {}{} for {}; not added: {}", added.empty() ? "nothing added" : "added ",

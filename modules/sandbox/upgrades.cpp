@@ -84,6 +84,9 @@ const MethodInfo* g_getUpgradeModel = nullptr;    // PlayerModel.GetUpgradeModel
 const MethodInfo* g_getLevel = nullptr;           // UpgradeModel.GetUpgradeLevel(UpgradeDefinition)
 const MethodInfo* g_setLevel = nullptr;           // UpgradeModel.SetUpgradeLevel(UpgradeDefinition, int)
 const MethodInfo* g_locGet = nullptr;             // LocalizedString.GetLocalizedString
+Il2CppClass* g_handlerClass = nullptr;            // ActorUpgradeHandler (optional: the effects applied again)
+const MethodInfo* g_applyUpgrade = nullptr;       // ActorUpgradeHandler.ApplyUpgrade(UpgradeDefinition, int) (private)
+size_t g_offUmParticipants = 0;                   // UpgradeModel.participants (List<UpgradeModel.Participant>)
 size_t g_offPlayerModel = 0;                      // PlayerState._model
 size_t g_offUmDefs = 0;                           // UpgradeModel.upgradeDefinitions (UpgradeDefinitionList)
 size_t g_offUdIcon = 0, g_offUdRequire = 0, g_offUdId = 0, g_offUdLevels = 0;  // UpgradeDefinition fields
@@ -400,13 +403,42 @@ void AfterChange() {
 }
 
 // --------------------------------------------------------------- levels ----
-// SetUpgradeLevel(def, to); for a discoverable upgrade reset to -1, level 0's components come back if
-// missing (it stays discovered). `note` gets what happened besides the level.
+// The level's effects once more, straight on every ActorUpgradeHandler of the model (UpgradeModel.
+// participants; the player's handler is one): ApplyUpgrade (0x8646B0, decompiled) removes what that upgrade
+// applied before and adds _levels[level].Effects (none at -1), so a second call changes nothing when the
+// event already did it. Needed when SetUpgradeLevel stored the level but an earlier subscriber of its
+// multicast OnUpgradeChanged threw, so the handler never heard of it (round 8: "Tank Booster max stayed at
+// 60"; the exact cause was not seen). Returns the number of handlers.
+int ApplyEffects(Il2CppObject* um, Il2CppObject* def, int level) {
+    if (!g_applyUpgrade || !g_handlerClass || !g_offUmParticipants) return 0;
+    void* list = unity::Field<void*>(um, g_offUmParticipants);
+    int n = 0;
+    for (size_t i = 0, c = unity::ListCount(list); i < c && i < 64; ++i) {
+        auto* h = static_cast<Il2CppObject*>(unity::ListAt(list, i));
+        if (!IsA(h, g_handlerClass)) continue;
+        int32_t v = level;
+        bool ok = false;
+        Call(g_applyUpgrade, h, {def, &v}, "ActorUpgradeHandler.ApplyUpgrade", &ok);
+        if (ok) ++n;
+    }
+    return n;
+}
+
+// SetUpgradeLevel(def, to), then the effects applied directly too (ApplyEffects); for a discoverable upgrade
+// reset to -1, level 0's components come back if missing (it stays discovered). `note` gets what happened
+// besides the level.
 bool SetLevel(Il2CppObject* um, Il2CppObject* spend, Il2CppObject* def, int to, std::string& note) {
     int32_t v = to;
     bool ok = false;
     Call(g_setLevel, um, {def, &v}, "UpgradeModel.SetUpgradeLevel", &ok);
-    if (!ok || Level(um, def) != to) return false;
+    if (Level(um, def) != to) return false;
+    const int handlers = ApplyEffects(um, def, to);
+    if (!ok) {
+        // The level is stored; the exception came from a subscriber of OnUpgradeChanged (logged above).
+        SR2_WARN("[{}] '{}': SetUpgradeLevel stored level {} but threw; effects applied directly on {} handler(s)",
+                 kModule, unity::GetName(def), to + 1, handlers);
+        if (!handlers) return false;
+    }
     if (to < 0 && spend) {
         const auto gate = GateComponents(def);
         int given = 0;
@@ -426,10 +458,16 @@ void DoSetLevel(uintptr_t id, long long value) {
     const std::string name = Info(def).name;
     if (to == from) return Done(true, std::format("{} is {} already", name, to < 0 ? "not bought" : "at " + Roman(to + 1)));
     std::string note;
+    const int32_t uid = unity::Field<int32_t>(def, g_offUdId);
+    const bool vacpack = VanillaLevels(uid) > 0;  // Tank Booster / Extra Tank: the slots are logged around it
+    const std::string before = vacpack && g_host.vacpackState ? g_host.vacpackState(false) : std::string();
     if (!SetLevel(um, SpendableDirector(), def, to, note))
         return Done(false, std::format("{} not changed: the game refused level {} (see the log)", name, to + 1));
     Done(true, std::format("{}: {} -> {} (of {}), free{}", name, from < 0 ? "not bought" : Roman(from + 1),
                            to < 0 ? "not bought" : Roman(to + 1), Roman(levels), note));
+    if (vacpack && g_host.vacpackState)
+        SR2_INFO("[{}] vacpack after {} {}: {} (before: {})", kModule, name, to < 0 ? "-" : Roman(to + 1),
+                 g_host.vacpackState(true), before);
     AfterChange();
 }
 
@@ -453,6 +491,7 @@ void DoMaxAll() {
                                                  : "Every upgrade is at its last level already");
     Done(failed == 0, std::format("Maxed {} upgrade(s), free: {}{}", raised, list,
                                   failed ? std::format(" ({} refused)", failed) : std::string()));
+    if (g_host.vacpackState) SR2_INFO("[{}] vacpack after Max: {}", kModule, g_host.vacpackState(true));
     AfterChange();
 }
 
@@ -721,6 +760,16 @@ void SetupUpgrades(sr2::core::ModuleContext& ctx, UpgradesHost host) {
         g_getLevel = method(upModel, "GetUpgradeLevel", 1, w);
         g_setLevel = method(upModel, "SetUpgradeLevel", 2, w);
         g_locGet = method(loc, "GetLocalizedString", 0, w);
+        {
+            std::string optional;  // the direct re-apply is a backstop only
+            g_handlerClass = cls(kImage, "", "ActorUpgradeHandler", optional);
+            g_applyUpgrade = method(g_handlerClass, "ApplyUpgrade", 2, optional);
+            off(upModel, "participants", g_offUmParticipants, optional);
+            if (!optional.empty()) {
+                g_applyUpgrade = nullptr;
+                SR2_WARN("[{}] upgrades manager: effects are applied by the game's event only ({})", kModule, optional);
+            }
+        }
         off(g_playerStateClass, "_model", g_offPlayerModel, w);
         off(upModel, "upgradeDefinitions", g_offUmDefs, w);
         off(g_upgradeDefClass, "_icon", g_offUdIcon, w);

@@ -1308,6 +1308,8 @@ enum class SbxGrid { Vacpack, Spawner };
 uintptr_t g_ctxItem = 0;
 SbxGrid g_ctxGrid = SbxGrid::Vacpack;
 constexpr const char* kSbxCtx = "##sbx_item_ctx";
+constexpr const char* kCraftCtx = "##sbx_craft_ctx";  // the crafter's right-click menu (variants)
+uintptr_t g_craftCtx = 0;                             // the recipe it was opened on
 constexpr const char* kSlotDrag = "SR2_SLOT";  // drag payload: a vacpack slot index (int)
 // The grid under the mouse: the key hints in the tab bar show its controls.
 enum class SbxHover { None, Slots, Picker, Spawner, Crafter, Upgrades, Blueprints };
@@ -1405,9 +1407,9 @@ void SandboxConfirm(const ModuleView& mv) {
         ImGui::TextUnformatted("Sandbox edits change your save directly. Enable?");
         ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.warn),
                            "This marks the loaded save (or, on the title screen, the next save you load) as cheated: "
-                           "Steam achievements are disabled in it for good, also after you turn Sandbox off.");
+                           "Steam achievements are disabled in it for good, and Sandbox can't be turned off in it again.");
         DimText("Each save keeps its own Sandbox switch: saves without the mark load with Sandbox off, a marked save "
-                "loads with Sandbox on or off as you left it.");
+                "always loads with Sandbox on.");
         ImGui::PopTextWrapPos();
         DimText("Every edit goes through the game's own functions and is kept when the game next saves. "
                 "There is no undo, so back up your save if you want to keep it as it is.");
@@ -2655,6 +2657,61 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
 // materials to the refinery.
 constexpr int kCraftEverything = -4, kCraftPinned = -3, kCraftMaterials = -2, kCraftAll = -1;
 
+// Right-click menu of a crafter recipe: the gadget itself, then its variants (the game's, then the mod's
+// buildables on it, modules/sandbox: Recipe::variants), each crafted like a tile (Op::Craft; the amount
+// picked on the recipe, else 1). A locked blueprint is crafted anyway (dimmed, with a tooltip); a mod
+// buildable is given the mod's way (its base gadget plus a kit in the mod's file).
+void CraftVariantMenu(const sbx::Snapshot& s) {
+    const Palette& P = theme::Colors();
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(8), U(8)));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(6), U(4)));
+    PushFloatingStyle();
+    if (ImGui::BeginPopup(kCraftCtx)) {
+        FloatingSurface(true);
+        const sbx::Recipe* rc = nullptr;
+        if (s.recipes)
+            for (const sbx::Recipe& x : *s.recipes)
+                if (x.id == g_craftCtx) rc = &x;
+        if (!rc) {
+            ImGui::CloseCurrentPopup();
+        } else {
+            const auto pk = g_craftPick.find(rc->id);
+            const int amount = pk != g_craftPick.end() ? std::max(1, pk->second) : 1;
+            {
+                FontScope f(theme::Body(), theme::kSmallSize);
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.soft), "%s", rc->name.c_str());
+            }
+            const float e = U(22), rowW = U(250), fs = theme::kSmallSize + 0.5f;
+            int row = 0;
+            auto entry = [&](uintptr_t id, const std::string& name, uint32_t icon, bool unlocked, bool mod) {
+                ImGui::PushID(++row);
+                const ImVec2 p = ImGui::GetCursorScreenPos();
+                const bool hit = ImGui::Selectable("##variant", false, 0, ImVec2(rowW, e));
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                item_grid::DrawIcons(dl, icon, 0, p, ImVec2(p.x + e, p.y + e), unlocked ? IM_COL32_WHITE : IM_COL32(255, 255, 255, 120));
+                const std::string label = amount > 1 ? std::format("Craft {}: {}", amount, name) : "Craft: " + name;
+                const ImVec2 ts = TextSize(theme::Body(), fs, label.c_str());
+                Text(dl, theme::Body(), fs, ImVec2(p.x + e + U(8), p.y + (e - ts.y) * 0.5f), unlocked ? P.text : P.dim,
+                     label.c_str());
+                if (ImGui::IsItemHovered() && (mod || !unlocked))
+                    Tooltip(mod ? (std::string("Mod buildable: you get a ") + rc->name +
+                                   " and a kit to place it as this, kept in the mod's file, not in the save.")
+                                      .c_str()
+                                : "Blueprint not unlocked: crafting puts it in your inventory anyway.");
+                if (hit) SbxRequest(sbx::Op::Craft, amount, -1, id);
+                ImGui::PopID();
+            };
+            entry(rc->id, rc->name, rc->icon, rc->unlocked, false);
+            if (rc->variants.empty()) DimText("No variants.");
+            for (const sbx::Variant& v : rc->variants) entry(v.id, v.name, v.icon, v.unlocked, v.mod);
+        }
+        if (PopupCancelled()) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    PopFloatingStyle();
+    ImGui::PopStyleVar(2);
+}
+
 // Tab order of a fabricator category: Utilities, Warp Tech, Decorations, then the rest (by index).
 int CraftCatRank(const std::string& title, int index) {
     std::string low;
@@ -2831,8 +2888,13 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
             info += std::format("In your inventory: {}{}.", rc.owned, rc.perCraft > 1 ? " (made in pairs)" : "");
             if (!rc.unlocked) info += " Blueprint not unlocked: crafting puts it in your inventory anyway.";
         }
-        ItemTooltip(s, rc.name, mat ? rc.kind : sbx::Kind::Gadget, mat ? rc.id : 0, info.c_str(), mat ? nullptr : &rc.costs,
-                    {{"LMB", g_craftPick.count(rc.id) ? "deselect" : "select"}, {"Shift+Wheel", "amount"}});
+        if (!mat && !rc.variants.empty()) info += std::format(" {} variant{}: right-click.", rc.variants.size(),
+                                                              rc.variants.size() == 1 ? "" : "s");
+        std::vector<KeyRow> keys{{"LMB", g_craftPick.count(rc.id) ? "deselect" : "select"}, {"Shift+Wheel", "amount"}};
+        if (!mat) keys.push_back({"RMB", rc.variants.empty() ? "craft menu" : "variants"});
+        if (!ImGui::IsPopupOpen(kCraftCtx))
+            ItemTooltip(s, rc.name, mat ? rc.kind : sbx::Kind::Gadget, mat ? rc.id : 0, info.c_str(), mat ? nullptr : &rc.costs,
+                        keys);
     }
     if (r.wheelStep != 0 && r.hovered >= 0) {
         const sbx::Recipe& rc = *src[static_cast<size_t>(r.hovered)];
@@ -2848,6 +2910,11 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
         if (!g_craftPick.erase(rc.id)) g_craftPick[rc.id] = 1;
     }
     if (r.clearSelection) g_craftPick.clear();
+    if (r.rightClicked >= 0 && !isMat[static_cast<size_t>(r.rightClicked)]) {
+        g_craftCtx = src[static_cast<size_t>(r.rightClicked)]->id;
+        ImGui::OpenPopup(kCraftCtx);
+    }
+    CraftVariantMenu(s);
     if (r.button) {
         // One request per selected item, as one batch: the module shows one HUD notice for all of them.
         std::vector<sbx::Action> acts;
