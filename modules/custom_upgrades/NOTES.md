@@ -438,15 +438,62 @@ right, and that nothing of the stripped clones still logs errors.
 
 ## Vacpack upgrades (Fabricator)
 
-`vacpack_upgrades.cpp`. Three new cards in the Fabricator's Upgrades category, each a clone of a vanilla
-`UpgradeDefinition`, bought through the vanilla flow (recipe panel, cost check, `SpendableDirector.Spend`,
-`UpgradeModel.IncrementUpgradeLevel`; the game's own modifier code applies the effect).
+`vacpack_upgrades.cpp`, `fabricator_levels.cpp`. Bought through the vanilla flow (recipe panel, cost check,
+`SpendableDirector.Spend`, `UpgradeModel.IncrementUpgradeLevel`; the game's own modifier code applies the effect).
 
-| card | levels | effect | shown once |
+| upgrade | levels | effect | where |
 |---|---|---|---|
-| Tank Booster IX-XII (id `0x53520101`) | 4 | +25 / +50 / +75 / +100 items per slot on top of Tank Booster VIII: 125 / 150 / 175 / 200 | Tank Booster VIII owned |
-| Extra Tank III-IV (id `0x53520102`) | 2 | a 7th / 8th vacpack slot | Extra Tank II owned |
-| Drone Battery Saver I-IV (id `0x53520103`) | 4 | every drone station's drone uses 1/1.25, 1/1.5, 1/1.75, 1/2 of the battery (80 / 67 / 57 / 50 %) | Drone Station blueprint owned |
+| Tank Booster IX-XII | 4 | 125 / 150 / 175 / 200 items per slot (absolute, like every vanilla level) | levels 9-12 of the vanilla Tank Booster card |
+| Extra Tank III-IV | 2 | a 7th / 8th vacpack slot, placed before the water slot | levels 3-4 of the vanilla Extra Tank card |
+| Drone Battery Saver I-IV (id `0x53520103`) | 4 | every drone station's drone uses 1/1.25, 1/1.5, 1/1.75, 1/2 of the battery (80 / 67 / 57 / 50 %) | own card, once the Drone Station blueprint is owned |
+
+**Merged into the vanilla cards** (feedback round after build 1aacffc: "Tank Booster IX is upgradeable before the
+previous tank booster ... base tank is 50, bought IX -> now 75"; "merge ... so they have more tiers and ours isn't a
+separate upgrade"). Before, Tank Booster IX-XII and Extra Tank III-IV were separate cards (cloned definitions with
+their own ids) whose ADD modifier stacked with the vanilla one (+25 on whatever Tank Booster level was owned), and the
+card could be bought with Tank Booster III. Now:
+
+- **Where the levels live.** `UpgradeDefinition._levels` is a `List<UpgradeLevelDefinition>` (Effects, `_costs`,
+  Title, Description); `LevelCount` is its Count everywhere (Fabricator card, details panel, `SetUpgradeLevel`'s range
+  check, `IncrementUpgradeLevel` / `UpgradeLevelExist`, `ActorUpgradeHandler.ApplyUpgrade`). The tick appends our level
+  objects to the vanilla `AmmoCapacity` / `AmmoSlots` definitions (looked up by id in the player's list every tick, so
+  a reloaded asset gets them again; log `'AmmoCapacity' now has 12 levels (8 vanilla + 4)`). The level objects are the
+  deep copies from `Object.Instantiate(AmmoCapacity)` (checked), with our values, costs and texts. So a tier can only
+  be bought after the vanilla max, the vanilla card shows the next level's title / costs / "fully upgraded", and the
+  level circles continue.
+- **Absolute values.** Vanilla levels replace each other, so each tier's modifier is the vanilla max level's value plus
+  ours: Tank Booster ADD 80 + 25 / 50 / 75 / 100 on `AmmoLimit` (default 20) = 125 / 150 / 175 / 200; Extra Tank ADD 2 +
+  1 / 2 on `AmmoSlotsAvailable` (default 4) = 7 / 8 slots.
+- **Keeping the vanilla save clean.** `UpgradeModel.Pull` hands the save a new dictionary copy; its post-detour clamps
+  ids 20 / 40 to the vanilla max (7 = VIII, 1 = II). The real level is a per-save sidecar value
+  (`custom_upgrades.vacpack.tank_booster_level` / `.extra_tank_level`, absolute 0-based level, only written past the
+  vanilla max) set by the `SetUpgradeLevel` detour on a purchase (and by Sandbox's unlock-all, which goes through the
+  same call); a level below the vanilla max clears it. `UpgradeModel.Push` writes saved levels straight into the
+  dictionary (no `SetUpgradeLevel`), so a load gives VIII / II; the tick then sets the sidecar level (`'AmmoCapacity'
+  level 8 -> 10 (Tank Booster X, from the sidecar)`) - only when the save holds exactly the vanilla max (a save that
+  disagrees wins). A mod-free load sees a valid vanilla value (a level past `LevelCount` would throw in
+  `UpgradeDefinition.GetUpgradeLevel`). Module off / faulted: `Cleanup` sets the live level back to the vanilla max and
+  removes our levels from the definitions, so a later save without our hooks is vanilla too.
+- **Older builds' cards.** Their sidecar values `custom_upgrades.vacpack.tank_booster` / `.extra_tank` (level of the
+  separate card) carry over to the vanilla card when the vanilla upgrade is maxed in the save (log `... carried over to
+  the vanilla card`); otherwise (bought out of order) they stay pending and are checked again after each load. Their
+  ids were never in a save (removed by the old Pull detour).
+- **Level circles** (`fabricator_levels.cpp`). The Fabricator prefabs have 8 circles: the details panel's
+  `UpgradeChain` (42 x 22, every 52 px, absolute positions) and each grid button's `FabricatorItemButtonPips` (22 x 11,
+  two rows of four). `UpgradeChain.Show` moves its highlight onto `_levels[current + 1]`, which throws at Tank Booster
+  VIII with 12 levels. Pre-hooks on `UpgradeChain.Show` (0x82ED90) and `FabricatorItemButton.ConfigurePips` (0x806CE0,
+  `Configure` inlined) clone the last circle / pip (same parent) and install a longer array, then lay them out for the
+  count shown: more than 8 -> narrower and closer in the prefab's width (chain: 12 circles 27.8 px wide every 34.4 px,
+  highlight 39.8 px; pips: two rows of six, 14 px wide), else the prefab's own positions. Without the chain hook Tank
+  Booster keeps its 8 levels (logged). Log: `fabricator levels: details panel shows 12 level circles ...`.
+
+**Costs (our choice).** Each level copies the refinery items of a late vanilla level, in the vanilla style:
+Tank Booster IX-XII use V-VIII's items with the amounts doubled (+2 for the rare ones vanilla asks 1-3 of) and
+60,000 / 75,000 / 90,000 / 120,000 Newbucks (vanilla VIII: 50,000). Extra Tank III / IV use VII / VIII's items
+unchanged and 25,000 / 50,000 Newbucks (vanilla Extra Tank II: 5,000; a slot this late is worth more than +25 per
+slot). No upgrade component: vanilla consumes one Tank Booster / Extra Tank component per level (counted items from
+treasure pods / the shop) and the world may hold no more than vanilla needs, so ours would be unbuyable; the cloned
+component list is cleared. The log lists every level's exact cost (`vacpack: TankBoosterTiers ready ...`).
 
 **Vanilla data** (UnityPy on `duplicateassetisolation_assets__54b00e46...bundle` and `corescenes_scenes_...bundle`,
 names from the English string table):
@@ -463,88 +510,89 @@ names from the English string table):
   (`AmmoSlotsAvailable` >= 5 / 6), `LiquidAmmoSlot` (`LiquidSlotEnabled` >= 1). Vanilla uses all of them:
   6 regular slots + water.
 
-**Costs (our choice).** Each level copies the refinery items of a late vanilla level, in the vanilla style:
-Tank Booster IX-XII use V-VIII's items with the amounts doubled (+2 for the rare ones vanilla asks 1-3 of) and
-60,000 / 75,000 / 90,000 / 120,000 Newbucks (vanilla VIII: 50,000). Extra Tank III / IV use VII / VIII's items
-unchanged and 25,000 / 50,000 Newbucks (vanilla Extra Tank II: 5,000; a slot this late is worth more than +25 per
-slot). No upgrade component: vanilla consumes one Tank Booster / Extra Tank component per level (counted items from
-treasure pods / the shop) and the world may hold no more than vanilla needs, so ours would be unbuyable; the cloned
-component list is cleared (and `_requireComponentToBeVisibleToPlayer` set false on our clones). The log lists
-every level's exact cost (`vacpack: TankBoosterPlus ready ...`).
+### Extra slots
+
+Feedback: "they aren't selectable with buttons; would be amazing if they are; also they're after the water tank and
+the inventory slots aren't centered."
+
+- **Order.** `PlayerState.InitModel` / `Reset` (pre) insert two clones of `ExpansionAmmoSlot 2` (thresholds 7 / 8) right
+  after it, before `LiquidAmmoSlot`, while the module is on: slots 1-6, Extra Tank III, IV, water. The HUD binds one
+  view per slot in index order (locked ones hidden by `AmmoSlotAdapter.PrefilterData`), so they show before the water
+  tank, and next / previous slot walk them in that order.
+- **Save.** A load copies the saved slots **by index** into the player's slots (`InitModel` -> `AmmoModel.Reset(defs)`
+  first, then `PlayerModel.Push` -> `AmmoModel.Push` 0xA6E530), and `ValidateAndAdjustSlots` clears ids a slot's
+  definition does not allow - so the saved water (index 6) would land in Extra Tank III's slot and be lost. Now:
+  `AmmoModel.Pull` (post, the player's model only) hands the save the 7 vanilla slots in the vanilla order (water back
+  at index 6) and writes the extra slots to `custom_upgrades.vacpack.extra_slot_items` (`k=referenceId*count;...`, k =
+  0 / 1); `AmmoModel.Push` (pre, the player's model only: its slot 6 has our definition) spreads a 7-slot array into the
+  9-slot layout, our two positions taking their own empty live slots (Push copies them onto themselves). Log `loaded
+  vacpack spread into the extended layout (saved slot 7 = water -> slot 9)`. The tick refills the extra slots from the
+  sidecar (`MaybeAddResource` with overflow); an older build's `custom_upgrades.vacpack.extra_slots` (indices 7 / 8)
+  is read once and converted. Slimes in those slots lose their emotions / radiant look (only type and count kept).
+- **Number keys.** The game has one `selectSlot` InputEvent for `MainGame/Slot1..Slot7`; `VacuumItem.SelectSlot(
+  InputEventData)` (0xA69640) selects slot `round(value)` (0..6, `Optional<float>` at +4 of the data). No Slot8 / 9
+  actions exist and an action asset can't be added at runtime without managed code, so:
+  - two Key settings (custom upgrades, group "Vacpack": "Extra Tank III slot key" = 8, "Extra Tank IV slot key" = 9),
+    polled every frame (`GetAsyncKeyState` edge, game window in front, overlay closed, cursor locked and time running,
+    `VacuumItem` active = not gadget mode); a press calls the game's own `VacuumItem.SelectSlot(int)` (sound, vac
+    animation; a locked slot is refused by `SetSelectedSlot`). Log `number key 8 selects vacpack slot 7 (Extra Tank
+    III)` once.
+  - The water slot keeps the game's key 7: a `VacuumItem.SelectSlot(InputEventData)` detour maps a vanilla index at or
+    after our slots to its index in our layout.
+  - HUD key label: `AmmoSlotViewHolder.BindInputKey(definition.Hotkey)` with our null hotkey logged "No binding set for
+    ammo slot!"; its detour now writes our key's name into `KeybindingText` (localized text off) for our slots and keeps
+    the key box shown (hidden when the key is set to none). The label follows a changed key the next time the game
+    rebinds labels (device / keys changed, reload).
+- **Centred row.** HUD `Ammo Slots` is 900 x 189 with a `HorizontalLayoutGroup` (spacing 10, LowerCenter, no width
+  control) over 108 px slots. Unity centres the children only while they fit (`GetTotalPreferredSize < size`); 9 slots
+  are 1052 px, so the row started at the rect's left edge and overflowed to the right. The tick widens the rect to 900 +
+  2 x 118 + 24 = 1160 px once the vacpack is extended (log `HUD slot row 900 -> 1160 px wide ...`); `Cleanup` puts the
+  width back.
+- **Module off / faulted:** `PlayerState` gets the vanilla array back for the next load, and the live slots are put back
+  in the vanilla order with ours last, so a save made without our hooks keeps the water slot at index 6 (a mod-free load
+  then drops slots 8-9 with the game's warning; their contents stay in the sidecar).
+
+**The real slot limit.** No hard limit in code: the slot list is an array of any length (`AmmoModel.Reset`;
+`ValidateAndAdjustSlots` pads / trims by index with a warning), the HUD binds one view per slot, the save is a list.
+Practical limits: number keys (ours are polled), the save layout (handled above) and the HUD width (widened).
 
 ### Drone Battery Saver
 
 First built as per-station tiers bought from a `[B] Battery` pill in the drone station menu; moved here after
-user feedback ("they should be refinery upgrades, not in a separate panel"). Now one global upgrade.
+user feedback ("they should be refinery upgrades, not in a separate panel"). Now one global upgrade, its own card.
 
-- **Card.** Same clone of `AmmoCapacity`, its single modifier set to ADD 0 (no vacpack effect; the effect list
+- **Card.** A clone of `AmmoCapacity`, its single modifier set to ADD 0 (no vacpack effect; the effect list
   keeps the one entry the game expects). Icon and pedia entry: the Drone Station gadget's (`DroneDirector.
   _droneStationType`, a `GadgetDefinition`: `icon`, `_pediaLink`), set by the tick once the scene has it (log
   `Drone Battery Saver card uses the '...' icon`); until then / if missing, Tank Booster's. Listed at the end of
-  the category (no vanilla parent).
+  the category (no vanilla parent). Its id is registered in `UpgradeModel.upgradeLevels` (-1) before the definition goes
+  into the player's list (`ActorUpgradeHandler.SetModifiersFromModel` asks every listed definition for its level), is
+  removed from the save's copy by the Pull detour and is not counted for TinkerTailorSlimes.
 - **Prerequisite: the Drone Station blueprint** (`GadgetDirector.HasBlueprint`, checked when the Fabricator
-  builds its items). Without it the upgrade is useless and would only clutter the list early on; the blueprint
-  rather than a placed station, so it can be bought before building the first one (and stays visible with all
-  stations picked up). An owned level always shows the card; an unknown answer (lookup failed) shows it too.
+  builds its items). An owned level always shows the card; an unknown answer (lookup failed) shows it too.
 - **Prices: 7,500 / 10,000 / 15,000 / 25,000 Newbucks (57,500 for IV) plus half of Tank Booster V-VIII's refinery
-  items** (rounded up, at least 1). The per-station version cost 1,500-7,500 (17,000 for one station's IV); one
-  purchase now covers every station, so it costs about three stations' worth, and the items put it in the late
-  game with the drone stations. Less fuel is its only gain, so it stays at half of the vac upgrade it is cut from.
-- **Effect** (`drone_battery.cpp`, from the old `drone_price_limit/battery.cpp`): every ~2 s each station gets back
-  what it drained beyond the level's share since the last look, through the game's own `AddEnergy`; the saved
-  battery stays a vanilla value. Runs from custom_upgrades' frame callback while the module is on (no longer tied
-  to drone_price_limit being on). Level = the per-save value `custom_upgrades.vacpack.drone_battery` (0-based).
-  Log: `battery saver: station <id>: Drone Battery Saver II active (battery drain x0.67)`.
+  items** (rounded up, at least 1).
+- **Effect** (`drone_battery.cpp`): every ~2 s each station gets back what it drained beyond the level's share since the
+  last look, through the game's own `AddEnergy`; the saved battery stays a vanilla value. Level = the per-save value
+  `custom_upgrades.vacpack.drone_battery` (0-based).
+- **Verified by reading the code again** (user: "idk check logs"; the log of that test had only the `... active (battery
+  drain x0.50)` lines, nothing about refunds). The drain is pure world time: `_energyDepleteTime` is written only by
+  `AddEnergy` (one caller, `DroneFuelDepositor.OnTriggerEnter`), the station's init / `Push`; `SetEnergy` has no caller,
+  so `energy = (depleteTime - now) / 3600 x EnergyDepletedPerHour` falls steadily and the refund `dt x (1 - 1/factor)`
+  is right. Fixed: a refund below 0.01 energy was dropped and its time window forgotten (t0 moved on); now t0 stays
+  until the accumulated refund is worth adding. New log lines: `station <id>: first refund +X energy for N world s
+  (battery A -> B of 1000)` per station and level, then once a minute `Drone Battery Saver IV gave back X energy to N
+  station(s) in the last 60 s: <id> +x (battery y), ...`.
 - **Migration.** Old sidecars hold `drone_battery.station.<actor id>` = 1..4. On the first tick after a load the
   highest tier of any station becomes the global level (if higher than an owned one), all those keys are erased
-  and one line is logged (`migrated the per-station Battery Saver of an older build: N station(s), highest tier T
-  -> global ...`). The other stations' tiers are not refunded (they are covered by the global level anyway).
+  and one line is logged.
 
-**How it works.**
-
-- Definitions: `Object.Instantiate(AmmoCapacity)` (deep copy of levels, modifiers, costs and LocalizedStrings; checked,
-  else nothing is offered), levels cut to the template range, `_uniqueId` set, effect value / target, costs and texts
-  changed (core/text_override; the Fabricator shows level texts through `LocalizeStringEvent.set_StringReference`).
-  Extra Tank III-IV points its modifier at `AmmoSlotsAvailable` and takes the vanilla Extra Tank icon and pedia entry.
-- Registration (world tick, in game): our ids into `UpgradeModel.upgradeLevels` (-1) first, then the definitions into
-  the player's `UpgradeDefinitionList` behind their vanilla parent (`ActorUpgradeHandler.SetModifiersFromModel` asks
-  every listed definition for its level; a missing key would throw). The Fabricator category's list gets them in a
-  `PlayerUpgradeFabricateCategory.GetItems` pre-hook; the post-hook drops our cards while the vanilla upgrade is not
-  maxed (and when the module is off). The Fabricator builds its items when it opens, so a card that becomes
-  available while it is open shows after reopening it.
-- Save: `UpgradeModel.Pull` (post) removes our ids from the save's copy. The level is a per-save value
-  (`custom_upgrades.vacpack.tank_booster` / `.extra_tank`, 0-based) written by the `UpgradeModel.SetUpgradeLevel`
-  detour on a purchase; the tick puts it back on the model after a load (`SetUpgradeLevel`, modifiers applied by the
-  game). A mod-free load sees the vanilla dictionary only (Push ignores unknown ids anyway).
-- Achievement: `CountUniqueUpgrades` (TinkerTailorSlimes progress) subtracts ours.
-- Extra slots: `PlayerState.InitModel` / `Reset` (pre) append two clones of `ExpansionAmmoSlot 2` (thresholds 7 / 8,
-  no hotkey) to the player's slot definitions before the game builds the `AmmoSlotManager`, while the module is on.
-  Locked slots are hidden by the HUD (`AmmoSlotAdapter.PrefilterData` filters on `IsUnlocked`), so nothing shows until
-  Extra Tank III. `AmmoModel.Pull` (post, the player's model only) writes the slots past the vanilla count to the
-  per-save value `custom_upgrades.vacpack.extra_slots` (`index=referenceId*count;...`) and hands the save a copy of
-  the first 7 slots; after the next load the tick refills empty extra slots from it (`MaybeAddResource` with overflow,
-  type by `LookupDirector.TryFindIdentifiableTypeByReferenceId`). Slimes in those slots lose their emotions / radiant
-  look (only type and count are kept). A save made before the refill keeps the old value.
-- Module off (only possible from the title screen or a save without custom upgrades, see the gate): levels set to -1
-  (modifiers removed), our ids and definitions out of the game's lists, `PlayerState` gets its vanilla array back for
-  the next load (the live vacpack keeps its 8 slots, locked, until then). The sidecar keeps everything. Switched on
-  after a save was loaded (the gate does this a moment after the load): the levels come back at once, the extra slots
-  only after loading the save again (logged).
-
-**The real slot limit.** No hard limit in code: the slot list is an array of any length (`AmmoModel.Reset`;
-`ValidateAndAdjustSlots` pads / trims by index with a warning), the HUD binds one view per slot, the save is a list.
-Practical limits: input actions exist only for `MainGame/Slot1..Slot7` (7 = the water slot), so slots 8+ have no
-number key (mouse wheel / next-previous only; `BindInputKey(null)` logs the game's "No binding set for ammo slot!"
-warning); new slots come after the water slot (index order; putting them before it would move the saved water slot
-into a regular one); and the width of the HUD row (not measured). Two extra slots = 9 icons in the row.
-
-**Not verified in game yet:** everything above, including the Drone Battery Saver card (icon, texts, blueprint gate,
-the refund and the migration). Known rough edges: Unity logs "Unserializing ammo slot length different
-than expected" on every load with the module on (7 saved vs 9 defined, harmless); the save's "viewed upgrades" set
-(`ViewedItemsV02`, a set of ints) may get our ids (harmless for a mod-free load, unknown ids are never looked up);
-pinning one of our upgrades as the recipe (`PinnedRecipeDirector`, saved as a string) was not checked for a mod-free
-load. After a fault the hooks are gone: the next save then contains our ids and 9 slots; a mod-free load ignores the
-ids and drops slots 8-9 with the game's warning.
+**Not verified in game yet:** the 12 circles / 12 pips (positions, the highlight), buying IX-XII and III-IV on the
+vanilla cards, the capacity values, save + reload (`... from the sidecar` lines), a mod-free load of such a save, the
+extra slots before the water slot, the number keys and their HUD labels, key 7 still selecting water, the centred row,
+the battery saver's refund lines. Known rough edges: the save's "viewed upgrades" set (`ViewedItemsV02`) may get the
+Battery Saver id (harmless for a mod-free load); pinning the Battery Saver as the recipe was not checked for a mod-free
+load.
 
 ### Lava tank: not built (research)
 

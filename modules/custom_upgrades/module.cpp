@@ -17,10 +17,11 @@
 //   Silo Capacity IV     silo         Silo Capacity III     6500    500 items per silo slot
 //   Silo Capacity V      silo         Silo Capacity IV      9000    600 items per silo slot
 //
-//   Not plot upgrades: the Fabricator vacpack upgrades Tank Booster IX-XII (+25 per slot per level,
-//   up to 200), Extra Tank III-IV (a 7th / 8th slot) and Drone Battery Saver I-IV (every drone station
-//   uses 1/1.25 .. 1/2 of the battery; effect in drone_battery.cpp), in vacpack_upgrades.cpp (own
-//   hooks, levels and extra slot contents in this module's sidecar as per-save values).
+//   Not plot upgrades: the Fabricator vacpack upgrades Tank Booster IX-XII (125 / 150 / 175 / 200
+//   per slot, more levels of the vanilla Tank Booster card), Extra Tank III-IV (a 7th / 8th slot,
+//   more levels of the vanilla Extra Tank card) and Drone Battery Saver I-IV (own card; every drone
+//   station uses 1/1.25 .. 1/2 of the battery; effect in drone_battery.cpp), in vacpack_upgrades.cpp
+//   (own hooks, levels and extra slot contents in this module's sidecar as per-save values).
 //
 //   Silo capacity (vanilla, prefab + disassembly): the silo's SiloStorage has 12 slot definitions
 //   ("SiloNonSlimes", _maxAmount 100); STORAGE2/3/4 only swap slot GameObjects, the one vanilla
@@ -2070,6 +2071,7 @@ void CustomUpgrades::FrameCheck(float dt) {
     if (On() && silo_.Ready()) g_siloGuard.Run([&] { silo_.Frame(); });  // button message (cheap when none)
     if (On() && notices_.Ready()) g_siloGuard.Run([&] { notices_.Frame(dt); });  // queued sale notices
     if (On() && receipt_.IsOpen()) g_siloGuard.Run([&] { ReceiptTick(dt); });   // Sell-All receipt input
+    if (On() && vacpack_.Ready()) vacpack_.Frame();  // extra vacpack slots' number keys
     if (battery_.Ready()) {  // drone battery refunds (every ~2 s); off: forget the last looks
         if (On()) g_batteryGuard.Run([&] { battery_.Tick(dt); });
         else battery_.Reset();
