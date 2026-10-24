@@ -204,7 +204,8 @@ struct Sym {
     Il2CppClass *teleportNetwork = nullptr, *zoneSgMapping = nullptr, *sceneLoaderClass = nullptr;
     ugui::Fn tpToDestImpl, nodeId, zsgTryGet, loadInProgress, isZoneHiddenFn, lsGetLocalized;
     size_t tnDefinition = kNoOff, listItems = kNoOff, tsdDestinations = kNoOff, tddNode = kNoOff, tddGroup = kNoOff;
-    size_t zmdPrimary = kNoOff, zoneLocName = kNoOff;
+    size_t zmdPrimary = kNoOff, zoneLocName = kNoOff, zoneRanch = kNoOff;  // ZoneDefinition._isRanchZone
+    ugui::Fn defaultGroup;  // SceneLoader.get_DefaultGameplaySceneGroup (the ranch's scene group)
     size_t zsgMappings = kNoOff, sglItems = kNoOff;  // ZoneSceneGroupMapping._mappings, SceneGroupList.items
     // MapUI
     size_t uiMap = kNoOff, uiViewModel = kNoOff, uiFogReveal = kNoOff, uiLegend = kNoOff, uiDirector = kNoOff,
@@ -219,7 +220,11 @@ struct Sym {
     // legend
     size_t ciObject = kNoOff, legendHints = kNoOff, regPassThrough = kNoOff;
     size_t iconButton = kNoOff, iconKey = kNoOff, iconKeyText = kNoOff, iconKeyImage = kNoOff, iconKeyLse = kNoOff,
-           iconDouble = kNoOff;
+           iconDouble = kNoOff, iconButtonImage = kNoOff;
+    // the game's mouse button glyphs: KeyboardMouseIconSet (InputIconSet<KeyboardMouseIcon>._items),
+    // KeyboardMouseIcon._control ("<Mouse>/rightButton") / ._buttonSprite
+    Il2CppClass* kmIconSet = nullptr;
+    size_t kmItems = kNoOff, kmControl = kNoOff, kmSprite = kNoOff;
 };
 
 struct ResolveCtx {
@@ -387,6 +392,12 @@ public:
         s_.iconKeyImage = c.Field(s_.inputIcon, "_keyImage");
         s_.iconKeyLse = c.Field(s_.inputIcon, "_keyLocalizeStringEvent");
         s_.iconDouble = c.Field(s_.inputIcon, "_doubleTapRoot");
+        s_.iconButtonImage = c.Field(s_.inputIcon, "_buttonImage");
+        s_.kmIconSet = c.Class("MonomiPark.SlimeRancher.Input", "KeyboardMouseIconSet");
+        s_.kmItems = c.Field(s_.kmIconSet, "_items");
+        Il2CppClass* kmIcon = c.Class("MonomiPark.SlimeRancher.Input", "KeyboardMouseIcon");
+        s_.kmControl = c.Field(kmIcon, "_control");
+        s_.kmSprite = c.Field(kmIcon, "_buttonSprite");
         s_.lse = c.Class("Unity.Localization", "UnityEngine.Localization.Components", "LocalizeStringEvent");
         s_.selectable = c.Class("UnityEngine.UI", "UnityEngine.UI", "Selectable");
 
@@ -432,12 +443,15 @@ public:
         s_.zsgMappings = c.Field(s_.zoneSgMapping, "_mappings");
         s_.sglItems = c.Field(c.Class("MonomiPark.SlimeRancher.SceneManagement", "SceneGroupList"), "items");
         s_.zmdPrimary = c.Field(c.Class("MonomiPark.SlimeRancher.World", "ZoneMapData"), "_primaryZone");
-        s_.zoneLocName = c.Field(c.Class("MonomiPark.SlimeRancher.World", "ZoneDefinition"), "_localizedName");
+        Il2CppClass* zoneDef = c.Class("MonomiPark.SlimeRancher.World", "ZoneDefinition");
+        s_.zoneLocName = c.Field(zoneDef, "_localizedName");
+        s_.zoneRanch = c.Field(zoneDef, "_isRanchZone");
         s_.lsGetLocalized = c.Bind(c.Class("Unity.Localization", "UnityEngine.Localization", "LocalizedString"),
                                    "GetLocalizedString", 0);
         s_.isZoneHiddenFn = c.Bind(s_.mapDirector, "IsZoneHidden", 1);
         s_.sceneLoaderClass = c.Class("MonomiPark.SlimeRancher.SceneManagement", "SceneLoader");
         s_.loadInProgress = c.Bind(s_.sceneLoaderClass, "get_IsSceneLoadInProgress", 0);
+        s_.defaultGroup = c.Bind(s_.sceneLoaderClass, "get_DefaultGameplaySceneGroup", 0);
         {
             std::string nerr;
             if (!notices_.Setup(Resolver::Get(), kModule, nerr, "teleport") || !notices_.SetupText(Resolver::Get(), nerr))
@@ -543,6 +557,8 @@ private:
     bool hintFailLogged_ = false, hintLogged_ = false;
     float hintSince_ = -1;  // first try of this map open (diagnostics after kHintDiagDelay)
     bool hintDiagLogged_ = false;
+    Ref mouseGlyph_;           // the game's right mouse button sprite (or the left one, drawn mirrored)
+    bool mouseGlyphMirror_ = false, mouseGlyphSearched_ = false;
 
     // teleport
     Ref player_, net_, zoneMap_, sceneLoader_;
@@ -551,7 +567,7 @@ private:
     std::map<Il2CppObject*, std::string> zoneNames_;
     std::vector<Ref> zonePins_;
     std::map<Il2CppObject*, std::vector<Ref>> zoneGroups_;  // ZoneDefinition -> its scene groups (BuildZoneGroups)
-    bool zoneGroupsBuilt_ = false, routesLogged_ = false;
+    bool zoneGroupsBuilt_ = false, routesLogged_ = false, ranchLogged_ = false;
     std::map<Il2CppObject*, std::string> nodeNames_;        // TeleporterNodeDefinition (asset) -> node id
     struct Travel {  // a zone change in progress (cross-zone click)
         bool active = false;
@@ -620,7 +636,7 @@ private:
         g_active.store(false);
         SR2_ERROR("map_tools: {} - map tools disabled for the rest of this session", why);
         core::MarkModuleFaulted(kModule, why);
-        for (Ref* r : {&mapUI_, &map_, &mapT_, &container_, &canvasT_, &hintGo_, &hintLabel_, &hintKey_, &player_, &net_,
+        for (Ref* r : {&mapUI_, &map_, &mapT_, &container_, &canvasT_, &hintGo_, &hintLabel_, &hintKey_, &mouseGlyph_, &player_, &net_,
                        &zoneMap_, &sceneLoader_, &travel_.group, &travel_.origin, &travel_.zoneDef})
             r->Abandon();
         for (auto& [z, groups] : zoneGroups_)
@@ -1179,14 +1195,66 @@ private:
                 hintLabel_.Reset(t);
                 return false;
             });
+        FindMouseGlyph();
         hintReapply_ = kReapplyFrames;
         ApplyHintLook();
         if (!hintLogged_) {
             hintLogged_ = true;
-            SR2_INFO("map_tools: [RMB] Teleport hint cloned from the map legend's '{}' ({} key icon(s), label {}; {})",
-                     unity::GetName(tmplGo), hintIcons_.size(), hintLabel_ ? "ok" : "MISSING", chain);
+            SR2_INFO("map_tools: [RMB] Teleport hint cloned from the map legend's '{}' ({} key icon(s), label {}, icon {}; {})",
+                     unity::GetName(tmplGo), hintIcons_.size(), hintLabel_ ? "ok" : "MISSING",
+                     !mouseGlyph_.Alive()      ? "key cap \"RMB\" (no mouse glyph)"
+                     : mouseGlyphMirror_ ? "the game's left mouse button glyph, mirrored"
+                                         : "the game's right mouse button glyph",
+                     chain);
         }
         return true;
+    }
+
+    // The game's own mouse button glyphs: every KeyboardMouseIconSet asset (the key bar's icon set for keyboard
+    // and mouse; InputIconSet<KeyboardMouseIcon>._items), the entry whose input control path is the right mouse
+    // button ("<Mouse>/rightButton") with a sprite; else the left button's, drawn mirrored. One asset scan per map
+    // open until found.
+    void FindMouseGlyph() {
+        if (mouseGlyph_.Alive() || !s_.kmIconSet || !Has(s_.kmItems) || !Has(s_.kmControl) || !Has(s_.kmSprite) ||
+            !Has(s_.iconButtonImage))
+            return;
+        Il2CppObject *right = nullptr, *left = nullptr;
+        std::string rightCtl, leftCtl;
+        int sets = 0, entries = 0;
+        ugui::ForEachOfType(s_.kmIconSet, [&](Il2CppObject* set) {
+            if (!ugui::IsA(set, s_.kmIconSet)) return true;
+            ++sets;
+            Il2CppObject* items = F<Il2CppObject*>(set, s_.kmItems);
+            if (!ugui::PlausiblePointer(items)) return true;
+            for (size_t i = 0, n = std::min<size_t>(unity::ListCount(items), 512); i < n; ++i) {
+                auto* icon = static_cast<Il2CppObject*>(unity::ListAt(items, i));
+                if (!ugui::PlausiblePointer(icon)) continue;
+                ++entries;
+                Il2CppObject* sprite = F<Il2CppObject*>(icon, s_.kmSprite);
+                if (!sprite || !unity::IsAlive(sprite)) continue;
+                std::string ctl = unity::ToUtf8(F<Il2CppString*>(icon, s_.kmControl));
+                if (ctl.find("<Mouse>") == std::string::npos) continue;
+                if (!right && ctl.find("rightButton") != std::string::npos) {
+                    right = sprite;
+                    rightCtl = ctl;
+                }
+                if (!left && ctl.find("leftButton") != std::string::npos) {
+                    left = sprite;
+                    leftCtl = ctl;
+                }
+            }
+            return !right;
+        });
+        mouseGlyph_.Reset(right ? right : left);
+        mouseGlyphMirror_ = !right && left;
+        if (!mouseGlyphSearched_ || mouseGlyph_) {
+            mouseGlyphSearched_ = true;
+            SR2_INFO("map_tools: mouse glyphs: {} KeyboardMouseIconSet(s), {} entries; right button {}, left button {}{}",
+                     sets, entries, right ? "'" + unity::GetName(right) + "' (" + rightCtl + ")" : std::string("none"),
+                     left ? "'" + unity::GetName(left) + "' (" + leftCtl + ")" : std::string("none"),
+                     mouseGlyph_ ? (mouseGlyphMirror_ ? " - the hint uses the left one mirrored" : "")
+                                 : " - the hint keeps the \"RMB\" key cap");
+        }
     }
 
     // InputIcon.SetKey by hand (see modules/drone_price_limit/station_dialog.cpp): the first icon shows the
@@ -1206,8 +1274,19 @@ private:
                 Il2CppObject* o = F<Il2CppObject*>(icon, off);
                 return unity::IsAlive(o) ? o : nullptr;
             };
-            if (Il2CppObject* b = obj(s_.iconButton)) unity::SetActive(b, false);
             if (Il2CppObject* d = obj(s_.iconDouble)) unity::SetActive(d, false);
+            // The game's mouse glyph, as InputIcon.SetButtonImage: _buttonRoot on, _keyRoot off, _buttonImage.sprite.
+            Il2CppObject* glyph = mouseGlyph_.Alive() ? mouseGlyph_.get() : nullptr;
+            Il2CppObject *button = obj(s_.iconButton), *image = obj(s_.iconButtonImage);
+            if (glyph && button && image) {
+                unity::SetActive(button, true);
+                if (Il2CppObject* k = obj(s_.iconKey)) unity::SetActive(k, false);
+                SetEnabled(image, true);
+                ugui::ImageSetSprite(image, glyph);
+                ugui::SetLocalScale(unity::TransformOf(image), {mouseGlyphMirror_ ? -1.0f : 1.0f, 1, 1});
+                continue;
+            }
+            if (button) unity::SetActive(button, false);
             if (Il2CppObject* k = obj(s_.iconKey)) unity::SetActive(k, true);
             SetEnabled(obj(s_.iconKeyImage), false);
             SetEnabled(obj(s_.iconKeyLse), false);
@@ -1248,6 +1327,16 @@ private:
         if (!ugui::IsA(area, s_.zoneArea)) return nullptr;
         Il2CppObject* zmd = F<Il2CppObject*>(area, s_.areaZoneData);
         return ugui::PlausiblePointer(zmd) ? zmd : nullptr;
+    }
+
+    // The Sanctuary: reached only at the end of the Grey Labyrinth's story (its arrivals are the scripted
+    // TeleporterSanctuaryDestination / the boat ride), so arriving early could skip or break the story. Matched by
+    // the zone's asset or display name.
+    bool StoryZone(Il2CppObject* zone) {
+        if (!zone) return false;
+        for (const std::string& n : {unity::GetName(zone), ZoneName(zone)})
+            if (n.find("Sanctuary") != std::string::npos) return true;
+        return false;
     }
 
     // ZoneMapData -> its primary ZoneDefinition.
@@ -1329,8 +1418,33 @@ private:
         SR2_INFO("map_tools: zone <-> scene group mapping: {} zone(s) with scene groups", zoneGroups_.size());
     }
 
-    // Is `group` one of the zone's scene groups? Without a mapping entry for the zone: the mapping's own
-    // TryGetValue(group) == zone.
+    // The game's default gameplay scene group (SceneLoader.DefaultGameplaySceneGroup): the ranch's.
+    Il2CppObject* DefaultGroup() {
+        if (!s_.sceneLoaderClass || !s_.defaultGroup) return nullptr;
+        if (!sceneLoader_.Alive()) sceneLoader_.Reset(ugui::FindFirst(s_.sceneLoaderClass, false));
+        Il2CppObject* g = nullptr;
+        if (sceneLoader_.Alive()) Managed([&] { g = ugui::Call<Il2CppObject*>(s_.defaultGroup, sceneLoader_.get()); });
+        return g && unity::IsAlive(g) ? g : nullptr;
+    }
+
+    // A ranch zone (ZoneDefinition._isRanchZone) with no mapping entry: its scene group is the default gameplay
+    // group. "No way into The Conservatory" (in-game test): the mapping has entries for the six other zones only
+    // (the route log listed Rainbow Fields with ConservatoryFields, no Conservatory), so the zone -> groups search
+    // found nothing for it from any zone. The first lookup is logged.
+    Il2CppObject* RanchGroup(Il2CppObject* zone) {
+        if (!zone || !Has(s_.zoneRanch) || !F<bool>(zone, s_.zoneRanch)) return nullptr;
+        Il2CppObject* g = DefaultGroup();
+        if (!ranchLogged_) {
+            ranchLogged_ = true;
+            SR2_INFO("map_tools: zone '{}' has no scene group mapping entry; it is the ranch zone, so its scene group is the "
+                     "default gameplay group '{}'",
+                     ZoneName(zone), g ? unity::GetName(g) : std::string("(none)"));
+        }
+        return g;
+    }
+
+    // Is `group` one of the zone's scene groups? Without a mapping entry for the zone: the ranch's default group
+    // for a ranch zone, else the mapping's own TryGetValue(group) == zone.
     bool GroupInZone(Il2CppObject* zone, Il2CppObject* group) {
         if (!zone || !group) return false;
         BuildZoneGroups();
@@ -1340,6 +1454,7 @@ private:
                 if (r.get() == group) return true;
             return false;
         }
+        if (Il2CppObject* ranch = RanchGroup(zone)) return ranch == group;
         if (!zoneMap_.Alive() || !s_.zsgTryGet) return false;
         Il2CppObject* z = nullptr;
         bool got = false;
@@ -1442,6 +1557,8 @@ private:
             std::string groups;
             if (auto it = zoneGroups_.find(zone); it != zoneGroups_.end())
                 for (const Ref& r : it->second) groups += (groups.empty() ? "" : ", ") + unity::GetName(r.get());
+            else if (Il2CppObject* ranch = RanchGroup(zone))
+                groups = unity::GetName(ranch) + " (ranch zone: default group)";
             why = groups.empty() ? std::format("none of the {} teleport destinations leads into it (no scene group mapping "
                                                "entry for the zone)",
                                                checked)
@@ -1489,17 +1606,17 @@ private:
                 if (r.ok) {
                     SR2_INFO("map_tools: {}teleported from ({:.1f}, {:.1f}, {:.1f}) to ({:.1f}, {:.1f}, {:.1f}) (zone '{}'{}){}",
                              afterTravel ? "arrived and " : "", r.from.x, r.from.y, r.from.z, r.to.x, r.to.y, r.to.z, zoneName,
-                             r.parked ? std::format(", area loaded first in {:.1f} s", r.seconds) : std::string(),
+                             r.loadedFirst ? std::format(", area loaded first in {:.1f} s", r.seconds) : std::string(),
                              afterTravel ? std::format(", {:.1f} s after the click", age + r.seconds) : std::string());
                     Notice(hasZone ? "Teleported to " + zoneName : std::string("Teleported"));
                 } else if (afterTravel) {
-                    SR2_INFO("map_tools: arrived in '{}', but no ground below ({:.0f}, {:.0f}) ({}) - staying at the arrival "
-                             "point",
+                    SR2_INFO("map_tools: arrived in '{}', but not teleported to ({:.0f}, {:.0f}) ({}) - staying at the "
+                             "arrival point",
                              zoneName, wx, wz, r.why);
-                    Notice("Teleported to " + zoneName + " (spot not loaded, at the teleporter)");
+                    Notice("Teleported to " + zoneName + " (at the teleporter: no safe spot there)");
                 } else {
-                    SR2_INFO("map_tools: teleport refused: no ground below ({:.0f}, {:.0f}): {}", wx, wz, r.why);
-                    Notice("Teleport refused: no ground there");
+                    SR2_INFO("map_tools: teleport refused: ({:.0f}, {:.0f}): {}", wx, wz, r.why);
+                    Notice("Teleport refused: no safe spot there");
                 }
             },
             &why);
@@ -1526,6 +1643,7 @@ private:
         if (!TeleportResolved()) return Refuse("teleport symbols missing (see the 'resolved' line)", "not available");
         if (travel_.active) return Refuse("a zone change for the last click is still running", "still travelling", false);
         if (ground_teleport::Busy()) return Refuse("the last teleport is still loading its spot", "still teleporting", false);
+        if (std::string busy; ground_teleport::PlayerUnavailable(&busy)) return Refuse(busy, busy, false);
         Il2CppObject* vm = F<Il2CppObject*>(mapUI_.get(), s_.uiViewModel);
         if (!ugui::IsA(vm, s_.viewModel)) return Refuse("no map view model", "map not ready");
         // The cursor's page point, as MapUI.LateUpdate computes it: -(mapAnchor + cursorOffset / zoom). The view
@@ -1582,9 +1700,18 @@ private:
         Route route;
         if (!sameZone) {
             if (!zTarget) return Refuse("the click is outside every zone of this map", "outside every zone");
-            if (!ZoneDiscovered(zTarget))
-                return Refuse(std::format("'{}' is not discovered yet (enter it once first)", zoneName),
-                              zoneName + " not discovered yet");
+            if (!ZoneDiscovered(zTarget)) {
+                // "Reveal everything" also opens the undiscovered zones, except the one the story leads into.
+                if (!cfg_.reveal)
+                    return Refuse(std::format("'{}' is not discovered yet (enter it once first)", zoneName),
+                                  zoneName + " not discovered yet");
+                if (StoryZone(targetZone))
+                    return Refuse(std::format("'{}' is not discovered yet and is only reached through the story (also with "
+                                              "Reveal everything on)",
+                                              zoneName),
+                                  zoneName + " not reached yet");
+                SR2_INFO("map_tools: '{}' is not discovered yet - allowed, Reveal everything is on", zoneName);
+            }
             std::string why;
             if (!TravelResolved())
                 return Refuse("zone travel symbols missing (see the 'resolved' line)", "zone travel not available");
@@ -1644,6 +1771,13 @@ private:
         }
         if (time_ < travel_.nextTry) return;
         travel_.nextTry = time_ + kTravelPoll;
+        bool knockedOut = false;
+        if (std::string why; ground_teleport::PlayerUnavailable(&why, &knockedOut) && knockedOut) {
+            SR2_INFO("map_tools: travel to '{}' dropped: {} (the game's respawn takes over)", travel_.zone, why);
+            Notice("Teleport to " + travel_.zone + " cancelled");
+            travel_ = {};
+            return;
+        }
         if (s_.sceneLoaderClass && s_.loadInProgress) {
             if (!sceneLoader_.Alive()) sceneLoader_.Reset(ugui::FindFirst(s_.sceneLoaderClass, false));
             bool loading = false;

@@ -7,8 +7,9 @@
 //   the current scene group and zone (the marker's position has y = 0), then
 //   the ground teleport shared with the full map's right-click teleport
 //   (modules/map_tools/ground_teleport.h: far targets are not loaded, so the
-//   player is parked there until the area's colliders exist, then lands on the
-//   ground; TeleportablePlayer.TeleportTo, the game's in-scene teleport).
+//   regions there are loaded on the spot while the player stays put, then he
+//   lands on a safe floor; TeleportablePlayer.TeleportTo, the game's in-scene
+//   teleport; never while knocked out or during a scene load).
 // - Unlock ranch expansions: for every AccessDoorUIActivator whose door is
 //   locked, what AccessDoorUIActivator.OnPurchaseMenuResult does after the
 //   purchase, minus spending, analytics and the achievement: door OPEN, linked
@@ -236,15 +237,14 @@ void DoTeleport() {
         kModule, mx, mz,
         [mx, mz](const sr2::modules::ground_teleport::Result& r) {
             if (!r.ok) {
-                Done(false, std::format("Not teleported: no ground found below the marker ({:.0f}, {:.0f}): {}", mx, mz, r.why),
-                     true);
+                Done(false, std::format("Not teleported to the marker ({:.0f}, {:.0f}): {}", mx, mz, r.why), true);
                 return;
             }
             Done(true,
                  std::format("Teleported to the map marker: ({:.0f}, {:.0f}, {:.0f}) -> ({:.0f}, {:.0f}, {:.0f}), {:.0f} m{}",
                              r.from.x, r.from.y, r.from.z, r.to.x, r.to.y, r.to.z,
                              std::hypot(r.to.x - r.from.x, r.to.z - r.from.z),
-                             r.parked ? std::format(" (area loaded first, {:.1f} s)", r.seconds) : std::string()),
+                             r.loadedFirst ? std::format(" (area loaded first, {:.1f} s)", r.seconds) : std::string()),
                  true);
         },
         &why);
