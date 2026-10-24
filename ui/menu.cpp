@@ -1277,6 +1277,9 @@ void SandboxConfirm(const ModuleView& mv) {
         }
         ImGui::PushTextWrapPos(0.0f);
         ImGui::TextUnformatted("Sandbox edits change your save directly. Enable?");
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.warn),
+                           "This marks the loaded save (and any save you load while Sandbox is on) as cheated: Steam "
+                           "achievements are disabled in it for good, also after you turn Sandbox off.");
         ImGui::PopTextWrapPos();
         DimText("Every edit goes through the game's own functions and is kept when the game next saves. "
                 "There is no undo, so back up your save if you want to keep it as it is.");
@@ -2495,14 +2498,22 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
         ImGui::PopTextWrapPos();
         DimText("Edits use the game's own functions, so the save stays valid, but they change your save directly and "
                 "can't be undone. Sandbox stays off until you enable it and confirm.");
-        DimText("Achievements are paused while Sandbox is on.");
+        DimText("Turning it on marks the loaded save as cheated: Steam achievements stay disabled in that save, "
+                "also with Sandbox off.");
+        if (sbx::SaveCheated()) {
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.warn),
+                               "Steam achievements are disabled for this save (Sandbox was used).");
+            ImGui::PopTextWrapPos();
+        }
         ImGui::Dummy(ImVec2(0, U(4)));
         if (AccentButton("Enable sandbox", ImVec2(U(170), U(34)))) g_sbxConfirm = true;
         EndCard();
         return;
     }
     // Across both columns, above everything else on the page.
-    Banner(P.warn, "Steam achievements are paused while Sandbox is on.");
+    Banner(P.warn, sbx::SaveCheated() ? "Steam achievements are disabled for this save (Sandbox was used)."
+                                      : "Steam achievements are paused while Sandbox is on.");
     sbx::MarkViewed();
     const auto snap = sbx::Get();
     if (!snap || h.nowMs - snap->tick > 3000) {
