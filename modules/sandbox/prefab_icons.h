@@ -14,10 +14,18 @@
 // Apply, Sprite.Create. Every created object is destroyed with DestroyImmediate in the same call,
 // so nothing is left in the scene for the game's own cameras (or the save) to see.
 //
+// Composite looks (RenderPieces): several prefabs, or one child of a prefab, each placed like the
+// mod's runtime dressing places its clones (position, yaw, lean-back tilt, scale), parts left out by
+// GameObject name, and an optional colour shift of the finished image. The Sandbox uses it for the
+// mod buildables' icons (the DJ Booth with its mixer, speakers and pillow, the tilted DJ Speaker, the
+// purple Quantum Storage Link, the Slime Radio).
+//
 // Main thread only; every game call through Resolver::Invoke (managed exceptions caught, a
 // native fault marks the module faulted). Cost: one Render plus one GPU readback per icon.
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 struct Il2CppObject;
 
@@ -42,10 +50,31 @@ public:
     // (HideFlags.DontUnloadUnusedAsset). nullptr and `why` on failure.
     Il2CppObject* Render(Il2CppObject* prefab, std::string& why);
 
+    // One prefab (or one child of it) in a composite look. Local units of the composition, which faces +Z.
+    struct Piece {
+        Il2CppObject* prefab = nullptr;  // GameObject asset
+        const char* sub = nullptr;       // only this child (Transform.Find path, e.g. "model_boombox"); nullptr: all
+        bool keepPlace = false;          // sub: starts at its place in the prefab (else at the origin, unrotated)
+        std::vector<std::string> skip;   // GameObjects (exact names) left out with everything under them
+        float pos[3] = {0, 0, 0};        // added to the start position
+        float yaw = 0;                   // degrees around +Y
+        float tilt = 0;                  // degrees leaning back (the front, +Z, turns upwards)
+        float scale = 1;
+    };
+    // Main thread: like Render, for several pieces in one image. `tint` (r, g, b in 0..1, or nullptr)
+    // shifts the finished image's colours towards it, keeping the shading. `parts` (optional) gets the
+    // number of meshes drawn.
+    Il2CppObject* RenderPieces(const std::vector<Piece>& pieces, const float* tint, std::string& why, int* parts = nullptr);
+
 private:
     struct Impl;
     Impl* impl_ = nullptr;
     bool ready_ = false;
 };
+
+// Main thread: icons rendered for the mod's buildables (custom_upgrades/buildables.h ids), shared by the
+// crafter / spawner (module.cpp) and the Upgrades & Blueprints card (upgrades.cpp). 0 = none (yet).
+uint32_t ModIcon(const std::string& id);
+void SetModIcon(const std::string& id, uint32_t icon);
 
 }  // namespace sr2::modules::sandbox
