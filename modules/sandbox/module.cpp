@@ -123,9 +123,50 @@ std::string Lower(std::string s) {
     return s;
 }
 
+// The area codes in the crates' asset names (identifiabletypes bundle, 1.3.0: ContainerFields01,
+// ContainerGorgeGold01, ContainerLabyDreamlands01, ContainerLabyShadow01, ...), longest first. `crate`
+// starts the crate's name, `zone` is the English zone name (fallback for the section when no
+// ZoneDefinition lists the crate) and `zoneKey` what that zone's _nameKey is expected to contain (its
+// localized name is used then). The Grey Labyrinth's areas have no localized names of their own (the
+// game only uses them in dialogue: "Dream Land", "Lava Depths", "Terrarium", "Waterworks").
+struct CrateCode {
+    const char* code;
+    const char* crate;
+    const char* zone;
+    const char* zoneKey;
+};
+constexpr CrateCode kCrateCodes[] = {
+    {"LabyDreamlands", "Dream Land", "The Grey Labyrinth", "labyrinth"},
+    {"LabyLavaDepths", "Lava Depths", "The Grey Labyrinth", "labyrinth"},
+    {"LabyTerrarium", "Terrarium", "The Grey Labyrinth", "labyrinth"},
+    {"LabyWaterworks", "Waterworks", "The Grey Labyrinth", "labyrinth"},
+    {"LabyShadow", "Shadow", "The Grey Labyrinth", "labyrinth"},
+    {"LabyHub", "Labyrinth Hub", "The Grey Labyrinth", "labyrinth"},
+    {"Laby", "Labyrinth", "The Grey Labyrinth", "labyrinth"},
+    {"Fields", "Rainbow Fields", "Rainbow Fields", "fields"},
+    {"Gorge", "Ember Valley", "Ember Valley", "gorge"},
+    {"Strand", "Starlight Strand", "Starlight Strand", "strand"},
+    {"Bluffs", "Powderfall Bluffs", "Powderfall Bluffs", "bluffs"},
+};
+
+// The crate code of an asset name ("ContainerLabyDreamlandsGold01" -> LabyDreamlands), else nullptr.
+const CrateCode* CrateCodeOf(const std::string& asset) {
+    constexpr std::string_view kPrefix = "Container";
+    if (!asset.starts_with(kPrefix)) return nullptr;
+    const std::string_view rest = std::string_view(asset).substr(kPrefix.size());
+    for (const CrateCode& c : kCrateCodes)
+        if (rest.starts_with(c.code)) return &c;
+    return nullptr;
+}
+
 // A readable name from an asset name, for types without a localized one (the crates show
-// "!! Actor.l.crate_reef_01 !!"): "ContainerBluffsGold01" -> "Bluffs Gold Crate".
+// "!! Actor.l.crate_reef_01 !!"): "ContainerBluffsGold01" -> "Powderfall Bluffs Gold Crate",
+// "ContainerLabyDreamlands01" -> "Dream Land Crate" (kCrateCodes).
 std::string PrettyAssetName(const std::string& asset) {
+    if (const CrateCode* c = CrateCodeOf(asset)) {
+        const bool gold = asset.find("Gold", 9 + std::strlen(c->code)) != std::string::npos;
+        return std::format("{}{} Crate", c->crate, gold ? " Gold" : "");
+    }
     std::string s;
     for (size_t i = 0; i < asset.size(); ++i) {
         const char c = asset[i];
@@ -226,7 +267,20 @@ private:
     void Refresh();
     void TopUpEnergy();
     void Done(bool ok, const std::string& text);
-    void Notify(Il2CppObject* type, const std::string& notice, const std::string& text);
+    // HUD notices of spawns, crafts and refinery adds. A request that is part of a multi-item one
+    // (bridge::Action::batch) collects them, and the last one shows a single summary (FlushNotices).
+    enum class NoticeKind { Spawn, Craft, Refinery };
+    struct NoticeLine {
+        NoticeKind kind;
+        std::string name;
+        int count = 0;
+        Il2CppObject* icon = nullptr;  // the type's sprite (an asset; checked again before use)
+    };
+    void Notify(Il2CppObject* type, NoticeKind kind, int count, const std::string& name, const std::string& text);
+    Il2CppObject* NoticeIcon(Il2CppObject* type);
+    void ShowNotice(Il2CppObject* icon, const std::string& notice);
+    void FlushNotices();
+    void EnsureCrateAreas();
 
     void DoNewbucks(const Ctx& c, int64_t target, const char* how);
     void DoSlotCount(const Ctx& c, int idx, int64_t value);
@@ -280,7 +334,12 @@ private:
     unsigned long long renderMs_ = 0;
     // The game's HUD notices for spawns, crafts and refinery adds (custom_upgrades/sale_notify.h).
     sr2::modules::custom_upgrades::ui::SaleNotices notices_;
+    std::vector<NoticeLine> batchNotices_;  // collected for the summary of a multi-item request
+    int batchIdx_ = 0, batchSize_ = 0;      // the request being handled (bridge::Action::batch / batchSize)
+    unsigned long long batchTick_ = 0;      // last notice collected (a batch left unfinished is shown after 2 s)
+    int spawnNext_ = 0;                     // spawn grid position for the next item of a multi-item spawn
     bool spawnGroupsLogged_ = false;
+    bool crateAreasBuilt_ = false;          // crate areas from the zones' crate lists (EnsureCrateAreas)
 
     // spawner and crafter lists (main thread), built once per enable; entries kept alive by GC handles
     std::shared_ptr<const std::vector<bridge::Item>> spawnables_;
@@ -418,6 +477,11 @@ private:
     size_t offModTarget_ = 0;       // FloatModifier.TargetProperty (from the live object's class)
     Il2CppClass* modClass_ = nullptr;
     Il2CppClass* droneTargetsClass_ = nullptr;  // DroneTargetDefinitions (ListAsset of DroneUIProgramDefinition<DroneTaskTargetType>)
+    Il2CppClass* zoneClass_ = nullptr;  // MonomiPark.SlimeRancher.World.ZoneDefinition (crate areas)
+    size_t offZoneCrates_ = 0;          // ZoneDefinition._crates (SpawnableCrate[])
+    size_t offZoneLocName_ = 0;         // ZoneDefinition._localizedName
+    size_t offZoneNameKey_ = 0;         // ZoneDefinition._nameKey (string)
+    size_t offCrateType_ = 0;           // ZoneDefinition.SpawnableCrate.Type (from the live object's class)
 
     // ---- vacpack slot unlock (optional): the upgrade levels the fabricator sells ----
     const MethodInfo* getUpgradeModel_ = nullptr;    // PlayerModel.GetUpgradeModel()
@@ -643,6 +707,15 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
         std::string tw;
         droneTargetsClass_ = cls(kImage, "MonomiPark.SlimeRancher.UI.Drone.Data", "DroneTargetDefinitions", tw);
         if (!tw.empty()) SR2_WARN("[{}] group tabs: no drone target icons ({})", kModule, tw);
+        std::string zw;
+        zoneClass_ = cls(kImage, "MonomiPark.SlimeRancher.World", "ZoneDefinition", zw);
+        off(zoneClass_, "_crates", offZoneCrates_, zw);
+        off(zoneClass_, "_localizedName", offZoneLocName_, zw);
+        off(zoneClass_, "_nameKey", offZoneNameKey_, zw);
+        if (!zw.empty()) {
+            zoneClass_ = nullptr;
+            SR2_WARN("[{}] crate areas: no zone data ({}); areas from the crates' asset names", kModule, zw);
+        }
     }
     {
         // Optional: unlocking a locked vacpack slot through the upgrade the fabricator sells
@@ -815,6 +888,7 @@ void Sandbox::OnDisable() {
     sandbox::SetAchievementsPaused(false);
     if (infinite_.exchange(false)) SR2_INFO("[{}] infinite energy off (module disabled)", kModule);
     notices_.Clear();
+    batchNotices_.clear();
     bridge::SetHandler(nullptr);
     bridge::SetFabricatorHint(false, 0);
     sandbox::PlayerExtrasEnabled(false);
@@ -1489,7 +1563,75 @@ bool Sandbox::EnsureSpawnables() {
     }
     LogSpawnGroups();
     QueueIconRenders(*spawnables_);
+    crateAreasBuilt_ = false;  // areas for the new list
     return true;
+}
+
+// The area of each crate in the spawn list (bridge::Item::area, the spawner's Crates sections): the
+// localized name of the zone whose crate list (ZoneDefinition._crates, SpawnableCrate.Type) has it,
+// else the zone its asset name's code stands for (kCrateCodes: the zone whose _nameKey contains the
+// code's key, by its localized name, else the English name). One FindObjectsOfTypeAll(ZoneDefinition).
+void Sandbox::EnsureCrateAreas() {
+    crateAreasBuilt_ = true;
+    if (!spawnables_) return;
+    std::unordered_map<uintptr_t, std::string> byType;
+    std::vector<std::pair<std::string, std::string>> zones;  // _nameKey (lower case), localized name
+    std::string zoneLog;
+    auto& R = Resolver::Get();
+    if (zoneClass_)
+        for (Il2CppObject* z : unity::FindObjectsOfTypeAll(zoneClass_)) {
+            if (!IsA(z, zoneClass_) || !unity::IsAlive(z)) continue;
+            const std::string key =
+                unity::ToUtf8(reinterpret_cast<Il2CppString*>(unity::Field<Il2CppObject*>(z, offZoneNameKey_)));
+            std::string name = Localized(unity::Field<Il2CppObject*>(z, offZoneLocName_));
+            if (name.rfind("!!", 0) == 0) name.clear();
+            if (name.empty()) continue;
+            zones.emplace_back(Lower(key), name);
+            void* crates = unity::Field<void*>(z, offZoneCrates_);
+            int listed = 0;
+            for (size_t i = 0, n = unity::ArrayLength(crates); i < n; ++i) {
+                auto* e = static_cast<Il2CppObject*>(unity::ArrayAt(crates, i));
+                if (!e) continue;
+                if (!offCrateType_) {
+                    Il2CppClass* k = api().il2cpp_object_get_class ? api().il2cpp_object_get_class(e) : nullptr;
+                    const auto o = k ? R.FieldOffset(k, "Type") : std::nullopt;
+                    if (!o) break;
+                    offCrateType_ = *o;
+                }
+                Il2CppObject* t = unity::Field<Il2CppObject*>(e, offCrateType_);
+                if (!IsA(t, identClass_)) continue;
+                byType.emplace(reinterpret_cast<uintptr_t>(t), name);
+                ++listed;
+            }
+            zoneLog += std::format("{}{} \"{}\": {}", zoneLog.empty() ? "" : ", ", name, key, listed);
+        }
+    auto next = std::make_shared<std::vector<bridge::Item>>(*spawnables_);
+    int fromZones = 0, fromCodes = 0;
+    std::string unknown;
+    for (bridge::Item& it : *next) {
+        if (it.kind != bridge::Kind::Container) continue;
+        if (auto f = byType.find(it.id); f != byType.end()) {
+            it.area = f->second;
+            ++fromZones;
+            continue;
+        }
+        Il2CppObject* o = Lookup(spawnById_, it.id, identClass_);
+        const std::string asset = o ? unity::GetName(o) : std::string();
+        if (const CrateCode* c = CrateCodeOf(asset)) {
+            it.area = c->zone;
+            for (const auto& [key, name] : zones)
+                if (key.find(c->zoneKey) != std::string::npos) {
+                    it.area = name;
+                    break;
+                }
+            ++fromCodes;
+        } else {
+            unknown += (unknown.empty() ? "" : ", ") + asset;
+        }
+    }
+    spawnables_ = std::move(next);
+    SR2_INFO("[{}] crate areas: {} from the zones' crate lists, {} from asset names{}{}; zones: {}", kModule, fromZones,
+             fromCodes, unknown.empty() ? "" : "; unknown: ", unknown, zoneLog.empty() ? "none read" : zoneLog);
 }
 
 // How many spawn-list items each tab shows, logged once (the kinds come from the game's groups).
@@ -1897,6 +2039,7 @@ void Sandbox::Refresh() {
         // Cheap one-time extras, each in its own refresh after the lists.
         if (!built && spawnables_ && !relations_) EnsureRelations(), built = true;
         if (!built && spawnables_ && !groupIconsBuilt_) EnsureGroupIcons(), built = true;
+        if (!built && spawnables_ && !crateAreasBuilt_) EnsureCrateAreas(), built = true;
         if (!built) built = RenderNextIcon();
         s.catalog = catalog_;  // icons rendered into the lists
         s.spawnables = spawnables_;
@@ -1943,6 +2086,10 @@ void Sandbox::Tick(float dt) {
         TopUpEnergy();
     }
     FabricatorTick(now);
+    if (!batchNotices_.empty() && now - batchTick_ > 2000) {  // a batch whose last request never came
+        FlushNotices();
+        batchIdx_ = batchSize_ = 0;
+    }
     const bool snap = bridge::WantsSnapshot() && now - lastSnap_ >= kSnapshotMs;
     if (snap) {
         lastSnap_ = now;
@@ -1957,23 +2104,69 @@ void Sandbox::Done(bool ok, const std::string& text) {
     bridge::SetStatus(text, !ok);
 }
 
-// A spawn / craft / refinery add that worked: `text` is logged, and `notice` ("Spawned 5 Pink Plort")
-// shows as a HUD pop-up in the game's notification list with the type's icon, instead of the tab's
-// status line. It is our own text entry (SaleNotices::QueueText), not the drones' cloud-upload notice
+// A spawn / craft / refinery add that worked: `text` is logged, and a HUD pop-up in the game's
+// notification list with the type's icon says it ("Spawned 5 Pink Plort"), instead of the tab's status
+// line. It is our own text entry (SaleNotices::QueueText), not the drones' cloud-upload notice
 // (AddResourceCollected reads "... sent to the Quantum Cloud"). Without the HUD list or the UI's text
 // sink the status line says it.
-void Sandbox::Notify(Il2CppObject* type, const std::string& notice, const std::string& text) {
+// Part of a multi-item request (Craft N / Spawn N / Put in slots with several items selected): the
+// notices are collected and the request's last item shows one summary. The game's list shows one page
+// of entries at a time and starts the next page only when the shown one has faded out, so separate
+// notices sent in a burst showed only the first one for a while (reported: "multiple crafting only
+// spawns one notification popup").
+void Sandbox::Notify(Il2CppObject* type, NoticeKind kind, int count, const std::string& name, const std::string& text) {
     SR2_INFO("[{}] {}", kModule, text);
-    if (notices_.TextReady() && notices_.Available()) {
-        Il2CppObject* icon = type && offIdentIcon_ ? unity::Field<Il2CppObject*>(type, offIdentIcon_) : nullptr;
-        if ((!icon || !unity::IsAlive(icon)) && type) icon = VirtualIcon(type);
-        if (icon && ((spriteClass_ && !IsA(icon, spriteClass_)) || !unity::IsAlive(icon))) icon = nullptr;
-        if (notices_.QueueText(icon, notice)) {
-            bridge::SetStatus("", false);  // no stale line from an earlier request
-            return;
-        }
+    if (batchSize_ > 1) {
+        batchNotices_.push_back({kind, name, count, NoticeIcon(type)});
+        batchTick_ = GetTickCount64();
+        return;
     }
-    bridge::SetStatus(text, false);
+    const std::string notice = kind == NoticeKind::Spawn   ? std::format("Spawned {} {}", count, name)
+                               : kind == NoticeKind::Craft ? std::format("Crafted {} {}", count, name)
+                                                           : std::format("+{} {} (refinery)", count, name);
+    ShowNotice(NoticeIcon(type), notice);
+}
+
+// The type's sprite for a notice: IdentifiableType.icon, else its get_Icon.
+Il2CppObject* Sandbox::NoticeIcon(Il2CppObject* type) {
+    Il2CppObject* icon = type && offIdentIcon_ ? unity::Field<Il2CppObject*>(type, offIdentIcon_) : nullptr;
+    if ((!icon || !unity::IsAlive(icon)) && type) icon = VirtualIcon(type);
+    if (icon && ((spriteClass_ && !IsA(icon, spriteClass_)) || !unity::IsAlive(icon))) icon = nullptr;
+    return icon;
+}
+
+void Sandbox::ShowNotice(Il2CppObject* icon, const std::string& notice) {
+    if (icon && ((spriteClass_ && !IsA(icon, spriteClass_)) || !unity::IsAlive(icon))) icon = nullptr;
+    if (notices_.TextReady() && notices_.Available() && notices_.QueueText(icon, notice)) {
+        bridge::SetStatus("", false);  // no stale line from an earlier request
+        return;
+    }
+    bridge::SetStatus(notice, false);
+}
+
+// The collected notices of a multi-item request: one per kind, "Crafted 3 Fire Flower" for a single
+// item, else "Crafted 9 items: Fire Flower, Dream Lantern +3 more" with the first item's icon.
+void Sandbox::FlushNotices() {
+    std::vector<NoticeLine> lines;
+    lines.swap(batchNotices_);
+    for (NoticeKind kind : {NoticeKind::Spawn, NoticeKind::Craft, NoticeKind::Refinery}) {
+        const NoticeLine* first = nullptr;
+        int total = 0, kinds = 0;
+        std::string names;
+        for (const NoticeLine& l : lines) {
+            if (l.kind != kind) continue;
+            if (!first) first = &l;
+            total += l.count;
+            if (++kinds <= 2) names += (names.empty() ? "" : ", ") + l.name;
+        }
+        if (!first) continue;
+        std::string what;
+        if (kinds == 1) what = std::format("{} {}", total, first->name);
+        else what = std::format("{} items: {}{}", total, names, kinds > 2 ? std::format(" +{} more", kinds - 2) : "");
+        ShowNotice(first->icon, kind == NoticeKind::Spawn   ? "Spawned " + what
+                                : kind == NoticeKind::Craft ? "Crafted " + what
+                                                            : std::format("+{} (refinery)", what));
+    }
 }
 
 // ---------------------------------------------------------------- actions ----
@@ -1982,6 +2175,22 @@ void Sandbox::Handle(const bridge::Action& a) {
         bridge::SetStatus("Sandbox is off.", true);
         return;
     }
+    // A multi-item request: its items' notices are collected and shown together after the last one.
+    if (a.batchSize <= 1 || a.batch <= 1) {
+        if (!batchNotices_.empty()) FlushNotices();  // an earlier batch that never got its last item
+        spawnNext_ = 0;
+    }
+    batchIdx_ = a.batch;
+    batchSize_ = a.batchSize;
+    struct BatchEnd {
+        Sandbox* self;
+        ~BatchEnd() {
+            if (self->batchSize_ <= 1 || self->batchIdx_ >= self->batchSize_) {
+                if (!self->batchNotices_.empty()) self->FlushNotices();
+                self->batchIdx_ = self->batchSize_ = 0;
+            }
+        }
+    } batchEnd{this};
     if (a.op == bridge::Op::InfiniteEnergy) {
         const bool on = a.value != 0;
         if (infinite_.exchange(on) != on)
@@ -2033,7 +2242,7 @@ void Sandbox::Handle(const bridge::Action& a) {
         }
         case bridge::Op::SetSlotCount: DoSlotCount(c, a.slot, a.value); break;
         case bridge::Op::PutItem: DoPutItem(c, a.slot, a.item, a.value); break;
-        case bridge::Op::Spawn: DoSpawn(c, a.item, a.value); break;
+        case bridge::Op::Spawn: DoSpawn(c, a.item, a.value, kMaxDrop); break;
         case bridge::Op::StowItem: DoStow(c, a.slot, a.item, a.value, a.replace); break;
         case bridge::Op::Craft:
             DoCraft(a.item, a.value);
@@ -2385,13 +2594,18 @@ int Sandbox::DoSpawn(const Ctx& c, uintptr_t item, int64_t count, int limit) {
         }
     }
     const int n = static_cast<int>(std::clamp<int64_t>(count, 1, std::max(1, limit)));
-    const int cols = std::min(n, n > kMaxSpawn ? 10 : 5);  // more than a click's worth: wider rows, fewer of them
+    int cols = std::min(n, n > kMaxSpawn ? 10 : 5);  // more than a click's worth: wider rows, fewer of them
+    // Part of a multi-item request: one grid for all its items (rows of 10), each item after the last.
+    const bool batch = batchSize_ > 1;
+    const int base = batch ? spawnNext_ : 0;
+    if (batch) cols = 10;
     const Vec3 right{fwd.z, 0, -fwd.x};
     Quat rot{0, 0, 0, 1};
     int spawned = 0;
     for (int i = 0; i < n; ++i) {
-        const float side = (static_cast<float>(i % cols) - static_cast<float>(cols - 1) * 0.5f) * 0.55f;
-        Vec3 pos{eye.x + fwd.x * dist + right.x * side, eye.y - 0.3f + static_cast<float>(i / cols) * 0.7f,
+        const int at = base + i;
+        const float side = (static_cast<float>(at % cols) - static_cast<float>(cols - 1) * 0.5f) * 0.55f;
+        Vec3 pos{eye.x + fwd.x * dist + right.x * side, eye.y - 0.3f + static_cast<float>(at / cols) * 0.7f,
                  eye.z + fwd.z * dist + right.z * side};
         bool nonActorOk = false, ignoreEmotions = false, setCollected = false;
         int appearance = 0, secondAppearance = 0;  // SlimeAppearance.AppearanceSaveSet.NONE
@@ -2403,7 +2617,8 @@ int Sandbox::DoSpawn(const Ctx& c, uintptr_t item, int64_t count, int limit) {
         if (!ok || !go) break;
         ++spawned;
     }
-    if (spawned == n) Notify(ident, std::format("Spawned {} {}", n, name), std::format("Spawned {} x {}", n, name));
+    if (batch) spawnNext_ = base + spawned;
+    if (spawned == n) Notify(ident, NoticeKind::Spawn, n, name, std::format("Spawned {} x {}", n, name));
     else Done(spawned > 0, spawned > 0 ? std::format("Spawned {} of {} x {} (the game refused the rest)", spawned, n, name)
                                        : std::format("{} not spawned: the game refused it", name));
     return spawned;
@@ -2453,7 +2668,7 @@ void Sandbox::DoCraft(uintptr_t item, int64_t count) {
     Call(gadgetAddItem_, dir, {def, &amount}, "GadgetDirector.AddItem", &ok);
     CallValue(gadgetCount_, dir, {def}, "GadgetDirector.GetItemCount", after);
     if (ok && after > before)
-        Notify(def, std::format("Crafted {} {}", after - before, name),
+        Notify(def, NoticeKind::Craft, after - before, name,
                std::format("Crafted {} x {} for free (inventory {} -> {}){}", after - before, name, before, after,
                            unlocked ? "" : "; its blueprint is still locked"));
     else
@@ -2490,7 +2705,7 @@ void Sandbox::DoAddMaterial(uintptr_t item, int64_t count) {
     Call(gadgetAddItem_, dir, {t, &amount}, "GadgetDirector.AddItem", &ok);
     CallValue(gadgetCount_, dir, {t}, "GadgetDirector.GetItemCount", after);
     if (ok && after > before)
-        Notify(t, std::format("+{} {} (refinery)", after - before, name), std::format("Refinery: {} {} -> {}", name, before, after));
+        Notify(t, NoticeKind::Refinery, after - before, name, std::format("Refinery: {} {} -> {}", name, before, after));
     else Done(false, std::format("{} not added: the game refused it", name));
 }
 

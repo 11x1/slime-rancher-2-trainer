@@ -1208,7 +1208,8 @@ bool g_sbxConfirm = false;   // open the "Enable sandbox?" dialog (set by the bu
 int g_sbxSlot = 0;           // selected vacpack slot
 long long g_sbxBucks = 1000;
 item_grid::State g_vacGrid, g_spawnGrid, g_craftGrid;  // search text and tab per grid
-int g_spawnCount = 1;
+constexpr int kSpawnMax = 60;          // most of one item per spawn request (the module's limit)
+std::map<uintptr_t, int> g_spawnPick;  // spawner multi-selection: item -> amount
 std::map<uintptr_t, int> g_vacPick;    // vacpack multi-selection: item -> amount (0 = the slot's maximum)
 std::map<uintptr_t, int> g_craftPick;  // crafter multi-selection: recipe / material -> amount
 uintptr_t g_vacFocus = 0;    // last picked vacpack item: Shift+wheel on a slot puts this one in
@@ -1225,6 +1226,10 @@ uintptr_t g_ctxItem = 0;
 SbxGrid g_ctxGrid = SbxGrid::Vacpack;
 constexpr const char* kSbxCtx = "##sbx_item_ctx";
 constexpr const char* kSlotDrag = "SR2_SLOT";  // drag payload: a vacpack slot index (int)
+// The grid under the mouse: the hint bar at the bottom of the page shows its controls.
+enum class SbxHover { None, Slots, Picker, Spawner, Crafter };
+SbxHover g_sbxHover = SbxHover::None;
+float g_vacPickerTop = FLT_MAX;  // screen y where the vacpack's item grid starts (above it: the slots)
 
 std::string Thousands(long long v) {
     std::string s = std::to_string(v < 0 ? -v : v);
@@ -1250,6 +1255,17 @@ void SbxRequest(sbx::Op op, long long value = 0, int slot = -1, uintptr_t item =
     a.slot = slot;
     a.item = item;
     sbx::Request(a);
+}
+
+// A multi-item request (Craft N, Spawn N, Put in slots): each action gets its index and the size, so
+// the module shows one HUD notice for all of them and spawns them in one grid (sbx::Action::batch).
+void SbxBatch(std::vector<sbx::Action>& actions) {
+    const int n = static_cast<int>(actions.size());
+    for (int i = 0; i < n; ++i) {
+        actions[static_cast<size_t>(i)].batch = n > 1 ? i + 1 : 0;
+        actions[static_cast<size_t>(i)].batchSize = n > 1 ? n : 0;
+        sbx::Request(actions[static_cast<size_t>(i)]);
+    }
 }
 
 void DimText(const std::string& text, float size = theme::kSmallSize) {
@@ -1400,8 +1416,11 @@ bool InGroup(sbx::Kind k, int group) {
     }
 }
 
-// A crate's area: its name without "Crate" / "Gold" / "Shadow" ("Bluffs Gold Crate" -> "Bluffs").
-std::string CrateArea(const std::string& name) {
+// A crate's area: the zone the module found for it (sbx::Item::area, the game's zone name), else its
+// name without "Crate" / "Gold" / "Shadow" ("Bluffs Gold Crate" -> "Bluffs").
+std::string CrateArea(const sbx::Item& it) {
+    if (!it.area.empty()) return it.area;
+    const std::string& name = it.name;
     std::string out, word;
     auto flush = [&] {
         if (!word.empty() && word != "Crate" && word != "Gold" && word != "Shadow") out += (out.empty() ? "" : " ") + word;
@@ -1484,17 +1503,6 @@ void SmallHeading(const char* text) {
     ImGui::PushStyleColor(ImGuiCol_Text, theme::Colors().soft);
     ImGui::TextUnformatted(text);
     ImGui::PopStyleColor();
-}
-
-// "How many" slider on one row with its label.
-void CountRow(const char* label, const char* id, int& value, int max, const char* tip) {
-    const float avail = ImGui::GetContentRegionAvail().x;
-    const float x0 = SbxRowStart(label);
-    const float sw = std::floor(avail * 0.58f);
-    ImGui::SameLine(x0 + avail - sw);
-    ImGui::SetNextItemWidth(sw);
-    ImGui::SliderInt(id, &value, 1, max, "%d", ImGuiSliderFlags_AlwaysClamp);
-    HoverTip(tip);
 }
 
 item_grid::Options GridOptions(float height) {
@@ -1595,7 +1603,7 @@ void RelationRow(const sbx::Snapshot& s, const char* label, const std::vector<ui
 // Item tooltip: the name with its group as a small tag; for slimes, foods and plorts the
 // diet links with icons (favourite food, plort, who loves / makes it; no largos under "Made
 // by"); optional cost lines with icons (crafter) and a dim info line. Control hints are not
-// here: they sit under each grid as keycaps (KeyHints).
+// here: the hint bar at the bottom of the page shows them (SandboxHintBar).
 void ItemTooltip(const sbx::Snapshot& s, const std::string& name, sbx::Kind kind, uintptr_t id, const char* info = nullptr,
                  const std::vector<sbx::CostLine>* costs = nullptr) {
     const Palette& P = theme::Colors();
@@ -1657,24 +1665,59 @@ void ItemTooltip(const sbx::Snapshot& s, const std::string& name, sbx::Kind kind
     ImGui::PopStyleVar(2);
 }
 
-// Control hints under a grid: each a keycap (or several joined by '+') and what it does,
-// wrapped onto as many lines as the width needs. The keycaps are the HUD edit help bar's, drawn
-// at 70 % of its size and faded, with small dim labels: the hints are secondary to the grid.
+// The hint bar at the bottom of the Sandbox page (pinned under the scrolling page, across the menu's
+// content width): the controls of the grid under the mouse (g_sbxHover), each a keycap (or several
+// joined by '+') and a short label. The keycaps are the HUD edit help bar's at 80 % of its size;
+// labels 2 px bigger than the old hint rows under each grid (which it replaces). Nothing hovered: a
+// short dim line.
 struct KeyHint {
     const char* keys;  // "Ctrl+Click": one keycap per part
     const char* text;
 };
 
-void KeyHints(std::initializer_list<KeyHint> hints) {
+float SandboxHintBarHeight() { return U(40); }
+
+void SandboxHintBar(ImDrawList* dl, ImVec2 a, ImVec2 b) {
     const Palette& P = theme::Colors();
+    static const KeyHint kSlots[] = {{"Click", "select"}, {"Shift+Wheel", "\u00b11"}, {"Ctrl+Wheel", "\u00b110"},
+                                     {"Drag", "move / swap"}, {"Right-click", "menu"}};
+    static const KeyHint kPicker[] = {{"Click", "fill slot"},    {"Ctrl+Click", "select"},       {"Shift+Wheel", "\u00b11"},
+                                      {"Ctrl+Wheel", "\u00b110"}, {"Drag", "to a slot"}, {"Right-click", "menu / clear"}};
+    static const KeyHint kSpawner[] = {{"Click", "spawn"},         {"Ctrl+Click", "select"}, {"Shift+Wheel", "\u00b11"},
+                                       {"Ctrl+Wheel", "\u00b110"}, {"Right-click", "menu / clear"}};
+    static const KeyHint kCrafter[] = {{"Click", "select"}, {"Shift+Wheel", "\u00b11"}, {"Ctrl+Wheel", "\u00b110"},
+                                       {"Right-click", "clear"}};
+    const KeyHint* hints = nullptr;
+    size_t count = 0;
+    const char* title = nullptr;
+    switch (g_sbxHover) {
+        case SbxHover::Slots: hints = kSlots, count = std::size(kSlots), title = "Vacpack slots"; break;
+        case SbxHover::Picker: hints = kPicker, count = std::size(kPicker), title = "Vacpack items"; break;
+        case SbxHover::Spawner: hints = kSpawner, count = std::size(kSpawner), title = "Spawner"; break;
+        case SbxHover::Crafter: hints = kCrafter, count = std::size(kCrafter), title = "Refinery Crafter"; break;
+        case SbxHover::None: break;
+    }
+    dl->AddRectFilled(a, b, P.card, U(8));
+    dl->AddRect(a, b, P.cardBorder, U(8));
     ImFont* f = theme::Body();
-    constexpr float kCapScale = 0.7f, kCapAlpha = 0.7f;
-    const float capScale = g_scale * kCapScale;
-    const float fs = theme::kSmallSize * 0.75f;
+    const float fs = theme::kSmallSize * 0.75f + 2.0f;
+    const float capScale = g_scale * 0.8f;
     const ImVec2 ts = TextSize(f, fs, "Ag");
-    const float lineH = std::max(ts.y + U(6), U(17));
-    const float avail = ImGui::GetContentRegionAvail().x;
-    const float plusW = TextSize(f, fs, "+").x + U(4);
+    const float cy = std::round((a.y + b.y) * 0.5f);
+    float x = a.x + U(14);
+    if (!hints) {
+        Text(dl, f, fs, ImVec2(x, std::round(cy - ts.y * 0.5f)), P.dim, "Point at a grid to see its controls.");
+        return;
+    }
+    {
+        ImFont* d = theme::Display();
+        const float ds = theme::kSmallSize + 1;
+        const ImVec2 tsz = TextSize(d, ds, title);
+        Text(dl, d, ds, ImVec2(x, std::round(cy - tsz.y * 0.5f)), P.soft, title);
+        x += tsz.x + U(12);
+        dl->AddLine(ImVec2(x, cy - U(9)), ImVec2(x, cy + U(9)), P.cardBorder, std::max(1.0f, U(1.5f)));
+        x += U(12);
+    }
     auto parts = [](const char* keys) {
         std::vector<std::string> out(1);
         for (const char* c = keys; *c; ++c) {
@@ -1683,33 +1726,26 @@ void KeyHints(std::initializer_list<KeyHint> hints) {
         }
         return out;
     };
-    auto width = [&](const KeyHint& h) {
-        float w = 0;
+    const float plusW = TextSize(f, fs, "+").x + U(4);
+    const float gap = U(14);
+    dl->PushClipRect(a, b, true);
+    for (size_t k = 0; k < count; ++k) {
+        const KeyHint& h = hints[k];
         const auto ks = parts(h.keys);
+        float w = U(4) + TextSize(f, fs, h.text).x;
         for (size_t i = 0; i < ks.size(); ++i) w += hud_edit::KeycapWidth(ks[i].c_str(), capScale) + (i ? plusW : 0.0f);
-        return w + U(4) + TextSize(f, fs, h.text).x;
-    };
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImVec2 o = ImGui::GetCursorScreenPos();
-    float x = 0, y = 0;
-    const float gap = U(12);
-    for (const KeyHint& h : hints) {
-        const float w = width(h);
-        if (x > 0 && x + w > avail) x = 0, y += lineH;
-        float cx = o.x + x;
-        const float cy = o.y + y + lineH * 0.5f;
-        const auto ks = parts(h.keys);
+        if (x + w > b.x - U(10)) break;  // what doesn't fit is left out (the hints are ordered by importance)
         for (size_t i = 0; i < ks.size(); ++i) {
             if (i) {
-                Text(dl, f, fs, ImVec2(cx + U(2), std::round(cy - ts.y * 0.5f)), P.dim, "+");
-                cx += plusW;
+                Text(dl, f, fs, ImVec2(x + U(2), std::round(cy - ts.y * 0.5f)), P.dim, "+");
+                x += plusW;
             }
-            cx += hud_edit::DrawKeycap(dl, cx, cy, ks[i].c_str(), capScale, kCapAlpha);
+            x += hud_edit::DrawKeycap(dl, x, cy, ks[i].c_str(), capScale, 1.0f);
         }
-        Text(dl, f, fs, ImVec2(cx + U(4), std::round(cy - ts.y * 0.5f)), P.dim, h.text);
-        x += w + gap;
+        Text(dl, f, fs, ImVec2(x + U(4), std::round(cy - ts.y * 0.5f)), P.soft, h.text);
+        x += U(4) + TextSize(f, fs, h.text).x + gap;
     }
-    ImGui::Dummy(ImVec2(avail, y + lineH));
+    dl->PopClipRect();
 }
 
 void TabTip(const item_grid::Result& r, const std::vector<item_grid::Tab>& tabs) {
@@ -1764,13 +1800,23 @@ void StowItem(int sel, uintptr_t id, int amount, bool replace) {
 // Right-click menu for an item (picker tiles, vacpack slots, spawner tiles): "Give: X" (vacpack)
 // or "Spawn: X" (spawner) for the related slimes, foods and plorts from the diets, done the grid's
 // way (vacpack: into a slot that holds it or an empty one, the slot's maximum, nothing is replaced;
-// spawner: spawn the current count in front of you). Largos (of a slime, of a plort, or loving a
-// food) are always spawned with the spawner's count, since the vacpack can't hold them, and read
+// spawner: spawn in front of you, SpawnAmount). A slime in the vacpack also gets "Spawn: <slime>"
+// first. Largos (of a slime, of a plort, or loving a food) are always spawned (SpawnAmount), since
+// the vacpack can't hold them, and read
 // "Spawn: <this item's slime> <other> Largo". They are not listed directly: one "Largos" row opens
 // them in a submenu. That is
 // ImGui's BeginMenu, so the first menu stays open while the submenu is used, and its safe
 // triangle (from the cursor to the submenu's near edge) keeps the submenu open while the mouse
 // moves diagonally into it across the other rows.
+// How many a context-menu "Spawn: X" entry spawns: X's amount picked in the spawner, else the amount
+// picked on the right-clicked item in its grid, else 1 (at most kSpawnMax).
+int SpawnAmount(uintptr_t id) {
+    if (const auto it = g_spawnPick.find(id); it != g_spawnPick.end() && it->second > 0) return std::min(it->second, kSpawnMax);
+    const auto& pick = g_ctxGrid == SbxGrid::Spawner ? g_spawnPick : g_vacPick;
+    if (const auto it = pick.find(g_ctxItem); it != pick.end() && it->second > 0) return std::min(it->second, kSpawnMax);
+    return 1;
+}
+
 void ItemContextMenu(const sbx::Snapshot& s) {
     const Palette& P = theme::Colors();
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(8), U(8)));
@@ -1886,11 +1932,17 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                             : g.spawn        ? "Not in the spawn list."
                                              : "No unlocked vacpack slot holds this or is empty. Empty a slot first.");
                 if (hit && g.can) {
-                    if (g.spawn) SbxRequest(sbx::Op::Spawn, g_spawnCount, -1, g.it->id);
+                    if (g.spawn) SbxRequest(sbx::Op::Spawn, SpawnAmount(g.it->id), -1, g.it->id);
                     else StowItem(g_sbxSlot, g.it->id, 0, false);
                 }
                 ImGui::PopID();
             };
+            if (vac && self->kind == sbx::Kind::Slime) {
+                // The slime itself, spawned in front of you (next to the Give entries).
+                const sbx::Item* sp = spawnable(self->id);
+                const bool can = sp && !(sp->tarr && s.tarrsOff);
+                entry({"Spawn: " + self->name, sp ? sp : self, can, true, {}});
+            }
             for (const Give& g : gives) entry(g);
             if (!largos.empty()) {
                 // "Largos  >": the first largo's icon, the label and count, ImGui's submenu arrow.
@@ -1926,7 +1978,7 @@ void OpenItemContext(uintptr_t id, SbxGrid grid) {
 }
 
 // Vacpack: the slots in a row across the top, Fill / Empty for the selected slot, then a grid
-// of what that slot accepts with group tabs, search and "Put in slots", and the control hints.
+// of what that slot accepts with group tabs, search and "Put in slots" (the controls: SandboxHintBar).
 //   * Item: click fills the selected slot; Ctrl+click selects several; Shift+wheel / Ctrl+wheel
 //     sets the amount (+-1 / +-10, shown on the tile); drag onto any slot; right-click: give menu.
 //   * Slot: click selects it; Shift+wheel / Ctrl+wheel changes its count (an empty one takes the
@@ -1944,6 +1996,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
         return;
     }
     const int n = std::min(static_cast<int>(s.slots.size()), 32);
+    g_vacPickerTop = FLT_MAX;  // set where the item grid starts (not drawn: the whole card is the slots)
     g_sbxSlot = std::clamp(g_sbxSlot, 0, n - 1);
     if (!s.slots[static_cast<size_t>(g_sbxSlot)].unlocked)  // move off a locked slot
         for (int i = 0; i < n; ++i)
@@ -2045,7 +2098,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
         }
         if (hot && !sl.unlocked) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort) && !ImGui::GetDragDropPayload() && !ImGui::IsPopupOpen(kSbxCtx)) {
-            // The item's name, group and favourites only; the controls are listed under the grid.
+            // The item's name, group and favourites only; the controls are in the hint bar.
             if (!sl.unlocked)
                 Tooltip(sl.unlockable ? "Locked. Click to unlock it (applies the vacpack upgrade, free)."
                                       : "Locked. No vacpack upgrade for it was found.");
@@ -2146,6 +2199,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     o.dropType = kSlotDrag;  // a slot dragged back onto the list is emptied
     const std::string dropHint = draggedSlot >= 0 ? std::format("Drop to empty slot {}", draggedSlot + 1) : std::string();
     o.dropHint = dropHint.c_str();
+    g_vacPickerTop = ImGui::GetCursorScreenPos().y;  // the hint bar: slots above, the item grid below
     const item_grid::Result r = item_grid::Draw("vac", tiles, g_vacGrid, o);
     lastHover = r.hovered >= 0 ? tiles[static_cast<size_t>(r.hovered)].id : 0;
     TabTip(r, tabs);
@@ -2191,24 +2245,28 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
         // One StowItem per selected item, in the module's order: the first may replace what the
         // selected slot holds, the others go into the slots that hold them or are empty.
         SR2_INFO("[sandbox] tab: Put in slots, {} item(s), selected slot {}", g_vacPick.size(), g_sbxSlot + 1);
-        bool first = true;
+        std::vector<sbx::Action> acts;
         for (const auto& [id, amount] : g_vacPick) {
-            StowItem(g_sbxSlot, id, amount, first);
-            first = false;
+            sbx::Action a;
+            a.op = sbx::Op::StowItem;
+            a.slot = g_sbxSlot;
+            a.item = id;
+            a.value = amount;
+            a.replace = acts.empty();
+            acts.push_back(a);
         }
+        SbxBatch(acts);
         g_vacPick.clear();
     }
-    KeyHints({{"Click", "fill the slot"},
-              {"Ctrl+Click", "select"},
-              {"Shift+Wheel", "amount, 1 at a time"},
-              {"Ctrl+Wheel", "10 at a time"},
-              {"Right-click", "give menu (empty space: clear selection)"},
-              {"Drag", "item onto a slot, slot back here to empty it"}});
     ItemContextMenu(s);
     EndCard();
 }
 
-// Spawner: places any actor the game can spawn (toys, slimes, food, ...) in front of you.
+// Spawner: places any actor the game can spawn (toys, slimes, food, ...) in front of you. The same
+// controls as the vacpack picker: click spawns (the tile's amount, else 1); Ctrl+click selects;
+// Shift+wheel / Ctrl+wheel sets a tile's amount (+-1 / +-10, up to kSpawnMax, shown on the tile; it
+// joins the selection, 0 removes it); "Spawn N" spawns every selected item with its amount;
+// right-click opens the menu, right-click between tiles clears the selection.
 void SandboxSpawner(const sbx::Snapshot& s, float w) {
     const Palette& P = theme::Colors();
     BeginCard("sbx_spawn", w);
@@ -2223,7 +2281,6 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
         EndCard();
         return;
     }
-    CountRow("How many", "##spawncount", g_spawnCount, 20, "How many to spawn per click.");
     static std::vector<int> groups, shownGroups;  // sbx::Group per tab (this frame, last frame)
     const auto& tabs = SpawnTabs(s, groups);
     if (groups != shownGroups) {  // the tab list changed: stay on the same group
@@ -2256,7 +2313,7 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
         for (const sbx::Item* it : order)
             if (families.empty() || families.back() != it->family) families.push_back(it->family);
     } else if (byArea) {
-        for (const sbx::Item* it : order) areas[it] = CrateArea(it->name);
+        for (const sbx::Item* it : order) areas[it] = CrateArea(*it);
         std::stable_sort(order.begin(), order.end(), [&](const sbx::Item* a, const sbx::Item* b) {
             const std::string &x = areas[a], &y = areas[b];
             return x != y ? x < y : a->name < b->name;
@@ -2277,6 +2334,10 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
         t.accent = KindAccent(it.kind);
         t.dimmed = it.tarr && s.tarrsOff;
         t.related = Related(hoverRel, it.id);
+        if (const auto pk = g_spawnPick.find(it.id); pk != g_spawnPick.end()) {
+            t.selected = true;
+            t.amount = pk->second;
+        }
         if (byFamily || byArea) {
             const std::string& key = byFamily ? it.family : areas[ip];
             t.section = static_cast<int>(std::find(families.begin(), families.end(), key) - families.begin());
@@ -2284,24 +2345,70 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
         tiles.push_back(t);
         src.push_back(&it);
     }
+    // Selected items still in the spawn list.
+    int picked = 0;
+    for (auto it = g_spawnPick.begin(); it != g_spawnPick.end();)
+        if (!FindItem(s, it->first)) it = g_spawnPick.erase(it);
+        else ++picked, ++it;
     item_grid::Options o = GridOptions(250);
     o.tabs = &tabs;
     o.tabsBelow = true;
     if (byFamily || byArea) o.sections = &families;
+    const std::string spawnLabel = picked > 0 ? std::format("Spawn {}", picked) : std::string("Spawn");
+    o.button = spawnLabel.c_str();
+    o.buttonEnabled = picked > 0;
     const item_grid::Result r = item_grid::Draw("spawn", tiles, g_spawnGrid, o);
     lastHover = r.hovered >= 0 ? tiles[static_cast<size_t>(r.hovered)].id : 0;
     TabTip(r, tabs);
+    if (r.buttonHovered)
+        Tooltip("Spawns every selected item in front of you, each with its amount (no amount: 1). Ctrl+click items "
+                "to select them; Shift+wheel / Ctrl+wheel sets an amount.");
     if (r.hovered >= 0 && !ImGui::IsPopupOpen(kSbxCtx)) {
         const sbx::Item& it = *src[static_cast<size_t>(r.hovered)];
         ItemTooltip(s, it.name, it.kind, it.id, it.tarr && s.tarrsOff ? "Tarrs are disabled in this save's game settings." : nullptr);
     }
+    if (r.wheelStep != 0 && r.hovered >= 0) {
+        const sbx::Item& it = *src[static_cast<size_t>(r.hovered)];
+        const auto pk = g_spawnPick.find(it.id);
+        const int next = std::clamp((pk != g_spawnPick.end() ? pk->second : 0) + r.wheelStep, 0, kSpawnMax);
+        if (next <= 0) g_spawnPick.erase(it.id);
+        else g_spawnPick[it.id] = next;
+    }
     if (r.clicked >= 0) {
         const sbx::Item& it = *src[static_cast<size_t>(r.clicked)];
-        if (it.tarr && s.tarrsOff) sbx::SetStatus(it.name + " not spawned: Tarrs are disabled in this save's game settings", true);
-        else SbxRequest(sbx::Op::Spawn, g_spawnCount, -1, it.id);
+        if (ImGui::GetIO().KeyCtrl) {
+            if (!g_spawnPick.erase(it.id)) g_spawnPick[it.id] = 1;
+        } else if (it.tarr && s.tarrsOff) {
+            sbx::SetStatus(it.name + " not spawned: Tarrs are disabled in this save's game settings", true);
+        } else {
+            const auto pk = g_spawnPick.find(it.id);
+            SbxRequest(sbx::Op::Spawn, pk != g_spawnPick.end() ? std::max(1, pk->second) : 1, -1, it.id);
+        }
+    }
+    if (r.clearSelection) g_spawnPick.clear();
+    if (r.button) {
+        // One request per selected item, as one batch: one HUD notice, one grid in front of you.
+        std::vector<sbx::Action> acts;
+        int skipped = 0;
+        for (const auto& [id, amount] : g_spawnPick) {
+            const sbx::Item* it = FindItem(s, id);
+            if (!it || (it->tarr && s.tarrsOff)) {
+                ++skipped;
+                continue;
+            }
+            sbx::Action a;
+            a.op = sbx::Op::Spawn;
+            a.item = id;
+            a.value = std::clamp(amount, 1, kSpawnMax);
+            acts.push_back(a);
+        }
+        SR2_INFO("[sandbox] tab: Spawn, {} item(s){}", acts.size(),
+                 skipped ? std::format(", {} skipped (Tarrs off)", skipped) : std::string());
+        if (skipped && acts.empty()) sbx::SetStatus("Not spawned: Tarrs are disabled in this save's game settings", true);
+        SbxBatch(acts);
+        g_spawnPick.clear();
     }
     if (r.rightClicked >= 0) OpenItemContext(tiles[static_cast<size_t>(r.rightClicked)].id, SbxGrid::Spawner);
-    KeyHints({{"Click", "spawn in front of you"}, {"Right-click", "give menu"}});
     ItemContextMenu(s);
     EndCard();
 }
@@ -2312,7 +2419,7 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
 void SandboxCrafter(const sbx::Snapshot& s, float w) {
     const Palette& P = theme::Colors();
     BeginCard("sbx_craft", w);
-    CardHeading("Crafter", P.head);
+    CardHeading("Refinery Crafter", P.head);
     if (!s.craftWhy.empty()) {
         DimText("Unavailable: " + s.craftWhy);
         EndCard();
@@ -2445,18 +2552,21 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
     }
     if (r.clearSelection) g_craftPick.clear();
     if (r.button) {
+        // One request per selected item, as one batch: the module shows one HUD notice for all of them.
+        std::vector<sbx::Action> acts;
         for (const auto& [id, amount] : g_craftPick) {
             bool material = false;
             if (s.materials)
                 for (const sbx::Recipe& rc : *s.materials) material = material || rc.id == id;
-            SbxRequest(material ? sbx::Op::AddMaterial : sbx::Op::Craft, std::max(1, amount), -1, id);
+            sbx::Action a;
+            a.op = material ? sbx::Op::AddMaterial : sbx::Op::Craft;
+            a.value = std::max(1, amount);
+            a.item = id;
+            acts.push_back(a);
         }
+        SbxBatch(acts);
         g_craftPick.clear();
     }
-    KeyHints({{"Click", "select"},
-              {"Shift+Wheel", "amount, 1 at a time"},
-              {"Ctrl+Wheel", "10 at a time"},
-              {"Right-click", "empty space: clear selection"}});
     EndCard();
 }
 
@@ -2675,16 +2785,35 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
     // Newbucks | Player, the vacpack across both columns, then Spawner | Crafter.
     const float full = ImGui::GetContentRegionAvail().x, w = ColumnWidth();
     const float gapY = U(kGap) - ImGui::GetStyle().ItemSpacing.y;
+    // The grid under the mouse, for the hint bar (DrawMenu draws it under the page). Kept while a
+    // menu or drag from it is open, so the bar doesn't blink.
+    const bool pageHovered =
+        ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    SbxHover hover = SbxHover::None;
+    auto hoverCard = [&](SbxHover what) {
+        if (pageHovered && ImGui::IsMouseHoveringRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), false)) hover = what;
+    };
     SandboxNewbucks(*snap, w);
     ImGui::SameLine(0, U(kGap));
     SandboxPlayer(h, *snap, w);
     ImGui::Dummy(ImVec2(0, gapY));
     SandboxVacpack(*snap, full);
+    hoverCard(ImGui::GetMousePos().y < g_vacPickerTop ? SbxHover::Slots : SbxHover::Picker);
     ImGui::Dummy(ImVec2(0, gapY));
     SandboxSpawner(*snap, w);
+    hoverCard(SbxHover::Spawner);
     ImGui::SameLine(0, U(kGap));
     SandboxCrafter(*snap, w);
+    hoverCard(SbxHover::Crafter);
+    if (!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) && !ImGui::GetDragDropPayload()) g_sbxHover = hover;
     SandboxStatus(h);
+}
+
+// True while the Sandbox page shows its grids (the menu reserves the hint bar under the page then).
+bool SandboxHintBarShown(const ModuleView& mv) {
+    if (!ModuleOn(mv)) return false;
+    const auto snap = sbx::Get();
+    return snap && snap->inGame;
 }
 
 // ------------------------------------------------------------- slime dj ----
@@ -3649,8 +3778,12 @@ bool Draw(const Host& h) {
         const Tab& tab = cat.tabs[static_cast<size_t>(ti)];
         const std::string page = cat.id + "/" + std::to_string(ti);
 
+        // The Sandbox page keeps a hint bar pinned under it (the controls of the grid under the mouse).
+        const ModuleView* sbxView = tab.kind == TabKind::Sandbox ? FindView(views, tab.module) : nullptr;
+        const bool hintBar = sbxView && SandboxHintBarShown(*sbxView);
+        const float footer = hintBar ? SandboxHintBarHeight() + U(12) : 0.0f;
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(18), 0));
-        ImGui::BeginChild("##body", ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoBackground);
+        ImGui::BeginChild("##body", ImVec2(0, -footer), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoBackground);
         // Each page keeps its scroll position across page switches and closing / reopening.
         // SetScrollY lands next frame, clamped to the previous frame's content height (the
         // other page's), so a restore is re-applied for a few frames.
@@ -3703,6 +3836,11 @@ bool Draw(const Host& h) {
         ImGui::Dummy(ImVec2(0, U(18)));
         ImGui::EndChild();
         ImGui::PopStyleVar();
+        if (hintBar) {
+            const ImVec2 b0 = ImGui::GetItemRectMin(), b1 = ImGui::GetItemRectMax();  // the page (##body)
+            const ImVec2 a(b0.x + U(18), b1.y + U(2)), b(b1.x - U(18), b1.y + U(2) + SandboxHintBarHeight());
+            SandboxHintBar(ImGui::GetWindowDrawList(), a, b);
+        }
         ImGui::EndChild();
         ImGui::PopStyleVar();
     } else {

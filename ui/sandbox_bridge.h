@@ -54,6 +54,7 @@ struct Item {
     std::string family;     // largo: the base slime it is listed under (the alphabetically first of its two)
     std::string family2;    // largo: its other base slime (sort key within the family)
     uintptr_t base = 0, base2 = 0;  // largo: its two base slimes (SlimeDefinition.BaseSlimes, ids as above)
+    std::string area;       // crate: the zone it spawns in (ZoneDefinition._crates; its localized name)
 };
 
 // How items relate through slime diets (SlimeDefinition.Diet), by item id. Ids
@@ -138,7 +139,7 @@ enum class Op {
     InfiniteEnergy,  // value = 0 / 1
     SetSlotCount,    // slot, value = new count (0 empties the slot)
     PutItem,         // slot, item, value = count (replaces what the slot holds)
-    Spawn,           // item (from spawnables), value = how many; placed in front of the player
+    Spawn,           // item (from spawnables), value = how many (at most 60); placed in front of the player
     Craft,           // item (a recipe id), value = how many crafts; added to the gadget inventory at no cost
     MoveSlot,        // slot = from, value = to: moves the contents (merges into the same item, else swaps)
     UnlockSlot,      // slot: applies the vacpack upgrade levels that unlock it
@@ -155,6 +156,10 @@ struct Action {
     int64_t value = 0;
     uintptr_t item = 0;
     bool replace = false;  // StowItem: may empty the selected slot if it holds something else
+    // Part of a multi-item request (Craft N, Spawn N, Put in slots): 1-based index and the request's size.
+    // The module collects the items' HUD notices and shows one summary after the last; spawns share one
+    // grid in front of the player. 0 / 0: a single request.
+    int batch = 0, batchSize = 0;
 };
 
 struct Status {
