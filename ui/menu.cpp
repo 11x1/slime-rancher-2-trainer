@@ -1303,8 +1303,10 @@ void SandboxConfirm(const ModuleView& mv) {
         ImGui::PushTextWrapPos(0.0f);
         ImGui::TextUnformatted("Sandbox edits change your save directly. Enable?");
         ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.warn),
-                           "This marks the loaded save (and any save you load while Sandbox is on) as cheated: Steam "
-                           "achievements are disabled in it for good, also after you turn Sandbox off.");
+                           "This marks the loaded save (or, on the title screen, the next save you load) as cheated: "
+                           "Steam achievements are disabled in it for good, also after you turn Sandbox off.");
+        DimText("Each save keeps its own Sandbox switch: saves without the mark load with Sandbox off, a marked save "
+                "loads with Sandbox on or off as you left it.");
         ImGui::PopTextWrapPos();
         DimText("Every edit goes through the game's own functions and is kept when the game next saves. "
                 "There is no undo, so back up your save if you want to keep it as it is.");
@@ -2756,7 +2758,7 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
         DimText("Edits use the game's own functions, so the save stays valid, but they change your save directly and "
                 "can't be undone. Sandbox stays off until you enable it and confirm.");
         DimText("Turning it on marks the loaded save as cheated: Steam achievements stay disabled in that save, "
-                "also with Sandbox off.");
+                "also with Sandbox off. Each save keeps its own Sandbox switch.");
         if (sbx::SaveCheated()) {
             ImGui::PushTextWrapPos(0.0f);
             ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.warn),
