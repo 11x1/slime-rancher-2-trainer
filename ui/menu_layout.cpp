@@ -91,8 +91,8 @@ std::vector<Category> Spec() {
          "Gadget mode ignores its placement limits: overlap, slope, distance, jumping. The cost and stacking rules "
          "stay, and placed gadgets are saved like any other."},
         {"misc_tweaks",
-         "Small speed-ups, each off until you turn it on: instant Fabricator purchases and a faster vacpack when "
-         "shooting items out."},
+         "Small speed-ups, each off until you turn it on: instant Fabricator purchases, no upgrade animation and a "
+         "faster vacpack when shooting items out."},
     };
     misc.tabs.push_back(general);
     Tab sandbox;
