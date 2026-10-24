@@ -897,13 +897,6 @@ void EndCard() {
     ImGui::PopStyleColor(2);
 }
 
-void SmallHeading(const char* text) {
-    FontScope f(theme::Display(), theme::kSmallSize + 1);
-    ImGui::PushStyleColor(ImGuiCol_Text, theme::Colors().soft);
-    ImGui::TextUnformatted(text);
-    ImGui::PopStyleColor();
-}
-
 void CardHeading(const char* text, ImU32 col) {
     FontScope f(theme::Display(), theme::kDisplaySize - 1);
     ImGui::PushStyleColor(ImGuiCol_Text, col);
@@ -1055,19 +1048,9 @@ void DrawCardsPage(const Host& h, const Tab& tab, const std::vector<ModuleView>&
             for (const auto& g : mv->groups) groups.push_back(&g);
             const Nesting n = BuildNesting(groups, {});
             ImGui::BeginDisabled(!on);  // grayed out and read-only while the module is off
-            bool first = true;
-            for (const auto* g : groups) {
-                const bool any = std::any_of(g->defs.begin(), g->defs.end(),
-                                             [&](const settings::Def& d) { return RowShown(*mv, d, n, {}); });
-                if (!any) continue;
-                // The card is named by its module: its groups get small sub-headers.
-                if (!g->name.empty() && groups.size() > 1) {
-                    if (!first) ImGui::Dummy(ImVec2(0, U(2)));
-                    SmallHeading(g->name.c_str());
-                }
-                first = false;
-                DrawGroupRows(h, *mv, *g, n, {}, {});
-            }
+            // The card is named by its module: its groups get no headings (round 10), just one
+            // list of rows in group order.
+            for (const auto* g : groups) DrawGroupRows(h, *mv, *g, n, {}, {});
             ImGui::EndDisabled();
             EndCard();
             ImGui::Dummy(ImVec2(0, U(kGap) - ImGui::GetStyle().ItemSpacing.y));
