@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 
+#include "modules/slime_dj/beat.h"
+
 namespace sr2::modules::slime_dj {
 
 class Stream {
@@ -44,6 +46,8 @@ public:
     bool Pop(std::vector<float>& out, uint32_t& frames);
     bool Done() const;      // decoder finished and every chunk was popped
     size_t Queued() const;  // chunks waiting
+    // Beat analysis of everything decoded so far (beat.h), in song frames.
+    const BeatTrack& beats() const { return beats_; }
     void Stop();
 
 private:
@@ -57,6 +61,7 @@ private:
         uint32_t frames = 0;
     };
     std::deque<Chunk> queue_;
+    BeatTrack beats_;
     std::string error_;
     std::atomic<State> state_{State::Opening};
     std::atomic<bool> stop_{false};
