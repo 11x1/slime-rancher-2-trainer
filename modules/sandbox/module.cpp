@@ -26,13 +26,13 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
-#include <optional>
 #include <cstdint>
 #include <cstring>
 #include <format>
 #include <initializer_list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -49,6 +49,7 @@
 #include "core/unity.h"
 #include "modules/common/legend_hint.h"
 #include "modules/custom_upgrades/api.h"
+#include "modules/custom_upgrades/buildables.h"
 #include "modules/custom_upgrades/sale_notify.h"
 #include "modules/minimap/ugui.h"
 #include "modules/sandbox/achievements.h"
@@ -347,6 +348,8 @@ private:
     int DoSpawn(const Ctx& c, uintptr_t item, int64_t count, int limit = kMaxSpawn);
     void DoStow(const Ctx& c, int sel, uintptr_t item, int64_t amount, bool replace);
     void DoCraft(uintptr_t item, int64_t count);
+    bool DoCraftMod(uintptr_t item, int64_t count);              // a mod buildable from the variant menu
+    bool MergeModVariants(std::vector<bridge::Recipe>& list);   // custom_upgrades' buildables as variants
     void DoAddMaterial(uintptr_t item, int64_t count);
     void DoMoveSlot(const Ctx& c, int from, int to);
     void DoUnlockSlot(const Ctx& c, int idx);
@@ -515,6 +518,7 @@ private:
     size_t offIdentCostAmount_ = 0, offIdentCostType_ = 0, identCostStride_ = 0;  // IdentCostEntry (in the struct)
     size_t offCurCostCurrency_ = 0, offCurCostAmount_ = 0;  // CurrencyCostEntry._currency / _amount
     size_t offBuyInPairs_ = 0;                       // GadgetDefinition.BuyInPairs
+    size_t offVariantOf_ = 0;                        // GadgetDefinition.VariantOf (optional: no variant menu)
     Il2CppClass* fabMenuClass_ = nullptr;            // FabricateMenuConfiguration (optional, for categories)
     Il2CppClass* fabGadgetCatClass_ = nullptr;       // GadgetFabricateCategory
     size_t offFabCategories_ = 0, offFabCatTitle_ = 0;
@@ -932,6 +936,8 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
     gadgetCount_ = method(gadgetDir, "GetItemCount", 1, cw);
     off(gadgetDefClass_, "CraftingCosts", offCraftCosts_, cw);
     off(gadgetDefClass_, "BuyInPairs", offBuyInPairs_, cw);
+    if (gadgetDefClass_)
+        if (auto o = R.FieldOffset(gadgetDefClass_, "VariantOf")) offVariantOf_ = *o;
     structOff(cost, "_currencyCosts", offCostCurrency_, cw);
     structOff(cost, "IdentCosts", offCostIdent_, cw);
     structOff(identCost, "Amount", offIdentCostAmount_, cw);
@@ -2075,13 +2081,19 @@ bool Sandbox::EnsureRecipes() {
         catSource = "the gadget groups";
     }
     auto list = std::make_shared<std::vector<bridge::Recipe>>();
+    // The game's gadget variants (GadgetDefinition.VariantOf = the base gadget), per base, for the right-click
+    // menu. A variant with its own cost is a recipe as well (category -1: in no Fabricator tab).
+    std::unordered_map<uintptr_t, std::vector<bridge::Variant>> variantsOf;
+    size_t variantCount = 0;
     for (Il2CppObject* d : unity::FindObjectsOfTypeAll(gadgetDefClass_)) {
         if (sr2::core::ModuleFaulted(kModule)) break;
         if (!IsA(d, gadgetDefClass_) || !unity::IsAlive(d)) continue;
         char* costs = reinterpret_cast<char*>(d) + offCraftCosts_;
         const size_t nIdent = unity::ListCount(*reinterpret_cast<void**>(costs + offCostIdent_));
         const size_t nCur = unity::ListCount(*reinterpret_cast<void**>(costs + offCostCurrency_));
-        if (nIdent == 0 && nCur == 0) continue;  // not crafted at the fabricator
+        Il2CppObject* variantOf = offVariantOf_ ? unity::Field<Il2CppObject*>(d, offVariantOf_) : nullptr;
+        if (variantOf && (variantOf == d || !IsA(variantOf, gadgetDefClass_))) variantOf = nullptr;
+        if (nIdent == 0 && nCur == 0 && !variantOf) continue;  // not crafted at the fabricator
         if (!Saveable(index, d)) {
             leftOut.push_back(unity::GetName(d));
             continue;
@@ -2108,8 +2120,25 @@ bool Sandbox::EnsureRecipes() {
         Il2CppGCHandle h = unity::NewGCHandle(d);
         if (!h) continue;
         recipeById_[r.id] = CatalogEntry{h, d};
+        if (variantOf) {
+            variantsOf[reinterpret_cast<uintptr_t>(variantOf)].push_back({r.id, r.name, r.icon, false, false});
+            ++variantCount;
+            if (nIdent == 0 && nCur == 0) continue;  // crafted through its base gadget's menu only
+        }
         list->push_back(std::move(r));
     }
+    size_t withVariants = 0;
+    for (bridge::Recipe& r : *list) {
+        auto it = variantsOf.find(r.id);
+        if (it == variantsOf.end()) continue;
+        r.variants = std::move(it->second);
+        std::sort(r.variants.begin(), r.variants.end(),
+                  [](const bridge::Variant& a, const bridge::Variant& b) { return a.name < b.name; });
+        ++withVariants;
+    }
+    if (offVariantOf_)
+        SR2_INFO("[{}] crafter: {} gadget variant(s) of {} recipe(s) in the right-click menu", kModule, variantCount,
+                 withVariants);
     std::sort(list->begin(), list->end(), [](const bridge::Recipe& a, const bridge::Recipe& b) { return a.name < b.name; });
     recipes_ = std::move(list);
     recipeCats_ = std::move(titles);
@@ -2146,7 +2175,16 @@ void Sandbox::RefreshRecipeState() {
             if (unlocked != r.unlocked || owned != r.owned) changed = true;
             r.unlocked = unlocked;
             r.owned = owned;
+            for (bridge::Variant& v : r.variants) {
+                if (v.mod) continue;
+                Il2CppObject* vd = Lookup(recipeById_, v.id, gadgetDefClass_);
+                bool vu = false;
+                if (vd) CallValue(hasBlueprint_, dir, {vd}, "GadgetDirector.HasBlueprint", vu);
+                changed = changed || vu != v.unlocked;
+                v.unlocked = vu;
+            }
         }
+        changed = MergeModVariants(*next) || changed;
         if (changed) recipes_ = std::move(next);
     }
     if (materials_ && !materials_->empty()) {
@@ -2161,6 +2199,64 @@ void Sandbox::RefreshRecipeState() {
         }
         if (changed) materials_ = std::move(next);
     }
+}
+
+// custom_upgrades' buildables that are variants of a vanilla gadget (Quantum Storage Link on the Refinery Link,
+// DJ Booth on the Scientist Desk, DJ Speaker on the Boombox; buildables::List, Info.baseDef) go into that
+// recipe's variant list, marked `mod`, behind the game's variants. Their id is the buildable's definition
+// (opaque; DoCraftMod matches it against List() again and grants through buildables::Grant, never AddItem).
+// The Slime Radio is a toy of its own, not a variant. Empty while custom upgrades are off or the buildables
+// are not built yet (a moment after a save is loaded). True if anything changed.
+bool Sandbox::MergeModVariants(std::vector<bridge::Recipe>& list) {
+    namespace bld = sr2::modules::custom_upgrades::buildables;
+    std::unordered_map<uintptr_t, std::vector<bridge::Variant>> mods;
+    for (const bld::Info& i : bld::List()) {
+        if (!i.def || !i.baseDef || i.id == bld::kSlimeRadio) continue;
+        bridge::Variant v;
+        v.id = reinterpret_cast<uintptr_t>(i.def);
+        v.name = i.name;
+        v.icon = ItemIcon(i.def);
+        if (!v.icon && i.icon && unity::IsAlive(i.icon)) v.icon = sr2::ui::item_icons::Register(i.icon);
+        v.unlocked = i.unlocked;
+        v.mod = true;
+        mods[reinterpret_cast<uintptr_t>(i.baseDef)].push_back(std::move(v));
+    }
+    bool changed = false;
+    for (bridge::Recipe& r : list) {
+        const auto it = mods.find(r.id);
+        std::vector<bridge::Variant> want;
+        for (const bridge::Variant& v : r.variants)
+            if (!v.mod) want.push_back(v);
+        if (it != mods.end()) want.insert(want.end(), it->second.begin(), it->second.end());
+        const bool same = want.size() == r.variants.size() &&
+                          std::equal(want.begin(), want.end(), r.variants.begin(), [](const auto& a, const auto& b) {
+                              return a.id == b.id && a.unlocked == b.unlocked && a.icon == b.icon && a.name == b.name;
+                          });
+        if (same) continue;
+        r.variants = std::move(want);
+        changed = true;
+    }
+    return changed;
+}
+
+// A mod buildable picked in the crafter's variant menu (`item` is its definition, see MergeModVariants): given
+// through buildables::Grant (the vanilla base gadget into the inventory plus a kit in the mod's sidecar, as
+// fabricating it does). False if `item` is not one of them (then it is an ordinary recipe).
+bool Sandbox::DoCraftMod(uintptr_t item, int64_t count) {
+    namespace bld = sr2::modules::custom_upgrades::buildables;
+    if (!item || !custom_upgrades::IsModGadget(reinterpret_cast<Il2CppObject*>(item))) return false;
+    for (const bld::Info& i : bld::List()) {
+        if (reinterpret_cast<uintptr_t>(i.def) != item) continue;
+        const int n = static_cast<int>(std::clamp<int64_t>(count, 1, kMaxCraft));
+        std::string result;
+        if (bld::Grant(i.id, n, result))
+            Notify(i.def, NoticeKind::Craft, n, i.name, std::format("Crafted {} x {} for free: {}", n, i.name, result));
+        else
+            Done(false, std::format("{} not crafted: {}", i.name, result));
+        return true;
+    }
+    Done(false, "Not crafted: that mod buildable is not available right now (custom upgrades off, or no save loaded)");
+    return true;
 }
 
 // The recipe pinned in the game's Fabricator (PlayerModel.PinnedRecipe, an IRecipe whose ReferenceId is
@@ -2503,7 +2599,7 @@ void Sandbox::Handle(const bridge::Action& a) {
         case bridge::Op::Spawn: DoSpawn(c, a.item, a.value, kMaxDrop); break;
         case bridge::Op::StowItem: DoStow(c, a.slot, a.item, a.value, a.replace); break;
         case bridge::Op::Craft:
-            DoCraft(a.item, a.value);
+            if (!DoCraftMod(a.item, a.value)) DoCraft(a.item, a.value);
             lastRecipeState_ = 0;  // show the new owned count at once
             break;
         case bridge::Op::AddMaterial:
