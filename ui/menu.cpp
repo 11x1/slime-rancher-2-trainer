@@ -17,6 +17,7 @@
 #include "core/build_info.h"
 #include "core/log.h"
 #include "core/profiles.h"
+#include "discord_bridge.h"
 #include "hud_edit.h"
 #include "menu_layout.h"
 #include "item_grid.h"
@@ -2782,7 +2783,78 @@ void KeyValue(const char* k, const std::string& v, ImU32 vcol, const std::string
     HoverTip(tip);
 }
 
-void DrawSettingsPage(const Host& h, const ModuleView* ui) {
+// Discord Rich Presence (module "discord_rpc", modules/discord_rpc): switch, application id, what to show and
+// the pipe thread's connection status (discord_bridge.h). The id is a free-text value in sr2mods.json.
+namespace dsc = ::sr2::ui::discord;
+char g_discordId[32] = {};
+bool g_discordIdEditing = false;
+
+void DiscordCard(const Host& h, const ModuleView& mv, float w) {
+    const Palette& P = theme::Colors();
+    const bool on = ModuleOn(mv);
+    BeginCard("discord", w);
+    const float avail = ImGui::GetContentRegionAvail().x, x0 = ImGui::GetCursorPosX();
+    {
+        FontScope f(theme::Display(), theme::kDisplaySize - 1);
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushStyleColor(ImGuiCol_Text, P.head);
+        ImGui::TextUnformatted("Discord Rich Presence");
+        ImGui::PopStyleColor();
+    }
+    if (mv.hasEnabled) {
+        ImGui::SameLine(x0 + avail - U(kSwitchW));
+        if (Switch("##enabled", on)) Write(mv.enabled, on ? 0.0 : 1.0);
+        HoverTip("Show what you are doing in the game on your Discord profile.");
+    }
+    bool failed = false;
+    const std::string status = ModuleStatus(mv.module, &failed);
+    if (failed) {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.err), "Failed: %s", status.c_str());
+        ImGui::PopTextWrapPos();
+    }
+    DimText("Shows the area you are in, \"On the ranch\" or \"Exploring\" and the time since you loaded your save on "
+            "your Discord profile (\"In the main menu\" at the title screen). Talks to the Discord desktop app "
+            "directly; nothing is sent anywhere else.");
+    ImGui::Dummy(ImVec2(0, U(2)));
+
+    // Application id: kept in sync with sr2mods.json while the field is not being edited.
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Application ID");
+    const char* idHelp = "Discord shows a presence for an application. Create one (free) at "
+                         "discord.com/developers/applications: New Application, give it the name your profile should "
+                         "show after \"Playing\" (for example \"Slime Rancher 2\"), then copy the Application ID from "
+                         "General Information and paste it here. Saved in sr2mods.json "
+                         "(modules.discord_rpc.application_id).";
+    HoverTip(idHelp);
+    const float ctlW = std::min(U(260), std::floor(avail * 0.55f));
+    ImGui::SameLine(x0 + avail - ctlW);
+    if (!g_discordIdEditing) CopyToBuf(g_discordId, sizeof(g_discordId), settings::GetString(dsc::kModule, dsc::kKeyAppId));
+    ImGui::SetNextItemWidth(ctlW);
+    ImGui::InputTextWithHint("##appid", "paste your application id", g_discordId, sizeof(g_discordId),
+                             ImGuiInputTextFlags_CharsDecimal | ImGuiInputTextFlags_AutoSelectAll);
+    g_discordIdEditing = ImGui::IsItemActive();
+    if (ImGui::IsItemDeactivatedAfterEdit()) settings::SetString(dsc::kModule, dsc::kKeyAppId, g_discordId);
+    HoverTip(idHelp);
+    DimText("You need your own Discord application id: create an app at discord.com/developers/applications and "
+            "paste its Application ID (hover the field for the steps).");
+
+    ImGui::BeginDisabled(!on);
+    for (const auto& g : mv.groups)
+        for (const auto& d : g.defs) DrawRow(h, d, d.label, false);
+    ImGui::EndDisabled();
+
+    const dsc::Status st = dsc::GetStatus();
+    const ImU32 col = !on ? P.dim
+                      : st.level == dsc::Level::Ok    ? P.ok
+                      : st.level == dsc::Level::Warn  ? P.warn
+                      : st.level == dsc::Level::Error ? P.err
+                                                      : P.dim;
+    KeyValue("Status", on ? st.text : std::string("Off."), col);
+    EndCard();
+}
+
+void DrawSettingsPage(const Host& h, const ModuleView* ui, const std::vector<ModuleView>& views) {
     const Palette& P = theme::Colors();
     const float w = ColumnWidth();
     BeginCard("overlay", w);
@@ -2803,6 +2875,12 @@ void DrawSettingsPage(const Host& h, const ModuleView* ui) {
     else
         KeyValue("Game build", h.versionStatus, h.versionMismatch ? P.warn : P.dim);
     EndCard();
+    if (const ModuleView* mv = FindView(views, layout::kDiscordModule)) {
+        ImGui::Dummy(ImVec2(0, U(kGap) - ImGui::GetStyle().ItemSpacing.y));
+        ImGui::PushID(mv->module.c_str());
+        DiscordCard(h, *mv, ImGui::GetContentRegionAvail().x);
+        ImGui::PopID();
+    }
 }
 
 // -------------------------------------------------------------- sidebar ----
@@ -3319,7 +3397,7 @@ bool Draw(const Host& h) {
             }
             case TabKind::Cards: DrawCardsPage(h, tab, views); break;
             case TabKind::Profiles: DrawProfilesPage(h); break;
-            case TabKind::Settings: DrawSettingsPage(h, ui); break;
+            case TabKind::Settings: DrawSettingsPage(h, ui, views); break;
             case TabKind::Sandbox:
                 if (const ModuleView* mv = FindView(views, tab.module)) DrawSandboxPage(h, *mv);
                 break;

@@ -144,7 +144,7 @@ std::vector<Category> Build(const std::vector<ModuleView>& views) {
     };
 
     std::vector<Category> spec = Spec();
-    std::set<std::string> placed{kUiModule};
+    std::set<std::string> placed{kUiModule, kDiscordModule};  // discord_rpc: its own card on the Settings page
     for (auto& c : spec) {
         std::vector<Tab> keep;
         for (auto& t : c.tabs) {

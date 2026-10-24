@@ -95,6 +95,10 @@ Start the game. The log is written to `sr2mods.log` in the same folder. On each 
 
 Slime DJ (Ranch > Slime DJ in the overlay) plays your own songs from the corral Music Box. On its first start the mod creates a `sr2mods_music` folder in the game folder, next to `SlimeRancher2.exe`. Put `.ogg`, `.mp3` or `.wav` files there (subfolders work too), then press the refresh icon in the tab bar or "Open folder" to get there. Songs are streamed, so long files are fine; the details and limits are in `modules/slime_dj/NOTES.md`. The folder is yours: deploy and uninstall never touch it.
 
+### Discord Rich Presence
+
+Settings > General in the overlay has a **Discord Rich Presence** card (off by default). It shows the area you are in, "On the ranch" or "Exploring" (optionally your Newbucks) and the time since you loaded the save on your Discord profile, and "In the main menu" at the title screen. The mod talks to the Discord desktop app over its local pipe; there is no Discord SDK and nothing is sent anywhere else. Discord needs an application to show a presence for: create one at [discord.com/developers/applications](https://discord.com/developers/applications) (New Application; its name is what your profile shows after "Playing", e.g. "Slime Rancher 2"), copy the **Application ID** from General Information and paste it into the card. It is saved in `sr2mods.json` as `modules.discord_rpc.application_id`. Details: `modules/discord_rpc/NOTES.md`.
+
 ### Matching a log to its PDB
 
 Every DLL that `build.ps1` produces is archived with its `version.pdb` and `sr2mods.json` in `dist\archive\<yyyyMMdd-HHmmss>-<first 8 hex of SHA-256>\`, together with a `build-info.txt` that records the full SHA-256 and the PDB GUID and age. The last 20 archives are kept. At startup the log prints `self: PE timestamp 0x…, sha256 <first 16 hex>, pdb <GUID> age <n> (…)`. Find the archive folder whose name ends in the first 8 hex digits of that SHA-256.
@@ -118,6 +122,7 @@ The file is JSON, but `//` and `/* */` comments and trailing commas are allowed.
 | `expected_game_version` / `expected_unity_version` | `1.3.0` / `6000.0.73f1` | a mismatch only logs a warning |
 | `modules.<name>.enabled` | module default | turns one module on or off (also switchable at runtime) |
 | `modules.<name>.<key>` | module default | one runtime setting of a module (see below) |
+| `modules.discord_rpc.application_id` | `""` | your Discord application id (a string) for Discord Rich Presence |
 | `active_profile` | `""` | last loaded or saved profile; remembered only, never re-applied at startup (see [Profiles](#profiles)) |
 
 ### Runtime settings and saving
@@ -131,6 +136,7 @@ Modules register their settings with `sr2::core::settings::Register` (`core/sett
 - Every module automatically gets an `enabled` setting (label "Enabled", default `Module::DefaultEnabled()`). Toggling it calls `ModuleManager::SetEnabled`. A module that was disabled at startup runs `Setup()` the first time it is enabled.
 - A setting can name a visibility parent in the same module (`Def::parent`, optional `parentValue` for an Enum index or 0 = "while off"; `settings::SetParent` sets it after registering). Both UIs hide it while the parent does not allow it, and hide every setting of a module except `enabled` while the module is off. `settings::Visible(module, key)` applies the rule.
 - A setting can also list "any of these on" parents (`Def::anyOf`, or `settings::SetAnyParent` after registering): it shows only while at least one of them is on and itself shown. Spawn Scaling uses it for the "Per resource (advanced)" multipliers (any source in advanced mode) and for the ore amount multiplier and its cap (any source applied).
+- A module can also keep a free-text value under its section (`settings::GetString` / `SetString`): not a `Def`, so no generic UI row, no callbacks and not in profiles. Discord Rich Presence keeps its application id that way.
 - Float/Int settings can carry a display unit (`Def::unit`, e.g. "%", " m", "x"), a text for 0 (`Def::zeroText`, e.g. "auto") and a display scale (`Def::displayScale`); `settings::SetDisplay` sets them after registering. They change only what the UIs show.
 
 ### Profiles
@@ -150,7 +156,7 @@ A profile is a named set of mod settings that you can create, switch between and
 - The file has the same shape as the `modules` section of `sr2mods.json`, plus an optional `description`. Comments and trailing commas are allowed when a file is read. Saved files are sorted by module and key and pretty-printed.
 - **Loading** applies every value with `settings::Set` on the Unity main thread, as if you had changed each one in the overlay. A value the profile does not contain is reset to its default. Unknown modules or keys are ignored. Module `enabled` flags are applied last, so modules start or stop with their final values in place. If a module has never been set up (it was off at startup), its values are stored in `sr2mods.json` and used when it starts.
 - **Saving** writes the current value of every setting. That includes values in `sr2mods.json` for settings a module has not registered yet. The write is atomic (`.tmp`, then rename). An existing file is only replaced after you confirm.
-- **Not in profiles:** the `ui` settings (overlay hotkey, hint and theme) and `sandbox` (its `enabled`). A shared profile can never move your hotkey or turn on the sandbox, which the overlay only enables after a confirmation dialog.
+- **Not in profiles:** the `ui` settings (overlay hotkey, hint and theme), `sandbox` (its `enabled`) and `discord_rpc` (personal: your own application id, and it tells your friends where you are). A shared profile can never move your hotkey, turn on the sandbox, which the overlay only enables after a confirmation dialog, or turn on Discord Rich Presence.
 - **Names** may contain letters, digits, spaces, `-` and `_`, up to 40 characters. Other characters are dropped. Files you copy in with other names still show up and can be loaded, renamed or deleted.
 - **Active profile:** `sr2mods.json` records it as `"active_profile"` (empty means none). The overlay shows it, with "(modified)" when the current values differ from its file. Startup does not re-apply it, because the live values in `sr2mods.json` are always the ones used.
 - **Starter profiles:** the first time the folder is created, two profiles are written: **Vanilla** (every module off, multiplier settings at 1) and **Default** (every setting at its default). They are ordinary files: edit or delete them. They are only written when the folder does not exist, and an existing file is never overwritten.
