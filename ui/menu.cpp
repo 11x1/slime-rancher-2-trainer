@@ -2134,8 +2134,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort) && !ImGui::GetDragDropPayload() && !ImGui::IsPopupOpen(kSbxCtx)) {
             // The item's name, group and favourites only; the controls are in the hint bar.
             if (!sl.unlocked)
-                Tooltip(sl.unlockable ? "Locked. Click to unlock it (applies the vacpack upgrade, free). Right-click: "
-                                        "the Extra Tank tier."
+                Tooltip(sl.unlockable ? "Locked. Click to unlock it for free. Right-click: Extra Tank tier."
                                       : "Locked. No vacpack upgrade for it was found.");
             else if (sl.item)
                 ItemTooltip(s, sl.name, sl.kind, sl.item);

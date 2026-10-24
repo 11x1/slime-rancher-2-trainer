@@ -233,16 +233,13 @@ void UpgradesTab(const Helpers& h, const ub::State& st) {
     ImGui::BeginDisabled(hidden == 0);
     if (ImGui::Button(std::format("Discover all ({})###disc", hidden).c_str(), ImVec2(bw1, bh))) RequestOp(ub::Op::DiscoverAll);
     ImGui::EndDisabled();
-    HoverTip(h, hidden ? "Makes every upgrade the Fabricator hides until you find it in the world available to buy, as "
-                         "finding it would (its upgrade component). No level is bought."
+    HoverTip(h, hidden ? "Makes the hidden upgrades available to buy, as if found. Buys no level."
                        : "Every upgrade is discovered already.");
     ImGui::SameLine(0, sp);
     ImGui::BeginDisabled(left == 0);
     if (ImGui::Button("Max###max", ImVec2(bw2, bh))) RequestOp(ub::Op::MaxAll);
     ImGui::EndDisabled();
-    HoverTip(h, left ? std::format("Every upgrade to its last level, free ({} level(s) to go). Each can be lowered "
-                                   "again here.",
-                                   left)
+    HoverTip(h, left ? std::format("Raises every upgrade to its last level for free ({} level(s) to go).", left)
                      : "Every upgrade is at its last level already.");
 
     // Entries, in two columns when the card is wide enough.
@@ -268,14 +265,8 @@ void UpgradesTab(const Helpers& h, const ub::State& st) {
         if (pressed) openMenu = u.id;
         WheelLevels(u);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort) && !ImGui::IsPopupOpen(kUpgradeCtx))
-            h.tooltip(std::format("{}: {}{}\nShift+wheel: one level up / down. Ctrl+wheel: max / not bought. "
-                                  "Right-click: more.",
-                                  u.name, TierText(u, level),
-                                  u.discoverable ? (u.discovered ? "\nThe Fabricator hides it until it is found; it is "
-                                                                   "discovered."
-                                                                 : "\nThe Fabricator hides it until it is found (right-"
-                                                                   "click: Discover).")
-                                                 : ""));
+            h.tooltip(std::format("{}: {}{}\nShift+wheel: +-1 level, Ctrl+wheel: max / none. Right-click: more.", u.name,
+                                  TierText(u, level), u.discoverable ? "\nHidden in the Fabricator until found." : ""));
         dl->AddRectFilled(a, b, hovered ? P.frameHover : P.frame, U(8));
         // Icon tile, dimmed while not bought.
         item_grid::Tile t;
@@ -299,7 +290,7 @@ void UpgradesTab(const Helpers& h, const ub::State& st) {
         ImGui::BeginDisabled(level < 0);
         if (ImGui::Button("-##dn", ImVec2(btn, btn))) RequestLevel(u, level - 1);
         ImGui::EndDisabled();
-        HoverTip(h, level == 0 ? "Back to not bought (the effect is taken away)." : "One level down (the lower level's effect).");
+        HoverTip(h, level == 0 ? "Back to not bought." : "One level down.");
         ImGui::SameLine(0, U(4));
         ImGui::BeginDisabled(level >= u.levels - 1);
         if (ImGui::Button("+##up", ImVec2(btn, btn))) RequestLevel(u, level + 1);
@@ -356,9 +347,7 @@ void BlueprintTab(const Helpers& h, const sbx::Snapshot& s, int cat, const std::
     if (r.button) RequestBlueprints(locked, true);
     if (r.buttonHovered)
         h.tooltip(locked.empty() ? "Every blueprint of " + title + " is unlocked already."
-                                 : std::format("Unlocks the {} locked blueprint(s) of {}, as finding them would. The "
-                                               "Fabricator then lists them.",
-                                               locked.size(), title));
+                                 : std::format("Unlocks the {} locked blueprint(s) of {}, as if found.", locked.size(), title));
     if (r.clicked >= 0) {
         const sbx::Recipe* rec = list[static_cast<size_t>(r.clicked)];
         RequestBlueprints({rec->id}, !Unlocked(*rec));
@@ -372,8 +361,8 @@ void BlueprintTab(const Helpers& h, const sbx::Snapshot& s, int cat, const std::
         const sbx::Recipe* rec = list[static_cast<size_t>(r.hovered)];
         h.tooltip(std::format("{}\n{}{}\nClick: {}. Right-click: more.", rec->name,
                               Unlocked(*rec) ? "Blueprint unlocked" : "Blueprint locked",
-                              rec->owned > 0 ? std::format(" ({} in your gadget inventory)", rec->owned) : std::string(),
-                              Unlocked(*rec) ? "lock it" : "unlock it"));
+                              rec->owned > 0 ? std::format(" ({} owned)", rec->owned) : std::string(),
+                              Unlocked(*rec) ? "lock" : "unlock"));
     }
     Popup(h, kBlueprintCtx, [&] {
         const sbx::Recipe* rec = nullptr;
@@ -390,8 +379,7 @@ void BlueprintTab(const Helpers& h, const sbx::Snapshot& s, int cat, const std::
         if (ImGui::MenuItem(std::format("Lock all {} ({})", title, unlocked.size()).c_str(), nullptr, false, !unlocked.empty()))
             RequestBlueprints(unlocked, false);
     });
-    DimText("The game has no way to lock a blueprint again; Lock takes it off your blueprint list (saved like that). "
-            "Gadgets you already have stay in your inventory.");
+    DimText("Lock takes a blueprint off your list again; gadgets you already have stay.");
 }
 
 }  // namespace
