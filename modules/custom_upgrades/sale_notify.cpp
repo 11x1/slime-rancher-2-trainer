@@ -282,7 +282,10 @@ Il2CppObject* NextName(SaleNotices::Impl& p) {
 // was handed over alone and got a page of its own) and only while every slot was free; now the caller
 // queues the whole burst first (QueueText(..., false), then FlushText) so it fills the first page.
 bool TryFlushText(SaleNotices::Impl& p) {
-    Il2CppObject* list = p.List(true);
+    // An active list only (round 10): a text notice handed to a hidden list (the full map was open: map_tools'
+    // first "Teleport refused" went to an inactive list #2) never showed. Waiting keeps it queued until the HUD
+    // is back.
+    Il2CppObject* list = p.List(false);
     if (!list) return false;
     Il2CppObject* provider = p.Provider(list);
     if (!provider) return false;
