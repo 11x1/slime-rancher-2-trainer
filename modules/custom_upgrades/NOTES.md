@@ -347,3 +347,105 @@ script; it may stand still or play its idle), the scattered coop layout, the -x 
 and whether the phantom purchase is gone. Also not checked yet: sizes and heights (hay bales, nests, pillow), whether the incinerator's
 `Glow` / `Embers` play on their own once active (they may be sub-emitters of `FireTest`) and look
 right, and that nothing of the stripped clones still logs errors.
+
+## Vacpack upgrades (Fabricator)
+
+`vacpack_upgrades.cpp`. Two new cards in the Fabricator's Upgrades category, each a clone of a vanilla
+`UpgradeDefinition`, bought through the vanilla flow (recipe panel, cost check, `SpendableDirector.Spend`,
+`UpgradeModel.IncrementUpgradeLevel`; the game's own modifier code applies the effect).
+
+| card | levels | effect | shown once |
+|---|---|---|---|
+| Tank Booster IX-XII (id `0x53520101`) | 4 | +25 / +50 / +75 / +100 items per slot on top of Tank Booster VIII: 125 / 150 / 175 / 200 | Tank Booster VIII owned |
+| Extra Tank III-IV (id `0x53520102`) | 2 | a 7th / 8th vacpack slot | Extra Tank II owned |
+
+**Vanilla data** (UnityPy on `duplicateassetisolation_assets__54b00e46...bundle` and `corescenes_scenes_...bundle`,
+names from the English string table):
+
+- `AmmoCapacity` (`_uniqueId` 20) = Tank Booster I-VIII: one ADD modifier per level on `AmmoLimit` (default 20):
+  +10 ... +80, so 30 ... 100 per slot (levels replace each other, they do not add up). 450 / 1000 / 3000 / 10000 /
+  15000 / 20000 / 30000 / 50000 Newbucks plus refinery items (V: 50 Sloomber plorts, 20 Stable plorts, 20 Black
+  Indigonium, 1 Royal Jelly; VI: 60 Twin, 25 Stable, 20 Dream Bubble, 3 Sun Sap; VII: 70 Hyper, 50 Sloomber,
+  20 Magma Comb, 3 Royal Jelly; VIII: 80 Ringtail, 50 Twin, 30 Aqua Glass, 3 Royal Jelly). II+ also need the
+  `TankBoosterComponent`.
+- `AmmoSlots` (40) = Extra Tank I-II: ADD +1 / +2 on `AmmoSlotsAvailable` (default 4). 1500 / 5000 Newbucks + items,
+  II also the `ExtraTankComponent`. `LiquidSlot` (80) = Water Tank.
+- Player slot definitions (`PlayerState._ammoSlotDefinitions`): `AmmoSlot1-4`, `ExpansionAmmoSlot 1` / `2`
+  (`AmmoSlotsAvailable` >= 5 / 6), `LiquidAmmoSlot` (`LiquidSlotEnabled` >= 1). Vanilla uses all of them:
+  6 regular slots + water.
+
+**Costs (our choice).** Each level copies the refinery items of a late vanilla level, in the vanilla style:
+Tank Booster IX-XII use V-VIII's items with the amounts doubled (+2 for the rare ones vanilla asks 1-3 of) and
+60,000 / 75,000 / 90,000 / 120,000 Newbucks (vanilla VIII: 50,000). Extra Tank III / IV use VII / VIII's items
+unchanged and 25,000 / 50,000 Newbucks (vanilla Extra Tank II: 5,000; a slot this late is worth more than +25 per
+slot). No upgrade component: vanilla consumes one Tank Booster / Extra Tank component per level (counted items from
+treasure pods / the shop) and the world may hold no more than vanilla needs, so ours would be unbuyable; the cloned
+component list is cleared. The log lists every level's exact cost (`vacpack: TankBoosterPlus ready ...`).
+
+**How it works.**
+
+- Definitions: `Object.Instantiate(AmmoCapacity)` (deep copy of levels, modifiers, costs and LocalizedStrings; checked,
+  else nothing is offered), levels cut to the template range, `_uniqueId` set, effect value / target, costs and texts
+  changed (core/text_override; the Fabricator shows level texts through `LocalizeStringEvent.set_StringReference`).
+  Extra Tank III-IV points its modifier at `AmmoSlotsAvailable` and takes the vanilla Extra Tank icon and pedia entry.
+- Registration (world tick, in game): our ids into `UpgradeModel.upgradeLevels` (-1) first, then the definitions into
+  the player's `UpgradeDefinitionList` behind their vanilla parent (`ActorUpgradeHandler.SetModifiersFromModel` asks
+  every listed definition for its level; a missing key would throw). The Fabricator category's list gets them in a
+  `PlayerUpgradeFabricateCategory.GetItems` pre-hook; the post-hook drops our cards while the vanilla upgrade is not
+  maxed (and when the module is off). The Fabricator builds its items when it opens, so a card that becomes
+  available while it is open shows after reopening it.
+- Save: `UpgradeModel.Pull` (post) removes our ids from the save's copy. The level is a per-save value
+  (`custom_upgrades.vacpack.tank_booster` / `.extra_tank`, 0-based) written by the `UpgradeModel.SetUpgradeLevel`
+  detour on a purchase; the tick puts it back on the model after a load (`SetUpgradeLevel`, modifiers applied by the
+  game). A mod-free load sees the vanilla dictionary only (Push ignores unknown ids anyway).
+- Achievement: `CountUniqueUpgrades` (TinkerTailorSlimes progress) subtracts ours.
+- Extra slots: `PlayerState.InitModel` / `Reset` (pre) append two clones of `ExpansionAmmoSlot 2` (thresholds 7 / 8,
+  no hotkey) to the player's slot definitions before the game builds the `AmmoSlotManager`, while the module is on.
+  Locked slots are hidden by the HUD (`AmmoSlotAdapter.PrefilterData` filters on `IsUnlocked`), so nothing shows until
+  Extra Tank III. `AmmoModel.Pull` (post, the player's model only) writes the slots past the vanilla count to the
+  per-save value `custom_upgrades.vacpack.extra_slots` (`index=referenceId*count;...`) and hands the save a copy of
+  the first 7 slots; after the next load the tick refills empty extra slots from it (`MaybeAddResource` with overflow,
+  type by `LookupDirector.TryFindIdentifiableTypeByReferenceId`). Slimes in those slots lose their emotions / radiant
+  look (only type and count are kept). A save made before the refill keeps the old value.
+- Module off (only possible from the title screen or a save without custom upgrades, see the gate): levels set to -1
+  (modifiers removed), our ids and definitions out of the game's lists, `PlayerState` gets its vanilla array back for
+  the next load (the live vacpack keeps its 8 slots, locked, until then). The sidecar keeps everything. Switched on
+  after a save was loaded (the gate does this a moment after the load): the levels come back at once, the extra slots
+  only after loading the save again (logged).
+
+**The real slot limit.** No hard limit in code: the slot list is an array of any length (`AmmoModel.Reset`;
+`ValidateAndAdjustSlots` pads / trims by index with a warning), the HUD binds one view per slot, the save is a list.
+Practical limits: input actions exist only for `MainGame/Slot1..Slot7` (7 = the water slot), so slots 8+ have no
+number key (mouse wheel / next-previous only; `BindInputKey(null)` logs the game's "No binding set for ammo slot!"
+warning); new slots come after the water slot (index order; putting them before it would move the saved water slot
+into a regular one); and the width of the HUD row (not measured). Two extra slots = 9 icons in the row.
+
+**Not verified in game yet:** everything above. Known rough edges: Unity logs "Unserializing ammo slot length different
+than expected" on every load with the module on (7 saved vs 9 defined, harmless); the save's "viewed upgrades" set
+(`ViewedItemsV02`, a set of ints) may get our ids (harmless for a mod-free load, unknown ids are never looked up);
+pinning one of our upgrades as the recipe (`PinnedRecipeDirector`, saved as a string) was not checked for a mod-free
+load. After a fault the hooks are gone: the next save then contains our ids and 9 slots; a mod-free load ignores the
+ids and drops slots 8-9 with the game's warning.
+
+### Lava tank: not built (research)
+
+Lava in 1.3.0 is not a liquid the vacpack knows: it is `LavaVolume`, a trigger that calls `ILavaTriggerReact` on
+whatever enters it (`DestroyOnLava` poofs items after `_hoursOfContactAllowed`, `TakeDamageInLava` hurts the player,
+`BounceInLava` makes slimes / chickens hop out). There is no lava `IdentifiableType`: the only `LiquidDefinition`s are
+`Water` and `MagicWater` (identifiabletypes bundle). The vacpack takes liquids from a `LiquidSourceSurface`
+(`LiquidIdentifiableType`, `DestroyOnVac`, `FillVac`) registered in `LiquidSourceRegistry`. A lava tank would need:
+
+1. a new `LiquidDefinition` "Lava" made at runtime (clone of `Water`) with a reference id, icon, colour, localized
+   name, a shoot prefab (what leaves the vac) and the in / vac-fail FX;
+2. registration in `LookupDirector` (`_identifiableTypeByRefId`, the type groups) and, the hard part, the save's
+   persistence-id tables (`SaveReferenceTranslation` / `LoadReferenceTranslation`): a slot holding an unknown type
+   cannot be saved, so it needs the same strip-and-sidecar path as the extra slots, and lava must be kept out of every
+   other place a liquid can end up (silos, drones, plots and gadgets that take water);
+3. `LiquidSourceSurface` components (and colliders on the vac's layer) added to every `LavaVolume` object at runtime,
+   so the vac can suck from it, with `DestroyOnVac` off;
+4. a slot that takes it: a "lava tank" `AmmoSlotDefinition` (clone of `LiquidAmmoSlot` with its own type group that
+   holds only Lava, unlocked by a new upgrade property), appended like the extra slots;
+5. something for lava to do when shot: nothing in the game reacts to it (no food for fire slimes, no incinerator
+   input), so this is new gameplay.
+
+1, 3 and 4 follow the patterns above; 2 is the risky part (save format); 5 needs a design.
