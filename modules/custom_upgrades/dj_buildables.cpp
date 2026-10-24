@@ -2119,4 +2119,28 @@ bool Grant(const std::string& id, int count, std::string& result) {
     return ok;
 }
 
+bool RadioShop(RadioShopInfo& out) {
+    if (!g || !g->defsBuilt || !main_thread::IsMainThread() || g->Faulted()) return false;
+    Impl& p = *g;
+    if (p.fams[kRadio].defs.empty() || !unity::IsAlive(p.toyDef)) return false;
+    bool ok = false;
+    g_guard.Run([&] {
+        out.toyDef = p.toyDef;
+        out.boombox = p.fams[kRadio].base;
+        out.toyRefId = p.RefId(p.toyDef);
+        out.unlocked = p.CardUnlocked(kRadio, [&](Il2CppObject*) { return p.BaseBlueprint(kRadio); });
+        ok = !out.toyRefId.empty();
+    });
+    return ok;
+}
+
+void ListRadio(int64_t actorId) {
+    if (!g || !actorId || !main_thread::IsMainThread() || g->Faulted()) return;
+    g_guard.Run([&] {
+        g->List(kRadio, actorId, 0);
+        SR2_INFO("[{}] dj buildables: Slime Radio actor {} listed ({} in this save)", g->module, actorId,
+                 g->Actors(kRadio).size());
+    });
+}
+
 }  // namespace sr2::modules::custom_upgrades::dj

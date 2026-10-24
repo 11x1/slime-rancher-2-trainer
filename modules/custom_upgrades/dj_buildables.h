@@ -12,14 +12,15 @@
 //   * Fabricating a DJ Booth / DJ Speaker adds the vanilla Scientist Desk / Boombox to the inventory and
 //     one kit ("dj.booth_kits" / "dj.speaker_kits"); placing the variant uses a kit, picking it up gives
 //     it back. Our definitions never enter the saved inventory, blueprints or favourites.
-//   * Slime Radio = a vanilla Night Light toy actor (spawned in front of you when fabricated) listed in
-//     "dj.radios"; dressed as a small boombox.
+//   * Slime Radio = a vanilla Night Light toy actor (spawned in front of you when fabricated, or dispensed
+//     by the shop, radio_shop.h) listed in "dj.radios"; dressed as a small boombox.
 //   * Without the mod: plain Scientist Desks, Boomboxes and Night Lights where they stood; unused kits
 //     are gone, the decorations fabricated with them stay in the inventory.
 //
 // Details: dj_buildables.cpp (header) and modules/custom_upgrades/NOTES.md ("Slime DJ buildables").
 // Threading: Setup on the worker thread, everything else on the Unity main thread.
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -66,5 +67,17 @@ bool Owns(Il2CppObject* def);
 void Describe(std::vector<buildables::Info>& out);
 // kDjBooth / kDjSpeaker: `count` Scientist Desks / Boomboxes and kits; kSlimeRadio: `count` radios spawned.
 bool Grant(const std::string& id, int count, std::string& result);
+
+// ---- for radio_shop.cpp (main thread) ----
+struct RadioShopInfo {
+    Il2CppObject* toyDef = nullptr;    // the vanilla Night Light ToyDefinition (what the shop really sells)
+    Il2CppObject* boombox = nullptr;   // the vanilla Boombox GadgetDefinition (the radio's icon and picture)
+    std::string toyRefId;              // the Night Light's reference id ("ToyDefinition.NightLight")
+    bool unlocked = false;             // the radio card's unlock rule (Boombox blueprint or the sidecar override)
+};
+// false until the radio's definition is built (first tick of a loaded save).
+bool RadioShop(RadioShopInfo& out);
+// A Night Light the shop dispensed for a bought radio: listed as a Slime Radio (dressed at the next tick).
+void ListRadio(int64_t actorId);
 
 }  // namespace sr2::modules::custom_upgrades::dj
