@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "imgui_internal.h"
 #include "item_icons.h"
 #include "theme.h"
 
@@ -65,6 +66,22 @@ void DrawTabFace(ImDrawList* dl, ImVec2 a, ImVec2 b, const Tab& t, bool on, floa
                                 WithAlpha(col, on ? 1.0f : 0.75f), 12);
         return;
     }
+    if (t.glyph == kGlyphPin) {  // "pinned": a push pin, tilted 45 degrees, the needle to the bottom left
+        const float w = ib.x - ia.x;
+        const ImVec2 c((ia.x + ib.x) * 0.5f + w * 0.06f, (ia.y + ib.y) * 0.5f - w * 0.06f);
+        constexpr float kCos = 0.70710678f;
+        auto at = [&](float x, float y) {  // pin space (unit = w, y down) -> screen, rotated
+            return ImVec2(c.x + (x * kCos - y * kCos) * w, c.y + (x * kCos + y * kCos) * w);
+        };
+        auto box = [&](float x0, float y0, float x1, float y1) {
+            dl->AddQuadFilled(at(x0, y0), at(x1, y0), at(x1, y1), at(x0, y1), WithAlpha(col, on ? 1.0f : 0.75f));
+        };
+        box(-0.17f, -0.44f, 0.17f, -0.32f);  // cap
+        box(-0.10f, -0.33f, 0.10f, -0.06f);  // body
+        box(-0.27f, -0.07f, 0.27f, 0.03f);   // collar
+        dl->AddLine(at(0.0f, 0.02f), at(0.0f, 0.40f), WithAlpha(col, on ? 1.0f : 0.75f), std::max(1.0f, w * 0.07f));
+        return;
+    }
     char buf[2] = {static_cast<char>(t.glyph), 0};
     ImFont* f = theme::Display();
     const float size = (ib.y - ia.y) * 0.9f;
@@ -72,30 +89,98 @@ void DrawTabFace(ImDrawList* dl, ImVec2 a, ImVec2 b, const Tab& t, bool on, floa
     dl->AddText(f, size, ImVec2((a.x + b.x - ts.x) * 0.5f, (a.y + b.y - ts.y) * 0.5f), col, buf);
 }
 
-// Options::tabsBelow: the tabs on a row of their own under the search box, right-aligned.
-void TabRowBelow(const std::vector<Tab>& tabs, State& st, Result& res, float s) {
+// The tabs in a row from the cursor. They switch on the press (PredictTab matches that) and their
+// rectangles are kept for next frame's PredictTab.
+void TabRow(const std::vector<Tab>& tabs, State& st, Result& res, float s) {
     const theme::Palette& P = theme::Colors();
     const float fh = ImGui::GetFrameHeight(), sp = 4.0f * s;
     const int n = static_cast<int>(tabs.size());
     st.tab = std::clamp(st.tab, 0, n - 1);
-    const float w = static_cast<float>(n) * fh + static_cast<float>(n - 1) * sp;
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, ImGui::GetContentRegionAvail().x - w));
     ImDrawList* dl = ImGui::GetWindowDrawList();
+    st.tabCount = std::min(n, kMaxTabs);
+    st.tabFrame = ImGui::GetFrameCount();
+    st.tabWindow = ImGui::GetCurrentWindow()->ID;
     for (int i = 0; i < n; ++i) {
         ImGui::PushID(i);
         if (i > 0) ImGui::SameLine(0, sp);
-        if (ImGui::InvisibleButton("##tab", ImVec2(fh, fh)) && st.tab != i) st.tab = i, res.tabChanged = true;
+        if (ImGui::InvisibleButton("##tab", ImVec2(fh, fh), ImGuiButtonFlags_PressedOnClick) && st.tab != i)
+            st.tab = i, res.tabChanged = true;
         const bool hot = ImGui::IsItemHovered(), on = st.tab == i;
         const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+        if (i < kMaxTabs) st.tabMin[i] = a, st.tabMax[i] = b;
         dl->AddRectFilled(a, b, on ? P.sel : hot ? P.frameHover : P.frame, 6.0f * s);
         if (on) dl->AddRect(a, b, Dark() ? P.grab : P.accent, 6.0f * s, 0, std::max(1.0f, 1.5f * s));
         DrawTabFace(dl, a, b, tabs[static_cast<size_t>(i)], on || hot, s);
         if (hot) res.hoveredTab = i;
         ImGui::PopID();
     }
+    if (st.predicted) res.tabChanged = true;
+    st.predicted = false;
+}
+
+// Options::tabsBelow: the tabs on a row of their own under the search box, right-aligned.
+void TabRowBelow(const std::vector<Tab>& tabs, State& st, Result& res, float s) {
+    const float fh = ImGui::GetFrameHeight(), sp = 4.0f * s;
+    const int n = static_cast<int>(tabs.size());
+    const float w = static_cast<float>(n) * fh + static_cast<float>(n - 1) * sp;
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, ImGui::GetContentRegionAvail().x - w));
+    TabRow(tabs, st, res, s);
+}
+
+// The accent bar along a tile's bottom edge, `h` high, inside the tile's rounded outline (radius `r`):
+// a plain rectangle with a smaller rounding stuck out past the round corners and the selection outline.
+void AccentBar(ImDrawList* dl, ImVec2 a, ImVec2 b, float r, float h, ImU32 col) {
+    const float in = 1.0f;  // stays inside the outline's anti-aliased edge
+    a.x += in, b.x -= in, b.y -= in, r = std::max(0.0f, r - in);
+    const float top = b.y - h;
+    if (r <= 0.5f || b.x - a.x < 2 * r) {
+        dl->AddRectFilled(ImVec2(a.x, top), b, col);
+        return;
+    }
+    // Left corner arc, bottom edge, right corner arc, clipped to y >= top (convex).
+    constexpr int kSeg = 8;
+    constexpr float kHalfPi = 1.57079633f;
+    ImVec2 pts[2 * (kSeg + 1) + 2];
+    int n = 0;
+    const float cyc = b.y - r;  // the corner circles' centre height
+    auto arcX = [&](float y) {  // horizontal distance of the arc from its centre at height y
+        const float d = std::clamp(y - cyc, 0.0f, r);
+        return std::sqrt(std::max(0.0f, r * r - d * d));
+    };
+    pts[n++] = ImVec2(a.x + r - arcX(top), top);
+    for (int i = 0; i <= kSeg; ++i) {  // left corner: from the top of the bar down to the bottom
+        const float an = kHalfPi * static_cast<float>(i) / kSeg;  // 0 = side, pi/2 = bottom
+        const ImVec2 p(a.x + r - std::cos(an) * r, cyc + std::sin(an) * r);
+        if (p.y > top) pts[n++] = p;
+    }
+    for (int i = kSeg; i >= 0; --i) {  // right corner: from the bottom up
+        const float an = kHalfPi * static_cast<float>(i) / kSeg;
+        const ImVec2 p(b.x - r + std::cos(an) * r, cyc + std::sin(an) * r);
+        if (p.y > top) pts[n++] = p;
+    }
+    pts[n++] = ImVec2(b.x - r + arcX(top), top);
+    std::reverse(pts, pts + n);  // clockwise on screen, as the anti-aliased fill wants it
+    dl->AddConvexPolyFilled(pts, n, col);
 }
 
 }  // namespace
+
+bool PredictTab(State& st) {
+    st.predicted = false;
+    if (st.tabCount <= 0 || st.tabFrame != ImGui::GetFrameCount() - 1 || !ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        return false;
+    const ImGuiContext& g = *ImGui::GetCurrentContext();
+    if (!g.HoveredWindow || g.HoveredWindow->ID != st.tabWindow) return false;
+    const ImVec2 m = ImGui::GetMousePos();
+    for (int i = 0; i < st.tabCount; ++i) {
+        if (m.x < st.tabMin[i].x || m.y < st.tabMin[i].y || m.x >= st.tabMax[i].x || m.y >= st.tabMax[i].y) continue;
+        if (st.tab == i) return false;
+        st.tab = i;
+        st.predicted = true;
+        return true;
+    }
+    return false;
+}
 
 int WheelStep(float wheel) {
     const ImGuiIO& io = ImGui::GetIO();
@@ -161,8 +246,7 @@ void DrawTile(ImDrawList* dl, ImVec2 a, ImVec2 b, const Tile& t, bool hot, bool 
         const ImU32 glow = WithAlpha(t.accent, t.dimmed ? 0.06f : (hot ? 0.30f : 0.18f));
         dl->AddRectFilledMultiColor(ImVec2(a.x + inset, gy), ImVec2(b.x - inset, b.y - 3.0f * scale), WithAlpha(glow, 0.0f),
                                     WithAlpha(glow, 0.0f), glow, glow);
-        dl->AddRectFilled(ImVec2(a.x, b.y - 3.0f * scale), b, t.dimmed ? WithAlpha(t.accent, 0.35f) : t.accent, r,
-                          ImDrawFlags_RoundCornersBottom);
+        AccentBar(dl, a, b, r, 3.0f * scale, t.dimmed ? WithAlpha(t.accent, 0.35f) : t.accent);
     }
     const float pad = 7.0f * scale;
     const ImVec2 ia(a.x + pad, a.y + pad), ib(b.x - pad, b.y - pad - 2.0f * scale);
@@ -209,24 +293,10 @@ Result Draw(const char* id, const std::vector<Tile>& tiles, State& st, const Opt
     ImGui::PushID(id);
 
     // ---- header row: tabs, search, button ----
-    const float fh = ImGui::GetFrameHeight();
     const float sp = 4.0f * s;
+    if (!o.tabs || o.tabs->empty()) st.tabCount = 0;
     if (o.tabs && !o.tabs->empty() && !o.tabsBelow) {
-        st.tab = std::clamp(st.tab, 0, static_cast<int>(o.tabs->size()) - 1);
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        for (int i = 0; i < static_cast<int>(o.tabs->size()); ++i) {
-            const Tab& t = (*o.tabs)[static_cast<size_t>(i)];
-            ImGui::PushID(i);
-            if (i > 0) ImGui::SameLine(0, sp);
-            if (ImGui::InvisibleButton("##tab", ImVec2(fh, fh)) && st.tab != i) st.tab = i, res.tabChanged = true;
-            const bool hot = ImGui::IsItemHovered(), on = st.tab == i;
-            const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
-            dl->AddRectFilled(a, b, on ? P.sel : hot ? P.frameHover : P.frame, 6.0f * s);
-            if (on) dl->AddRect(a, b, Dark() ? P.grab : P.accent, 6.0f * s, 0, std::max(1.0f, 1.5f * s));
-            DrawTabFace(dl, a, b, t, on || hot, s);
-            if (hot) res.hoveredTab = i;
-            ImGui::PopID();
-        }
+        TabRow(*o.tabs, st, res, s);
         ImGui::SameLine(0, 8.0f * s);
     }
     float bw = 0;

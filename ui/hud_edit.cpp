@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <string>
 
 #include "core/log.h"
 #include "core/settings.h"
@@ -442,6 +443,52 @@ float DrawKeycap(ImDrawList* dl, float x, float cy, const char* key, float uiSca
 float KeycapWidth(const char* key, float uiScale) {
     const Metrics bm(uiScale);
     return std::round(TextSz(theme::Mono(), bm.fsKey, key).x + bm.chipX * 2);
+}
+
+namespace {
+// "Ctrl+LMB" -> {"Ctrl", "LMB"}; a '+' at the end is a key of its own.
+template <class F>
+void ForEachKey(const char* keys, F&& f) {
+    std::string part;
+    for (const char* c = keys; *c; ++c) {
+        if (*c == '+' && c[1] && !part.empty()) {
+            f(part);
+            part.clear();
+        } else {
+            part += *c;
+        }
+    }
+    if (!part.empty()) f(part);
+}
+
+float PlusW(float uiScale) { return std::round(TextSz(theme::Body(), (theme::kSmallSize - 1) * uiScale, "+").x + 4 * uiScale); }
+}  // namespace
+
+float DrawKeyCombo(ImDrawList* dl, float x, float cy, const char* keys, float uiScale, float alpha) {
+    const theme::Palette& P = theme::Colors();
+    const float x0 = x, fs = (theme::kSmallSize - 1) * uiScale;
+    bool first = true;
+    ForEachKey(keys, [&](const std::string& k) {
+        if (!first) {
+            const ImVec2 ts = TextSz(theme::Body(), fs, "+");
+            dl->AddText(theme::Body(), fs, ImVec2(std::round(x + 2 * uiScale), std::round(cy - ts.y * 0.5f - uiScale)),
+                        Fade(P.dim, alpha), "+");
+            x += PlusW(uiScale);
+        }
+        first = false;
+        x += DrawKeycap(dl, x, cy, k.c_str(), uiScale, alpha);
+    });
+    return x - x0;
+}
+
+float KeyComboWidth(const char* keys, float uiScale) {
+    float w = 0;
+    bool first = true;
+    ForEachKey(keys, [&](const std::string& k) {
+        w += KeycapWidth(k.c_str(), uiScale) + (first ? 0.0f : PlusW(uiScale));
+        first = false;
+    });
+    return w;
 }
 
 void Begin(Element e) { Start(e); }

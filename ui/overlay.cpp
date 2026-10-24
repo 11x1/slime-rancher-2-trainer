@@ -323,6 +323,73 @@ bool ForegroundIsGame() { return g_hwnd && GetForegroundWindow() == g_hwnd; }
 
 bool KeyDown(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
 
+// ---------------------------------------------------- Steam overlay key ----
+// While the overlay is open, Shift+Tab must not open the Steam overlay. Swallowing WM_KEYDOWN / WM_INPUT
+// in our WndProc is not enough: Steam's GameOverlayRenderer64 sees the key outside it (its own hooks on
+// the message pump, raw input and key state). A low-level keyboard hook runs before any of that: a key
+// it eats is never posted to the game's queue, never becomes raw input and never reaches the async key
+// state. Installed only while the overlay has the input (one more stop for every key system-wide), on
+// a thread of its own with a message loop (LL hooks are called through it); Tab is eaten while Shift
+// is down, the overlay has the input and the game window is in front.
+std::atomic<DWORD> g_kbThreadId{0};
+std::atomic<bool> g_kbWant{false};  // the hook should be installed
+bool g_kbWanted = false;            // last state passed on (render thread)
+constexpr UINT kKbSync = WM_APP + 0x51;
+
+LRESULT CALLBACK SteamKeyHook(int code, WPARAM wp, LPARAM lp) {
+    if (code == HC_ACTION && lp && reinterpret_cast<const KBDLLHOOKSTRUCT*>(lp)->vkCode == VK_TAB && Captured() &&
+        KeyDown(VK_SHIFT) && g_hwnd && GetForegroundWindow() == g_hwnd)
+        return 1;  // Shift+Tab (down, repeat and up): neither the game nor Steam gets it
+    return CallNextHookEx(nullptr, code, wp, lp);
+}
+
+DWORD WINAPI SteamKeyThread(LPVOID) {
+    MSG m;
+    PeekMessageW(&m, nullptr, WM_USER, WM_USER, PM_NOREMOVE);  // the queue exists from here on
+    HMODULE self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&SteamKeyHook), &self);
+    HHOOK hook = nullptr;
+    bool failLogged = false;
+    auto sync = [&] {
+        const bool want = g_kbWant.load();
+        if (want && !hook) {
+            hook = SetWindowsHookExW(WH_KEYBOARD_LL, &SteamKeyHook, self, 0);
+            if (!hook && !failLogged) {
+                failLogged = true;
+                SR2_WARN("ui: Shift+Tab block unavailable (SetWindowsHookEx WH_KEYBOARD_LL failed, error {})", GetLastError());
+            }
+        } else if (!want && hook) {
+            UnhookWindowsHookEx(hook);
+            hook = nullptr;
+        }
+    };
+    sync();  // a post made before the queue existed failed: catch up
+    while (GetMessageW(&m, nullptr, 0, 0) > 0)
+        if (m.message == kKbSync) sync();
+    return 0;
+}
+
+// Render thread, every frame: installs / removes the hook as the overlay takes / gives back the input.
+void SyncSteamKeyBlock(bool captured) {
+    if (captured == g_kbWanted) return;
+    g_kbWanted = captured;
+    g_kbWant = captured;
+    if (!g_kbThreadId.load()) {
+        if (!captured) return;
+        DWORD id = 0;
+        HANDLE t = CreateThread(nullptr, 0, &SteamKeyThread, nullptr, 0, &id);
+        if (!t) {
+            SR2_WARN("ui: Shift+Tab block unavailable (CreateThread failed, error {})", GetLastError());
+            return;
+        }
+        CloseHandle(t);
+        g_kbThreadId = id;
+        return;  // the thread installs it itself
+    }
+    PostThreadMessageW(g_kbThreadId.load(), kKbSync, 0, 0);  // fails only before its queue exists: it syncs then
+}
+
 // Codes key capture accepts: every keyboard key plus mouse 3-5. Left/right
 // click stay usable for the UI (the click that starts capture is one), the
 // generic Shift/Ctrl/Alt codes are skipped in favour of their L/R variants,
@@ -622,6 +689,7 @@ void RenderFrame() {
 
     const bool open = g_open.load();
     const bool editing = hud_edit::Active();
+    SyncSteamKeyBlock(Captured());
     if (!open) {
         g_openFrames = 0;
         g_imguiWantsMouse = true;

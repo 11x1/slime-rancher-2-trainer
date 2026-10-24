@@ -206,6 +206,7 @@ struct FabUi {
     Il2CppGCHandle handle = nullptr;
 };
 std::vector<FabUi> g_fabUis;
+int g_fabStarts = 0;  // FabricatorUI.Start calls so far (a Fabricator UI was built: its assets are loaded)
 using FabUiFn = void (*)(Il2CppObject*, const MethodInfo*);
 FabUiFn g_origFabStart = nullptr, g_origFabDestroy = nullptr;
 sr2::core::DetourGuard g_fabStartGuard{kFabHooks, "FabricatorUI.Start"};
@@ -215,6 +216,7 @@ void FabStartDetour(Il2CppObject* self, const MethodInfo* mi) {
     g_origFabStart(self, mi);
     g_fabStartGuard.Run([&] {
         if (!self || !main_thread::IsMainThread()) return;
+        ++g_fabStarts;
         for (const FabUi& f : g_fabUis)
             if (f.ui == self) return;
         g_fabUis.push_back({self, unity::NewGCHandle(self)});
@@ -305,6 +307,7 @@ private:
         int index;  // into the category titles
     };
     void ReadFabCategories(std::vector<FabCat>& cats, std::vector<std::string>& titles, std::vector<uint32_t>& icons);
+    bool EnsurePinnedIcon();
     void GroupFabCategories(std::vector<std::unordered_set<uintptr_t>>& members, std::vector<std::string>& titles,
                             std::vector<uint32_t>& icons, std::vector<std::unordered_map<uintptr_t, int>>& orders);
     int RecipeCategory(const std::vector<FabCat>& cats, Il2CppObject* def, int* order);
@@ -518,6 +521,7 @@ private:
     const MethodInfo* fabCatIndexOf_ = nullptr;      // GadgetFabricateCategory.IndexOf(GadgetDefinition) (optional: the Fabricator's order)
     Il2CppClass* fabPinnedCatClass_ = nullptr;       // PinnedFabricateCategory (optional: the Pinned tab's icon)
     uint32_t pinnedIcon_ = 0;
+    int pinnedIconTry_ = -1;                         // g_fabStarts at the last EnsurePinnedIcon search
     size_t offPinnedRecipe_ = 0;                     // PlayerModel.PinnedRecipe (IRecipe; optional)
     std::unordered_map<std::string, uintptr_t> recipeByRef_;  // gadget ReferenceId -> recipe id
     Il2CppObject* pinnedObj_ = nullptr;              // the IRecipe last resolved (identity only)
@@ -1904,6 +1908,28 @@ void Sandbox::ReadFabCategories(std::vector<FabCat>& cats, std::vector<std::stri
     }
 }
 
+// The Fabricator's Pinned tab icon (PinnedFabricateCategory._icon). ReadFabCategories only sees it when
+// the recipe list is built after the Fabricator menu asset was loaded; built earlier (from the gadget
+// groups, the usual case) it was never looked at again, so the overlay's Pinned tab showed its fallback
+// (round 7: "no pinned icon, opened refinery but still nothing"). Searched by its own class (one
+// FindObjectsOfTypeAll) once, and again after each Fabricator UI was built (FabricatorUI.Start: the asset
+// comes with it), while missing. Not on a timer: a 5 s FindObjectsOfTypeAll retry for the menu asset
+// cost a 25 ms frame each time (see the Crafter notes). True if it searched.
+bool Sandbox::EnsurePinnedIcon() {
+    if (pinnedIcon_ || !fabPinnedCatClass_ || !offFabCatIcon_ || pinnedIconTry_ == g_fabStarts) return false;
+    const bool first = pinnedIconTry_ < 0;
+    pinnedIconTry_ = g_fabStarts;
+    for (Il2CppObject* c : unity::FindObjectsOfTypeAll(fabPinnedCatClass_)) {
+        if (!c || !IsA(c, fabPinnedCatClass_) || !unity::IsAlive(c)) continue;
+        if ((pinnedIcon_ = SpriteIcon(unity::Field<Il2CppObject*>(c, offFabCatIcon_)))) {
+            SR2_INFO("[{}] crafter: the Fabricator's Pinned icon found ({})", kModule, unity::GetName(c));
+            return true;
+        }
+    }
+    if (first) SR2_INFO("[{}] crafter: the Fabricator's Pinned icon is not loaded yet (the overlay draws a pin until it is)", kModule);
+    return true;
+}
+
 // Index of the first category that contains the gadget, -1 if none. `order`: its position there as the
 // Fabricator lists it (GadgetFabricateCategory.IndexOf), -1 if unknown.
 int Sandbox::RecipeCategory(const std::vector<FabCat>& cats, Il2CppObject* def, int* order) {
@@ -2194,6 +2220,7 @@ void Sandbox::Refresh() {
         if (!built && spawnables_ && !relations_) EnsureRelations(), built = true;
         if (!built && spawnables_ && !groupIconsBuilt_) EnsureGroupIcons(), built = true;
         if (!built && spawnables_ && !crateAreasBuilt_) EnsureCrateAreas(), built = true;
+        if (!built && recipes_) built = EnsurePinnedIcon();
         if (!built) built = RenderNextIcon();
         s.catalog = catalog_;  // icons rendered into the lists
         s.spawnables = spawnables_;
