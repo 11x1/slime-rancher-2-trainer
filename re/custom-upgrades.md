@@ -296,6 +296,11 @@ As built:
   that is ~30 chicks, ~50 birds in total, under the 58 density cap where breeding stalls.
   20 is now only the default (18 hens + 2 roosters): see the limit sliders below.
 * Price 1000 (Deluxe Coop 1300, Plort Collector 750), icon = the Deluxe Coop item's.
+* Ranch drones: the Coop source's `RanchDroneSourceProgramElderCollector` part reads
+  `RanchMetadata.LandPlotMetadata.elderCollectors` (built in `RanchMetadata.Register(LandPlot)`
+  0x98D7D0 from `DeluxeCoopUpgrader.DeluxeStuff` only; `GetStorageMetadata` 0x98D290:
+  `StorageMetadata(i, storage, First(catchers, c => c.SlotIdx == i))`). The tick appends the Hen
+  Collector's slots there (see `modules/custom_upgrades/NOTES.md`, "Ranch drones").
 
 Limit sliders (user request, follow-up): the keep-limits are per coop, hens **0..58** (58 =
 `MaxDensityInsideCoops`, default 18) and roosters **0..20** (default 2), set with two sliders side

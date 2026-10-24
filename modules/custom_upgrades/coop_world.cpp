@@ -82,6 +82,22 @@
 //   reads the occupied corners from the live plot's own children (by path, plot-local through
 //   InverseTransformPoint) and turns the clone by a multiple of 90 deg into the first free one,
 //   (+x, -z) preferred; logged once per build ("hen collector corner").
+//   Ranch drones: the station program's source "Coop" (DroneTaskSourceType.COOP) is built by
+//   RanchDrone.GatherSourceTask as TWO source programs, RanchDroneSourceProgramCoop (live chickens
+//   above the task config's minimums) and RanchDroneSourceProgramElderCollector (a
+//   RanchDroneSourceProgramSiloStorage whose GetSources walks RanchMetadata.Plots ->
+//   LandPlotMetadata.elderCollectors, filtered by the target). RanchMetadata.Register(LandPlot)
+//   (LandPlot.Start / ApplyUpgrades / OnUpgradesChanged) fills elderCollectors for coops only from
+//   the plot's own DeluxeCoopUpgrader.DeluxeStuff storage: one StorageMetadata(slot, storage,
+//   SiloCatcher with that SlotIdx) per slot (GetStorageMetadata). The drone flies to the catcher
+//   (GetTargetPosition, no null check), takes one item per GatherTimePerItem (OnAction:
+//   MaybeAddToAnySlot into the drone, StorageMetadata.Decrement -> AmmoSlotManager.Decrement) and
+//   fast-forward uses the same StorageMetadata. So the tick appends our storage's slots to the
+//   coop's elderCollectors (LinkDrones, a new array; again after every Register, which replaces
+//   the entry) and a removal rebuilds the entry with OnUpgradesChanged (UnlinkDrones). No new
+//   source type (that would need the UI's source definitions and a new DroneTaskSourceType value
+//   in the vanilla save's DroneTaskData): "Coop" with a meat / hen / rooster target now also
+//   empties the Hen Collector.
 //
 // Clones are named "sr2mods_<kind>#<generation>" and found again every tick under the plot
 // transform (no stored pointers). A clone of another generation (an older save game / before a
@@ -432,6 +448,25 @@ struct CoopWorld::Impl {
     bool henBroken = false;  // a build failed structurally: not retried this session
     bool loggedLinked = false;
     bool henButton = false;  // the last built clone kept its button (build log)
+
+    // Ranch drones (optional, see "Ranch drones" in the header): the Hen Collector's storage as
+    // elder-collector slots of its coop in RanchMetadata, so the vanilla Coop source reads it.
+    bool drones = false;
+    Il2CppClass* ranchMetaClass = nullptr;       // RanchMetadata
+    Il2CppClass* plotMetaClass = nullptr;        // RanchMetadata.LandPlotMetadata (nested)
+    Il2CppClass* storageMetaClass = nullptr;     // RanchMetadata.StorageMetadata (nested)
+    Il2CppClass* siloCatcherClass = nullptr;
+    const MethodInfo* rmFind = nullptr;          // RanchMetadata.Find(GameObject) (static)
+    const MethodInfo* rmUpgradesChanged = nullptr;  // RanchMetadata.OnUpgradesChanged(LandPlot)
+    const MethodInfo* smCtor = nullptr;          // StorageMetadata..ctor(int, SiloStorage, SiloCatcher)
+    using ArrayNewFn = Il2CppObject* (*)(Il2CppClass*, uintptr_t);
+    ArrayNewFn arrayNew = nullptr;
+    size_t offRmPlots = 0, offLpmPlot = 0, offLpmElder = 0, offSmStorage = 0, offCatcherSlot = 0;
+    bool loggedDroneFail = false;
+    bool SetupDrones(Resolver& R);
+    Il2CppObject* RanchOf(Il2CppObject* plot);
+    void LinkDrones(Il2CppObject* plot, Il2CppObject* clone, const std::string& id);
+    void UnlinkDrones(Il2CppObject* plot, const std::string& why);
 };
 
 // ---------------------------------------------------------------- setup --
@@ -588,6 +623,8 @@ bool CoopWorld::Setup(Resolver& R, const char* module, std::string& why) {
         if (auto o = R.FieldOffset(p->plortCollectorClass, "CollectPt", &err)) p->offPcCollectPt = *o;
         // Vacuum: the vanilla collector's joints (all optional together).
         p->vacuum = p->SetupVacuum(R);
+        // Ranch drones (all optional together).
+        p->drones = p->SetupDrones(R);
     }
     impl_ = p;
     ready_ = true;
@@ -1517,6 +1554,155 @@ void CoopWorld::Impl::ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopReque
              vac ? "vacuuming" : "stored directly", n, period);
 }
 
+// ---------------------------------------------------------------- ranch drones --
+
+bool CoopWorld::Impl::SetupDrones(Resolver& R) {
+    std::string err, miss;
+    auto need = [&](bool ok, const char* what) {
+        if (!ok && miss.empty()) miss = what;
+    };
+    ranchMetaClass = R.Class(kImage, "", "RanchMetadata", &err);
+    siloCatcherClass = R.Class(kImage, "", "SiloCatcher", &err);
+    need(ranchMetaClass && siloCatcherClass, "RanchMetadata / SiloCatcher");
+    // LandPlotMetadata / StorageMetadata are nested (internal) classes of RanchMetadata.
+    using NestedFn = Il2CppClass* (*)(Il2CppClass*, void**);
+    auto nested = reinterpret_cast<NestedFn>(api().module ? GetProcAddress(api().module, "il2cpp_class_get_nested_types") : nullptr);
+    void* iter = nullptr;
+    for (Il2CppClass* k = nested && ranchMetaClass ? nested(ranchMetaClass, &iter) : nullptr; k && api().il2cpp_class_get_name;
+         k = nested(ranchMetaClass, &iter)) {
+        const std::string_view n = api().il2cpp_class_get_name(k) ? api().il2cpp_class_get_name(k) : "";
+        if (n == "LandPlotMetadata") plotMetaClass = k;
+        else if (n == "StorageMetadata") storageMetaClass = k;
+    }
+    need(plotMetaClass && storageMetaClass, "RanchMetadata.LandPlotMetadata / StorageMetadata");
+    arrayNew = reinterpret_cast<ArrayNewFn>(api().module ? GetProcAddress(api().module, "il2cpp_array_new") : nullptr);
+    need(arrayNew && objectNew && compsInChildren, "il2cpp_array_new / il2cpp_object_new / GetComponentsInChildren");
+    if (!miss.empty()) {
+        SR2_WARN("[{}] hen collector: ranch drones can't take from it ({} not found)", module, miss);
+        return false;
+    }
+    rmFind = R.MethodByParams(ranchMetaClass, "Find", {"UnityEngine.GameObject"}, &err);
+    rmUpgradesChanged = R.Method(ranchMetaClass, "OnUpgradesChanged", 1, &err);
+    smCtor = R.Method(storageMetaClass, ".ctor", 3, &err);
+    need(rmFind && rmUpgradesChanged && smCtor, "RanchMetadata.Find / OnUpgradesChanged / StorageMetadata..ctor");
+    auto off = [&](Il2CppClass* k, const char* field, size_t& out) {
+        std::string e;
+        auto o = R.FieldOffset(k, field, &e);
+        if (o) out = *o;
+        need(o.has_value(), field);
+    };
+    off(ranchMetaClass, "plots", offRmPlots);
+    off(plotMetaClass, "plot", offLpmPlot);
+    off(plotMetaClass, "elderCollectors", offLpmElder);
+    off(storageMetaClass, "storage", offSmStorage);
+    off(siloCatcherClass, "SlotIdx", offCatcherSlot);
+    if (!miss.empty()) {
+        SR2_WARN("[{}] hen collector: ranch drones can't take from it ({} not found)", module, miss);
+        return false;
+    }
+    return true;
+}
+
+Il2CppObject* CoopWorld::Impl::RanchOf(Il2CppObject* plot) {
+    Il2CppObject* go = unity::GameObjectOf(plot);
+    if (!unity::IsAlive(go)) return nullptr;
+    bool ok = false;
+    Il2CppObject* r = Call(rmFind, nullptr, {go}, "RanchMetadata.Find", &ok);
+    return ok && unity::IsAlive(r) && IsA(r, ranchMetaClass) ? r : nullptr;
+}
+
+// RanchMetadata.Register(LandPlot) builds the coop's LandPlotMetadata.elderCollectors from the
+// DeluxeCoopUpgrader's DeluxeStuff storage only (one StorageMetadata(slot, storage, the SiloCatcher
+// with that SlotIdx) per slot), and a new LandPlotMetadata replaces it on every ApplyUpgrades. So
+// each tick checks whether the coop's current entry lists our storage, and if not appends our slots
+// built the same way (a new array: old entries + ours).
+void CoopWorld::Impl::LinkDrones(Il2CppObject* plot, Il2CppObject* clone, const std::string& id) {
+    if (!drones || sr2::core::ModuleFaulted(module)) return;
+    Il2CppObject* ranch = RanchOf(plot);
+    if (!ranch) return;  // no ranch drone data here (not on a ranch cell)
+    void* plots = unity::Field<void*>(ranch, offRmPlots);
+    Il2CppObject* meta = nullptr;
+    for (size_t i = 0, n = unity::ListCount(plots); i < n && i < 256 && !meta; ++i) {
+        auto* m = static_cast<Il2CppObject*>(unity::ListAt(plots, i));
+        if (m && IsA(m, plotMetaClass) && unity::Field<Il2CppObject*>(m, offLpmPlot) == plot) meta = m;
+    }
+    if (!meta) return;  // not registered (yet): next tick
+    Il2CppObject* storage = InChildren(unity::TransformOf(clone), siloStorageClass, true);
+    if (!storage) return;
+    // Entries kept: every one whose storage still exists (a clone destroyed without a rebuild of the
+    // entry, e.g. by a load without a scene change, must not stay a drone target).
+    void* old = unity::Field<void*>(meta, offLpmElder);
+    const size_t nAll = old ? unity::ArrayLength(old) : 0;
+    if (nAll > 64) return;
+    std::vector<Il2CppObject*> keep;
+    bool linked = false;
+    for (size_t i = 0; i < nAll; ++i) {
+        auto* e = static_cast<Il2CppObject*>(unity::ArrayAt(old, i));
+        Il2CppObject* s = e ? unity::Field<Il2CppObject*>(e, offSmStorage) : nullptr;
+        if (!e || !unity::IsAlive(s)) continue;
+        linked = linked || s == storage;
+        keep.push_back(e);
+    }
+    if (linked && keep.size() == nAll) return;  // already linked (the usual case)
+    const size_t nOld = keep.size();
+    bool ok = true;
+    size_t nSlots = 0;
+    std::vector<Il2CppObject*> ports;
+    if (!linked) {
+        Il2CppObject* ammo = Call(localAmmo, storage, {}, "SiloStorage.get_LocalAmmo", &ok);
+        nSlots = ok && ammo ? unity::ArrayLength(Call(ammoSlots, ammo, {}, "AmmoSlotManager.get_Slots", &ok)) : 0;
+        if (!ok || nSlots == 0 || nSlots > 8) return;
+        // The output port of each slot (active ones only, like vanilla's GetComponentsInChildren(false)):
+        // the drone flies to it (GetTargetPosition dereferences it without a check).
+        bool inactive = false;
+        Il2CppObject* arr = Call(compsInChildren, storage, {unity::TypeOf(siloCatcherClass), &inactive},
+                                 "GetComponentsInChildren(SiloCatcher)", &ok);
+        ports.assign(nSlots, nullptr);
+        for (size_t i = 0, n = ok ? unity::ArrayLength(arr) : 0; i < n && i < 16; ++i) {
+            auto* c = static_cast<Il2CppObject*>(unity::ArrayAt(arr, i));
+            if (!unity::IsAlive(c) || !IsA(c, siloCatcherClass)) continue;
+            const int32_t slot = unity::Field<int32_t>(c, offCatcherSlot);
+            if (slot >= 0 && static_cast<size_t>(slot) < nSlots && !ports[slot]) ports[slot] = c;
+        }
+        if (std::find(ports.begin(), ports.end(), nullptr) != ports.end()) {
+            if (!loggedDroneFail)
+                SR2_WARN("[{}] hen collector on plot '{}': an output port is missing - ranch drones can't take from it",
+                         module, id);
+            loggedDroneFail = true;
+            return;
+        }
+    }
+    auto* list = arrayNew(storageMetaClass, nOld + nSlots);
+    Il2CppObject** dst = unity::ArrayData<Il2CppObject*>(list);
+    if (!list || !dst) return;
+    for (size_t i = 0; i < nOld; ++i) SetRef(list, reinterpret_cast<void**>(&dst[i]), keep[i]);
+    for (size_t i = 0; i < nSlots; ++i) {
+        Il2CppObject* sm = objectNew(storageMetaClass);
+        int32_t slot = static_cast<int32_t>(i);
+        if (sm) Call(smCtor, sm, {&slot, storage, ports[i]}, "StorageMetadata..ctor", &ok);
+        if (!sm || !ok) return;  // nothing was published yet
+        SetRef(list, reinterpret_cast<void**>(&dst[nOld + i]), sm);
+    }
+    SetRef(meta, reinterpret_cast<void**>(reinterpret_cast<char*>(meta) + offLpmElder), list);
+    if (linked)
+        SR2_INFO("[{}] hen collector on plot '{}': {} stale ranch drone slot(s) dropped", module, id, nAll - nOld);
+    else
+        SR2_INFO("[{}] hen collector on plot '{}': linked to the ranch drones ({} slot(s) added to the coop's elder "
+                 "collector source, {} other); drones with the source Coop take from it",
+                 module, id, nSlots, nOld);
+}
+
+// Our slots go away with the coop's next RanchMetadata entry; rebuild it now like vanilla's
+// ApplyUpgrades does (Deregister + Register), which never sees our clone.
+void CoopWorld::Impl::UnlinkDrones(Il2CppObject* plot, const std::string& why) {
+    if (!drones || sr2::core::ModuleFaulted(module) || !unity::IsAlive(plot)) return;
+    Il2CppObject* ranch = RanchOf(plot);
+    if (!ranch) return;
+    bool ok = false;
+    Call(rmUpgradesChanged, ranch, {plot}, "RanchMetadata.OnUpgradesChanged", &ok);
+    if (ok) SR2_INFO("[{}] hen collector unlinked from the ranch drones ({})", module, why);
+}
+
 // ---------------------------------------------------------------- api --
 
 void CoopWorld::Tick(const QueryFn& query, const LookupFn& lookup) {
@@ -1546,7 +1732,11 @@ void CoopWorld::Tick(const QueryFn& query, const LookupFn& lookup) {
             p.ReleaseJoints(have.hen);
             p.Destroy(have.hen);
             SR2_INFO("[{}] hen collector removed from plot '{}' (not owned)", p.module, req.id);
-        } else if (have.hen) p.ServeHen(have.hen, c, req);
+            p.UnlinkDrones(c.plot, "not owned");
+        } else if (have.hen) {
+            p.ServeHen(have.hen, c, req);
+            if (!sr2::core::ModuleFaulted(p.module)) p.LinkDrones(c.plot, have.hen, req.id);
+        }
         if (sr2::core::ModuleFaulted(p.module)) return;
     }
 }
@@ -1613,11 +1803,14 @@ void CoopWorld::RemoveAll(const QueryFn* query) {
                 if (have.hen) impl_->SnapshotInto(have.hen, req);
             }
         }
+        bool hadHen = false;
         if (!sr2::core::ModuleFaulted(impl_->module)) {
             Impl::Children have = impl_->Scan(c.plot, generation_, false);
             if (have.hen) impl_->ReleaseJoints(have.hen);
+            hadHen = have.hen != nullptr;
         }
         impl_->Scan(c.plot, generation_, true, true);
+        if (hadHen) impl_->UnlinkDrones(c.plot, "custom upgrades off");
     }
 }
 
@@ -1642,6 +1835,7 @@ void CoopWorld::Remove(Il2CppObject* plot, bool airNet, bool henCollector) {
         impl_->ReleaseJoints(have.hen);
         impl_->Destroy(have.hen);
         SR2_INFO("[{}] hen collector removed (sold)", impl_->module);
+        impl_->UnlinkDrones(plot, "sold");
     }
 }
 
