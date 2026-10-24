@@ -10,11 +10,11 @@
 
 namespace sr2::modules::slime_dj {
 
-std::shared_ptr<Stream> Stream::Start(const std::filesystem::path& path) {
+std::shared_ptr<Stream> Stream::Start(const std::filesystem::path& path, uint64_t startFrame) {
     std::shared_ptr<Stream> s(new Stream());
     // The thread keeps the stream alive while it runs; the owner ends it with Stop().
-    std::thread([w = std::weak_ptr<Stream>(s), path] {
-        if (auto self = w.lock()) self->Run(path);
+    std::thread([w = std::weak_ptr<Stream>(s), path, startFrame] {
+        if (auto self = w.lock()) self->Run(path, startFrame);
     }).detach();
     return s;
 }
@@ -51,7 +51,7 @@ size_t Stream::Queued() const {
     return queue_.size();
 }
 
-void Stream::Run(std::filesystem::path path) {
+void Stream::Run(std::filesystem::path path, uint64_t startFrame) {
     // Runs with a strong reference (taken by the thread lambda) for its whole life, so the owner
     // must call Stop() before letting go; the wait below wakes up on stop_.
     sr2_audio_info info{};
@@ -67,6 +67,13 @@ void Stream::Run(std::filesystem::path path) {
     rate_ = info.sampleRate;
     chunkFrames_ = std::max<uint32_t>(1024, static_cast<uint32_t>(std::lround(rate_ * kChunkSeconds)));
     total_.store(info.totalFrames);
+    if (startFrame && !sr2_decoder_seek(d, startFrame)) {
+        sr2_decoder_close(d);
+        std::lock_guard lock(mu_);
+        error_ = "can't seek in this file";
+        state_.store(State::Failed);
+        return;
+    }
     state_.store(State::Ready);
 
     std::vector<float> raw(static_cast<size_t>(chunkFrames_) * inCh);
@@ -102,6 +109,7 @@ void Stream::Run(std::filesystem::path path) {
     }
     sr2_decoder_close(d);
     if (!stop_.load()) {
+        decoded += startFrame;
         if (info.totalFrames && decoded + rate_ < info.totalFrames)
             SR2_WARN("slime_dj: '{}' ended early: {} of {} frames decoded (damaged file?)", Utf8(path.filename().wstring()),
                      decoded, info.totalFrames);

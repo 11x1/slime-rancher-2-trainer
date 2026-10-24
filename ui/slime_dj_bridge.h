@@ -64,12 +64,14 @@ enum class Op {
     Skip,         // next song (queue, else a random one with shuffle on)
     Stop,         // unload the current song
     Rescan,       // read the music folder again
+    Seek,         // seconds: jump to that point of the current song
 };
 
 struct Action {
     Op op = Op::Rescan;
     uint64_t song = 0;
     uint64_t uid = 0;
+    double seconds = 0;  // Seek
 };
 
 struct Status {

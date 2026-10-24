@@ -11,9 +11,10 @@
 //     GameObject the upgrade switches on) is active. Corrals without the upgrade are skipped.
 //   * Every owned box nearby gets a speaker: a GameObject "sr2dj_Speaker" with a Unity
 //     AudioSource, parented to the box's SECTR audio source (or the box itself), fully 3D with
-//     the vanilla cue's MinDistance / MaxDistance / falloff. All speakers play the same clip in
-//     sync (started together; a box that appears later joins at the current position), so
-//     walking from one corral to the next never restarts the song. At most kMaxSpeakers.
+//     the Hearing range setting (linear rolloff). All speakers play the same clip in sync
+//     (started together; a box that appears later joins at the current position; a drift check
+//     moves stragglers back), so walking from one corral to the next never restarts the song.
+//     At most kMaxSpeakers. Objects registered through api.h (emitters.cpp) get a speaker too.
 //   * The clip is a ring: AudioClip.Create(kRingChunks chunks, looping) filled with
 //     AudioClip.SetData one chunk (0.5 s) at a time, ahead of the play head
 //     (AudioSource.timeSamples of the first speaker, unwrapped). Memory stays the same for a
@@ -846,6 +847,33 @@ private:
         return true;
     }
 
+    // Jumps within the current song: a new decoder from that frame and a new clip; every speaker
+    // restarts on it together (TickSong), so they stay in sync. Keeps the player's pause.
+    void SeekTo(double seconds) {
+        if (!cur_ || !cur_->stream || !std::isfinite(seconds)) return;
+        if (cur_->stream->state() != dj::Stream::State::Ready) return;  // still opening (or failed)
+        const dj::SongInfo* s = FindSong(cur_->song);
+        if (!s || !s->error.empty()) return;
+        const uint32_t rate = cur_->stream->rate();
+        if (!rate) return;
+        uint64_t total = cur_->stream->totalFrames();
+        if (!total && cur_->hintSeconds > 0) total = static_cast<uint64_t>(cur_->hintSeconds * rate);
+        uint64_t frame = static_cast<uint64_t>(std::max(0.0, seconds) * rate);
+        if (total) frame = std::min(frame, total > rate / 2 ? total - rate / 2 : 0);  // not past the end
+        const bool paused = cur_->userPaused;
+        const double hint = cur_->hintSeconds;
+        StopCurrent();
+        cur_ = std::make_unique<Current>();
+        cur_->song = s->id;
+        cur_->name = s->name;
+        cur_->hintSeconds = hint;
+        cur_->userPaused = paused;
+        cur_->rate = rate;  // position shows the target while the new decoder opens
+        cur_->base = frame;
+        cur_->stream = dj::Stream::Start(s->path, frame);
+        SR2_INFO("slime_dj: seek to {:.1f} s in '{}'", static_cast<double>(frame) / rate, s->name);
+    }
+
     // Next song: the queue's first, else a random one (shuffle), else stop.
     void NextSong() {
         StopCurrent();
@@ -1132,6 +1160,7 @@ private:
                 StopCurrent();
                 bridge::SetStatus("Stopped.", false);
                 break;
+            case bridge::Op::Seek: SeekTo(a.seconds); break;
             case bridge::Op::Rescan:
                 library_.Rescan(folder_);
                 bridge::SetStatus("Reading the music folder...", false);
@@ -1172,7 +1201,7 @@ private:
             const uint64_t total = c.stream ? c.stream->totalFrames() : 0;
             s.duration = c.rate && total ? static_cast<double>(total) / c.rate : c.hintSeconds;
             const uint64_t pos = c.endFrame ? std::min(c.playPos, c.endFrame) : c.playPos;
-            s.position = c.rate ? static_cast<double>(pos) / c.rate : 0.0;
+            s.position = c.rate ? static_cast<double>(c.base + pos) / c.rate : 0.0;
             if (s.duration > 0) s.position = std::min(s.position, s.duration);
             if (!c.stream || c.stream->state() == dj::Stream::State::Opening || !c.clip) s.waiting = "Loading...";
             else if (speakers_.empty())

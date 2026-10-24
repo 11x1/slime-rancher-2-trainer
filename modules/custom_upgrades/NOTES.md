@@ -532,7 +532,10 @@ simulation over 2000 ids never needed it).
 
 Corral corners: plot menu terminal (-x, -z) outside the post at ground height, vanilla speaker
 (-x, +z), plort collector (+x, +z), auto-feeder distributor (+x, -z) at 2.5 m. The second speaker
-shares the terminal's corner, 2.5 m up.
+shares the terminal's corner, 2.5 m up. It has no sound of its own (the strip removes the game's
+audio scripts with the rest), so `Create` registers the cloned `Music` model as a Slime DJ emitter
+(`modules/slime_dj/api.h`): it plays the Slime DJ song in sync with the vanilla speaker. Slime DJ
+drops the registration by itself when the holder is destroyed.
 
 Test 2 "sprinkler left behind after selling Fast Growth" was not a props bug: the log shows every
 sale of Fast Growth I (and of Music Box / Ash Trough) from its tier card followed 2-12 ms later by

@@ -93,7 +93,7 @@ Start the game. The log is written to `sr2mods.log` in the same folder. On each 
 
 ### Songs for Slime DJ
 
-Slime DJ (Ranch > Slime DJ in the overlay) plays your own songs from the corral Music Box. On its first start the mod creates a `sr2mods_music` folder in the game folder, next to `SlimeRancher2.exe`. Put `.ogg`, `.mp3` or `.wav` files there (subfolders work too), then press the refresh icon in the tab bar or "Open folder" to get there. Songs are streamed, so long files are fine; the details and limits are in `modules/slime_dj/NOTES.md`. The folder is yours: deploy and uninstall never touch it.
+Slime DJ (Ranch > Slime DJ in the overlay) plays your own songs from the corral Music Box. On its first start the mod creates a `sr2mods_music` folder in the game folder, next to `SlimeRancher2.exe`. Put `.ogg`, `.mp3` or `.wav` files there (subfolders work too), then press Rescan on the Songs card (or the refresh icon in the tab bar); "Open folder" gets you there. Songs are streamed, so long files are fine; the details and limits are in `modules/slime_dj/NOTES.md`. The folder is yours: deploy and uninstall never touch it.
 
 ### Discord Rich Presence
 

@@ -2884,13 +2884,24 @@ namespace djb = ::sr2::ui::slime_dj;
 
 char g_djSearch[128] = {};
 
-void DjRequest(djb::Op op, uint64_t song = 0, uint64_t uid = 0) {
+void DjRequest(djb::Op op, uint64_t song = 0, uint64_t uid = 0, double seconds = 0) {
     djb::Action a;
     a.op = op;
     a.song = song;
     a.uid = uid;
+    a.seconds = seconds;
     djb::Request(a);
 }
+
+// Seek bar: while dragging it shows the drag position; after release the target until the module's
+// snapshot reaches it (the new decoder needs a moment), at most 3 s.
+struct DjSeek {
+    bool dragging = false;
+    uint64_t song = 0;
+    double target = -1;              // seconds, -1 = none
+    unsigned long long until = 0;    // GetTickCount64 limit for showing `target`
+};
+DjSeek g_djSeek;
 
 std::string Clock(double seconds) {
     if (!(seconds > 0)) return "0:00";
@@ -2964,8 +2975,14 @@ void DjSongs(const djb::Snapshot& s, float w, float listH) {
     const float avail = ImGui::GetContentRegionAvail().x, x0 = ImGui::GetCursorPosX();
     const size_t count = s.songs ? s.songs->size() : 0;
     CardHeading(count ? std::format("Songs ({})", count).c_str() : "Songs", P.head);
-    ImGui::SameLine(x0 + avail - U(96));
-    if (ImGui::Button("Open folder", ImVec2(U(96), 0))) djb::OpenFolder(s.folder);
+    const float rescanW = U(76), folderW = U(96), gap = ImGui::GetStyle().ItemSpacing.x;
+    ImGui::SameLine(x0 + avail - folderW - gap - rescanW);
+    ImGui::BeginDisabled(s.scanning);
+    if (ImGui::Button("Rescan", ImVec2(rescanW, 0))) DjRequest(djb::Op::Rescan);
+    ImGui::EndDisabled();
+    HoverTip("Read the music folder again (after adding or removing songs).");
+    ImGui::SameLine(0, gap);
+    if (ImGui::Button("Open folder", ImVec2(folderW, 0))) djb::OpenFolder(s.folder);
     HoverTip("Opens " + s.folder + "\nPut .ogg, .mp3 or .wav files there (subfolders work too), then Rescan.");
     ImGui::SetNextItemWidth(-FLT_MIN);
     ImGui::InputTextWithHint("##djsearch", "Search songs...", g_djSearch, sizeof(g_djSearch));
@@ -2977,7 +2994,7 @@ void DjSongs(const djb::Snapshot& s, float w, float listH) {
     if (!s.songs) {
         DimText(s.scanning ? "Reading the music folder..." : "The music folder has not been read yet.");
     } else if (s.songs->empty()) {
-        DimText("No songs yet. Put .ogg, .mp3 or .wav files in\n" + s.folder + "\nthen press Rescan (the arrow at the top right).");
+        DimText("No songs yet. Put .ogg, .mp3 or .wav files in\n" + s.folder + "\nthen press Rescan.");
     } else {
         const float bs = U(26);
         int shown = 0;
@@ -2997,7 +3014,10 @@ void DjSongs(const djb::Snapshot& s, float w, float listH) {
             if (DjIconButton("##add", bs, "Add to the queue", [](ImVec2 c, ImU32 col) { DrawPlus(ImGui::GetWindowDrawList(), c, col); }))
                 DjRequest(djb::Op::Enqueue, song.id);
             ImGui::EndDisabled();
-            ImGui::SetCursorPosY(rowY + U(30) + ImGui::GetStyle().ItemSpacing.y);
+            // Back to the row's bottom; the Dummy is the item that ends the line (moving the cursor
+            // past the content without one trips ImGui's "submit an item" check at EndChild).
+            ImGui::SetCursorPosY(rowY + U(30));
+            ImGui::Dummy(ImVec2(0, 0));
             ImGui::PopID();
         }
         if (shown == 0) DimText("No song matches the search.");
@@ -3021,20 +3041,50 @@ void DjNowPlaying(const Host& h, const ModuleView& mv, const djb::Snapshot& s, f
         ImGui::PopStyleColor();
         ImGui::PopTextWrapPos();
     }
-    // progress
+    // seek bar: click or drag (the song jumps there on release)
     const float avail = ImGui::GetContentRegionAvail().x;
     const ImVec2 a = ImGui::GetCursorScreenPos();
-    const float barH = U(6);
+    const float barH = U(6), hitH = U(16);
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const float frac = s.duration > 0 ? static_cast<float>(std::clamp(s.position / s.duration, 0.0, 1.0)) : 0.0f;
-    dl->AddRectFilled(ImVec2(a.x, a.y + U(4)), ImVec2(a.x + avail, a.y + U(4) + barH), ImGui::GetColorU32(P.frame), barH * 0.5f);
+    const bool seekable = s.hasSong && s.duration > 0;
+    DjSeek& sk = g_djSeek;
+    if (sk.song != s.song || !s.hasSong) sk = DjSeek{false, s.song, -1, 0};
+    double pos = s.position;
+    ImGui::BeginDisabled(!seekable);
+    ImGui::InvisibleButton("##djseek", ImVec2(std::max(1.0f, avail), hitH));
+    ImGui::EndDisabled();
+    const bool hov = seekable && ImGui::IsItemHovered();
+    if (seekable && ImGui::IsItemActive()) {
+        sk.dragging = true;
+        const float mx = std::clamp((ImGui::GetIO().MousePos.x - a.x) / std::max(1.0f, avail), 0.0f, 1.0f);
+        sk.target = mx * s.duration;
+        pos = sk.target;
+    } else if (sk.dragging) {
+        sk.dragging = false;
+        if (seekable && sk.target >= 0) {
+            DjRequest(djb::Op::Seek, 0, 0, sk.target);
+            sk.until = h.nowMs + 3000;
+            pos = sk.target;
+        }
+    } else if (sk.target >= 0) {
+        if (h.nowMs < sk.until && std::fabs(s.position - sk.target) > 1.0) pos = sk.target;
+        else sk.target = -1;
+    }
+    if (hov || sk.dragging) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        if (seekable) Tooltip(Clock(sk.dragging ? pos : std::clamp((ImGui::GetIO().MousePos.x - a.x) / std::max(1.0f, avail), 0.0f, 1.0f) * s.duration));
+    }
+    const float frac = s.duration > 0 ? static_cast<float>(std::clamp(pos / s.duration, 0.0, 1.0)) : 0.0f;
+    const float by = a.y + (hitH - barH) * 0.5f;
+    dl->AddRectFilled(ImVec2(a.x, by), ImVec2(a.x + avail, by + barH), ImGui::GetColorU32(P.frame), barH * 0.5f);
     if (frac > 0)
-        dl->AddRectFilled(ImVec2(a.x, a.y + U(4)), ImVec2(a.x + std::max(barH, avail * frac), a.y + U(4) + barH),
-                          ImGui::GetColorU32(P.accent), barH * 0.5f);
-    ImGui::Dummy(ImVec2(avail, barH + U(6)));
+        dl->AddRectFilled(ImVec2(a.x, by), ImVec2(a.x + std::max(barH, avail * frac), by + barH), ImGui::GetColorU32(P.accent),
+                          barH * 0.5f);
+    if (seekable && (hov || sk.dragging))  // play head knob
+        dl->AddCircleFilled(ImVec2(a.x + avail * frac, by + barH * 0.5f), U(6.5f), ImGui::GetColorU32(P.grab));
     {
         FontScope f(theme::Body(), theme::kSmallSize);
-        const std::string left = s.hasSong ? Clock(s.position) : std::string("-:--");
+        const std::string left = s.hasSong ? Clock(pos) : std::string("-:--");
         const std::string right = s.hasSong && s.duration > 0 ? Clock(s.duration) : std::string("-:--");
         const float x0 = ImGui::GetCursorPosX();
         ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.dim), "%s", left.c_str());
@@ -3061,14 +3111,18 @@ void DjNowPlaying(const Host& h, const ModuleView& mv, const djb::Snapshot& s, f
         ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.warn), "%s", s.waiting.c_str());
         ImGui::PopTextWrapPos();
     } else if (s.hasSong && s.speakers > 0) {
-        DimText(s.speakers == 1 ? std::string("Playing from 1 music box.")
-                                : std::format("Playing from {} music boxes, in sync.", s.speakers));
+        const int boxes = s.speakers - s.emitterSpeakers;
+        std::string from = boxes == 1 ? std::string("1 music box") : std::format("{} music boxes", boxes);
+        if (s.emitterSpeakers > 0)
+            from = (boxes > 0 ? from + " and " : std::string()) +
+                   (s.emitterSpeakers == 1 ? std::string("1 speaker") : std::format("{} speakers", s.emitterSpeakers));
+        DimText(std::format("Playing from {}{}.", from, s.speakers > 1 ? ", in sync" : ""));
     } else if (!s.hasSong && s.boxes == 0) {
         DimText("No music box nearby. Songs play from the corral Music Box upgrade.");
     }
     ImGui::Dummy(ImVec2(0, U(2)));
-    // settings of the module (shuffle, volume, vanilla tune)
-    for (const char* key : {"shuffle", "volume", "mute_vanilla"})
+    // settings of the module
+    for (const char* key : {"shuffle", "volume", "range", "amplify", "mute_vanilla"})
         if (const settings::Def* d = FindDef(mv, key)) DrawRow(h, *d, d->label, false);
     EndCard();
 }
@@ -3110,7 +3164,8 @@ void DjQueue(const djb::Snapshot& s, float w, float listH) {
         ImGui::SameLine(0, U(2));
         if (DjIconButton("##rm", bs, "Remove from the queue", [](ImVec2 c, ImU32 col) { DrawCross(ImGui::GetWindowDrawList(), c, col); }))
             DjRequest(djb::Op::Remove, 0, q.uid);
-        ImGui::SetCursorPosY(rowY + U(30) + ImGui::GetStyle().ItemSpacing.y);
+        ImGui::SetCursorPosY(rowY + U(30));
+        ImGui::Dummy(ImVec2(0, 0));  // see DjSongs
         ImGui::PopID();
     }
     ImGui::EndChild();

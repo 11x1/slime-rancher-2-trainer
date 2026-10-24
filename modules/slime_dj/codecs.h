@@ -35,6 +35,9 @@ sr2_decoder* sr2_decoder_open(const wchar_t* path, int countFrames, sr2_audio_in
 // Reads up to `frames` frames of interleaved float PCM (info.channels per frame) into `out`.
 // Returns the frames read; fewer than asked (0 at the end) = end of stream or a decode error.
 uint64_t sr2_decoder_read(sr2_decoder* d, float* out, uint64_t frames);
+// Moves to PCM frame `frame` (0 = start). MP3 without a seek table decodes up to it, so a far seek
+// in a long MP3 takes a moment. Returns 0 on failure (the position is then undefined).
+int sr2_decoder_seek(sr2_decoder* d, uint64_t frame);
 void sr2_decoder_close(sr2_decoder* d);
 
 #ifdef __cplusplus
