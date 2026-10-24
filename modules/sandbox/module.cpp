@@ -304,8 +304,9 @@ private:
     };
     void ReadFabCategories(std::vector<FabCat>& cats, std::vector<std::string>& titles, std::vector<uint32_t>& icons);
     void GroupFabCategories(std::vector<std::unordered_set<uintptr_t>>& members, std::vector<std::string>& titles,
-                            std::vector<uint32_t>& icons);
-    int RecipeCategory(const std::vector<FabCat>& cats, Il2CppObject* def);
+                            std::vector<uint32_t>& icons, std::vector<std::unordered_map<uintptr_t, int>>& orders);
+    int RecipeCategory(const std::vector<FabCat>& cats, Il2CppObject* def, int* order);
+    uintptr_t PinnedRecipe(const Ctx& c);
     bool EnsureRecipes();
     bool EnsureMaterials();
     void RefreshRecipeState();
@@ -317,7 +318,7 @@ private:
     void TopUpEnergy();
     void Done(bool ok, const std::string& text);
     // HUD notices of spawns, crafts and refinery adds. A request that is part of a multi-item one
-    // (bridge::Action::batch) collects them, and the last one shows a single summary (FlushNotices).
+    // (bridge::Action::batch) collects them, and the last one shows them, one per item type (FlushNotices).
     enum class NoticeKind { Spawn, Craft, Refinery };
     struct NoticeLine {
         NoticeKind kind;
@@ -327,11 +328,13 @@ private:
     };
     void Notify(Il2CppObject* type, NoticeKind kind, int count, const std::string& name, const std::string& text);
     Il2CppObject* NoticeIcon(Il2CppObject* type);
+    static std::string NoticeText(NoticeKind kind, int count, const std::string& name);
     void ShowNotice(Il2CppObject* icon, const std::string& notice);
     void FlushNotices();
     void EnsureCrateAreas();
 
     void DoNewbucks(const Ctx& c, int64_t target, const char* how);
+    void RefreshPurchaseMenus();
     void DoSlotCount(const Ctx& c, int idx, int64_t value);
     void DoPutItem(const Ctx& c, int idx, uintptr_t item, int64_t value);
     int DoSpawn(const Ctx& c, uintptr_t item, int64_t count, int limit = kMaxSpawn);
@@ -354,7 +357,8 @@ private:
     void DoFabricatorMaterials();
 
     std::atomic<bool> enabled_{false};
-    std::atomic<bool> infinite_{false};
+    std::atomic<bool> infinite_{false};  // infinite energy (stored per save: cheated_save.h, SaveToggle)
+    unsigned togglesSeen_ = 0;           // SaveTogglesVersion() applied last (0: apply again)
     int frameCb_ = 0;
     unsigned long long lastSnap_ = 0, lastEnergy_ = 0;
 
@@ -385,7 +389,7 @@ private:
     unsigned long long renderMs_ = 0;
     // The game's HUD notices for spawns, crafts and refinery adds (custom_upgrades/sale_notify.h).
     sr2::modules::custom_upgrades::ui::SaleNotices notices_;
-    std::vector<NoticeLine> batchNotices_;  // collected for the summary of a multi-item request
+    std::vector<NoticeLine> batchNotices_;  // collected for the notices of a multi-item request
     int batchIdx_ = 0, batchSize_ = 0;      // the request being handled (bridge::Action::batch / batchSize)
     unsigned long long batchTick_ = 0;      // last notice collected (a batch left unfinished is shown after 2 s)
     int spawnNext_ = 0;                     // spawn grid position for the next item of a multi-item spawn
@@ -509,6 +513,13 @@ private:
     size_t offFabCategories_ = 0, offFabCatTitle_ = 0;
     size_t offFabCatIcon_ = 0;                       // FabricateCategory._icon (optional)
     const MethodInfo* fabCatContains_ = nullptr;     // GadgetFabricateCategory.Contains(GadgetDefinition)
+    const MethodInfo* fabCatIndexOf_ = nullptr;      // GadgetFabricateCategory.IndexOf(GadgetDefinition) (optional: the Fabricator's order)
+    Il2CppClass* fabPinnedCatClass_ = nullptr;       // PinnedFabricateCategory (optional: the Pinned tab's icon)
+    uint32_t pinnedIcon_ = 0;
+    size_t offPinnedRecipe_ = 0;                     // PlayerModel.PinnedRecipe (IRecipe; optional)
+    std::unordered_map<std::string, uintptr_t> recipeByRef_;  // gadget ReferenceId -> recipe id
+    Il2CppObject* pinnedObj_ = nullptr;              // the IRecipe last resolved (identity only)
+    uintptr_t pinnedId_ = 0;
     const MethodInfo* isStorable_ = nullptr;         // GadgetDirector.IsStorable(IdentifiableType) (refinery materials)
     const MethodInfo* refinerySpace_ = nullptr;      // GadgetDirector.GetRefinerySpaceAvailable(IdentifiableType)
 
@@ -574,11 +585,15 @@ private:
     bool fabHintOk_ = false, fabHintLogged_ = false, fabHintFailLogged_ = false;
     unsigned long long fabHintNext_ = 0, fabHintSince_ = 0;
     legend_hint::Clone fabHint_;
+    bool quiet_ = false;  // Done() only logs (the Fabricator key's results)
 
     // ---- "Discover all upgrades" (optional): the upgrade components that make a hidden upgrade buyable ----
     size_t offUdRequireComp_ = 0;                      // UpgradeDefinition._requireComponentToBeVisibleToPlayer
     const MethodInfo* tryGetSpendable_ = nullptr;      // SceneContextUtility.TryGetSpendableDirector(out SpendableDirector)
     int upgHidden_ = -1;                               // upgrades still to discover (snapshot; -1 = unknown)
+
+    // ---- open plot purchase menu (optional): rebuilt after a Newbucks change ----
+    Il2CppClass* landPlotUiClass_ = nullptr;           // MonomiPark.SlimeRancher.UI.Plot.LandPlotUIRoot
 
     Il2CppObject* OpenFabricator();                    // the open FabricatorUI, or nullptr
     Il2CppObject* FabricatorItem(Il2CppObject* ui, Il2CppObject** content, Il2CppObject** details);
@@ -925,6 +940,18 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
         }
         std::string iw;
         off(fabCat, "_icon", offFabCatIcon_, iw);
+        std::string lw2;
+        landPlotUiClass_ = cls(kImage, "MonomiPark.SlimeRancher.UI.Plot", "LandPlotUIRoot", lw2);
+        if (!lw2.empty()) SR2_WARN("[{}] Newbucks: an open plot menu is not refreshed ({})", kModule, lw2);
+        // Optional: the Fabricator's order within a category, its Pinned category icon and the pinned recipe.
+        std::string ow;
+        fabCatIndexOf_ = method(fabGadgetCatClass_, "IndexOf", 1, ow);
+        std::string pw2;
+        fabPinnedCatClass_ = cls(kImage, kFab, "PinnedFabricateCategory", pw2);
+        off(playerModelClass_, "PinnedRecipe", offPinnedRecipe_, pw2);
+        if (!ow.empty() || !pw2.empty())
+            SR2_WARN("[{}] crafter: {}{}", kModule, ow.empty() ? "" : "no Fabricator order (" + ow + ") ",
+                     pw2.empty() ? "" : "no Pinned tab content (" + pw2 + ")");
     }
     {
         // Optional: crafting materials straight into the refinery (GadgetDirector.AddItem
@@ -945,6 +972,7 @@ void Sandbox::OnEnable() {
     bridge::SetHandler(&HandleThunk);
     sandbox::PlayerExtrasEnabled(true);
     lastSnap_ = 0;
+    togglesSeen_ = 0;  // the save's toggles apply again
     // A list that came out empty (built before the assets were loaded) is tried again.
     if (!spawnables_ || spawnables_->empty()) spawnTried_ = false;
     if (!recipes_ || recipes_->empty()) recipesTried_ = false;
@@ -955,7 +983,7 @@ void Sandbox::OnEnable() {
 void Sandbox::OnDisable() {
     enabled_.store(false);
     sandbox::SetAchievementsPaused(false);
-    if (infinite_.exchange(false)) SR2_INFO("[{}] infinite energy off (module disabled)", kModule);
+    if (infinite_.exchange(false)) SR2_INFO("[{}] infinite energy off (module disabled; kept for the save)", kModule);
     notices_.Clear();
     batchNotices_.clear();
     bridge::SetHandler(nullptr);
@@ -1853,6 +1881,8 @@ void Sandbox::ReadFabCategories(std::vector<FabCat>& cats, std::vector<std::stri
         void* list = unity::Field<void*>(menu, offFabCategories_);
         for (size_t i = 0, n = unity::ListCount(list); i < n; ++i) {
             auto* c = static_cast<Il2CppObject*>(unity::ListAt(list, i));
+            if (c && fabPinnedCatClass_ && offFabCatIcon_ && IsA(c, fabPinnedCatClass_) && unity::IsAlive(c))
+                pinnedIcon_ = SpriteIcon(unity::Field<Il2CppObject*>(c, offFabCatIcon_));
             if (!c || !IsA(c, fabGadgetCatClass_) || !unity::IsAlive(c)) continue;
             std::string t = Localized(unity::Field<Il2CppObject*>(c, offFabCatTitle_));
             if (t.empty()) t = unity::GetName(c);
@@ -1864,11 +1894,17 @@ void Sandbox::ReadFabCategories(std::vector<FabCat>& cats, std::vector<std::stri
     }
 }
 
-// Index of the first category that contains the gadget, -1 if none.
-int Sandbox::RecipeCategory(const std::vector<FabCat>& cats, Il2CppObject* def) {
+// Index of the first category that contains the gadget, -1 if none. `order`: its position there as the
+// Fabricator lists it (GadgetFabricateCategory.IndexOf), -1 if unknown.
+int Sandbox::RecipeCategory(const std::vector<FabCat>& cats, Il2CppObject* def, int* order) {
+    *order = -1;
     for (const FabCat& c : cats) {
         bool in = false;
-        if (CallValue(fabCatContains_, c.obj, {def}, "GadgetFabricateCategory.Contains", in) && in) return c.index;
+        if (CallValue(fabCatContains_, c.obj, {def}, "GadgetFabricateCategory.Contains", in) && in) {
+            int at = -1;
+            if (fabCatIndexOf_ && CallValue(fabCatIndexOf_, c.obj, {def}, "GadgetFabricateCategory.IndexOf", at)) *order = at;
+            return c.index;
+        }
     }
     return -1;
 }
@@ -1879,7 +1915,7 @@ int Sandbox::RecipeCategory(const std::vector<FabCat>& cats, Il2CppObject* def) 
 // which are loaded from the start. Title from the group's localized name, icon from the
 // fabricator's own category sprites by name when loaded (EnsureNamedSprites).
 void Sandbox::GroupFabCategories(std::vector<std::unordered_set<uintptr_t>>& members, std::vector<std::string>& titles,
-                                 std::vector<uint32_t>& icons) {
+                                 std::vector<uint32_t>& icons, std::vector<std::unordered_map<uintptr_t, int>>& orders) {
     Il2CppObject* root = offGroupMembers_ ? NamedGroup("GadgetGroup") : nullptr;
     if (!root) return;
     void* subs = unity::Field<void*>(root, offGroupSubGroups_);
@@ -1903,9 +1939,15 @@ void Sandbox::GroupFabCategories(std::vector<std::unordered_set<uintptr_t>>& mem
         else if (low.find("warp") != std::string::npos) icon = NamedSprite({"iconCategoryWarptech"});
         else if (low.find("decor") != std::string::npos) icon = NamedSprite({"iconCategoryDecorations"});
         else if (low.find("curio") != std::string::npos) icon = NamedSprite({"iconCategoryCurios"});
+        // The Fabricator lists a category in its group's member order (GadgetFabricateCategory.IndexOf).
+        std::unordered_map<uintptr_t, int> order;
+        void* types = unity::Field<void*>(g, offGroupMembers_);
+        for (size_t k = 0, m = unity::ListCount(types); k < m; ++k)
+            if (void* t = unity::ListAt(types, k)) order.emplace(reinterpret_cast<uintptr_t>(t), static_cast<int>(k));
         members.push_back(std::move(set));
         titles.push_back(title);
         icons.push_back(icon);
+        orders.push_back(std::move(order));
     }
 }
 
@@ -1924,9 +1966,10 @@ bool Sandbox::EnsureRecipes() {
     auto catIcons = std::make_shared<std::vector<uint32_t>>();
     ReadFabCategories(cats, *titles, *catIcons);
     std::vector<std::unordered_set<uintptr_t>> groupCats;  // without the fabricator's menu asset: its groups
+    std::vector<std::unordered_map<uintptr_t, int>> groupOrders;
     const char* catSource = "the fabricator's menu";
     if (cats.empty()) {
-        GroupFabCategories(groupCats, *titles, *catIcons);
+        GroupFabCategories(groupCats, *titles, *catIcons, groupOrders);
         catSource = "the gadget groups";
     }
     auto list = std::make_shared<std::vector<bridge::Recipe>>();
@@ -1947,9 +1990,19 @@ bool Sandbox::EnsureRecipes() {
         r.icon = ItemIcon(d);
         r.cost = RecipeCost(d, &r.costs);
         r.perCraft = unity::Field<bool>(d, offBuyInPairs_) ? 2 : 1;
-        r.category = RecipeCategory(cats, d);
+        r.category = RecipeCategory(cats, d, &r.order);
         for (size_t i = 0; i < groupCats.size() && r.category < 0; ++i)
-            if (groupCats[i].count(r.id)) r.category = static_cast<int>(i);
+            if (groupCats[i].count(r.id)) {
+                r.category = static_cast<int>(i);
+                const auto at = groupOrders[i].find(r.id);
+                r.order = at != groupOrders[i].end() ? at->second : -1;
+            }
+        if (referenceId_) {
+            bool ok = false;
+            Il2CppObject* ref = Call(referenceId_, d, {}, "IdentifiableType.ReferenceId", &ok);
+            const std::string key = ok && ref ? unity::ToUtf8(reinterpret_cast<Il2CppString*>(ref)) : std::string();
+            if (!key.empty()) recipeByRef_[key] = r.id;
+        }
         Il2CppGCHandle h = unity::NewGCHandle(d);
         if (!h) continue;
         recipeById_[r.id] = CatalogEntry{h, d};
@@ -2006,6 +2059,29 @@ void Sandbox::RefreshRecipeState() {
         }
         if (changed) materials_ = std::move(next);
     }
+}
+
+// The recipe pinned in the game's Fabricator (PlayerModel.PinnedRecipe, an IRecipe whose ReferenceId is
+// the gadget's), as a recipe id; 0 if none or not a gadget (upgrades can be pinned too). Resolved again
+// only when the pinned object changes.
+uintptr_t Sandbox::PinnedRecipe(const Ctx& c) {
+    if (!offPinnedRecipe_ || !c.model) return 0;
+    auto* pinned = unity::Field<Il2CppObject*>(c.model, offPinnedRecipe_);
+    if (pinned == pinnedObj_) return pinnedId_;
+    pinnedObj_ = pinned;
+    pinnedId_ = 0;
+    if (!pinned) return 0;
+    const MethodInfo* getRef = nullptr;
+    const auto& a = api();
+    for (Il2CppClass* k = a.il2cpp_object_get_class ? a.il2cpp_object_get_class(pinned) : nullptr; k && !getRef;
+         k = a.il2cpp_class_get_parent ? a.il2cpp_class_get_parent(k) : nullptr)
+        getRef = Resolver::Get().Method(k, "get_ReferenceId", 0);
+    bool ok = false;
+    Il2CppObject* ref = getRef ? Call(getRef, pinned, {}, "IRecipe.ReferenceId", &ok) : nullptr;
+    const std::string key = ok && ref ? unity::ToUtf8(reinterpret_cast<Il2CppString*>(ref)) : std::string();
+    if (const auto it = recipeByRef_.find(key); it != recipeByRef_.end()) pinnedId_ = it->second;
+    SR2_INFO("[{}] crafter: pinned recipe '{}'{}", kModule, key, pinnedId_ ? "" : " (not a gadget recipe: the Pinned tab stays empty)");
+    return pinnedId_;
 }
 
 // Crafting materials for the crafter's own section: every IdentifiableType the gadget
@@ -2120,6 +2196,8 @@ void Sandbox::Refresh() {
         s.recipeCategoryIcons = recipeCatIcons_;
         s.materials = materials_;
         s.craftWhy = craftWhy_;
+        s.pinnedRecipe = recipes_ ? PinnedRecipe(c) : 0;
+        s.pinnedIcon = pinnedIcon_;
         s.relations = relations_;
         std::copy(std::begin(groupIcons_), std::end(groupIcons_), std::begin(s.groupIcons));
         if (incUpgrade_ && s.tick - lastUpgState_ >= kRecipeStateMs) {
@@ -2152,6 +2230,11 @@ void Sandbox::Tick(float dt) {
         return;
     }
     if (notices_.Ready()) notices_.Frame(dt);  // queued HUD notices wait for the HUD (menus closed)
+    if (const unsigned v = sandbox::SaveTogglesVersion(); v != togglesSeen_) {  // another save's toggles, or enabled
+        togglesSeen_ = v;
+        const bool on = sandbox::SaveToggle(sandbox::kToggleInfiniteEnergy);
+        if (infinite_.exchange(on) != on) SR2_INFO("[{}] infinite energy {} (as this save has it)", kModule, on ? "on" : "off");
+    }
     const unsigned long long now = GetTickCount64();
     if (infinite_.load() && now - lastEnergy_ >= kEnergyMs) {
         lastEnergy_ = now;
@@ -2173,19 +2256,18 @@ void Sandbox::Tick(float dt) {
 void Sandbox::Done(bool ok, const std::string& text) {
     if (ok) SR2_INFO("[{}] {}", kModule, text);
     else SR2_WARN("[{}] {}", kModule, text);
-    bridge::SetStatus(text, !ok);
+    if (!quiet_) bridge::SetStatus(text, !ok);
 }
 
 // A spawn / craft / refinery add that worked: `text` is logged, and a HUD pop-up in the game's
 // notification list with the type's icon says it ("Spawned 5 Pink Plort"), instead of the tab's status
 // line. It is our own text entry (SaleNotices::QueueText), not the drones' cloud-upload notice
 // (AddResourceCollected reads "... sent to the Quantum Cloud"). Without the HUD list or the UI's text
-// sink the status line says it.
+// sink the result is only logged.
 // Part of a multi-item request (Craft N / Spawn N / Put in slots with several items selected): the
-// notices are collected and the request's last item shows one summary. The game's list shows one page
-// of entries at a time and starts the next page only when the shown one has faded out, so separate
-// notices sent in a burst showed only the first one for a while (reported: "multiple crafting only
-// spawns one notification popup").
+// notices are collected and shown after the request's last item, one per item type with its own icon
+// and count (FlushNotices). The game's list shows one page of entries at a time; SaleNotices hands
+// the queued notices over a page at a time, when the list is idle, so every one of them is shown.
 void Sandbox::Notify(Il2CppObject* type, NoticeKind kind, int count, const std::string& name, const std::string& text) {
     SR2_INFO("[{}] {}", kModule, text);
     if (batchSize_ > 1) {
@@ -2193,10 +2275,13 @@ void Sandbox::Notify(Il2CppObject* type, NoticeKind kind, int count, const std::
         batchTick_ = GetTickCount64();
         return;
     }
-    const std::string notice = kind == NoticeKind::Spawn   ? std::format("Spawned {} {}", count, name)
-                               : kind == NoticeKind::Craft ? std::format("Crafted {} {}", count, name)
-                                                           : std::format("+{} {} (refinery)", count, name);
-    ShowNotice(NoticeIcon(type), notice);
+    ShowNotice(NoticeIcon(type), NoticeText(kind, count, name));
+}
+
+std::string Sandbox::NoticeText(NoticeKind kind, int count, const std::string& name) {
+    return kind == NoticeKind::Spawn   ? std::format("Spawned {} {}", count, name)
+           : kind == NoticeKind::Craft ? std::format("Crafted {} {}", count, name)
+                                       : std::format("+{} {} (refinery)", count, name);
 }
 
 // The type's sprite for a notice: IdentifiableType.icon, else its get_Icon.
@@ -2216,29 +2301,20 @@ void Sandbox::ShowNotice(Il2CppObject* icon, const std::string& notice) {
     bridge::SetStatus(notice, false);
 }
 
-// The collected notices of a multi-item request: one per kind, "Crafted 3 Fire Flower" for a single
-// item, else "Crafted 9 items: Fire Flower, Dream Lantern +3 more" with the first item's icon.
+// The collected notices of a multi-item request: one per item type and kind (the same type twice, e.g.
+// put in slots and the rest dropped, adds up), in the order they came.
 void Sandbox::FlushNotices() {
     std::vector<NoticeLine> lines;
     lines.swap(batchNotices_);
-    for (NoticeKind kind : {NoticeKind::Spawn, NoticeKind::Craft, NoticeKind::Refinery}) {
-        const NoticeLine* first = nullptr;
-        int total = 0, kinds = 0;
-        std::string names;
-        for (const NoticeLine& l : lines) {
-            if (l.kind != kind) continue;
-            if (!first) first = &l;
-            total += l.count;
-            if (++kinds <= 2) names += (names.empty() ? "" : ", ") + l.name;
-        }
-        if (!first) continue;
-        std::string what;
-        if (kinds == 1) what = std::format("{} {}", total, first->name);
-        else what = std::format("{} items: {}{}", total, names, kinds > 2 ? std::format(" +{} more", kinds - 2) : "");
-        ShowNotice(first->icon, kind == NoticeKind::Spawn   ? "Spawned " + what
-                                : kind == NoticeKind::Craft ? "Crafted " + what
-                                                            : std::format("+{} (refinery)", what));
+    std::vector<NoticeLine> merged;
+    for (const NoticeLine& l : lines) {
+        auto it = std::find_if(merged.begin(), merged.end(),
+                               [&](const NoticeLine& m) { return m.kind == l.kind && m.name == l.name; });
+        if (it != merged.end()) it->count += l.count;
+        else merged.push_back(l);
     }
+    for (const NoticeLine& l : merged) ShowNotice(l.icon, NoticeText(l.kind, l.count, l.name));
+    if (merged.size() > 1) SR2_INFO("[{}] {} HUD notices queued (shown in sequence)", kModule, merged.size());
 }
 
 // ---------------------------------------------------------------- actions ----
@@ -2266,8 +2342,9 @@ void Sandbox::Handle(const bridge::Action& a) {
     if (a.op == bridge::Op::InfiniteEnergy) {
         const bool on = a.value != 0;
         if (infinite_.exchange(on) != on)
-            Done(true, on ? "Infinite energy on (energy is refilled to its maximum; not saved, off after a restart)"
+            Done(true, on ? "Infinite energy on (energy is refilled to its maximum; kept for this save)"
                           : "Infinite energy off");
+        sandbox::SetSaveToggle(sandbox::kToggleInfiniteEnergy, on);
         Refresh();
         return;
     }
@@ -2374,9 +2451,30 @@ void Sandbox::DoNewbucks(const Ctx& c, int64_t target, const char* how) {
     }
     int now = cur;
     CallValue(getCurrency_, c.player, {c.currency}, "PlayerState.GetCurrency", now);
+    if (ok) RefreshPurchaseMenus();
     Done(ok, ok ? std::format("Newbucks {}: {} -> {}{}", how, Thousands(cur), Thousands(now),
                               clamped != target ? std::format(" (clamped to 0..{})", Thousands(max)) : std::string())
                 : std::format("Newbucks not changed ({} failed)", delta > 0 ? "AddCurrency" : "SpendCurrency"));
+}
+
+// After a Newbucks change: an open plot purchase menu (LandPlotUIRoot) shows the new amount and what is
+// affordable. AddCurrency / SpendCurrency already raise the game's currency events (PlayerModel.
+// CurrencyChanged -> PlayerState.DisplayCurrencyChanged), which the HUD's currency lists follow, but the
+// plot menu reads the amounts when it builds its list and only rebuilds after its own purchases
+// (ListUIRoot.RebuildUI -> IListViewSwapper.RefreshAndAdvance). We call that rebuild, the most derived
+// override, on the open menu: one FindObjectOfType per Newbucks request, nothing otherwise.
+void Sandbox::RefreshPurchaseMenus() {
+    if (!landPlotUiClass_) return;
+    Il2CppObject* ui = unity::FindObjectOfType(landPlotUiClass_);
+    if (!ui || !unity::IsAlive(ui) || !IsA(ui, landPlotUiClass_) || !unity::ActiveInHierarchy(unity::GameObjectOf(ui))) return;
+    const auto& a = api();
+    const MethodInfo* rebuild = nullptr;
+    for (Il2CppClass* k = a.il2cpp_object_get_class ? a.il2cpp_object_get_class(ui) : nullptr; k && !rebuild;
+         k = a.il2cpp_class_get_parent ? a.il2cpp_class_get_parent(k) : nullptr)
+        rebuild = Resolver::Get().Method(k, "RebuildUI", 0);
+    bool ok = false;
+    if (rebuild) Call(rebuild, ui, {}, "LandPlotUIRoot.RebuildUI", &ok);
+    SR2_INFO("[{}] Newbucks: open plot menu {}", kModule, ok ? "rebuilt (new amounts)" : "not rebuilt (RebuildUI not found or failed)");
 }
 
 // Count of what a slot holds, clamped to [0, GetSlotMaxCount]: up through
@@ -3381,6 +3479,11 @@ void Sandbox::DropFabricatorHint() {
 // counts (SpendableDirector.GetIdentCostAmount / GetUpgradeComponentAmount). The panel is then refreshed
 // (RefreshFabricator). Nothing is crafted or bought: the player still presses Fabricate.
 void Sandbox::DoFabricatorMaterials() {
+    // Its result is logged only: the page's status line showed it long after (the key is pressed in the game).
+    struct Quiet {
+        bool& q;
+        ~Quiet() { q = false; }
+    } quiet{quiet_ = true};
     Ctx c;
     std::string why;
     if (!Context(c, why)) {

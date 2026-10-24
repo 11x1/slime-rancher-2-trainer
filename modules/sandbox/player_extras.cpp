@@ -38,6 +38,7 @@
 #include "core/unity.h"
 #include "modules/custom_upgrades/sale_notify.h"
 #include "modules/map_tools/ground_teleport.h"
+#include "modules/sandbox/cheated_save.h"
 #include "ui/sandbox_bridge.h"
 #include "ui/sandbox_extras_bridge.h"
 
@@ -60,7 +61,8 @@ struct Vec3 {
 };
 
 std::atomic<bool> g_live{false};      // module enabled
-std::atomic<bool> g_infinite{false};  // infinite health (session only)
+std::atomic<bool> g_infinite{false};  // infinite health (stored per save: cheated_save.h, SaveToggle)
+unsigned g_togglesSeen = 0;           // SaveTogglesVersion() applied last (0: apply again; main thread)
 bool g_hookReady = false;
 unsigned long long g_lastHealth = 0, g_lastScan = 0;
 int g_locked = -1, g_total = 0;  // last expansion scan
@@ -380,10 +382,11 @@ void Handle(extras::Op op, long long value) {
                 break;
             }
             if (g_infinite.exchange(on) != on)
-                Done(true, on ? std::format("Infinite health on (damage {}; health refilled to its maximum; not saved, off "
-                                            "after a restart)",
+                Done(true, on ? std::format("Infinite health on (damage {}; health refilled to its maximum; kept for "
+                                            "this save)",
                                             g_hookReady ? "is ignored" : "still applies, then refills")
                               : "Infinite health off");
+            SetSaveToggle(kToggleInfiniteHealth, on);
             if (on) TopUpHealth();
             break;
         }
@@ -496,7 +499,8 @@ void SetupPlayerExtras(sr2::core::ModuleContext& ctx) {
 
 void PlayerExtrasEnabled(bool on) {
     g_live.store(on);
-    if (!on && g_infinite.exchange(false)) SR2_INFO("[{}] infinite health off (module disabled)", kModule);
+    if (!on && g_infinite.exchange(false)) SR2_INFO("[{}] infinite health off (module disabled; kept for the save)", kModule);
+    if (on) g_togglesSeen = 0;  // the save's toggles apply again (read in PlayerExtrasTick, main thread)
     extras::SetHandler(on ? &HandleThunk : nullptr);
     if (!on) {
         extras::State st;
@@ -508,6 +512,11 @@ void PlayerExtrasEnabled(bool on) {
 
 void PlayerExtrasTick(bool snapshot) {
     if (!Live()) return;
+    if (const unsigned v = SaveTogglesVersion(); v != g_togglesSeen) {  // another save's toggles, or enabled
+        g_togglesSeen = v;
+        const bool on = SaveToggle(kToggleInfiniteHealth) && g_healthWhy.empty();
+        if (g_infinite.exchange(on) != on) SR2_INFO("[{}] infinite health {} (as this save has it)", kModule, on ? "on" : "off");
+    }
     const unsigned long long now = GetTickCount64();
     if (g_infinite.load() && now - g_lastHealth >= kHealthMs) {
         g_lastHealth = now;

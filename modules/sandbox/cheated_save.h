@@ -32,4 +32,17 @@ namespace sr2::modules::sandbox {
 // Worker thread (module Setup, after SetupAchievementPause). false = ctx.Fail(...) was called.
 bool SetupCheatedSave(sr2::core::ModuleContext& ctx);
 
+// ---- Sandbox toggles per save (main thread) ----
+// The Sandbox page's on/off options (infinite energy, infinite health) belong to the save like the
+// Sandbox switch: kept in the mark as "toggles": {"infinite_energy": false, ...}, written whenever one
+// changes in a marked save and with every new save file of it, and loaded with the save. A save without
+// the mark (and the title screen) starts with all of them off. Only the stored value: whoever applies a
+// toggle reads it again when SaveTogglesVersion() changes (another save's toggles were loaded) and while
+// Sandbox is on.
+inline constexpr const char* kToggleInfiniteEnergy = "infinite_energy";
+inline constexpr const char* kToggleInfiniteHealth = "infinite_health";
+bool SaveToggle(const char* key);
+void SetSaveToggle(const char* key, bool on);
+unsigned SaveTogglesVersion();
+
 }  // namespace sr2::modules::sandbox
