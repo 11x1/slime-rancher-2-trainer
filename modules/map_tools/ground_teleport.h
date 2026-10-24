@@ -15,9 +15,13 @@
 // The landing spot (Pick): every upward-facing surface below the column (rays from y = kRayTop down, layers the
 // player collides with, triggers ignored), top to bottom. A surface counts when it is walkable (normal), has
 // headroom, is not inside a hazard trigger (KillOnTrigger, KillOnTriggerCloudOcean, LavaVolume,
-// DamagePlayerOnEnterTrigger: lava, the slime sea, the fall-through kill volumes) and is not sealed in. The top
-// one wins unless it is a thin slab (a roof) with a valid floor below it: then the floor (the Grey Labyrinth's
-// roofs). Nothing valid: refused.
+// DamagePlayerOnEnterTrigger: lava, the slime sea, the fall-through kill volumes) and is not sealed in. Render
+// helpers ('Depth Only Quad', '*VISBLOCKER*') are looked through. The top one wins unless it is a roof over an
+// indoor floor: the floor has a ceiling above it seen from below (a modelled underside within 6 m of the top =
+// thin slab, or any underside when the top is a roof by name, e.g. 'caveRoof01'), and is not buried (the nearest
+// face above it, with Physics.queriesHitBackfaces on, is not the back of a one-sided surface such as a ground
+// plane). Nothing valid: refused. 1.5 s after landing, a player more than 8 m below the landing point is put
+// back where the teleport started.
 //
 // Never while the player is knocked out (PlayerDeathHandler._isPlayerDead) or a scene load runs; if that
 // happens mid-way, the request is dropped without moving the player.
