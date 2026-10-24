@@ -51,8 +51,8 @@
 // collector, Hen Collector), off the vanilla nest in the middle and clear of the other slots;
 // after 64 failed draws it takes a fixed fallback spot.
 //
-// Garden: a third sprinkler head in the middle of the +x side (Fast Growth I or II) and a fourth
-// in the middle of the -x side (Fast Growth II; the deposit port at (-5.44, -3.14) is outside the
+// Garden: a third sprinkler head in the middle of the +x side (Sprinkler II or III) and a fourth
+// in the middle of the -x side (Sprinkler III; the deposit port at (-5.44, -3.14) is outside the
 // soil), spraying inwards like the vanilla ones.
 //
 // Corral: the second speaker goes on the (-x, -z) corner post, above the plot menu terminal

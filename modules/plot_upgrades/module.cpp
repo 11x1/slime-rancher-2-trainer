@@ -1,6 +1,6 @@
 // plot_upgrades: the effects of the purchasable per-plot upgrade tiers (SR2 1.3.0).
 //
-// The tiers themselves (Music Box II, Faster Hens I/II, Fast Growth I/II, Ash Booster;
+// The tiers themselves (Music Box II, Faster Hens I/II, Sprinkler II/III, Ash Booster;
 // Plort Collector II/III and Auto-Feeder II were retired) are custom upgrades bought in
 // each plot's own purchase menu (modules/custom_upgrades: prices, prerequisites, sidecar persistence,
 // selling through sell_upgrades). This module only applies the multiplier of the tier a
@@ -385,7 +385,7 @@ void PlotUpgrades::GardenBefore(Il2CppObject* self, double delta, float timeOfDa
     if (!(advance > 0.0)) return;
     next -= advance;
     if (LogOnce(kFGarden))
-        SR2_INFO("[{}] garden '{}': growth rate {:.2f} -> {:.2f} (Fast Growth x{:.2f})", kModule,
+        SR2_INFO("[{}] garden '{}': growth rate {:.2f} -> {:.2f} (Sprinkler II / III x{:.2f})", kModule,
                  NameOf(self, "SpawnResource"), rate, rate * m, m);
 }
 
