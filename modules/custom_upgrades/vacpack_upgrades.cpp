@@ -22,8 +22,12 @@
 //     a NEW Dictionary copy; Push (0xAD9A40) writes the saved levels straight into the dictionary (no
 //     SetUpgradeLevel), only for the keys the model has. A saved level past LevelCount throws later
 //     in UpgradeDefinition.GetUpgradeLevel (ActorUpgradeHandler) - so the save must never hold one.
-//   * Fabricator: PlayerUpgradeFabricateCategory._upgradeDefinitions; GetItems (0x82C000) maps it
-//     to PlayerUpgradeFabricatableItems each time the menu opens. The card of an upgrade shows its
+//   * Fabricator: PlayerUpgradeFabricateCategory._upgradeDefinitions; PlayerUpgradeFabricateCategoryRuntime
+//     ..ctor(category, recipeFactory) (0x82BE90) maps it to PlayerUpgradeFabricatableItems each time the
+//     menu opens (FabricatorCategoryList.FindCategoriesToShow) and hands the list to FabricateCategoryRuntime
+//     <T>..ctor (_categoryCount = category.TotalCount() = Count(_upgradeDefinitions), _itemList). The same
+//     LINQ code as PlayerUpgradeFabricateCategory.GetItems (0x82C000) is INLINED there: GetItems has no
+//     native caller in 1.3.0 (only metadata references). The card of an upgrade shows its
 //     next level (GetUpgradeLevel + 1, clamped to LevelCount - 1): title, costs, "fully upgraded"
 //     when no next level exists; the details panel's UpgradeChain draws one circle per level and the
 //     grid button's pips likewise (fabricator_levels.cpp makes room for 12).
@@ -170,7 +174,7 @@ using ArrayNewFn = Il2CppArray* (*)(Il2CppClass*, uintptr_t);
 using SetLevelFn = void (*)(Il2CppObject*, Il2CppObject*, int32_t, const MethodInfo*);
 using CountFn = int32_t (*)(Il2CppObject*, const MethodInfo*);
 using PullDictFn = void (*)(Il2CppObject*, Il2CppObject**, const MethodInfo*);
-using GetItemsFn = Il2CppObject* (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+using RuntimeCtorFn = void (*)(Il2CppObject*, Il2CppObject*, Il2CppObject*, const MethodInfo*);
 using InitModelFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
 using PullAmmoFn = void (*)(Il2CppObject*, Il2CppArray**, const MethodInfo*);
 using PushAmmoFn = void (*)(Il2CppObject*, Il2CppArray*, const MethodInfo*);
@@ -225,6 +229,7 @@ struct State {
     size_t offSlotId = 0, offSlotCount = 0, offSlotDef = 0;
     size_t offSdProp = 0, offSdThreshold = 0, offSdHotkey = 0;
     size_t offCatDefs = 0, offFabDef = 0;
+    size_t offRtItems = 0, offRtCount = 0;  // FabricateCategoryRuntime`1 _itemList / _categoryCount
     size_t offPcCurrency = 0, offPcIdent = 0, offPcComponent = 0;  // PurchaseCost (value-type offsets)
     size_t offCostAmount = 0;                                      // CurrencyCostEntry._amount
     size_t offPropDefault = 0;                                     // PropertyDefinition.DefaultValue
@@ -254,7 +259,7 @@ struct State {
     SetLevelFn origSetLevel = nullptr;
     CountFn origCount = nullptr;
     PullDictFn origPullDict = nullptr;
-    GetItemsFn origGetItems = nullptr;
+    RuntimeCtorFn origRuntime = nullptr;
     InitModelFn origInitModel = nullptr;
     InitModelFn origReset = nullptr;
     PullAmmoFn origPullAmmo = nullptr;
@@ -277,6 +282,7 @@ struct State {
     Il2CppObject* restoredAmmo = nullptr;  // AmmoModel whose extra slots were refilled (identity only)
     bool applying = false;                 // our own SetUpgradeLevel calls: not a purchase
     bool loggedNoSlots = false, loggedNoBlueprint = false, loggedRemap = false, loggedKeys = false;
+    std::string cardState;  // the Fabricator cards' last logged state (logged when it changes)
     bool batteryArt = false;  // the battery saver card has the Drone Station's icon / pedia entry
     bool migrated = false;    // old per-station battery tiers checked for this save
     bool tiersMigrated = false;  // old separate Tank Booster / Extra Tank cards checked for this save
@@ -294,7 +300,7 @@ State g;
 sr2::core::DetourGuard g_levelGuard{kModule, "UpgradeModel.SetUpgradeLevel"};
 sr2::core::DetourGuard g_countGuard{kModule, "UpgradeModel.CountUniqueUpgrades"};
 sr2::core::DetourGuard g_pullGuard{kModule, "UpgradeModel.Pull"};
-sr2::core::DetourGuard g_itemsGuard{kModule, "PlayerUpgradeFabricateCategory.GetItems"};
+sr2::core::DetourGuard g_itemsGuard{kModule, "PlayerUpgradeFabricateCategoryRuntime..ctor"};
 sr2::core::DetourGuard g_slotsGuard{kModule, "PlayerState.InitModel/Reset"};
 sr2::core::DetourGuard g_ammoGuard{kModule, "AmmoModel.Pull/Push"};
 sr2::core::DetourGuard g_keyGuard{kModule, "AmmoSlotViewHolder.BindInputKey"};
@@ -1151,36 +1157,64 @@ void PullDictDetour(Il2CppObject* self, Il2CppObject** saved, const MethodInfo* 
     });
 }
 
-// Fabricator upgrade category (each time the menu opens): our own cards in its list (pre), out of
-// the result while not unlocked (post). Tier levels need nothing here: they are the vanilla card's.
-Il2CppObject* GetItemsDetour(Il2CppObject* self, Il2CppObject* recipeFactory, const MethodInfo* mi) {
-    const bool on = On() && g.created;
-    if (on && self)
+// PlayerUpgradeFabricateCategoryRuntime..ctor(category, recipeFactory): the Fabricator builds one per
+// upgrade category each time it opens (also the Sandbox's rebuild); GetItems is inlined there. Pre: our
+// own cards go into the vacpack category's definition list (the one with Tank Booster), so the vanilla
+// code makes their PlayerUpgradeFabricatableItems. Post: they leave the runtime's item list while not
+// unlocked, and _categoryCount (counted from the definition list: title "unlocked / total", page count)
+// drops by as many, so it matches the vanilla count again. Tier levels need nothing here: they are the
+// vanilla card's.
+void RuntimeCtorDetour(Il2CppObject* self, Il2CppObject* category, Il2CppObject* recipeFactory, const MethodInfo* mi) {
+    const bool main = main_thread::IsMainThread();
+    const bool on = main && On() && g.created;
+    bool vacpackCategory = false;
+    if (on && category)
         g_itemsGuard.Run([&] {
-            Il2CppObject* items = AssetItems(unity::Field<Il2CppObject*>(self, g.offCatDefs));
-            if (!items) return;
-            if (InsertOurs(items) > 0) {
+            Il2CppObject* items = AssetItems(unity::Field<Il2CppObject*>(category, g.offCatDefs));
+            if (!items || !FindDefById(items, kVanillaCapacityId)) return;  // not the vacpack category
+            vacpackCategory = true;
+            if (const int added = InsertOurs(items)) {
                 if (std::find(g.categoryLists.begin(), g.categoryLists.end(), items) == g.categoryLists.end()) {
                     unity::NewGCHandle(items);  // a handful per session: kept for cleanup
                     g.categoryLists.push_back(items);
                 }
-                SR2_INFO("[{}] vacpack: upgrades added to the Fabricator category list", kModule);
+                SR2_INFO("[{}] vacpack: {} upgrade(s) added to the Fabricator category '{}' list", kModule, added,
+                         unity::GetName(category));
             }
         });
-    Il2CppObject* r = g.origGetItems(self, recipeFactory, mi);
-    if (r && g.created)
-        g_itemsGuard.Run([&] {
-            Player p;
-            const bool havePlayer = on && GetPlayer(p);
-            for (int32_t i = static_cast<int32_t>(unity::ListCount(r)) - 1; i >= 0; --i) {
-                auto* item = static_cast<Il2CppObject*>(unity::ListAt(r, static_cast<size_t>(i)));
-                if (!IsA(item, g.fabItemClass)) continue;
-                const Ours* o = FindOurs(unity::Field<Il2CppObject*>(item, g.offFabDef));
-                if (!o) continue;
-                if (!havePlayer || !Unlocked(*o, p.upgrades)) ListRemoveAt(r, i);
-            }
-        });
-    return r;
+    g.origRuntime(self, category, recipeFactory, mi);
+    if (!self || !main || !g.created || !g.offRtItems) return;
+    g_itemsGuard.Run([&] {
+        Il2CppObject* list = unity::Field<Il2CppObject*>(self, g.offRtItems);
+        if (!list) return;
+        Player p;
+        const bool havePlayer = on && GetPlayer(p);
+        int removed = 0;
+        std::string state;
+        for (int32_t i = static_cast<int32_t>(unity::ListCount(list)) - 1; i >= 0; --i) {
+            auto* item = static_cast<Il2CppObject*>(unity::ListAt(list, static_cast<size_t>(i)));
+            if (!IsA(item, g.fabItemClass)) continue;
+            const Ours* o = FindOurs(unity::Field<Il2CppObject*>(item, g.offFabDef));
+            if (!o) continue;
+            const bool keep = havePlayer && Unlocked(*o, p.upgrades);
+            if (!keep && ListRemoveAt(list, i)) ++removed;
+            if (!state.empty()) state += "; ";
+            state += keep ? std::format("{}: card shown (position {} of {})", o->spec->name, i + 1, unity::ListCount(list))
+                     : !on        ? std::format("{}: card removed (custom upgrades off)", o->spec->name)
+                     : !havePlayer ? std::format("{}: card removed (no player state yet)", o->spec->name)
+                                   : std::format("{}: card hidden (locked: Drone Station blueprint not owned)", o->spec->name);
+        }
+        if (removed > 0 && g.offRtCount) {
+            int32_t& total = unity::Field<int32_t>(self, g.offRtCount);
+            total = std::max(total - removed, 0);
+        }
+        if (vacpackCategory && state.empty())
+            state = on ? "no mod card in the vacpack category (not created?)" : "custom upgrades off";
+        if (!state.empty() && state != g.cardState) {
+            g.cardState = state;
+            SR2_INFO("[{}] vacpack: Fabricator category '{}': {}", kModule, unity::GetName(category), state);
+        }
+    });
 }
 
 void InitModelDetour(Il2CppObject* self, Il2CppObject* model, const MethodInfo* mi) {
@@ -1512,6 +1546,7 @@ bool VacpackUpgrades::Setup(sr2::core::ModuleContext& ctx, Host host, std::strin
     g.slotDefClass = cls("", "AmmoSlotDefinition");
     g.fabItemClass = cls("MonomiPark.SlimeRancher.UI.Fabricator", "PlayerUpgradeFabricatableItem");
     Il2CppClass* category = cls("MonomiPark.SlimeRancher.UI.Fabricator", "PlayerUpgradeFabricateCategory");
+    Il2CppClass* runtime = cls("MonomiPark.SlimeRancher.UI.Fabricator", "PlayerUpgradeFabricateCategoryRuntime");
     Il2CppClass* purchaseCost = cls("MonomiPark.SlimeRancher.Economy", "PurchaseCost");
     Il2CppClass* costEntry = cls("MonomiPark.SlimeRancher.Economy", "CurrencyCostEntry");
     Il2CppClass* propDef = R.Class("Assembly-CSharp", "MonomiPark.UnitPropertySystem", "PropertyDefinition");
@@ -1540,6 +1575,8 @@ bool VacpackUpgrades::Setup(sr2::core::ModuleContext& ctx, Host host, std::strin
     off(g.slotDefClass, "_hotkey", g.offSdHotkey);
     off(category, "_upgradeDefinitions", g.offCatDefs);
     off(g.fabItemClass, "<UpgradeDefinition>k__BackingField", g.offFabDef);
+    off(runtime, "_itemList", g.offRtItems);  // FabricateCategoryRuntime`1 fields (found through the parent)
+    off(runtime, "_categoryCount", g.offRtCount);
     off(purchaseCost, "_currencyCosts", g.offPcCurrency);
     off(purchaseCost, "IdentCosts", g.offPcIdent);
     off(purchaseCost, "ComponentCosts", g.offPcComponent);
@@ -1557,7 +1594,9 @@ bool VacpackUpgrades::Setup(sr2::core::ModuleContext& ctx, Host host, std::strin
     g.setLevel = method(upModel, "SetUpgradeLevel", 2);
     const MethodInfo* countMi = method(upModel, "CountUniqueUpgrades", 0);
     const MethodInfo* pullMi = method(upModel, "Pull", 1);
-    const MethodInfo* itemsMi = method(category, "GetItems", 1);
+    // Its own ctor, not the base's (FabricateCategoryRuntime`1..ctor also takes 2): no parent walk.
+    const MethodInfo* runtimeMi = runtime ? R.Method(runtime, ".ctor", 2, nullptr) : nullptr;
+    if (!runtimeMi && why.empty()) why = "PlayerUpgradeFabricateCategoryRuntime..ctor(2) not found";
     const MethodInfo* initMi = method(g.playerStateClass, "InitModel", 1);
     const MethodInfo* resetMi = method(g.playerStateClass, "Reset", 1);
     const MethodInfo* ammoPullMi = method(ammoModel, "Pull", 1);
@@ -1597,8 +1636,8 @@ bool VacpackUpgrades::Setup(sr2::core::ModuleContext& ctx, Host host, std::strin
         {"UpgradeModel.CountUniqueUpgrades", countMi, reinterpret_cast<void*>(&CountDetour),
          reinterpret_cast<void**>(&g.origCount)},
         {"UpgradeModel.Pull", pullMi, reinterpret_cast<void*>(&PullDictDetour), reinterpret_cast<void**>(&g.origPullDict)},
-        {"PlayerUpgradeFabricateCategory.GetItems", itemsMi, reinterpret_cast<void*>(&GetItemsDetour),
-         reinterpret_cast<void**>(&g.origGetItems)},
+        {"PlayerUpgradeFabricateCategoryRuntime..ctor", runtimeMi, reinterpret_cast<void*>(&RuntimeCtorDetour),
+         reinterpret_cast<void**>(&g.origRuntime)},
         {"PlayerState.InitModel", initMi, reinterpret_cast<void*>(&InitModelDetour),
          reinterpret_cast<void**>(&g.origInitModel)},
         {"PlayerState.Reset", resetMi, reinterpret_cast<void*>(&ResetDetour), reinterpret_cast<void**>(&g.origReset)},
