@@ -3,7 +3,7 @@
 Writes assets/icons/game/index.html (gitignored). PNGs are referenced by
 relative path; nothing is embedded or uploaded. Rerun after extracting icons:
 
-    python build_viewer.py [path-to-sr2-mods-repo]
+    python assets/icons/src/build_viewer.py [path-to-sr2-mods-repo]
 """
 import html
 import json
