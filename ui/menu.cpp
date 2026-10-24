@@ -2101,32 +2101,33 @@ void ItemContextMenu(const sbx::Snapshot& s) {
             }
             const float e = U(22), rowW = U(250), fs = theme::kSmallSize + 0.5f;
             if (vac && g_ctxSlot >= 0 && g_ctxSlot < std::min(static_cast<int>(s.slots.size()), 32)) {
-                // The slot's Fill / Empty, as the buttons under the slots do them (round 8).
+                // The slot's Fill / Empty, as the buttons under the slots do them: two buttons side by side
+                // on one row (round 9, "fill/empty should be buttons next to eachother ... on a single line").
                 const int idx = g_ctxSlot;
                 const sbx::Slot& sl = s.slots[static_cast<size_t>(idx)];
                 const uintptr_t holds = SlotItem(sl, idx);
                 const int count = SlotCount(sl, idx), max = std::max(0, sl.max);
-                auto slotRow = [&](const char* id, const std::string& label, bool can, const char* why) {
-                    const ImVec2 p = ImGui::GetCursorScreenPos();
-                    ImGui::BeginDisabled(!can);
-                    const bool hit = ImGui::Selectable(id, false, 0, ImVec2(rowW, e));
-                    ImGui::EndDisabled();
-                    const ImVec2 ts = TextSize(theme::Body(), fs, label.c_str());
-                    Text(ImGui::GetWindowDrawList(), theme::Body(), fs, ImVec2(p.x + e + U(8), p.y + (e - ts.y) * 0.5f),
-                         can ? P.text : P.dim, label.c_str());
-                    if (!can && why && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) Tooltip(why);
-                    return hit && can;
-                };
                 if (sl.unlocked && holds) {
-                    if (slotRow("##fill", std::format("Fill slot {} ({}/{})", idx + 1, count, max), count < max,
-                                "The slot is full.")) {
+                    FontScope bf(theme::Body(), fs);
+                    const float sp = ImGui::GetStyle().ItemSpacing.x, bw = std::floor((rowW - sp) * 0.5f);
+                    const std::string fill = std::format("Fill ({}/{})", count, max);
+                    ImGui::BeginDisabled(count >= max);
+                    if (ImGui::Button(fill.c_str(), ImVec2(bw, e + U(4)))) {
                         SetSlotPending(idx, holds, max);
                         SbxRequest(sbx::Op::SetSlotCount, max, idx);
+                        ImGui::CloseCurrentPopup();
                     }
-                    if (slotRow("##empty", std::format("Empty slot {}", idx + 1), true, nullptr)) {
+                    ImGui::EndDisabled();
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                        Tooltip(count >= max ? std::string("The slot is full.")
+                                             : std::format("Fill slot {} to its maximum.", idx + 1));
+                    ImGui::SameLine(0, sp);
+                    if (ImGui::Button("Empty", ImVec2(bw, e + U(4)))) {
                         SetSlotPending(idx, 0, 0);
                         SbxRequest(sbx::Op::SetSlotCount, 0, idx);
+                        ImGui::CloseCurrentPopup();
                     }
+                    if (ImGui::IsItemHovered()) Tooltip(std::format("Remove everything from slot {}.", idx + 1));
                     ImGui::Separator();
                 }
             }
@@ -2325,7 +2326,6 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     const float e = std::max(U(24), std::floor(std::min(U(92), (avail - gap * static_cast<float>(n - 1)) / static_cast<float>(n))));
     uintptr_t slotMenu = 0;  // right-clicked slot's item: its give menu opens after the loop (popup id outside the slot's id)
     int slotMenuIdx = -1;    // that slot
-    bool tierMenu = false;   // an empty / locked slot was right-clicked (sandbox_upgrades::SlotTierMenu)
     for (int i = 0; i < n; ++i) {
         const sbx::Slot& sl = s.slots[static_cast<size_t>(i)];
         const int count = SlotCount(sl, i);
@@ -2342,8 +2342,9 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
             if (sl.unlocked) g_sbxSlot = i;
             else if (sl.unlockable) SbxRequest(sbx::Op::UnlockSlot, 0, i);
         }
+        // Right-click: only a slot with an item has a menu (round 9: the Extra Tank tier menu on empty /
+        // locked slots is gone; the tier is on the Upgrades page).
         if (right && sl.unlocked && sl.item) slotMenu = sl.item, slotMenuIdx = i;
-        else if (right) tierMenu = true;  // empty / locked: the slot-count upgrade's tier menu
         if (sl.unlocked) {
             // Shift / Ctrl + wheel over a slot: its count +-1 / +-10; an empty slot takes the last
             // picked item. A plain wheel is left alone, so the page scrolls.
@@ -2412,29 +2413,28 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
         }
         if (hot && !sl.unlocked) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort) && !ImGui::GetDragDropPayload() && !ImGui::IsPopupOpen(kSbxCtx)) {
-            // The item's name, group and favourites, the left / right click as keycaps (the tab bar's hints
-            // list the rest).
+            // The item's name, group and favourites, the left / right click as keycaps (the hint bar
+            // lists the rest).
             sandbox_upgrades::Tip tip;
             tip.name = std::format("Slot {}", i + 1);
             if (!sl.unlocked) {
                 tip.tag = "Locked";
                 tip.tagCol = P.dim;
-                if (sl.unlockable) tip.keys = {{"LMB", "unlock for free"}, {"RMB", "Extra Tank tier"}};
-                else tip.lines.push_back({"No vacpack upgrade for it was found.", P.dim}), tip.keys = {{"RMB", "Extra Tank tier"}};
+                if (sl.unlockable) tip.keys = {{"LMB", "unlock for free"}};
+                else tip.lines.push_back({"No vacpack upgrade for it was found.", P.dim});
                 RichTooltip(tip);
             } else if (sl.item) {
                 ItemTooltip(s, sl.name, sl.kind, sl.item, nullptr, nullptr, {{"LMB", "select"}, {"RMB", "context menu"}});
             } else {
                 tip.tag = "Empty";
                 tip.tagCol = P.dim;
-                tip.keys = {{"LMB", "select"}, {"RMB", "Extra Tank tier"}};
+                tip.keys = {{"LMB", "select"}};
                 RichTooltip(tip);
             }
         }
         ImGui::PopID();
     }
     if (slotMenu) OpenItemContext(slotMenu, SbxGrid::Vacpack, slotMenuIdx);
-    sandbox_upgrades::SlotTierMenu(SbxHelpers(), tierMenu);
     // A dragged slot: its icon follows the cursor.
     int draggedSlot = -1;
     if (const ImGuiPayload* p = ImGui::GetDragDropPayload(); p && p->IsDataType(kSlotDrag) && p->DataSize == sizeof(int)) {
