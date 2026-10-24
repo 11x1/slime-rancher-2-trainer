@@ -506,6 +506,20 @@ replaced (old type T, stored type T): dropped owned [...], values [...]`.
   sibling: Cancel left, Purchase right, still centred, like the card's Sell / Purchase pair. Only the order
   changes (keys, actions, labels are the game's). The layout re-lays out on OnTransformChildrenChanged.
   Log once: `purchase popup: buttons reordered (Cancel left, Purchase right) under 'ButtonPanel'`.
+- **Plot purchase popup order** (round 8: "same for plot buying, not just upgrades"). Buying a plot on an
+  empty plot does not go through OpenPopupPrompt: `LandPlotUIRoot.PromptForPlot` (0x6E77D0) calls
+  `UITemplates.CreatePopupPrompt(body, misc, positive, negative, expiration)` (0x6B1910) directly (IDA).
+  sell_upgrades now also detours PromptForPlot (marks the call) and CreatePopupPrompt (reorders the popup it
+  returns while marked; every other popup untouched). Log once: `plot purchase popup: buttons reordered`.
+- **Sell button matching** (round 8: "i cant sell music box I now, shows on e.g., hen upgrades"). The cause was
+  not found for sure in the log (no line said why a card had no Sell button). Changes: the details are matched
+  to every menu item with the same `_infoButtonLabel` (the owned state has to fit the view: PURCHASED = owned,
+  Purchase = not owned; more than one match is logged as a warning), a vanilla item a tier card stands in for is
+  found too (custom_upgrades `HiddenMenuItem`), and a tier card on a vanilla upgrade (Music Box II, Sprinkler II,
+  Ash Booster) sells that upgrade whenever it is owned (the "stands in at this moment" condition is gone).
+  Every card without a working Sell button now logs why, once per reason: `no Sell button: card 'Music Box II':
+  no tier to sell (...)`, `no Sell button: Music Box: Sell 'Music Box II' first ...`, `... could not be placed
+  next to Purchase`.
 - **Coop Air Net icon**: the corral's own Air Net upgrade icon (`iconFrom` = Air Net, found in the corral
   menu's items by `GlobalUpgradeItem`), no mod icon any more (user: "use the air net icon from corrals").
 
@@ -622,6 +636,17 @@ dialog.
   tinted renderer, and the tint is stronger: cap 85 %, base (`button_base`) 35 % (no cap: everything
   40 %). First log line now: `tinted gold (cap + base): N colour(s) on button_button (24 at 85 %),
   button_base (.. at 35 %); property block on K renderer(s)`.
+- **Gold button, round 9** (test: "not gold" again, log as above). Writing the palette slots evidently does
+  not reach the screen (the Animator of `techActivator` can animate `button_button`'s material properties, and
+  animated properties win over material values and property blocks; palette code works through the same
+  `_ColorNN` names). The cap now gets a material of our own on another shader: `HDRP/Lit` (Shader.Find, else
+  one FindObjectsOfTypeAll(Shader) by name), `_BaseColor` (1, 0.74, 0.16), metallic 0.6, smoothness 0.75,
+  named `sr2mods_gold (HDRP/Lit)`, one per session (DontUnloadUnusedAsset). No RanchTech01 property exists on
+  it. The base keeps the 35 % palette tint. Each tick checks every tinted renderer's material name (not only
+  the first). The first build dumps every renderer of the button once (GameObject, class, material, shader,
+  its Color / Texture properties, property block yes / no): `renderers before the gold: ...`; then `gold
+  material made on 'HDRP/Lit'` and `made gold (cap + base): ... button_button (gold HDRP/Lit material)`. If
+  HDRP/Lit is missing: `shader 'HDRP/Lit' not found` and the old palette tint.
 - Log: `silo receipt ready`, `sell all (plot '...'): receipt shown, N plort(s) in T type(s) for V`,
   `receipt cancelled, nothing sold`, `receipt changed before the sale (...) - refreshed`, then the
   usual `sell all (receipt, plot '...'): sold ...`. Without the dialog parts (setup failed) the button
@@ -678,6 +703,12 @@ Storage per silo slot: 100 -> 200 (vanilla) -> 300 -> 400 -> 500 -> 600 (ours).
   titles read "Additional Storage II / III / IV" (STORAGE2 / 3 / 4, the section each one adds), like
   our tier cards; a text_override on each vanilla item's own `_title` (pinned items), removed in Cleanup.
   Log once per menu: `silo: 3 Additional Storage card(s) labelled with their section (II / III / IV)`.
+- **Round 8: "silo additional storage is separate upgrades again..."** No code path was found that undoes the
+  merge: since round 6 (when the one card was confirmed) only the II / III / IV labels and `RefreshAvailability`
+  touched the menu, and the round-8 log shows the merge ran (`3 Additional Storage card(s) labelled`). After
+  every menu update the silo's list is now checked and logged when it changes: `silo menu: Additional Storage 1
+  card(s): STORAGE3 at 4; 2 vanilla card(s) out of the list`, or a warning `Additional Storage NOT merged after the
+  game's update - ...` with the cards found. The next test log tells whether the list or the view is wrong.
 - **Not sellable**, like the vanilla silo storage upgrades: `CanSell` gives the same permanent reason
   ("silo storage"), so sell_upgrades shows no Sell button and no alt-action prompt.
 
@@ -731,8 +762,8 @@ coop_world's scan would destroy), stripped of colliders, joints, rigidbodies and
 | tier | prop | source |
 |---|---|---|
 | Faster Hens I or II (u5) | two small hay bales (scale 0.5) and three grass tufts, scattered | decoration `decorHayBales`: `hayBale_2`, `hayBale_0 (1)`; coop prefab `Deco/decoFieldsGrass01 _Green`, `Deco/decoFieldsGrass02_Green` |
-| Faster Hens II (u6) | two nests (a stuffed chicken sitting deep in the second), a flower pillow and two more grass tufts, scattered | coop prefab `Deco/nestPlain01` (the vanilla nest), toy `toyStuffedChicken`: `model_stuffedChicken`, decoration `decorFlowerPillowSmall`: `mesh`, coop grass as above |
-| Sprinkler II or III (u9; were Fast Growth I / II) | a third sprinkler head in the middle of the +x side, spraying inwards | garden prefab `Sprinkler/SprinklerBase` (vanilla heads are on the -z / +z sides) |
+| Faster Hens II (u6) | two nests (a stuffed chicken lying on its side in the second), a flower pillow and two more grass tufts, scattered | coop prefab `Deco/nestPlain01` (the vanilla nest), toy `toyStuffedChicken`: `model_stuffedChicken`, decoration `decorFlowerPillowSmall`: `mesh`, coop grass as above |
+| Sprinkler II or III (u9; were Fast Growth I / II; since round 9 tiers of the vanilla Sprinkler card) | a third sprinkler head in the middle of the +x side, spraying inwards | garden prefab `Sprinkler/SprinklerBase` (vanilla heads are on the -z / +z sides) |
 | Sprinkler III | a fourth head in the middle of the -x side, turned 180 degrees | same |
 | Music Box II | a second speaker on the (-x, -z) corner post (above the plot menu terminal), leaning inwards | corral prefab `Music Box/techCorralMusicBox/MusicBox/Music` (the vanilla speaker sits on the (-x, +z) post) |
 | Ash Booster (u11) | glow + embers in the fire, embers rising out of the opening, and three ember emitters on the ash around the incinerator (following the ash height) | incinerator prefab `.../meshIncinerator/FireTest/Glow` and `/Embers` (inactive in vanilla, switched on), decoration `decorFireFlower`: `FX Fireflower` |
@@ -756,6 +787,17 @@ sides (toes, wing tips, y -0.48 .. +0.05). At the old height (+0.1 in the nest) 
 the nest floor (~0.09; rim ~0.40) in a neat row. The hen now sits at -0.06 (every bulb below the floor,
 inside the straw wall; body and head still ~0.2 m over the rim) with a 6 degree lean. If the user still
 sees eggs, ask for a screenshot.
+
+Round 8 feedback, coop: "what stuffed chicken" / "the 3 eggs in hen upgrade in one nest is singular asset, should
+be sideways probably, also the nests are not random again". The "3 eggs" are the sunk plush hen: upright, its head
+bulb and two wing bulbs were all that rose over the straw. It now lies on its side (rolled 90 degrees about its
+forward axis), size 1.0 instead of 1.33, centre 0.30 above the nest root, so the body shows. The layout was random
+already (for the test coop `plot1996802419` the nests stood at (3.6, 0.5) and (-0.4, -3.2)); now the second nest is
+also never in one line with the first through the vanilla nest in the middle (55..135 degrees around from the
+first, seen from the middle), up to 256 draws (no fallback over 2000 simulated ids), and the build line names the
+nest positions: `CoopNests props built ...; nests at (x, z) and (x, z), the plush hen lying in the second`. The
+layout of existing coops changes once. If the user still sees nests in a row, ask which objects (the deluxe coop has
+vanilla parts of its own).
 
 Round 7 feedback, incinerator: "embers should come from ash aswell". Three more clones of the vanilla
 inactive `FireTest/Embers` emitter (turned -90 degrees about x, so it emits upwards), smaller, at r ~3.3

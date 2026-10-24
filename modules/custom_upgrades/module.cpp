@@ -1592,6 +1592,10 @@ bool CustomUpgrades::Visible(Il2CppObject* plot, const UpgradeDef& d) {
     if (IsSiloCapacity(d) && !capacityOk_) return false;        // nothing could apply the capacity
     if (!d.needs) return true;
     if (!custom_upgrades::IsCustomUpgrade(d.needs)) return VanillaOwned(plot, d.needs);  // vanilla prerequisite
+    // A higher tier of a chain on a vanilla card needs that vanilla upgrade too: a save that owns Sprinkler II
+    // without the Sprinkler (bought before round 9, when Sprinkler II needed nothing) keeps the vanilla Sprinkler
+    // card buyable instead of covering it with Sprinkler III.
+    if (const int32_t root = ChainVanillaRoot(d); root && !VanillaOwned(plot, root)) return false;
     const UpgradeDef* r = FindDef(d.needs);
     return r && OwnsKey(plot, *r);
 }
