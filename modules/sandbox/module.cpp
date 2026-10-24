@@ -453,7 +453,7 @@ bool Sandbox::Setup(sr2::core::ModuleContext& ctx) {
     // Required: without the pause the module does not run (fail closed).
     if (!sandbox::SetupAchievementPause(ctx)) return false;
     SetupExtras(R);
-    sandbox::SetupPlayerExtras(ctx);  // optional tools on the World card (player_extras.cpp)
+    sandbox::SetupPlayerExtras(ctx);  // optional tools on the Extras card (player_extras.cpp)
 
     g_self = this;
     if (!frameCb_) frameCb_ = main_thread::AddFrameCallback(kModule, [this](float) { Tick(); });

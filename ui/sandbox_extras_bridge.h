@@ -1,6 +1,6 @@
 #pragma once
 // Data exchange between the sandbox module's player extras
-// (modules/sandbox/player_extras.cpp) and the "World" card on the Sandbox page
+// (modules/sandbox/player_extras.cpp) and the "Extras" card on the Sandbox page
 // (menu.cpp). Kept apart from sandbox_bridge.h so the extras don't touch the
 // main snapshot.
 //

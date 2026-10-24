@@ -1,5 +1,5 @@
 #pragma once
-// sandbox: player extras on the Sandbox page's "World" card (see NOTES.md,
+// sandbox: player extras on the Sandbox page's "Extras" card (see NOTES.md,
 // "Player extras"): infinite health, teleport to the map marker, unlock the
 // ranch expansions. SR2 1.3.0.
 //
