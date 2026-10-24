@@ -7,6 +7,7 @@
 #include <cmath>
 #include <format>
 #include <initializer_list>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,7 @@
 #include "core/il2cpp_api.h"
 #include "core/log.h"
 #include "core/resolver.h"
+#include "core/text_override.h"
 #include "core/unity.h"
 
 namespace sr2::modules::custom_upgrades::ui {
@@ -52,6 +54,31 @@ struct SaleNotices::Impl {
         Notice kind;
     };
     std::vector<Entry> queue;
+
+    // free-text notices
+    Il2CppClass* entryClass = nullptr;         // NotificationEntry
+    Il2CppClass* zoneClass = nullptr;          // ZoneDefinition (owner of the LocalizedStrings we clone)
+    const MethodInfo* entryCtor = nullptr;     // NotificationEntry(provider, group, icon, name, style)
+    const MethodInfo* styleDefault = nullptr;  // static NotificationEntryStyle.get_Default
+    size_t offPending = 0;                     // ItemAcquisitionNotificationList._pendingNotifications
+    size_t offZoneName = 0;                    // ZoneDefinition._localizedName
+    Il2CppObject* (*objectNew)(Il2CppClass*) = nullptr;  // il2cpp_object_new
+    struct Text {
+        Il2CppObject* icon;  // a Sprite asset (IsAlive-checked again before use)
+        std::string text;
+    };
+    std::vector<Text> texts;
+    struct Name {
+        Il2CppGCHandle owner = nullptr, str = nullptr;  // the cloned ZoneDefinition and its LocalizedString
+        Il2CppObject* ls = nullptr;
+    };
+    Name names[4];
+    size_t nextName = 0;
+    bool loggedText = false, loggedNoSink = false;
+    Il2CppClass* gadgetClass = nullptr;  // GadgetDefinition
+    size_t offGadgetType = 0, offIdentIcon = 0;
+    Il2CppGCHandle teleIcon = nullptr;
+    unsigned long long teleIconTried = 0;
     float retry = 0.0f;
     float waited = 0.0f;
     bool loggedFirst = false;
@@ -174,6 +201,93 @@ struct SaleNotices::Impl {
     }
 };
 
+// ------------------------------------------------------------ free-text notices --
+namespace {
+
+// HUD suppression query (menus open): -1 call failed, 0 suppressed, 1 notices allowed.
+int CanQueue(SaleNotices::Impl& p, Il2CppObject* list) {
+    bool ok = false;
+    Il2CppObject* boxed = p.Call(p.canQueueAny, list, {}, "ItemAcquisitionNotificationList.get_CanQueueAny", &ok);
+    if (!ok) return -1;
+    return boxed && *reinterpret_cast<bool*>(reinterpret_cast<char*>(boxed) + 2 * sizeof(void*)) ? 1 : 0;
+}
+
+// One of our LocalizedStrings (round robin), created on first use from a loaded ZoneDefinition.
+Il2CppObject* NextName(SaleNotices::Impl& p) {
+    auto& n = p.names[p.nextName++ % 4];
+    Il2CppObject* owner = n.owner ? unity::GCHandleTarget(n.owner) : nullptr;
+    if (owner && unity::IsAlive(owner) && n.ls) return n.ls;
+    if (n.ls) sr2::core::text_override::Remove(n.ls);
+    if (n.owner) unity::FreeGCHandle(n.owner);
+    if (n.str) unity::FreeGCHandle(n.str);
+    n = {};
+    Il2CppObject* tpl = nullptr;
+    for (Il2CppObject* z : unity::FindObjectsOfTypeAll(p.zoneClass))
+        if (unity::IsAlive(z) && p.IsA(z, p.zoneClass) && unity::Field<Il2CppObject*>(z, p.offZoneName)) {
+            tpl = z;
+            break;
+        }
+    if (!tpl) return nullptr;
+    Il2CppObject* clone = unity::Instantiate(tpl, nullptr);  // a fresh ScriptableObject: its own LocalizedString
+    if (!unity::IsAlive(clone) || !p.IsA(clone, p.zoneClass)) return nullptr;
+    Il2CppObject* ls = unity::Field<Il2CppObject*>(clone, p.offZoneName);
+    if (!ls || ls == unity::Field<Il2CppObject*>(tpl, p.offZoneName)) return nullptr;
+    unity::SetName(clone, "SR2Mods.NoticeText");
+    n.owner = unity::NewGCHandle(clone, false);
+    n.str = unity::NewGCHandle(ls, false);
+    if (!n.owner || !n.str) return nullptr;
+    n.ls = ls;
+    return ls;
+}
+
+// true = done with the text queue (shown or given up), false = try again later.
+bool TryFlushText(SaleNotices::Impl& p) {
+    Il2CppObject* list = p.List(true);
+    if (!list) return false;
+    Il2CppObject* provider = p.Provider(list);
+    if (!provider) return false;
+    const int can = CanQueue(p, list);
+    if (can < 0) return true;
+    if (can == 0) return false;  // HUD suppressed (menu open)
+    auto* pending = unity::Field<Il2CppObject*>(list, p.offPending);
+    const auto& a = api();
+    Il2CppClass* pk = pending && a.il2cpp_object_get_class ? a.il2cpp_object_get_class(pending) : nullptr;
+    const MethodInfo* add = pk ? Resolver::Get().Method(pk, "Add", 1) : nullptr;
+    if (!add) {
+        SR2_WARN("[{}] text notices: ItemAcquisitionNotificationList._pendingNotifications.Add not found - {} dropped",
+                 p.module, p.texts.size());
+        return true;
+    }
+    bool ok = false;
+    Il2CppObject* boxedStyle = p.Call(p.styleDefault, nullptr, {}, "NotificationEntryStyle.get_Default", &ok);
+    if (!ok || !boxedStyle) return true;
+    void* style = reinterpret_cast<char*>(boxedStyle) + 2 * sizeof(void*);
+    int added = 0;
+    for (auto& t : p.texts) {
+        Il2CppObject* ls = NextName(p);
+        if (!ls) {
+            SR2_WARN("[{}] text notices: no LocalizedString to carry the text - '{}' not shown", p.module, t.text);
+            continue;
+        }
+        sr2::core::text_override::Set(ls, t.text);
+        Il2CppObject* icon = t.icon && unity::IsAlive(t.icon) ? t.icon : nullptr;
+        Il2CppObject* entry = p.objectNew(p.entryClass);
+        if (!entry) return true;
+        p.Call(p.entryCtor, entry, {provider, nullptr, icon, ls, style}, "NotificationEntry..ctor", &ok);
+        if (!ok) return true;
+        p.Call(add, pending, {entry}, "List<INotificationEntry>.Add", &ok);
+        if (!ok) return true;
+        ++added;
+    }
+    if (!p.loggedText && added) {
+        p.loggedText = true;
+        SR2_INFO("[{}] text notices: {} notice(s) added to the HUD's pending notifications", p.module, added);
+    }
+    return true;
+}
+
+}  // namespace
+
 SaleNotices::SaleNotices() = default;
 SaleNotices::~SaleNotices() { delete impl_; }
 
@@ -237,24 +351,128 @@ void SaleNotices::Queue(const std::vector<std::pair<Il2CppObject*, int>>& sold, 
 }
 
 void SaleNotices::Frame(float dt) {
-    if (!ready_ || impl_->queue.empty()) return;
+    if (!ready_ || (impl_->queue.empty() && impl_->texts.empty())) return;
     if (!std::isfinite(dt) || dt < 0.0f) dt = 0.0f;
     dt = dt > 1.0f ? 1.0f : dt;
     impl_->waited += dt;
     impl_->retry += dt;
     if (impl_->retry < kRetrySeconds) return;
     impl_->retry = 0.0f;
+    if (!impl_->texts.empty() && TryFlushText(*impl_)) impl_->texts.clear();
+    if (impl_->queue.empty()) {
+        if (impl_->waited > kMaxWaitSeconds) impl_->texts.clear();
+        return;
+    }
     if (impl_->TryFlush()) {
         impl_->queue.clear();
     } else if (impl_->waited > kMaxWaitSeconds) {
         SR2_INFO("[{}] {} notices: HUD not available for {:.0f} s - {} notice(s) dropped", impl_->module, impl_->label,
                  kMaxWaitSeconds, impl_->queue.size());
         impl_->queue.clear();
+        impl_->texts.clear();
     }
 }
 
 void SaleNotices::Clear() {
-    if (impl_) impl_->queue.clear();
+    if (impl_) {
+        impl_->queue.clear();
+        impl_->texts.clear();
+    }
+}
+
+bool SaleNotices::SetupText(Resolver& R, std::string& why) {
+    if (!ready_ || !impl_) {
+        why = "sale notices not set up";
+        return false;
+    }
+    Impl& p = *impl_;
+    std::string err;
+    p.entryClass = R.Class(kImage, kNotifNs, "NotificationEntry", &err);
+    Il2CppClass* style = R.Class(kImage, kNotifNs, "NotificationEntryStyle", &err);
+    p.zoneClass = R.Class(kImage, "MonomiPark.SlimeRancher.World", "ZoneDefinition", &err);
+    if (p.entryClass)
+        p.entryCtor = R.MethodByParams(p.entryClass, ".ctor",
+                                       {"MonomiPark.SlimeRancher.UI.HUD.Notification.INotificationProvider",
+                                        "MonomiPark.SlimeRancher.UI.HUD.Notification.INotificationGroup",
+                                        "UnityEngine.Sprite", "UnityEngine.Localization.LocalizedString",
+                                        "MonomiPark.SlimeRancher.UI.HUD.Notification.NotificationEntryStyle"},
+                                       &err);
+    if (style) p.styleDefault = R.Method(style, "get_Default", 0, &err);
+    auto pending = R.FieldOffset(p.listClass, "_pendingNotifications", &err);
+    std::optional<size_t> zoneName;
+    if (p.zoneClass) zoneName = R.FieldOffset(p.zoneClass, "_localizedName", &err);
+    const auto& a = api();
+    p.objectNew = a.module ? reinterpret_cast<Il2CppObject* (*)(Il2CppClass*)>(
+                                 reinterpret_cast<void*>(GetProcAddress(a.module, "il2cpp_object_new")))
+                           : nullptr;
+    if (!p.entryCtor || !p.styleDefault || !pending || !zoneName || !p.objectNew) {
+        why = err.empty() ? "notification entry / LocalizedString source not found" : err;
+        return false;
+    }
+    p.offPending = *pending;
+    p.offZoneName = *zoneName;
+    p.gadgetClass = R.Class(kImage, "", "GadgetDefinition", nullptr);
+    if (p.gadgetClass) {
+        auto t = R.FieldOffset(p.gadgetClass, "Type", nullptr);
+        auto i = R.FieldOffset(p.identClass, "icon", nullptr);
+        if (t && i) {
+            p.offGadgetType = *t;
+            p.offIdentIcon = *i;
+        } else {
+            p.gadgetClass = nullptr;
+        }
+    }
+    textReady_ = true;
+    return true;
+}
+
+Il2CppObject* SaleNotices::TeleporterIcon() {
+    if (!textReady_ || !impl_->gadgetClass) return nullptr;
+    Impl& p = *impl_;
+    if (p.teleIcon) {
+        Il2CppObject* s = unity::GCHandleTarget(p.teleIcon);
+        if (s && unity::IsAlive(s)) return s;
+        unity::FreeGCHandle(p.teleIcon);
+        p.teleIcon = nullptr;
+    }
+    const unsigned long long now = GetTickCount64();
+    if (p.teleIconTried && now - p.teleIconTried < 30000) return nullptr;  // one asset scan per 30 s at most
+    p.teleIconTried = now;
+    Il2CppObject* best = nullptr;
+    std::string bestName;
+    for (Il2CppObject* g : unity::FindObjectsOfTypeAll(p.gadgetClass)) {
+        if (!unity::IsAlive(g) || !p.IsA(g, p.gadgetClass)) continue;
+        if (unity::Field<int>(g, p.offGadgetType) != 1) continue;  // GadgetDefinition.Types.TELEPORTER
+        Il2CppObject* icon = unity::Field<Il2CppObject*>(g, p.offIdentIcon);
+        if (!icon || !unity::IsAlive(icon)) continue;
+        std::string name = unity::GetName(g);
+        // prefer the plain home teleporter (blue) over colour variants, if present
+        if (!best || name.find("Blue") != std::string::npos) {
+            best = icon;
+            bestName = name;
+        }
+        if (name.find("Blue") != std::string::npos) break;
+    }
+    if (!best) return nullptr;
+    p.teleIcon = unity::NewGCHandle(best, false);
+    SR2_INFO("[{}] text notices: teleporter icon '{}' (from {})", p.module, unity::GetName(best), bestName);
+    return best;
+}
+
+bool SaleNotices::QueueText(Il2CppObject* icon, const std::string& text) {
+    if (!textReady_ || text.empty()) return false;
+    if (!sr2::core::text_override::SinkActive()) {
+        if (!impl_->loggedNoSink) {
+            impl_->loggedNoSink = true;
+            SR2_INFO("[{}] text notices: the UI's text sink is off - notices only in the log", impl_->module);
+        }
+        return false;
+    }
+    if (impl_->texts.size() < kMaxQueued) impl_->texts.push_back({icon, text});
+    impl_->waited = 0.0f;
+    impl_->retry = 0.0f;
+    if (TryFlushText(*impl_)) impl_->texts.clear();
+    return true;
 }
 
 }  // namespace sr2::modules::custom_upgrades::ui
