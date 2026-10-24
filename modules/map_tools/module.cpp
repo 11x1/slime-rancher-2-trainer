@@ -16,9 +16,10 @@
 //     MapUI.LateUpdate uses (-MapViewModel.CursorPosition), turned into a world position with the view
 //     model's map / world rects (the inverse of Map.GetMapPosition) of the tab shown. In the player's zone
 //     (MapUI.TryFindZoneAt, ZoneDetectionArea._zoneMapData) or a zone of the player's scene group: the shared
-//     ground teleport (ground_teleport.h: far spots are streamed out, so the player is parked there until the
-//     area's colliders exist, then lands on the ground; TeleportablePlayer.TeleportTo, the game's in-scene
-//     teleport). In another discovered zone: the game's zone-to-zone travel
+//     ground teleport (ground_teleport.h: far spots are streamed out, so their regions are loaded in place while
+//     the player stays put, then he lands on a safe floor; TeleportablePlayer.TeleportTo, the game's in-scene
+//     teleport; never while knocked out). In another discovered zone (any zone but the Sanctuary with "Reveal
+//     everything" on): the game's zone-to-zone travel
 //     TeleportNetwork.TeleportToDestinationImpl into a node of the static teleport network that arrives in one
 //     of the zone's scene groups (ZoneSceneGroupMapping._mappings), then the same ground teleport. The map closes
 //     (UIDisplayManager.CloseDisplayByObjectInHierarchy). A refused click plays the map's "failed to place

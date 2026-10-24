@@ -128,6 +128,7 @@ float g_releaseAt = -1;              // >= 0: drop g_pins at this g_clock
 int g_frameCb = 0;
 Il2CppGCHandle g_loader = nullptr;   // SceneLoader (session cache)
 float g_loaderRetry = 0;
+bool g_checksLogged = false;         // the player state checks logged once (first Start)
 
 // ------------------------------------------------------------ game calls ---
 struct Fault {};  // a native fault inside a game call: abort the request, owner faulted
@@ -805,6 +806,14 @@ bool Start(const char* owner, float x, float z, Done done, std::string* why) {
             return;
         Il2CppObject* go = Call(g_s.scPlayer, sc, {}, "SceneContext.get_Player");
         if (!go || !unity::IsAlive(go)) return;
+        if (!g_checksLogged) {
+            g_checksLogged = true;
+            SR2_INFO("ground_teleport: knock-out check {}, scene load check {}",
+                     !g_s.deathHandler || !g_s.scriptedBoolValue ? "unavailable (symbols)"
+                     : unity::GetComponent(go, g_s.deathHandler) ? "on (PlayerDeathHandler on the player)"
+                                                                 : "OFF (no PlayerDeathHandler on the player object)",
+                     SceneLoader() ? "on" : "OFF (no SceneLoader found)");
+        }
         busy = Unavailable(go);
         if (!busy.empty()) return;
         Il2CppObject* player = unity::GetComponent(go, g_s.teleportable);
