@@ -108,9 +108,31 @@ animation).
 ## Sell-All receipt
 
 Pressing the silo's Sell-All button no longer sells at once: it opens a receipt (`silo_receipt.cpp`).
-One row per sellable plort type (icon, name, "x count", "@ unit price", line total + coin), the grand
+One row per sellable plort type (icon, name, "x count", unit price, line total + coin), the grand
 total, Cancel and Sell. Market closed / unreachable or no plorts: the old text above the button, no
 dialog.
+
+- **Fits the screen** (feedback round 4: it ran off-screen on a smaller resolution). The panel height
+  is capped at the canvas height (Screen size through the CanvasScaler formula, ScaleWithScreenSize
+  1920 x 1080 match 0.5 -> 16:9 is 1080 units high, ultrawide less) minus 36 px each side. Rows shrink
+  from 56 to 40 px, then the row list scrolls: a uGUI `ScrollRect` (Clamped) on a `RectMask2D`
+  viewport with a thin `Scrollbar` in the right margin (draggable, hidden when not needed). Its own
+  wheel handling is off (sensitivity 0); the mouse wheel (`Mouse.scroll.y`, one row per notch whatever
+  the delta units), Up / Down, W / S, d-pad and left stick up / down step one row. Without these
+  classes the rows only shrink (to 34 px) as before.
+- **Game buttons.** Cancel and Sell are clones of the game's own confirm-popup buttons:
+  `GameContext.UITemplates.popupPrompt` (prefab `PopupPrompt`, gamecore_scenes bundle, read with
+  UnityPy) -> `PopupPrompt._negativeActionButton` / `_positiveActionButton`, both
+  `TextButton_NoneSelectable` (the Purchase button's prefab: Button, ButtonAnimator, EventTrigger,
+  DetailsMoreButtonView, InputEventButton, EncapsulateChildren, the key icon `InputEventDisplay`
+  under "Icon Background" bound to the popup's positive / negative InputEvent). On the clone the
+  InputEventButton is disabled (it would perform that InputEvent on pointer down / up), the label's
+  LocalizeStringEvent is disabled and the TMP text set to "Cancel" / "Sell"; a polled Toggle on its
+  root takes the click (Button.onClick is empty in the prefab). The keyboard / pad focus is a teal
+  (Cancel) / pink (Sell) ring behind the focused button, fitted to its self-sized rect for 30 frames
+  after a build; disabled Sell = `Selectable.interactable` false (the prefab's disabled colours).
+  Fallback when any piece is missing: our own SDF buttons with "(Esc / B)" / "(Enter / A)" in the
+  label. Log: `silo receipt: buttons cloned from the game's popup, rows fit|scroll (N px, canvas H high)`.
 
 - **Input lock = the game's own.** The dialog root carries the game's `UIInputLocker` component, as
   menu prefabs do: `OnEnable` -> `TimeDirector.Pause` (timeScale 0, ref-counted) ->

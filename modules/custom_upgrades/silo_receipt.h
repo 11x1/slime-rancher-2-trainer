@@ -7,7 +7,9 @@
 //
 // Built at runtime from uGUI parts in the game's menu style (SDFRoundedRectangle shapes, the drone /
 // plot menu palette, a TMP font taken from the HUD): a root GameObject with its own overlay Canvas
-// (CanvasScaler 1920 x 1080, GraphicRaycaster) and the game's own UIInputLocker component.
+// (CanvasScaler 1920 x 1080, GraphicRaycaster) and the game's own UIInputLocker component. Cancel /
+// Sell are clones of the game's confirm-popup buttons (own buttons as a fallback); the panel is never
+// taller than the screen (the plort rows scroll when they do not fit).
 //
 // Input lock, the way the game's menus do it (disassembly, 1.3.0): UIInputLocker.OnEnable (0x6B0F00)
 // calls TimeDirector.Pause (0x550570: timeScale 0, ref-counted, raises OnPausedChanged) and pauses the
@@ -19,7 +21,8 @@
 //
 // Input while open: polled from the InputSystem devices (Keyboard.current / Gamepad.current
 // ButtonControl.wasPressedThisFrame; nothing hooked): Left / Right, A / D, Tab, d-pad, left stick
-// move between Cancel and Sell; Enter / Space / pad A press the focused one; Esc / pad B cancel.
+// move between Cancel and Sell; Enter / Space / pad A press the focused one; Esc / pad B cancel;
+// Up / Down, W / S, d-pad / left stick up / down and the mouse wheel scroll the rows (when they scroll).
 // Mouse: both buttons and the dimmed backdrop (= Cancel) carry a UnityEngine.UI.Toggle that we poll
 // and reset (no managed delegates). Input is ignored for the first 0.3 s, so the press that opened
 // the dialog can never confirm it.
