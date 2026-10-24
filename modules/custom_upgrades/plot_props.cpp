@@ -56,7 +56,8 @@
 // both kinds (the Hens II slots stay put when Hens I is bought or sold). A slot keeps within
 // +-3.7 m, out of the corner squares (|x| and |z| both > 2.5: terminal, vitamizer, elder
 // collector, Hen Collector), off the vanilla nest in the middle and clear of the other slots;
-// after 64 failed draws it takes a fixed fallback spot.
+// after 256 failed draws it takes a fixed fallback spot. The two nests are never in one line with the
+// vanilla nest (seen from the middle the second is 55..135 deg around from the first).
 //
 // Garden: a third sprinkler head in the middle of the +x side (Sprinkler II or III) and a fourth
 // in the middle of the -x side (Sprinkler III; the deposit port at (-5.44, -3.14) is outside the
@@ -163,6 +164,7 @@ constexpr SlotDef kCoopSlots[] = {
     {0.45f, 0.8f, 1.25f, 2.0f, -2.0f, 60.0f},  // 9 grass
 };
 constexpr size_t kCoopSlotCount = std::size(kCoopSlots);
+constexpr size_t kNestSlotA = 5, kNestSlotB = 6;  // the two nests (CoopLayout keeps them out of one line)
 
 const Part kHay[] = {
     {Src::kGadget, 0, "decorHayBales", "hayBale_2", {}, kId, S(0.5f), false, 0},
@@ -174,14 +176,17 @@ const Part kHay[] = {
 const Part kNests[] = {
     {Src::kPlot, kPlotCoop, nullptr, "Deco/nestPlain01", {}, kId, S(1.0f), false, 5},
     {Src::kPlot, kPlotCoop, nullptr, "Deco/nestPlain01", {}, kId, S(1.0f), false, 6},
-    // The plush hen sits deep in the nest (round 7: "hen one nest eggs are unnaturally lined up"): the
-    // stuffed chicken mesh (identifiabletypes bundle, "stuffedChicken", origin at the body centre, radius
-    // 0.44) has a row of round bulbs low on its front and sides (toes, wing tips; y -0.48 .. +0.05), which
-    // at the old height (+0.1) stood just above the nest floor (nestChicken01: floor ~0.09, rim ~0.40)
-    // like a neat row of eggs. At -0.06 every bulb is below the floor and inside the straw wall; the body
-    // and head still rise ~0.2 m over the rim. A slight 6 deg lean (about its own x) so it settles in.
-    {Src::kToy, 0, "toyStuffedChicken", "model_stuffedChicken", {0.0f, -0.06f, 0.0f},
-     {0.03700710f, -0.70614096f, 0.03700710f, 0.70614096f}, S(1.33f), false, 6},
+    // The plush hen lies on its side in the second nest. Round 7 sank it upright to -0.06 ("hen one nest eggs
+    // are unnaturally lined up"); round 8: "what stuffed chicken" / "the 3 eggs in hen upgrade in one nest is
+    // singular asset, should be sideways probably". The mesh ("stuffedChicken", identifiabletypes bundle, y up,
+    // origin at the body centre, half extents 0.49 x 0.48 x 0.54; the model's own local transform is identity)
+    // is a round body with a head bulb at the top front and two wing bulbs: sunk upright, only those three
+    // bulbs rose over the straw and read as three eggs in a row. Now it is rolled 90 deg about its forward
+    // axis (z) and smaller (1.0 instead of the toy's 1.33): lying sideways its centre is 0.30 above the nest
+    // root (floor ~0.09, rim ~0.40), so the body shows over the rim and its lower third hides in the straw.
+    // The nest's slot gives it a random yaw per plot.
+    {Src::kToy, 0, "toyStuffedChicken", "model_stuffedChicken", {0.0f, 0.30f, 0.0f},
+     {0.0f, 0.0f, 0.70710678f, 0.70710678f}, S(1.0f), false, 6},
     {Src::kGadget, 0, "decorFlowerPillowSmall", "mesh", {}, kId, S(0.7f), false, 7},
     {Src::kPlot, kPlotCoop, nullptr, "Deco/decoFieldsGrass02_Green", {}, kId, S(0.6f), false, 8},
     {Src::kPlot, kPlotCoop, nullptr, "Deco/decoFieldsGrass01 _Green", {}, kId, S(0.65f), false, 9},
@@ -304,7 +309,7 @@ CoopSlots CoopLayout(const std::string& id) {
     for (size_t i = 0; i < kCoopSlotCount; ++i) {
         const SlotDef& d = kCoopSlots[i];
         float x = d.fx, z = d.fz, yaw = d.fyaw;
-        for (int attempt = 0; attempt < 64; ++attempt) {
+        for (int attempt = 0; attempt < 256; ++attempt) {
             const float cx = rng.Range(-kHalf, kHalf), cz = rng.Range(-kHalf, kHalf);
             if (std::fabs(cx) > kCorner && std::fabs(cz) > kCorner) continue;
             if (cx * cx + cz * cz < (kMiddle + d.radius) * (kMiddle + d.radius)) continue;
@@ -314,6 +319,15 @@ CoopSlots CoopLayout(const std::string& id) {
                 clear = dx * dx + dz * dz >= r * r;
             }
             if (!clear) continue;
+            // The two nests (round 8: "the nests are not random again"): never in a line through the vanilla
+            // nest in the middle (nor side by side): seen from the middle the second one is 55..135 deg
+            // around from the first.
+            if (i == kNestSlotB) {
+                const float a = std::atan2(cz, cx), b = std::atan2(out[kNestSlotA].pos.z, out[kNestSlotA].pos.x);
+                float gap = std::fabs(a - b) * 57.2957795f;
+                if (gap > 180.0f) gap = 360.0f - gap;
+                if (gap < 55.0f || gap > 135.0f) continue;
+            }
             x = cx;
             z = cz;
             yaw = rng.Range(0.0f, 360.0f);
@@ -701,8 +715,13 @@ void PlotProps::Impl::Create(Il2CppObject* plot, const KindDef& def, Il2CppObjec
     if (def.kind == kPropCorralMusic)
         for (Il2CppObject* clone : clones)
             if (unity::IsAlive(clone)) sr2::modules::slime_dj::RegisterEmitter(clone, sr2::modules::slime_dj::EmitterKind::kSpeaker);
-    SR2_INFO("[{}] {} props built on plot '{}' ({} of {} piece(s){}{})", module, def.name, id, built, def.count,
-             scattered ? ", scattered by plot id" : "", SolidKind(def.kind) ? ", colliders kept" : "");
+    std::string where;
+    if (def.kind == kPropCoopNests)
+        where = std::format("; nests at ({:.1f}, {:.1f}) and ({:.1f}, {:.1f}), the plush hen lying in the second",
+                            layout[kNestSlotA].pos.x, layout[kNestSlotA].pos.z, layout[kNestSlotB].pos.x,
+                            layout[kNestSlotB].pos.z);
+    SR2_INFO("[{}] {} props built on plot '{}' ({} of {} piece(s){}{}){}", module, def.name, id, built, def.count,
+             scattered ? ", scattered by plot id" : "", SolidKind(def.kind) ? ", colliders kept" : "", where);
 }
 
 // Ash Booster: the "sr2ash" ember clones sit 5 cm over the live ash surface (see the header). Called
