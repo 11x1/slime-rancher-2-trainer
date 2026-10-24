@@ -9,6 +9,8 @@
 //                                                                                    card, after II
 //   Drone Battery Saver   4      every drone station's drone uses 1/1.25 .. 1/2 of   own card, once the Drone
 //     I-IV                       the battery (effect: drone_battery.cpp)             Station blueprint is owned
+//   Shadow Catcher        1      the vacpack holds shadow slimes, they stay and eat  own card
+//                                on the ranch (effect: shadow_catcher.cpp)
 //
 // Tiers: four / two more UpgradeLevelDefinitions (deep copies from Object.Instantiate of
 // "AmmoCapacity", with our values, costs and texts) appended to the vanilla definitions' _levels at
@@ -18,6 +20,9 @@
 // Tank Booster / Extra Tank to VIII / II in the save's copy; the real level is a per-save value in
 // the custom_upgrades sidecar (written by the SetUpgradeLevel detour) and the ~1 Hz tick puts it back
 // on the model after a load (only on top of a maxed vanilla level in the save).
+// Shadow slimes in the vacpack never reach the vanilla save: AmmoModel.Pull gives the save an empty
+// slot in their place and writes "vanilla slot index=count" to the sidecar (kShadowStashKey); the tick
+// puts them back after a load (once the Shadow Catcher is known to be owned).
 // The Drone Battery Saver is its own card: a clone of "AmmoCapacity" with its own _uniqueId,
 // appended to the player's UpgradeDefinitionList (+ the Fabricator category's list); its id is
 // removed from the save's copy, its level lives in the sidecar.
@@ -50,6 +55,11 @@ inline constexpr const char* kDroneBatteryKey = "custom_upgrades.vacpack.drone_b
 // Old builds sold the Battery Saver per drone station: "<prefix><actor id>" = tier 1..4. Migrated
 // once into the global level (the highest tier wins) and then erased.
 inline constexpr const char* kOldBatteryPrefix = "drone_battery.station.";
+// Per-save value of the Shadow Catcher: "0" = owned ("" = not).
+inline constexpr const char* kShadowCatcherKey = "custom_upgrades.vacpack.shadow_catcher";
+// Shadow slimes in the player's vanilla vacpack slots at the last game save: "v=count;..." (v = vanilla
+// slot index 0..6).
+inline constexpr const char* kShadowStashKey = "custom_upgrades.vacpack.shadow_slots";
 
 // What the vacpack upgrades need from module.cpp.
 struct Host {
