@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <optional>
 #include <cstdint>
 #include <cstring>
 #include <format>
@@ -274,6 +275,7 @@ private:
     }
     bool Context(Ctx& c, std::string& why);
     Il2CppObject* SlotAt(const Ctx& c, int idx);
+    std::string VacpackState(bool sync);  // for the upgrades manager (log line; sync: slot maxima follow AmmoLimit)
     std::string Localized(Il2CppObject* ls);
     std::string ItemName(Il2CppObject* ident);
     uint32_t ItemIcon(Il2CppObject* ident, uint32_t* second = nullptr);
@@ -706,7 +708,8 @@ bool Sandbox::Setup(sr2::core::ModuleContext& ctx) {
     sandbox::SetupPlayerExtras(ctx);  // optional tools on the Extras card (player_extras.cpp)
     sandbox::SetupUpgrades(ctx, {[this](uintptr_t id) { return Lookup(recipeById_, id, gadgetDefClass_); },
                                  [this](bool rebuild) { RefreshFabricator(rebuild); },
-                                 [this] { lastRecipeState_ = lastUpgState_ = lastSnap_ = 0; }});  // upgrades.cpp
+                                 [this] { lastRecipeState_ = lastUpgState_ = lastSnap_ = 0; },
+                                 [this](bool sync) { return VacpackState(sync); }});  // upgrades.cpp
 
     g_self = this;
     if (!frameCb_) frameCb_ = main_thread::AddFrameCallback(kModule, [this](float dt) { Tick(dt); });
@@ -1059,6 +1062,62 @@ bool Sandbox::Context(Ctx& c, std::string& why) {
         }
     }
     return true;
+}
+
+// "slot 1 holds up to 60, 6 of 9 slots unlocked": what the Tank Booster / Extra Tank levels show, read the
+// way the page reads it (AmmoSlotManager.GetSlotMaxCount, AmmoSlot.IsUnlocked).
+// `sync` (after a Tank Booster / Extra Tank change): when slot 1's maximum is not what the AmmoLimit property
+// now says, every slot's maximum is set to it with AmmoSlotManager.UpdateMaxCount (0xA3AB70 -> AmmoModel.
+// UpdateMaxCount -> AmmoSlot.set_MaxCount, the NullableFloatProperty's DefaultValue; the call the silo
+// capacity upgrade uses). A backstop for "the Tank Booster max stayed at 60" (round 8), cause not seen.
+std::string Sandbox::VacpackState(bool sync) {
+    Ctx c;
+    std::string why;
+    if (!Context(c, why)) return "no player (" + why + ")";
+    const size_t n = c.slots ? unity::ArrayLength(c.slots) : 0;
+    int max0 = -1, unlocked = 0;
+    for (size_t i = 0; i < n; ++i) {
+        int idx = static_cast<int>(i);
+        Il2CppObject* a = SlotAt(c, idx);
+        if (!a) continue;
+        bool open = false;
+        CallValue(slotUnlocked_, a, {}, "AmmoSlot.IsUnlocked", open);
+        unlocked += open ? 1 : 0;
+        if (i == 0) CallValue(slotMax_, c.ammo, {&idx}, "AmmoSlotManager.GetSlotMaxCount", max0);
+    }
+    // Where slot 1's maximum comes from: AmmoSlot._maxCountValue (NullableFloatProperty: DefaultValue, or the
+    // bound ModifiableFloat "AmmoLimit" that the Tank Booster's modifiers change; AmmoSlot.Setup binds it).
+    std::string src;
+    Il2CppObject* a0 = n ? SlotAt(c, 0) : nullptr;
+    auto& R = Resolver::Get();
+    static std::optional<size_t> offNullable = R.FieldOffset(ammoSlotClass_, "_maxCountValue");
+    Il2CppObject* nullable = a0 && offNullable ? unity::Field<Il2CppObject*>(a0, *offNullable) : nullptr;
+    if (nullable) {
+        Il2CppClass* nk = api().il2cpp_object_get_class(nullable);
+        auto offDef = R.FieldOffset(nk, "DefaultValue"), offProp = R.FieldOffset(nk, "Property");
+        Il2CppObject* prop = offProp ? unity::Field<Il2CppObject*>(nullable, *offProp) : nullptr;
+        float value = -1.0f;
+        if (prop) {
+            const MethodInfo* get = nullptr;
+            for (Il2CppClass* k = api().il2cpp_object_get_class(prop); k && !get; k = api().il2cpp_class_get_parent(k))
+                get = R.Method(k, "get_Value", 0);
+            CallValue(get, prop, {}, "ModifiableFloat.get_Value", value);
+        }
+        src = std::format("; its default {}, AmmoLimit property {}", offDef ? unity::Field<float>(nullable, *offDef) : -1.0f,
+                          prop ? std::format("bound, value {}", value) : std::string("not bound"));
+        const int want = static_cast<int>(std::floor(value));
+        static const MethodInfo* updateMax = R.Method(ammoMgrClass_, "UpdateMaxCount", 1);
+        if (sync && prop && want > 0 && want != max0 && updateMax) {
+            int32_t v = want;
+            bool ok = false;
+            Call(updateMax, c.ammo, {&v}, "AmmoSlotManager.UpdateMaxCount", &ok);
+            int idx = 0, now = -1;
+            CallValue(slotMax_, c.ammo, {&idx}, "AmmoSlotManager.GetSlotMaxCount", now);
+            src += std::format("; slot maxima set to {} with UpdateMaxCount ({} -> {})", want, max0, now);
+            max0 = now;
+        }
+    }
+    return std::format("slot 1 holds up to {}{}, {} of {} slots unlocked", max0, src, unlocked, n);
 }
 
 Il2CppObject* Sandbox::SlotAt(const Ctx& c, int idx) {
