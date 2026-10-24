@@ -658,11 +658,11 @@ coop_world's scan would destroy), stripped of colliders, joints, rigidbodies and
 | tier | prop | source |
 |---|---|---|
 | Faster Hens I or II (u5) | two small hay bales (scale 0.5) and three grass tufts, scattered | decoration `decorHayBales`: `hayBale_2`, `hayBale_0 (1)`; coop prefab `Deco/decoFieldsGrass01 _Green`, `Deco/decoFieldsGrass02_Green` |
-| Faster Hens II (u6) | two nests (a stuffed chicken in the second), a flower pillow and two more grass tufts, scattered | coop prefab `Deco/nestPlain01` (the vanilla nest), toy `toyStuffedChicken`: `model_stuffedChicken`, decoration `decorFlowerPillowSmall`: `mesh`, coop grass as above |
+| Faster Hens II (u6) | two nests (a stuffed chicken sitting deep in the second), a flower pillow and two more grass tufts, scattered | coop prefab `Deco/nestPlain01` (the vanilla nest), toy `toyStuffedChicken`: `model_stuffedChicken`, decoration `decorFlowerPillowSmall`: `mesh`, coop grass as above |
 | Sprinkler II or III (u9; were Fast Growth I / II) | a third sprinkler head in the middle of the +x side, spraying inwards | garden prefab `Sprinkler/SprinklerBase` (vanilla heads are on the -z / +z sides) |
 | Sprinkler III | a fourth head in the middle of the -x side, turned 180 degrees | same |
 | Music Box II | a second speaker on the (-x, -z) corner post (above the plot menu terminal), leaning inwards | corral prefab `Music Box/techCorralMusicBox/MusicBox/Music` (the vanilla speaker sits on the (-x, +z) post) |
-| Ash Booster (u11) | glow + embers in the fire, embers rising out of the opening | incinerator prefab `.../meshIncinerator/FireTest/Glow` and `/Embers` (inactive in vanilla, switched on), decoration `decorFireFlower`: `FX Fireflower` |
+| Ash Booster (u11) | glow + embers in the fire, embers rising out of the opening, and three ember emitters on the ash around the incinerator (following the ash height) | incinerator prefab `.../meshIncinerator/FireTest/Glow` and `/Embers` (inactive in vanilla, switched on), decoration `decorFireFlower`: `FX Fireflower` |
 | Silo Capacity II / III / IV / V | one capacity tank per tier standing on the ground beside the silo: II (+x, +z), III adds (-x, +z), IV adds (+x, -z), V adds (-x, -z); solid (colliders kept) | silo prefab `Silo Upgrade 0/Addition 0/Capacity Addon 0/techSiloCapacity` (the vanilla Storage Capacity Upgrade's tank, with its pipe-connector foot) at 0.8 size |
 
 Gadget / toy prefabs are found by prefab name in `LookupDirector._gadgetDefinitions` /
@@ -674,6 +674,23 @@ Coop scatter: one layout of 10 slots per coop (`CoopLayout`), seeded by FNV-1a o
 Slots stay within +-3.7 m, out of the corner squares (|x| and |z| both > 2.5), about 1.2 m off the
 vanilla nest and clear of each other (radius per slot); 64 draws, then a fixed fallback spot (a
 simulation over 2000 ids never needed it).
+
+Round 7 feedback, coop: "hen one nest eggs are unnaturally lined up". No prop has eggs: the nest mesh
+(`nestChicken01`, 482 vertices: bowl, floor disc, straw planks) and the pillow (5 petals) have none, and
+SR2 has no egg model besides the giant eggs. The "eggs" are the stuffed chicken's own bulbs: its mesh
+(`stuffedChicken`, origin at the body centre, radius 0.44) has a row of round bulbs low on its front and
+sides (toes, wing tips, y -0.48 .. +0.05). At the old height (+0.1 in the nest) their tops stood just above
+the nest floor (~0.09; rim ~0.40) in a neat row. The hen now sits at -0.06 (every bulb below the floor,
+inside the straw wall; body and head still ~0.2 m over the rim) with a 6 degree lean. If the user still
+sees eggs, ask for a screenshot.
+
+Round 7 feedback, incinerator: "embers should come from ash aswell". Three more clones of the vanilla
+inactive `FireTest/Embers` emitter (turned -90 degrees about x, so it emits upwards), smaller, at r ~3.3
+around the incinerator: (3.1, 1.2), (-1.9, 2.7), (-1.0, -3.2). They are named `sr2ash` and follow the
+live `AshTrough/Ash Level` transform (FillableAshSource moves it between MinYPos and MaxYPos with the ash;
+prefab y 0.75 = full) 5 cm above it, checked on every ~1 Hz tick (`FollowAsh`, writes only on a change).
+Not checked: that the ash plane really covers those spots (Ash Level mesh bounds not read) and whether the
+emitter looks right at that size.
 
 Corral corners: plot menu terminal (-x, -z) outside the post at ground height, vanilla speaker
 (-x, +z), plort collector (+x, +z), auto-feeder distributor (+x, -z) at 2.5 m. The second speaker
