@@ -1,8 +1,14 @@
 # misc_tweaks module notes
 
-Small speed-ups. Module key `misc_tweaks`, on by default, but every option is off (or 1x) by default, so it changes nothing until one is turned on. Options tab: Misc > General, its own card (groups Fabricator and Vacpack). Game 1.3.0; everything is resolved by name, the RVAs are for re-checking after an update (Cpp2IL dump + IDA). Each feature degrades on its own: a missing symbol drops that feature's settings and hook (log: `fast Fabricator purchases NOT available: ...` / `skip upgrade animation NOT available: ...` / `vacpack shooting options NOT available: ...`); the module fails only when all three are missing.
+Small speed-ups. Module key `misc_tweaks`, on by default, but every option is off (or 1x) by default, so it changes nothing until one is turned on. Options tab: Misc > General, its own card, with the small sub-headers Fabricator and Vacpack (the card's groups). Help texts are one short sentence each (round 9 request: "keep them 1 sentence and lean"). Game 1.3.0; everything is resolved by name, the RVAs are for re-checking after an update (Cpp2IL dump + IDA). Each feature degrades on its own: a missing symbol drops that feature's hook and its combo entry or settings (log: `fast Fabricator purchases NOT available: ...` / `skip upgrade animation NOT available: ...` / `vacpack shooting options NOT available: ...`); the module fails only when all three are missing.
 
-## Fast Fabricator purchases (`fast_fabricator`, default off)
+## Fabricator purchases (`fab_purchases`, combo, default Normal)
+
+Round 9 request: "fast fabricator purchases should override skip upgrade animation, make it a combo instead". The two switches below became one Enum: **Normal** (the game's way), **Skip animation** (the confirm window stays, the success animation goes: the HideForConfirm detour), **Instant** (no window, bought at once: the OnItemActivated detour; the HideForConfirm skip is on too, for what still opens the window). Without the OnItemActivated hook the combo has only Normal / Skip animation; without the HideForConfirm hook, Instant still works and Skip animation does nothing (logged at setup).
+
+**Migration** (`MigrateFabMode`, once, at setup, only when `fab_purchases` was never saved and an old key was): `fast_fabricator` on -> Instant; else `skip_fab_anim` on -> Skip animation; else Normal. Logged as `migrated Fabricator settings (...) -> Fabricator purchases = N`. The old keys stay in `sr2mods.json` but are no longer registered or read. Profiles saved before round 9 still carry the old keys, which do nothing now.
+
+## Instant purchases (was `fast_fabricator` until round 9)
 
 "It takes a bit right now, like completely remove the game's popup maybe?" What the game does (IDA):
 
@@ -19,14 +25,14 @@ Log: at setup the RVAs of the hook, both `CheckCanFabricate` bodies and `OnConfi
 
 Not seen in game: the grid's refresh after `ItemCrafted`, and the cue.
 
-## Skip upgrade animation (`skip_fab_anim`, default off)
+## Skip animation (was `skip_fab_anim` until round 9)
 
 The softer option: the confirmation window stays (count picker for gadgets, confirm), only the wait after the confirm goes. What the game does after the confirm (IDA):
 
 - `HideForConfirm` (0x800A50): `_isClosing = true`, `_onFadeOutStart.Invoke()`; with a `_successAnimator`: enable it, `SetBool(IS_UPGRADE)`, `SetTrigger(SUCCESS)`, return. Without one: the `_transitionFader`'s fade-out and `FadeOutComplete` at once (the game's own no-animation path).
 - The animation's end calls `NotifyAnimatorFadeOutComplete` (0x800FB0, `[PublicAPI]`, an animation event): disables the Animator, the fader's fade-out, `FadeOutComplete` -> `FabricatorUI.HandleConfirmationFadeOutComplete` -> `ReturnToContent` (0x826CB0: `_confirming = false`, content enabled and focused, key bar back). The success sound is `PlaySuccessAudioCue` (0x8010C0, also `[PublicAPI]`, so an animation event too).
 
-What the module does: a detour on `HideForConfirm`: the original first, then, with the option on and only when the Animator path was taken (`_isClosing` set, `_successAnimator` alive, `_transitionFader` set; `NotifyAnimatorFadeOutComplete` throws a NullReferenceException without them), `PlaySuccessAudioCue` and `NotifyAnimatorFadeOutComplete`. The Animator is disabled in the same frame it was triggered, so nothing of it is drawn and its events never fire (no double cue, no second `FadeOutComplete`); `Show` resets it next time. Works for upgrades and gadgets. With "Fast Fabricator purchases" also on, buyable items never reach the window, so this only matters for what still goes through it. Log: `skipped the Fabricator's success animation` (first 10).
+What the module does: a detour on `HideForConfirm`: the original first, then, with the option on and only when the Animator path was taken (`_isClosing` set, `_successAnimator` alive, `_transitionFader` set; `NotifyAnimatorFadeOutComplete` throws a NullReferenceException without them), `PlaySuccessAudioCue` and `NotifyAnimatorFadeOutComplete`. The Animator is disabled in the same frame it was triggered, so nothing of it is drawn and its events never fire (no double cue, no second `FadeOutComplete`); `Show` resets it next time. Works for upgrades and gadgets. With Instant, buyable items never reach the window, so this only matters for what still goes through it. Log: `skipped the Fabricator's success animation` (first 10).
 
 Not seen in game: whether the fader's own fade-out is short enough to feel instant, and that the Animator starts clean on the next purchase.
 

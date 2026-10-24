@@ -1,6 +1,7 @@
 // misc_tweaks: small speed-ups, each off by default (Misc > General card). See NOTES.md for the research.
 //
-//   * Fast Fabricator purchases: FabricatorUI.OnItemActivated(item) (the item grid's activate / Fabricate /
+//   * "Fabricator purchases" (one combo: Normal / Skip animation / Instant).
+//   * Instant: FabricatorUI.OnItemActivated(item) (the item grid's activate / Fabricate /
 //     Upgrade) normally opens FabricatorConfirmPopup (count picker, confirm), and after the confirm plays the
 //     popup's success animation before the menu takes input again. With the option on, the detour checks the
 //     item as the popup's confirm does (IFabricatableItem.CheckCanFabricate(1) == NONE) and, if it can be made,
@@ -10,7 +11,7 @@
 //     no animation. Anything that cannot be made goes the game's way (the popup with its reason, or nothing).
 //     CheckCanFabricate is an explicit interface implementation, so its metadata name is
 //     "MonomiPark.SlimeRancher.UI.Fabricator.IFabricatableItem.CheckCanFabricate" (the plain name is not found).
-//   * Skip upgrade animation: FabricatorConfirmPopup.HideForConfirm (after the confirm) starts the popup's success
+//   * Skip animation (also on with Instant, for what still goes through the popup): FabricatorConfirmPopup.HideForConfirm (after the confirm) starts the popup's success
 //     Animator, whose end calls NotifyAnimatorFadeOutComplete (fade out, FadeOutComplete -> FabricatorUI.
 //     ReturnToContent) and whose event plays PlaySuccessAudioCue. With the option on, the detour calls both right
 //     after the original: the popup closes and the menu takes input in the same frame.
@@ -35,6 +36,7 @@
 #include <format>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "core/detour_guard.h"
 #include "core/il2cpp_api.h"
@@ -54,8 +56,11 @@ using sr2::il2cpp::api;
 
 constexpr const char* kModule = "misc_tweaks";
 constexpr const char* kImage = "Assembly-CSharp";
-constexpr const char* kFastFab = "fast_fabricator";
-constexpr const char* kSkipAnim = "skip_fab_anim";
+constexpr const char* kFabMode = "fab_purchases";  // FabMode
+// Before round 9: two switches, replaced by kFabMode (migrated once, see MigrateFabMode).
+constexpr const char* kOldFastFab = "fast_fabricator";
+constexpr const char* kOldSkipAnim = "skip_fab_anim";
+enum FabMode : int { kFabNormal = 0, kFabSkipAnim = 1, kFabInstant = 2 };
 constexpr const char* kVacFast = "vac_always_fast";
 constexpr const char* kVacMult = "vac_shoot_mult";
 // VacAccelerationHelper.CreateInput (1.3.0 RVA 0x99A530): MinFactor 1, MaxFactor 3, Speed 0.5/s, Duration 1 s.
@@ -92,8 +97,9 @@ std::atomic<bool> g_fastFab{false}, g_skipAnim{false}, g_vacFast{false};
 std::atomic<float> g_vacMult{1.0f};
 
 void LoadCfg() {
-    g_fastFab.store(settings::GetBool(kModule, kFastFab));
-    g_skipAnim.store(settings::GetBool(kModule, kSkipAnim));
+    const int mode = settings::GetInt(kModule, kFabMode);
+    g_fastFab.store(mode == kFabInstant);
+    g_skipAnim.store(mode == kFabSkipAnim || mode == kFabInstant);  // Instant: also for what still opens the window
     g_vacFast.store(settings::GetBool(kModule, kVacFast));
     float m = settings::GetFloat(kModule, kVacMult);
     g_vacMult.store(std::isfinite(m) ? std::clamp(m, 1.0f, 5.0f) : 1.0f);
@@ -121,6 +127,7 @@ private:
     bool SetupSkipAnim(sr2::core::ModuleContext& ctx, std::string& why);
     bool SetupVacpack(sr2::core::ModuleContext& ctx, std::string& why);
     void RegisterSettings(bool fab, bool anim, bool vac);
+    static void MigrateFabMode();
     void LogSkip(Il2CppObject* item, const std::string& why);
 
     Il2CppClass* fabUiClass_ = nullptr;      // MonomiPark.SlimeRancher.UI.Fabricator.FabricatorUI
@@ -355,26 +362,23 @@ void MiscTweaks::RegisterSettings(bool fab, bool anim, bool vac) {
         x.tooltip = tip;
         return x;
     };
-    if (fab)
-        settings::Register(def(kFastFab, "Fast Fabricator purchases", "Fabricator", settings::Kind::Bool, 0, 0, 1, 1,
-                               "Fabricate or Upgrade in the Fabricator buys at once: no confirmation window and no "
-                               "purchase animation. It costs what it always costs and needs the same materials; "
-                               "gadgets are made one per press (the window's amount picker is skipped). Anything "
-                               "you cannot buy opens the game's window as usual"));
-    if (anim)
-        settings::Register(def(kSkipAnim, "Skip upgrade animation", "Fabricator", settings::Kind::Bool, 0, 0, 1, 1,
-                               "After you confirm a purchase in the Fabricator's window (upgrades and gadgets), the "
-                               "success animation is skipped: the window closes at once and the Fabricator takes "
-                               "input again. The success sound still plays"));
+    if (fab || anim) {
+        // Only the modes whose hooks are in: Instant needs OnItemActivated, Skip animation HideForConfirm.
+        settings::Def d = def(kFabMode, "Fabricator purchases", "Fabricator", settings::Kind::Enum, 0, 0,
+                              fab ? 2 : 1, 1,
+                              fab && anim ? "Skip animation keeps the confirm window without the success animation; "
+                                            "Instant buys at once, one per press."
+                              : fab       ? "Instant buys at once without the confirm window, one per press."
+                                          : "Skip animation keeps the confirm window without the success animation.");
+        d.options = fab ? std::vector<std::string>{"Normal", "Skip animation", "Instant"}
+                        : std::vector<std::string>{"Normal", "Skip animation"};
+        settings::Register(d);
+    }
     if (vac) {
         settings::Register(def(kVacFast, "Fast vacpack shooting everywhere", "Vacpack", settings::Kind::Bool, 0, 0, 1,
-                               1,
-                               "Holding the shoot button speeds the vacpack up the way feeding a silo, refinery or "
-                               "market input does, wherever you aim: from the normal rate to 3x over 4 seconds of "
-                               "shooting, back to normal 1 second after you stop"));
+                               1, "Shooting ramps the vacpack up to 3x anywhere, as feeding a silo does."));
         settings::Def m = def(kVacMult, "Vacpack shooting speed", "Vacpack", settings::Kind::Float, 1, 1, 5, 0.25,
-                              "Multiplies how fast the vacpack shoots out items. Stacks with the option above and "
-                              "with the game's own speed-up at inputs (the vacpack shoots at most once per frame)");
+                              "Multiplies how fast the vacpack shoots items out.");
         m.unit = "x";
         settings::Register(m);
     }
@@ -390,14 +394,29 @@ bool MiscTweaks::Setup(sr2::core::ModuleContext& ctx) {
     if (!vac) SR2_WARN("[{}] vacpack shooting options NOT available: {}", kModule, vacWhy);
     if (!fab && !anim && !vac) return ctx.Fail("nothing to do: " + fabWhy + "; " + animWhy + "; " + vacWhy);
     RegisterSettings(fab, anim, vac);
+    if (fab || anim) MigrateFabMode();
     LoadCfg();
     if (!onChange_) onChange_ = settings::OnChange(kModule, [](const std::string&) { LoadCfg(); });
     g_self = this;
-    SR2_INFO("[{}] setup ok (fast Fabricator {}, skip animation {}, vacpack {}; now: fast purchases {}, skip "
-             "animation {}, fast shooting {}, speed {:.2f}x)",
-             kModule, fab ? "yes" : "no", anim ? "yes" : "no", vac ? "yes" : "no", g_fastFab.load() ? "on" : "off",
-             g_skipAnim.load() ? "on" : "off", g_vacFast.load() ? "on" : "off", g_vacMult.load());
+    static constexpr const char* kModeNames[] = {"Normal", "Skip animation", "Instant"};
+    SR2_INFO("[{}] setup ok (instant Fabricator {}, skip animation {}, vacpack {}; now: Fabricator purchases {}, "
+             "fast shooting {}, speed {:.2f}x)",
+             kModule, fab ? "yes" : "no", anim ? "yes" : "no", vac ? "yes" : "no",
+             kModeNames[std::clamp(settings::GetInt(kModule, kFabMode), 0, 2)], g_vacFast.load() ? "on" : "off",
+             g_vacMult.load());
     return true;
+}
+
+// Round 9: the two switches became one combo. Once, when the combo was never saved but a switch was: fast
+// purchases on -> Instant (it already skipped the window), else skip animation on -> Skip animation.
+void MiscTweaks::MigrateFabMode() {
+    if (settings::Saved(kModule, kFabMode)) return;
+    if (!settings::Saved(kModule, kOldFastFab) && !settings::Saved(kModule, kOldSkipAnim)) return;
+    const bool fast = settings::GetBool(kModule, kOldFastFab), skip = settings::GetBool(kModule, kOldSkipAnim);
+    const int mode = fast ? kFabInstant : skip ? kFabSkipAnim : kFabNormal;
+    settings::Set(kModule, kFabMode, mode);  // clamped to the registered range if Instant is unavailable
+    SR2_INFO("[{}] migrated Fabricator settings (fast purchases {}, skip animation {}) -> Fabricator purchases = {}",
+             kModule, fast ? "on" : "off", skip ? "on" : "off", settings::GetInt(kModule, kFabMode));
 }
 
 // The popup's confirm, minus the popup: FabricatorConfirmPopup.OnSubmit checks
