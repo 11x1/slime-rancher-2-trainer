@@ -23,7 +23,7 @@ struct KeyRow {
 };
 
 // A tooltip in the Sandbox page's item style: the name, a small coloured tag, coloured lines, then the
-// key hints as keycap rows (stacked, at the right).
+// key hints as keycap rows (left-aligned, each label after its own keycaps: menu.cpp TipKeys).
 struct Tip {
     std::string name;
     std::string tag;                                   // "" = no tag
