@@ -137,11 +137,14 @@ decompiled, **[inferred]** = not checked. RVAs for reference only.
 | part | how |
 |---|---|
 | (a) vac them | `AmmoSlotDefinition.IsAllowed` detour: true for the Shadow `SlimeDefinition` on the player's regular slot definitions (same type group as `AmmoSlot1`, so the six vanilla slots and Extra Tank III / IV; not the water slot, silos, drones, feeders). Shadow slimes don't notice the player any more (`ScatterIfPlayerNear` skipped, `Relevancy` 0 unless alerted), so you can walk up to them; a hit still alerts them as in vanilla. |
-| (b) stay on the ranch | on the ranch (`CellDirector.IsOnRanch(scatter._member)`): `DoAlert` skipped, an old alert cleared (`_latestAlertObject` null, `_destroyTime` 1e300, face `_isFleeing` false), `Action` skipped, `Relevancy` 0; `ProducePlort` resets the hit-plort counter. They save as normal actors. |
+| (b) stay on the ranch | on the ranch (`CellDirector.IsOnRanch(scatter._member)`): `DoAlert` skipped, an old alert cleared (`_latestAlertObject` null, `_destroyTime` 1e300, face `_isFleeing` false), `Action` skipped, `Relevancy` 0; `ProducePlort` skipped (no hit plorts on the ranch; `ProcessCollisionEnter` 0x8859F0 is its only caller). They save as normal actors. |
+| (b2) need shade by day | the Phosphor rule (`DestroyOutsideHoursOfDay`: live window + endure hours, stopped by any `CaveTrigger`; the corral Solar Shield is a `CaveTrigger` box, 10 x 5 / 10 x 8 x 10 m): in daylight a kept slime outside every active `CaveTrigger` collider's bounds gets a fade clock (Phosphor's endure, floored at 0.25-0.5 game h), then a deliberate vanilla `DoAlert` makes it vanish. Card text and the English Slimepedia risks entry carry the note. |
 | (c) eat | the Shadow diet's `EatMap` gets copies of the Pink slime's food entries (no plorts, no transformations, `MinDrive` / `ExtraDrive` 0) producing Shadow plorts; each kept slime gets `_keepEatingWhenFull` and `InitFood`, plus the Ringtail rhythm: `DrivePerEat` >= 1, the vanilla default hunger rate, mischievous face while full (in memory). |
 | save of the vacpack | `AmmoModel.Pull` (player): an empty `AmmoSlot` replaces each slot holding Shadow slimes in the save's copy; `custom_upgrades.vacpack.shadow_slots` = `v=count;...` (vanilla slot index). The tick puts them back after a load. |
 
 Not done / limits: no new food item (an existing diet copied instead); the diet change is global, so a
 feral wild shadow slime could eat too (non-feral wild ones never get hungry and don't keep eating); kept
 slimes eat whenever food reaches them like Ringtails, but only a meal while hungry makes a plort; emotions of a
-vacuumed shadow slime are lost (only type and count are stored, like the extra slots).
+vacuumed shadow slime are lost (only type and count are stored, like the extra slots). No Shadow largos exist in
+1.3.0 (`CanLargofy` 0, no largo definition or name pairs Shadow with anything); new ones would need new type ids
+(not save-safe), so none were made.

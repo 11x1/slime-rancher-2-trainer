@@ -1341,7 +1341,8 @@ eating food". Research, RVAs and the save question: `re/shadow-slimes.md` (secti
 - **Ranch.** Shadow slimes are tracked when one of their scatter hooks runs (GC handle; the tick frees dead ones).
   The ~1 Hz tick asks `CellDirector.IsOnRanch(scatter._member)` (the game's own test, also used by the feral
   lifetime). Kept: `DoAlert` and `Action` skipped, an old alert cleared, `Relevancy` 0, and the
-  `ProducePlortsOnHit.ProducePlort` detour resets the hit-plort counter so the "despawn after 10 plorts" never fires.
+  `ProducePlortsOnHit.ProducePlort` detour skips hit plorts on the ranch (below), so the "despawn after 10 plorts"
+  never fires.
   They save natively (actor type Shadow has a persistence id; only the player is in `ignoreOnLoad`). Logs:
   `shadow catcher: shadow slime '...' is on the ranch: kept ...` / `left the ranch ...`, and `N shadow slime(s) loaded
   nearby, K kept on the ranch` when the numbers change.
@@ -1371,6 +1372,46 @@ eating food". Research, RVAs and the save question: `re/shadow-slimes.md` (secti
   `shadow slime '...' ate and is full ... hungry again in ~N game h` / `is hungry again ... next meal makes a plort`
   (at most 12 such lines per minute). The hunger value is saved in `SlimeModel.Emotions` like every slime's (vanilla
   safe); the rate, `DrivePerEat` and the face flag are not saved.
+  **Fix (round 9):** the rhythm never ran before: `SlimeEmotionConfig` was looked up in the global namespace, it lives
+  in `MonomiPark.SlimeRancher.Slime` (user's log: `no hunger rhythm (class 'SlimeEmotionConfig' not found ...)`). So a
+  kept slime kept Shadow's hunger rate 0 and the vanilla `DrivePerEat`.
+- **No hit plorts on the ranch (round 9).** User: "hitting them with food while in a plot still drops plorts". That was
+  `ProducePlortsOnHit` (the Gold / Shadow "plort when hit" component): `ProcessCollisionEnter` (0x8859F0) calls
+  `ProducePlort` for any `ProducePlortGroups` object hitting faster than `_speedThresholdToProducePlort` (thrown food
+  included), its only caller. The `ProducePlort` detour now skips the call for a Shadow slime on the ranch
+  (`CellDirector.IsOnRanch(_regionMember)`, owned only): on the ranch plorts come only from meals while hungry. In the
+  wilds hit plorts are vanilla. Log once: `a hit on a shadow slime on the ranch made no plort`.
+- **Sunlight: the Phosphor rule (round 9).** User: "another upgrade to keep them in ... maybe solar shield works? should
+  have the same note as phosphor ... (that they hate sunlight when in ranch)". Vanilla Phosphors carry
+  `DestroyOutsideHoursOfDay` (`StartHour` / `EndHour` = the hours they live in, `Min/MaxEndureHoursOutsideWindow`,
+  `CavesPreventShutdown`): outside the window a shutdown clock runs (next `EndHour` + Random(endure) game h), then
+  `DeathHandler.Kill` + `Destroyer.DestroyActor`; any `CaveTrigger` holding the slime (`OnCaveEnter`) stops it. The
+  corral **Solar Shield is a CaveTrigger**: CORRAL prefab children "Base SolarShield" / "High SolarShield" (inactive until
+  bought, `SolarShieldUpgrader.Shields`), each with a "Cave Trigger" child (BoxCollider on layer 22, 10 x 5 x 10 and 10 x 8
+  x 10 m, `CaveTrigger` component). Adding the vanilla component to a shadow slime at runtime would miss the
+  trigger-enter of a slime already inside the shield, so the tick runs the same rule itself, per kept slime:
+  - day = the hour (`TimeDirector.CurrHour`) outside the Phosphor's window, read once from the Phosphor
+    `SlimeDefinition.prefab` (or its `SlimeModules`); defaults 18:00-06:00. Endure = the Phosphor's, floored at
+    0.25-0.5 game h (15-30 real s) so there is time to carry them into the shade. Log `sunlight rule from ...`.
+  - shade = inside the world AABB (`Collider.bounds`) of any enabled, active-in-hierarchy `CaveTrigger` collider
+    (rescanned with `FindObjectsOfTypeAll(CaveTrigger)` every ~10 s while slimes are kept in daylight; prefab assets
+    drop out with empty bounds). Plots sit on a 90-degree grid, so the shield's AABB is its box; natural caves count
+    too, as for Phosphors ("somewhere perpetually dark, like a cave").
+  - in daylight outside the shade: the face gets `_isFleeing` (scared look) and a fade clock of Random(endure) game h
+    starts (log `is out in the sun: it fades in ~N game h ...`); shade or night stops it (`is safe again`). When it runs
+    out the slime is alerted on purpose (vanilla `DoAlert` through the trampoline, own GameObject as the alert object);
+    our detours let a fading slime's scatter run, so it hops about and vanishes 10-15 s later with its DisappearFX
+    (`Action` -> `Destroyer.DestroyActor`). Log `fades away in the sunlight`. Nothing of this is saved; after a load the
+    clock starts fresh.
+  - Card text and Slimepedia: the card description ends with the sunlight warning; the English `PediaPage_en` entry
+    `m.risks.shadow_slime` ("Rancher Risks") gets a note appended while the upgrade is owned (`StringTable.GetEntry` /
+    `StringTableEntry.set_Value`, in memory; table found by name with `FindObjectsOfTypeAll(StringTable)` every ~10 s
+    until loaded; removed again when not owned / module off). Other languages keep the vanilla text.
+- **Largos (round 9: "mixes should work aswell, so largos work maybe if possible").** Not possible without new
+  content: 1.3.0 has no Shadow largo. The Shadow `SlimeDefinition` has `CanLargofy` 0 and no `SlimeDefinition` / string
+  (`Actor_en` has `l.<a>_<b>_largo` names for every vanilla pair; none with shadow) pairs it with anything. A largo needs
+  its own `SlimeDefinition` with an identifiable id; the save stores actors by persistence id, so a new one would be
+  unloadable for a mod-free game (same blocker as a new food item). Not built.
 - **Vacpack save.** No vanilla slot allows Shadow, so a load would drop them (`ValidateAndAdjustSlots`). The
   `AmmoModel.Pull` detour gives the save an empty `AmmoSlot` (new object, same definition) in place of each slot
   with shadow slimes and writes `custom_upgrades.vacpack.shadow_slots` = `v=count;...` (vanilla slot index); in the
@@ -1394,8 +1435,11 @@ Shadow plort price was not checked (economy).
    owned`).
 2. Grey Labyrinth: walk up to shadow slimes - they no longer scatter; vac one - it goes into a regular slot (not the
    water slot); hit one with a plort - it and its neighbours still flee and vanish.
-3. Shoot it out on the ranch (in a corral): log `is on the ranch: kept`; stand next to it for a minute - it stays;
-   hit it with items more than 10 times - plorts, no despawn.
+3. Shoot it out on the ranch (in a corral with a Solar Shield): log `is on the ranch: kept`; stand next to it for a
+   minute - it stays; hit it with items more than 10 times - no plorts from the hits, no despawn.
+3a. Sunlight: by day, shoot one into a corral without a Solar Shield: scared face, log `is out in the sun: it fades in
+   ~N game h`; after N game h it hops about and vanishes (`fades away in the sunlight`). Vac it into a shielded
+   corral before that: `is safe again (in the shade)`. At night it is safe anywhere on the ranch.
 4. Feed it fruit / veggies / meat (shoot them at it, or a feeder): it eats and makes Shadow plorts (log `food
    entries ... added to the Shadow diet`, `vanilla hunger rate .../game h`).
 4a. Ringtail rule: feed a hungry kept shadow slime several foods in a row: the first one makes a Shadow plort (log
