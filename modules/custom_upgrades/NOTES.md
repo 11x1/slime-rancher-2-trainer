@@ -879,8 +879,14 @@ Practical limits: number keys (ours are polled), the save layout (handled above)
 First built as per-station tiers bought from a `[B] Battery` pill in the drone station menu; moved here after
 user feedback ("they should be refinery upgrades, not in a separate panel"). Now one global upgrade, its own card.
 
-- **Card.** A clone of `AmmoCapacity`, its single modifier set to ADD 0 (no vacpack effect; the effect list
-  keeps the one entry the game expects). Icon and pedia entry: the Drone Station gadget's (`DroneDirector.
+- **Card.** A clone of `AmmoCapacity` with an empty effect list (round 9; `ApplyUpgrade` walks an empty list). It
+  kept the cloned modifier as ADD 0 on AmmoLimit before, so every level change of it re-evaluated the vacpack
+  capacity, threw with it in the user's round-8 session ("bee drone upgrade errored") and left stray Tank Booster
+  modifiers behind (x1880 slots; `modules/sandbox/NOTES.md`, "Round 9"). If the list can't be emptied, no vacpack
+  upgrade is set up (logged). The `SetUpgradeLevel` detour now writes the sidecar *before* the original call (for a
+  level in -1 .. LevelCount - 1, which the game stores before raising `OnUpgradeChanged`): a throwing subscriber
+  unwound past the old post-call code, the sidecar kept IV and the tick set IV again every second (`DroneBatterySaver
+  level 0 -> 4 (from the sidecar) FAILED` repeated in that log). Icon and pedia entry: the Drone Station gadget's (`DroneDirector.
   _droneStationType`, a `GadgetDefinition`: `icon`, `_pediaLink`), set by the tick once the scene has it (log
   `Drone Battery Saver card uses the '...' icon`); until then / if missing, Tank Booster's. Listed at the end of
   the category (no vanilla parent). Its id is registered in `UpgradeModel.upgradeLevels` (-1) before the definition goes
