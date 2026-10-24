@@ -11,6 +11,7 @@ std::unique_ptr<sr2::core::Module> CreateSpawnScaling();  // modules/spawn_scali
 std::unique_ptr<sr2::core::Module> CreateHl2Movement();   // modules/hl2_movement/module.cpp
 std::unique_ptr<sr2::core::Module> CreateMinimap();       // modules/minimap/module.cpp
 std::unique_ptr<sr2::core::Module> CreateCollectibles();  // modules/collectibles/module.cpp
+std::unique_ptr<sr2::core::Module> CreateMapTools();      // modules/map_tools/module.cpp
 std::unique_ptr<sr2::core::Module> CreateQuickStart();    // modules/quick_start/module.cpp
 std::unique_ptr<sr2::core::Module> CreateQuickTravel();   // modules/quick_travel/module.cpp
 std::unique_ptr<sr2::core::Module> CreateInstantBuild();  // modules/instant_build/module.cpp
@@ -32,6 +33,7 @@ void RegisterBuiltinModules(ModuleManager& mm) {
     mm.Register(modules::CreateHl2Movement());
     mm.Register(modules::CreateMinimap());
     mm.Register(modules::CreateCollectibles());
+    mm.Register(modules::CreateMapTools());
     mm.Register(modules::CreateQuickStart());
     mm.Register(modules::CreateQuickTravel());
     mm.Register(modules::CreateInstantBuild());

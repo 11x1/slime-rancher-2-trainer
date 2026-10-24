@@ -1,0 +1,1206 @@
+// map_tools: extensions for the game's own full-screen map (MapUI). See NOTES.md for the research.
+//
+//   * Reveal everything: FogMapElement.SetRevealState(bool) is forced to "revealed" (hook; its only caller is
+//     MapUIFogReveal.RevealKnownZones, which runs when a map page opens) and MapDirector.IsZoneHidden is
+//     answered "not hidden" (hook; called only by the full map's MapUI / ZoneMarkerUI / LabyrinthZoneMarkerUI
+//     LateUpdates). The fog-shader art outside every FogMapElement (the static fog covers and the outside
+//     fog) is switched off (Behaviour.enabled) on the live page and switched back on afterwards. Display
+//     only: nothing is written to the save; with the switch off the next map open shows the real fog again.
+//   * Icons: the minimap's page icon scan (modules/minimap/api.h CollectPageIcons) drawn as our own uGUI
+//     Images INSIDE the live map page (a container under MapUI._map, page-local coordinates = the page's
+//     own space), so the game's pan / zoom / mask apply to them exactly. Their size stays constant on
+//     screen (scale = root canvas scale / page scale, per frame). With "hide icons under fog" the container
+//     sits right below the page's fog layer, so the game's fog covers them like the map art.
+//   * Right-click teleport: MapClickPlaceMarker.OnPointerClick (the map surface's click handler, left
+//     button = waypoint) is hooked to notice right clicks. The cursor's page point is the one the game's
+//     MapUI.LateUpdate uses (-MapViewModel.CursorPosition), turned into a world position with the view
+//     model's map / world rects (the inverse of Map.GetMapPosition). Only inside the player's current zone
+//     (MapUI.TryFindZoneAt, ZoneDetectionArea._zoneMapData) on the map of the player's zone; the ground is
+//     found with Physics.Raycast straight down; then TeleportablePlayer.TeleportTo(position, current scene
+//     group) (the game's own in-scene teleport: controller, region loader, held item, audio) and the map
+//     closes (UIDisplayManager.CloseDisplayByObjectInHierarchy). A refused click plays the map's
+//     "failed to place waypoint" cue. A "[RMB] Teleport" hint is cloned from the map's input legend.
+//
+// Fault policy: hooks only record / flip an argument inside DetourGuards; every game call runs on the main
+// thread under core::Try + a native-fault guard; a native fault disables the module for the session.
+
+#include <windows.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <format>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "core/detour_guard.h"
+#include "core/guard.h"
+#include "core/il2cpp_api.h"
+#include "core/log.h"
+#include "core/main_thread.h"
+#include "core/module.h"
+#include "core/resolver.h"
+#include "core/settings.h"
+#include "core/unity.h"
+#include "modules/minimap/api.h"
+#include "modules/minimap/ugui.h"
+
+namespace sr2::modules {
+namespace {
+
+namespace settings = sr2::core::settings;
+namespace unity = sr2::core::unity;
+namespace main_thread = sr2::core::main_thread;
+namespace ugui = sr2::modules::minimap::ugui;
+namespace mapi = sr2::modules::minimap::api;
+using il2cpp::Resolver;
+using ugui::Color;
+using ugui::Rect;
+using ugui::Ref;
+using ugui::Vec2;
+using ugui::Vec3;
+
+constexpr const char* kModule = "map_tools";
+constexpr const char* kAsm = "Assembly-CSharp";
+constexpr size_t kNoOff = static_cast<size_t>(-1);
+inline bool Has(size_t off) { return off != kNoOff; }
+constexpr float kIconRefresh = 2.0f;   // full map icons re-collected this often while the map is open
+constexpr int kClosedTicks = 3;        // no MapUI.LateUpdate for this many frames = map closed
+constexpr int kReapplyFrames = 4;      // re-assert the cloned legend hint's key / label for a few frames
+constexpr float kRayTop = 3000.0f;     // teleport: ground ray from this height straight down
+constexpr float kRayLength = 6000.0f;
+constexpr float kLandOffset = 1.0f;    // teleport: above the hit point (no spawn inside the ground)
+
+template <class T>
+T& F(void* obj, size_t off) {
+    return unity::Field<T>(obj, off);
+}
+
+struct NativeFault : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+// ------------------------------------------------------------- settings -----
+struct IconKind {
+    const char* key;
+    const char* sizeKey;
+    const char* label;
+    double def, size;
+    const char* tip;
+};
+// Order = mapi::IconCat.
+const IconKind kKinds[mapi::kIconCatCount] = {
+    {"icon_teleporters", "size_teleporters", "Undiscovered ancient teleporters", 0, 30,
+     "The map shows ancient teleporters once found. This adds the ones not found yet (spoilers)"},
+    {"icon_treasure_pods", "size_treasure_pods", "Treasure pods", 1, 26, "Unopened treasure pods"},
+    {"icon_gordos", "size_gordos", "Undiscovered gordos", 0, 30,
+     "The map shows gordos once seen. This adds the ones not seen yet (spoilers); popped gordos never show"},
+    {"icon_resource_nodes", "size_resource_nodes", "Resource nodes", 0, 22,
+     "Resource nodes ready to harvest (only in loaded areas)"},
+    {"icon_other", "size_other", "Undiscovered plort doors and landmarks", 0, 28,
+     "Map markers not discovered yet besides teleporters and gordos (spoilers); solved plort doors never show"},
+    {"icon_null_walls", "size_null_walls", "Nullifier walls (Grey Labyrinth)", 1, 24, "Intact Nullifier walls"},
+    {"icon_placed_gadgets", "size_placed_gadgets", "Placed gadgets", 1, 24,
+     "Every gadget you placed, with its own icon. The three options below refine this one"},
+    {"icon_drone_ports", "size_drone_ports", "Placed gadgets: drone ports", 1, 28,
+     "Quantum drone stations (the map already shows them; this draws them in your size)"},
+    {"icon_placed_teleporters", "size_placed_teleporters",
+     "Placed gadgets: teleporters, warp depots, market/refinery links", 1, 26, ""},
+    {"icon_placed_decor", "size_placed_decor", "Placed gadgets: decorations", 0, 20, "Purely decorative gadgets"},
+};
+
+struct Cfg {
+    bool reveal = false;
+    bool icons[mapi::kIconCatCount] = {};
+    float size[mapi::kIconCatCount] = {};
+    bool underFog = true;
+    bool teleport = false;
+    bool AnyIcon() const {
+        for (bool b : icons)
+            if (b) return true;
+        return false;
+    }
+};
+
+void RegisterSettings() {
+    using settings::Kind;
+    auto def = [](const char* key, const char* label, const char* group, Kind kind, double d, double mn, double mx,
+                  double step, const char* tip) {
+        settings::Def x;
+        x.module = kModule;
+        x.key = key;
+        x.label = label;
+        x.group = group;
+        x.kind = kind;
+        x.def = d;
+        x.min = mn;
+        x.max = mx;
+        x.step = step;
+        x.tooltip = tip;
+        settings::Register(x);
+    };
+    def("reveal_all", "Reveal the whole map", "Fog of war", Kind::Bool, 0, 0, 1, 1,
+        "The full map shows every area without fog, and every zone name. Display only: your save is not changed, "
+        "nothing counts as discovered, and with this off the fog is back the next time you open the map");
+    for (const IconKind& k : kKinds) {
+        def(k.key, k.label, "Icons", Kind::Bool, k.def, 0, 1, 1, k.tip);
+        def(k.sizeKey, (std::string(k.label) + ": size").c_str(), "Icons", Kind::Float, k.size, 12, 64, 1,
+            "Icon size on screen (in 1080p pixels), at every map zoom");
+        settings::SetDisplay(kModule, k.sizeKey, " px");
+        settings::SetParent(kModule, k.sizeKey, k.key);
+    }
+    for (const char* k : {"icon_drone_ports", "icon_placed_teleporters", "icon_placed_decor"})
+        settings::SetParent(kModule, k, "icon_placed_gadgets");
+    def("icons_under_fog", "Hide icons under fog", "Icons", Kind::Bool, 1, 0, 1, 1,
+        "Icons are drawn below the map's fog, so unexplored areas hide them like the map art. Off: icons are drawn "
+        "on top of the fog");
+    def("rmb_teleport", "Right-click to teleport", "Teleport", Kind::Bool, 0, 0, 1, 1,
+        "Right-click a spot on the open map to teleport there; the map closes. Only inside the zone you are in "
+        "(other zones need a loading screen), onto the ground found straight below the spot. The map's key bar "
+        "shows [RMB] Teleport while this is on");
+}
+
+Cfg LoadCfg() {
+    Cfg c;
+    c.reveal = settings::GetBool(kModule, "reveal_all");
+    for (int i = 0; i < mapi::kIconCatCount; ++i) {
+        c.icons[i] = settings::GetBool(kModule, kKinds[i].key);
+        float s = settings::GetFloat(kModule, kKinds[i].sizeKey);
+        c.size[i] = std::isfinite(s) ? std::clamp(s, 8.0f, 96.0f) : static_cast<float>(kKinds[i].size);
+    }
+    // the gadget groups refine the master switch
+    if (!c.icons[mapi::kIconPlaced])
+        for (int g : {mapi::kIconDronePort, mapi::kIconPlacedTele, mapi::kIconPlacedDecor}) c.icons[g] = false;
+    c.underFog = settings::GetBool(kModule, "icons_under_fog");
+    c.teleport = settings::GetBool(kModule, "rmb_teleport");
+    return c;
+}
+
+// --------------------------------------------------------------- symbols ----
+struct Sym {
+    Il2CppClass *mapUI = nullptr, *map = nullptr, *viewModel = nullptr, *fogReveal = nullptr, *fogElement = nullptr;
+    Il2CppClass *mapDirector = nullptr, *zoneArea = nullptr, *clickMarker = nullptr, *pointerEvent = nullptr;
+    Il2CppClass *legend = nullptr, *hint = nullptr, *inputIcon = nullptr, *eventDisplay = nullptr, *invokeOnClick = nullptr;
+    Il2CppClass *componentIface = nullptr, *lse = nullptr, *selectable = nullptr;
+    Il2CppClass *teleportable = nullptr, *displayManager = nullptr, *raycastHit = nullptr;
+    // hook targets
+    void *lateUpdate = nullptr, *setRevealState = nullptr, *isZoneHidden = nullptr, *onPointerClick = nullptr;
+    // calls
+    ugui::Fn currentMapDef, tryFindZoneAt, revealZonesInMap, getMapForZone, playerCurrentZone;
+    ugui::Fn teleportTo, playerSceneGroup, dmInstance, dmClose, playCue, raycast;
+    ugui::Fn behSetEnabled, setSiblingIndex, getSiblingIndex;
+    // MapUI
+    size_t uiMap = kNoOff, uiViewModel = kNoOff, uiFogReveal = kNoOff, uiLegend = kNoOff, uiDirector = kNoOff,
+           uiFailCue = kNoOff;
+    // Map
+    size_t mapBelowMarkers = kNoOff, mapStaticMarkers = kNoOff;
+    // MapViewModel
+    size_t vmAnchor = kNoOff, vmCursor = kNoOff, vmZoom = kNoOff, vmMapRect = kNoOff, vmWorldRect = kNoOff,
+           vmFullRect = kNoOff;
+    size_t areaZoneData = kNoOff;
+    size_t clickDragging = kNoOff, peButton = kNoOff;
+    // legend
+    size_t ciObject = kNoOff, legendHints = kNoOff;
+    size_t iconButton = kNoOff, iconKey = kNoOff, iconKeyText = kNoOff, iconKeyImage = kNoOff, iconKeyLse = kNoOff,
+           iconDouble = kNoOff;
+    // RaycastHit (raw struct offsets)
+    size_t hitPoint = kNoOff;
+};
+
+struct ResolveCtx {
+    std::vector<std::string> missing;
+    Il2CppClass* Class(const char* image, const char* ns, const char* name) {
+        std::string e;
+        Il2CppClass* k = Resolver::Get().Class(image, ns, name, &e);
+        if (!k) missing.push_back(e.empty() ? std::format("class {}.{}", ns, name) : e);
+        return k;
+    }
+    Il2CppClass* Class(const char* ns, const char* name) { return Class(kAsm, ns, name); }
+    const MethodInfo* Method(Il2CppClass* k, const char* name, int argc) {
+        if (!k) return nullptr;
+        std::string e;
+        const MethodInfo* m = Resolver::Get().Method(k, name, argc, &e);
+        if (!m) missing.push_back(e.empty() ? std::format("method {}", name) : e);
+        return m;
+    }
+    ugui::Fn Bind(const MethodInfo* m, const char* name) {
+        if (!m) return {};
+        ugui::Fn f = ugui::BindFn(m);
+        if (!f) missing.push_back(std::format("{}: no native body", name));
+        return f;
+    }
+    ugui::Fn Bind(Il2CppClass* k, const char* name, int argc) { return Bind(Method(k, name, argc), name); }
+    void* Target(Il2CppClass* k, const char* name, int argc) {
+        const MethodInfo* m = Method(k, name, argc);
+        if (!m) return nullptr;
+        void* p = ugui::MethodPtr(m);
+        if (!p) missing.push_back(std::format("{}: no native body to hook", name));
+        return p;
+    }
+    size_t Field(Il2CppClass* k, const char* name) {
+        if (!k) return kNoOff;
+        std::string e;
+        auto o = Resolver::Get().FieldOffset(k, name, &e);
+        if (!o) {
+            missing.push_back(e.empty() ? std::format("field {}", name) : e);
+            return kNoOff;
+        }
+        return *o;
+    }
+};
+
+// ----------------------------------------------------------- hook state ------
+// All detours run on the Unity main thread. Each one calls the original (unguarded) and does its own small
+// logic inside a DetourGuard: record a pointer / a flag, or flip an argument / result. No IL2CPP calls.
+std::atomic<bool> g_dead{false};
+std::atomic<bool> g_active{false};
+std::atomic<bool> g_reveal{false}, g_teleport{false};
+std::atomic<Il2CppObject*> g_mapUI{nullptr};
+std::atomic<uint32_t> g_lateCount{0};
+std::atomic<bool> g_rightClick{false};
+size_t g_offButton = kNoOff, g_offDragging = kNoOff;  // set in Setup, read by the click detour
+
+sr2::core::DetourGuard g_guardLate{"map_tools", "MapUI.LateUpdate"};
+sr2::core::DetourGuard g_guardReveal{"map_tools", "FogMapElement.SetRevealState"};
+sr2::core::DetourGuard g_guardHidden{"map_tools", "MapDirector.IsZoneHidden"};
+sr2::core::DetourGuard g_guardClick{"map_tools", "MapClickPlaceMarker.OnPointerClick"};
+
+bool Live() { return !g_dead.load() && g_active.load(); }
+
+using VoidFn = void (*)(Il2CppObject*, const MethodInfo*);
+using SetRevealFn = void (*)(Il2CppObject*, bool, const MethodInfo*);
+using IsHiddenFn = bool (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+using ClickFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+VoidFn g_origLate = nullptr;
+SetRevealFn g_origSetReveal = nullptr;
+IsHiddenFn g_origIsHidden = nullptr;
+ClickFn g_origClick = nullptr;
+
+void LateUpdateDetour(Il2CppObject* self, const MethodInfo* mi) {
+    g_origLate(self, mi);
+    if (Live())
+        g_guardLate.Run([&] {
+            g_mapUI.store(self);
+            g_lateCount.fetch_add(1);
+        });
+}
+
+void SetRevealStateDetour(Il2CppObject* self, bool isRevealed, const MethodInfo* mi) {
+    if (!isRevealed && Live()) g_guardReveal.Run([&] { isRevealed = g_reveal.load(); });
+    g_origSetReveal(self, isRevealed, mi);
+}
+
+bool IsZoneHiddenDetour(Il2CppObject* self, Il2CppObject* zoneMapData, const MethodInfo* mi) {
+    bool hidden = g_origIsHidden(self, zoneMapData, mi);
+    if (hidden && Live()) g_guardHidden.Run([&] { hidden = !g_reveal.load(); });
+    return hidden;
+}
+
+void ClickDetour(Il2CppObject* self, Il2CppObject* eventData, const MethodInfo* mi) {
+    g_origClick(self, eventData, mi);  // left button: the game's waypoint; other buttons: nothing
+    if (!Live() || !g_teleport.load() || !self || !eventData) return;
+    g_guardClick.Run([&] {
+        // PointerEventData.InputButton: 0 Left, 1 Right, 2 Middle; no click after a drag
+        if (F<int>(eventData, g_offButton) == 1 && !(Has(g_offDragging) && F<bool>(self, g_offDragging)))
+            g_rightClick.store(true);
+    });
+}
+
+// =============================================================== module ======
+class MapTools {
+public:
+    bool Setup(core::ModuleContext& ctx) {
+        std::string err;
+        if (!ugui::Resolve(err)) return ctx.Fail("uGUI bindings: " + err);
+        ResolveCtx c;
+        const char* nsUiMap = "MonomiPark.SlimeRancher.UI.Map";
+        const char* nsCtl = "MonomiPark.SlimeRancher.UI.Framework.CommonControls";
+        s_.mapUI = c.Class(nsUiMap, "MapUI");
+        s_.map = c.Class(nsUiMap, "Map");
+        s_.viewModel = c.Class(nsUiMap, "MapViewModel");
+        s_.fogReveal = c.Class(nsUiMap, "MapUIFogReveal");
+        s_.fogElement = c.Class(nsUiMap, "FogMapElement");
+        s_.zoneArea = c.Class(nsUiMap, "ZoneDetectionArea");
+        s_.clickMarker = c.Class(nsUiMap, "MapClickPlaceMarker");
+        s_.mapDirector = c.Class("MonomiPark.SlimeRancher.Map", "MapDirector");
+        if (!s_.mapUI || !s_.map) return ctx.Fail("MapUI / Map not found");
+
+        s_.uiMap = c.Field(s_.mapUI, "_map");
+        s_.uiViewModel = c.Field(s_.mapUI, "_viewModel");
+        s_.uiFogReveal = c.Field(s_.mapUI, "_fogReveal");
+        s_.uiLegend = c.Field(s_.mapUI, "_inputLegend");
+        s_.uiDirector = c.Field(s_.mapUI, "_mapDirector");
+        s_.uiFailCue = c.Field(s_.mapUI, "_failedPlaceWaypointCue");
+        s_.currentMapDef = c.Bind(s_.mapUI, "get_CurrentMapDefinition", 0);
+        s_.tryFindZoneAt = c.Bind(s_.mapUI, "TryFindZoneAt", 1);
+        s_.lateUpdate = c.Target(s_.mapUI, "LateUpdate", 0);
+        if (!Has(s_.uiMap) || !s_.lateUpdate) return ctx.Fail("MapUI._map / MapUI.LateUpdate not found");
+        s_.mapBelowMarkers = c.Field(s_.map, "_belowMarkersContainer");
+        s_.mapStaticMarkers = c.Field(s_.map, "_staticMarkerContainer");
+        s_.vmAnchor = c.Field(s_.viewModel, "_mapAnchor");
+        s_.vmCursor = c.Field(s_.viewModel, "_cursorOffset");
+        s_.vmZoom = c.Field(s_.viewModel, "_mapZoom");
+        s_.vmMapRect = c.Field(s_.viewModel, "_mapRect");
+        s_.vmWorldRect = c.Field(s_.viewModel, "_worldRect");
+        s_.vmFullRect = c.Field(s_.viewModel, "_fullMapRect");
+        s_.areaZoneData = c.Field(s_.zoneArea, "_zoneMapData");
+        s_.revealZonesInMap = c.Bind(s_.fogReveal, "RevealZonesInMap", 1);
+        s_.setRevealState = c.Target(s_.fogElement, "SetRevealState", 1);
+        s_.isZoneHidden = c.Target(s_.mapDirector, "IsZoneHidden", 1);
+        s_.getMapForZone = c.Bind(s_.mapDirector, "GetMapForZone", 1);
+        s_.playerCurrentZone = c.Bind(c.Class(nsUiMap, "MapUIUtilities"), "GetPlayerCurrentZone", 0);
+        s_.onPointerClick = c.Target(s_.clickMarker, "UnityEngine.EventSystems.IPointerClickHandler.OnPointerClick", 1);
+        s_.clickDragging = c.Field(s_.clickMarker, "_isDragging");
+        s_.pointerEvent = c.Class("UnityEngine.UI", "UnityEngine.EventSystems", "PointerEventData");
+        s_.peButton = c.Field(s_.pointerEvent, "<button>k__BackingField");
+
+        // input legend ("[RMB] Teleport")
+        s_.componentIface = c.Class("MonomiPark.SlimeRancher.UI.Framework", "ComponentInterfaceBase");
+        s_.ciObject = c.Field(s_.componentIface, "_object");
+        s_.legend = c.Class(nsCtl, "InputLegend");
+        s_.legendHints = c.Field(s_.legend, "_hints");
+        s_.hint = c.Class(nsCtl, "InputHint");
+        s_.inputIcon = c.Class(nsCtl, "InputIcon");
+        s_.eventDisplay = c.Class(nsCtl, "InputEventDisplay");
+        s_.invokeOnClick = c.Class(nsCtl, "InvokeInputEventOnPointerClick");
+        s_.iconButton = c.Field(s_.inputIcon, "_buttonRoot");
+        s_.iconKey = c.Field(s_.inputIcon, "_keyRoot");
+        s_.iconKeyText = c.Field(s_.inputIcon, "_keyText");
+        s_.iconKeyImage = c.Field(s_.inputIcon, "_keyImage");
+        s_.iconKeyLse = c.Field(s_.inputIcon, "_keyLocalizeStringEvent");
+        s_.iconDouble = c.Field(s_.inputIcon, "_doubleTapRoot");
+        s_.lse = c.Class("Unity.Localization", "UnityEngine.Localization.Components", "LocalizeStringEvent");
+        s_.selectable = c.Class("UnityEngine.UI", "UnityEngine.UI", "Selectable");
+
+        // teleport
+        s_.teleportable = c.Class("", "TeleportablePlayer");
+        s_.teleportTo = c.Bind(s_.teleportable, "TeleportTo", 4);
+        s_.playerSceneGroup = c.Bind(s_.teleportable, "get_SceneGroup", 0);
+        s_.displayManager = c.Class("MonomiPark.SlimeRancher.UI.Framework.Displays", "UIDisplayManager");
+        s_.dmInstance = c.Bind(s_.displayManager, "get_Instance", 0);
+        if (s_.displayManager) {
+            std::string e;
+            s_.dmClose = c.Bind(Resolver::Get().MethodByParams(s_.displayManager, "CloseDisplayByObjectInHierarchy",
+                                                               {"UnityEngine.Component"}, &e),
+                                "UIDisplayManager.CloseDisplayByObjectInHierarchy(Component)");
+            if (!s_.dmClose && !e.empty()) c.missing.push_back(e);
+        }
+        s_.playCue = c.Bind(c.Class("MonomiPark.SlimeRancher.UI.Framework.Audio", "UIAudioCueHandle"), "PlayAudioCue", 1);
+        Il2CppClass* physics = c.Class("UnityEngine.PhysicsModule", "UnityEngine", "Physics");
+        s_.raycast = c.Bind(physics, "Raycast", 6);  // (Vector3, Vector3, out RaycastHit, float, int, QueryTriggerInteraction)
+        s_.raycastHit = c.Class("UnityEngine.PhysicsModule", "UnityEngine", "RaycastHit");
+        if (s_.raycastHit) {
+            size_t off = 0;
+            if (ugui::StructFieldOffset(s_.raycastHit, "m_Point", off)) s_.hitPoint = off;
+            else c.missing.push_back("RaycastHit.m_Point");
+        }
+
+        // Unity
+        Il2CppClass* behaviour = c.Class("UnityEngine.CoreModule", "UnityEngine", "Behaviour");
+        Il2CppClass* transform = c.Class("UnityEngine.CoreModule", "UnityEngine", "Transform");
+        s_.behSetEnabled = c.Bind(behaviour, "set_enabled", 1);
+        s_.setSiblingIndex = c.Bind(transform, "SetSiblingIndex", 1);
+        s_.getSiblingIndex = c.Bind(transform, "GetSiblingIndex", 0);
+
+        for (const auto& m : c.missing) SR2_INFO("map_tools: optional (degraded): {}", m);
+        g_offButton = s_.peButton;
+        g_offDragging = s_.clickDragging;
+
+        auto hook = [&](const char* name, void* target, void* detour, void** orig) {
+            if (!target) return false;
+            std::string herr;
+            if (ctx.hooks().Create(kModule, std::string("map_tools.") + name, target, detour, orig, &herr)) return true;
+            SR2_WARN("map_tools: hook {} not created ({})", name, herr);
+            return false;
+        };
+        if (!hook("MapUI.LateUpdate", s_.lateUpdate, reinterpret_cast<void*>(&LateUpdateDetour),
+                  reinterpret_cast<void**>(&g_origLate)))
+            return ctx.Fail("hook MapUI.LateUpdate failed");
+        hookReveal_ = hook("FogMapElement.SetRevealState", s_.setRevealState, reinterpret_cast<void*>(&SetRevealStateDetour),
+                           reinterpret_cast<void**>(&g_origSetReveal));
+        hookHidden_ = hook("MapDirector.IsZoneHidden", s_.isZoneHidden, reinterpret_cast<void*>(&IsZoneHiddenDetour),
+                           reinterpret_cast<void**>(&g_origIsHidden));
+        hookClick_ = Has(s_.peButton) &&
+                     hook("MapClickPlaceMarker.OnPointerClick", s_.onPointerClick, reinterpret_cast<void*>(&ClickDetour),
+                          reinterpret_cast<void**>(&g_origClick));
+
+        RegisterSettings();
+        if (!onChange_) onChange_ = settings::OnChange(kModule, [this](const std::string&) { cfgDirty_.store(true); });
+        SR2_INFO("map_tools: resolved (reveal {}, zone names {}, static fog {}, icons {}, teleport {}, legend hint {}, "
+                 "{} optional symbols missing)",
+                 hookReveal_ ? "yes" : "no", hookHidden_ ? "yes" : "no", s_.behSetEnabled ? "yes" : "no",
+                 s_.setSiblingIndex ? "yes" : "no", TeleportResolved() ? "yes" : "no", LegendResolved() ? "yes" : "no",
+                 c.missing.size());
+        return true;
+    }
+
+    void OnEnable() {
+        if (g_dead.load()) {
+            SR2_WARN("map_tools: stays off for this session after a native fault");
+            return;
+        }
+        cfgDirty_.store(true);
+        g_active.store(true);
+        if (!frameCb_) frameCb_ = main_thread::AddFrameCallback(kModule, [this](float dt) { Tick(dt); });
+    }
+
+    void OnDisable() {
+        g_active.store(false);
+        g_rightClick.store(false);
+        if (frameCb_) main_thread::RemoveFrameCallback(frameCb_);
+        frameCb_ = 0;
+        if (g_dead.load()) return;
+        auto td = [this] {
+            if (!g_dead.load()) Teardown();
+        };
+        if (main_thread::IsMainThread()) td();
+        else main_thread::Post(td);
+    }
+
+private:
+    struct Icon {
+        Ref go, t, img;
+        int cat = -1;
+        bool active = false;
+    };
+
+    Sym s_;
+    Cfg cfg_;
+    std::atomic<bool> cfgDirty_{true};
+    int frameCb_ = 0, onChange_ = 0;
+    bool hookReveal_ = false, hookHidden_ = false, hookClick_ = false;
+    bool frozen_ = false;
+    const char* step_ = "";
+
+    // the open map
+    uint32_t lastLate_ = 0;
+    int closedTicks_ = kClosedTicks;
+    bool open_ = false;
+    Ref mapUI_, map_, mapT_;
+    float time_ = 0;
+
+    // reveal
+    bool revealApplied_ = false;       // static fog switched off on this page
+    std::vector<Ref> hiddenStatic_;    // fog-shader graphics we disabled
+    bool revealShown_ = false;         // cfg the page's fog state belongs to
+
+    // icons
+    Ref container_, canvasT_;  // canvasT_: the root canvas above the page (icon scale reference)
+    std::vector<Icon> icons_;
+    bool containerFog_ = true;
+    float iconAcc_ = 1e9f, lastK_ = -1;
+    Il2CppObject* iconMapDef_ = nullptr;  // identity only
+    bool iconsLogged_ = false, iconMismatchLogged_ = false, minimapOffLogged_ = false;
+    std::vector<mapi::PageIcon> buf_;
+
+    // legend
+    Ref hintGo_, hintLabel_, hintKey_;
+    std::vector<Ref> hintIcons_;
+    int hintReapply_ = 0;
+    float hintRetryAt_ = 0;
+    bool hintFailLogged_ = false, hintLogged_ = false;
+
+    // teleport
+    Ref player_;
+    bool clickLogged_ = false;
+
+    bool TeleportResolved() const {
+        return hookClick_ && s_.teleportTo && s_.playerSceneGroup && s_.raycast && Has(s_.hitPoint) &&
+               Has(s_.uiViewModel) && Has(s_.vmAnchor) && Has(s_.vmCursor) && Has(s_.vmZoom) && Has(s_.vmMapRect) &&
+               Has(s_.vmWorldRect) && s_.teleportable;
+    }
+    bool LegendResolved() const {
+        return Has(s_.uiLegend) && Has(s_.ciObject) && Has(s_.legendHints) && s_.hint && s_.inputIcon &&
+               Has(s_.iconKey) && Has(s_.iconKeyText) && s_.behSetEnabled;
+    }
+
+    void Step(const char* s) { step_ = s; }
+
+    template <class Fn>
+    bool Managed(Fn&& fn) {
+        std::string fault;
+        bool native = false;
+        bool ok = core::Try([&] {
+            if (!ugui::GuardNative(fn, &fault)) native = true;
+        });
+        if (native) throw NativeFault(fault);
+        return ok;
+    }
+
+    void SetEnabled(Il2CppObject* behaviour, bool on) {
+        if (!s_.behSetEnabled || !unity::IsAlive(behaviour)) return;
+        Managed([&] { ugui::Call<void>(s_.behSetEnabled, behaviour, on); });
+    }
+
+    // ----------------------------------------------------------------- tick --
+    void Tick(float dt) {
+        if (!frozen_ && core::ModuleFaulted(kModule)) {
+            Die("module marked faulted (fault inside a hook detour, see the line above)");
+            return;
+        }
+        if (g_dead.load()) return;
+        std::string err, fault;
+        bool native = false;
+        bool ok = core::Try([&] {
+            if (!ugui::GuardNative([&] { TickImpl(dt); }, &fault)) native = true;
+        }, &err);
+        if (ok && !native) return;
+        Die(std::format("step '{}': {}", step_, native ? fault : err));
+    }
+
+    void Die(const std::string& why) {
+        frozen_ = true;
+        g_dead.store(true);
+        g_active.store(false);
+        SR2_ERROR("map_tools: {} - map tools disabled for the rest of this session", why);
+        core::MarkModuleFaulted(kModule, why);
+        for (Ref* r : {&mapUI_, &map_, &mapT_, &container_, &canvasT_, &hintGo_, &hintLabel_, &hintKey_, &player_}) r->Abandon();
+        for (Icon& i : icons_)
+            for (Ref* r : {&i.go, &i.t, &i.img}) r->Abandon();
+        for (Ref& r : hiddenStatic_) r.Abandon();
+        for (Ref& r : hintIcons_) r.Abandon();
+        icons_.clear();
+        hiddenStatic_.clear();
+        hintIcons_.clear();
+        if (frameCb_) main_thread::RemoveFrameCallback(frameCb_);
+        frameCb_ = 0;
+    }
+
+    void TickImpl(float dt) {
+        if (ugui::RuntimeFrozen()) {  // the minimap froze the shared bindings after a fault: stop calling
+            if (!frozen_) Die("shared uGUI bindings frozen by the minimap");
+            return;
+        }
+        time_ += dt;
+        Step("settings");
+        bool cfgChanged = false;
+        if (cfgDirty_.exchange(false)) {
+            Cfg old = cfg_;
+            cfg_ = LoadCfg();
+            g_reveal.store(cfg_.reveal && hookReveal_);
+            g_teleport.store(cfg_.teleport);
+            cfgChanged = true;
+            iconAcc_ = 1e9f;
+            if (cfg_.underFog != old.underFog) DestroyContainer();  // re-placed below / above the fog
+        }
+
+        Step("map open");
+        uint32_t late = g_lateCount.load();
+        if (late != lastLate_) {
+            lastLate_ = late;
+            closedTicks_ = 0;
+        } else if (closedTicks_ < kClosedTicks) {
+            ++closedTicks_;
+        }
+        bool open = closedTicks_ < kClosedTicks;
+        if (!open) {
+            if (open_) OnMapClosed();
+            g_rightClick.store(false);
+            return;
+        }
+        Il2CppObject* ui = g_mapUI.load();
+        if (!ugui::IsA(ui, s_.mapUI)) return;
+        if (ui != mapUI_.get()) {
+            OnMapClosed();
+            mapUI_.Reset(ui);
+            SR2_DEBUG("map_tools: full map opened");
+        }
+        open_ = true;
+        Il2CppObject* map = F<Il2CppObject*>(ui, s_.uiMap);
+        if (!ugui::IsA(map, s_.map)) return;
+        if (map != map_.get()) OnNewPage(map);
+
+        Step("reveal");
+        UpdateReveal(cfgChanged);
+        Step("icons");
+        iconAcc_ += dt;
+        if (iconAcc_ >= kIconRefresh) {
+            iconAcc_ = 0;
+            RefreshIcons();
+        }
+        Step("icon scale");
+        UpdateIconScale();
+        Step("legend");
+        UpdateLegend();
+        Step("teleport");
+        if (g_rightClick.exchange(false) && cfg_.teleport) Teleport();
+        Step("idle");
+    }
+
+    void OnNewPage(Il2CppObject* map) {
+        RestoreStaticFog();  // dies with the old page anyway; restores what is still alive
+        DestroyContainer();
+        map_.Reset(map);
+        mapT_.Reset(unity::TransformOf(map));
+        revealApplied_ = false;
+        revealShown_ = cfg_.reveal;  // the page's RevealKnownZones ran with the current hook state
+        iconAcc_ = 1e9f;
+        iconMapDef_ = nullptr;
+        iconMismatchLogged_ = false;
+    }
+
+    void OnMapClosed() {
+        Step("map closed");
+        RestoreStaticFog();
+        DestroyContainer();
+        DestroyHint();
+        map_.Reset(nullptr);
+        mapT_.Reset(nullptr);
+        mapUI_.Reset(nullptr);
+        open_ = false;
+        revealApplied_ = false;
+    }
+
+    // ------------------------------------------------------------ teardown ---
+    template <class Fn>
+    void TeardownStep(const char* what, Fn&& fn) {
+        if (frozen_) return;
+        std::string err, fault;
+        bool native = false;
+        bool ok = core::Try([&] {
+            if (!ugui::GuardNative(fn, &fault)) native = true;
+        }, &err);
+        if (native) Die(std::format("teardown step '{}': {}", what, fault));
+        else if (!ok) SR2_WARN("map_tools: teardown step '{}' failed: {}", what, err);
+    }
+
+    void Teardown() {
+        if (ugui::RuntimeFrozen()) {
+            if (!frozen_) Die("shared uGUI bindings frozen");
+            return;
+        }
+        g_reveal.store(false);
+        g_teleport.store(false);
+        TeardownStep("restore static fog", [&] { RestoreStaticFog(); });
+        TeardownStep("re-evaluate fog", [&] {
+            if (revealShown_ && open_) ReapplyFog();
+        });
+        TeardownStep("destroy icons", [&] { DestroyContainer(); });
+        TeardownStep("destroy hint", [&] { DestroyHint(); });
+        TeardownStep("release", [&] {
+            map_.Reset(nullptr);
+            mapT_.Reset(nullptr);
+            mapUI_.Reset(nullptr);
+            player_.Reset(nullptr);
+        });
+        open_ = false;
+        revealShown_ = false;
+        closedTicks_ = kClosedTicks;
+    }
+
+    // -------------------------------------------------------------- reveal ---
+    // The game's fog state comes from MapUIFogReveal.RevealKnownZones (hooked SetRevealState). When the
+    // setting changes while the map is open, the page is re-evaluated through RevealZonesInMap.
+    void ReapplyFog() {
+        if (!s_.revealZonesInMap || !mapUI_.Alive() || !map_.Alive() || !Has(s_.uiFogReveal)) return;
+        Il2CppObject* fr = F<Il2CppObject*>(mapUI_.get(), s_.uiFogReveal);
+        if (!ugui::IsA(fr, s_.fogReveal)) return;
+        Managed([&] { ugui::Call<void>(s_.revealZonesInMap, fr, map_.get()); });
+    }
+
+    void UpdateReveal(bool cfgChanged) {
+        if (cfgChanged && cfg_.reveal != revealShown_) {
+            revealShown_ = cfg_.reveal;
+            ReapplyFog();
+            SR2_INFO("map_tools: reveal {} on the open map", cfg_.reveal ? "on" : "off");
+        }
+        if (cfg_.reveal && !revealApplied_) HideStaticFog();
+        else if (!cfg_.reveal && revealApplied_) RestoreStaticFog();
+    }
+
+    static bool IsFogShader(const std::string& shader) { return shader.find("FogOfWar") != std::string::npos; }
+
+    // Fog-shader art outside every FogMapElement ("fog_static": the static covers and the outside fog, see
+    // modules/minimap/NOTES.md): nothing in the game ever hides it, so "reveal" switches the Graphics off.
+    void HideStaticFog() {
+        revealApplied_ = true;
+        if (!s_.behSetEnabled || !map_.Alive() || !mapT_.Alive()) return;
+        Il2CppObject* mapGo = unity::GameObjectOf(map_.get());
+        std::vector<Il2CppObject*> fogRoots;
+        if (s_.fogElement)
+            ugui::ForEachInChildren(mapGo, s_.fogElement, true, [&](Il2CppObject* f) {
+                fogRoots.push_back(unity::TransformOf(f));
+                return true;
+            });
+        std::vector<Ref> pins;  // fogRoots stay reachable while we allocate
+        for (Il2CppObject* t : fogRoots) pins.emplace_back(t);
+        int hidden = 0, inAreas = 0;
+        std::string names;
+        ugui::ForEachInChildren(mapGo, ugui::GraphicClass(), true, [&](Il2CppObject* g) {
+            Il2CppObject* mat = ugui::GraphicGetMaterial(g);
+            if (!mat || !IsFogShader(ugui::MaterialShaderName(mat))) return true;
+            for (Il2CppObject* t = unity::TransformOf(g); t && t != mapT_.get(); t = ugui::GetParent(t))
+                if (std::find(fogRoots.begin(), fogRoots.end(), t) != fogRoots.end()) {
+                    ++inAreas;
+                    return true;
+                }
+            if (!ugui::BehaviourEnabled(g)) return true;
+            SetEnabled(g, false);
+            hiddenStatic_.emplace_back(g);
+            ++hidden;
+            if (names.size() < 300) names += (names.empty() ? "" : ", ") + unity::GetName(unity::GameObjectOf(g));
+            return true;
+        });
+        SR2_INFO("map_tools: reveal: {} fog areas forced revealed by the game's own fog pass, {} static fog image(s) "
+                 "switched off{}{}",
+                 fogRoots.size(), hidden, names.empty() ? "" : ": ", names);
+    }
+
+    void RestoreStaticFog() {
+        for (Ref& r : hiddenStatic_)
+            if (r.Alive()) SetEnabled(r.get(), true);
+        hiddenStatic_.clear();
+        revealApplied_ = false;
+    }
+
+    // --------------------------------------------------------------- icons ---
+    void DestroyContainer() {
+        if (container_.Alive()) ugui::Destroy(container_.get());
+        container_.Reset(nullptr);
+        canvasT_.Reset(nullptr);
+        icons_.clear();
+        lastK_ = -1;
+    }
+
+    // Direct child of the page that contains `t` (nullptr if `t` is not under the page).
+    Il2CppObject* TopChild(Il2CppObject* t) {
+        for (int guard = 0; t && guard < 64; ++guard) {
+            Il2CppObject* p = ugui::GetParent(t);
+            if (p == mapT_.get()) return t;
+            t = p;
+        }
+        return nullptr;
+    }
+    int SiblingIndex(Il2CppObject* t) {
+        int i = -1;
+        if (t && s_.getSiblingIndex) Managed([&] { i = ugui::Call<int>(s_.getSiblingIndex, t); });
+        return i;
+    }
+
+    // Our container: a child of the live page in its own space. Below the page's fog layer when icons hide
+    // under fog (the first direct child that holds a FogMapElement), else right below the marker containers.
+    bool EnsureContainer() {
+        if (container_.Alive()) return true;
+        container_.Reset(nullptr);
+        icons_.clear();
+        if (!mapT_.Alive()) return false;
+        Il2CppObject* mapGo = unity::GameObjectOf(map_.get());
+        int fogIdx = -1, markerIdx = -1;
+        std::string fogName, markerName;
+        if (s_.fogElement)
+            ugui::ForEachInChildren(mapGo, s_.fogElement, true, [&](Il2CppObject* f) {
+                Il2CppObject* top = TopChild(unity::TransformOf(f));
+                int i = SiblingIndex(top);
+                if (i >= 0 && (fogIdx < 0 || i < fogIdx)) {
+                    fogIdx = i;
+                    fogName = unity::GetName(top);
+                }
+                return true;
+            });
+        for (size_t off : {s_.mapBelowMarkers, s_.mapStaticMarkers}) {
+            if (!Has(off)) continue;
+            Il2CppObject* c = F<Il2CppObject*>(map_.get(), off);
+            if (!ugui::IsA(c, ugui::TransformClass())) continue;
+            Il2CppObject* top = (c == mapT_.get()) ? nullptr : TopChild(c);
+            int i = SiblingIndex(top);
+            if (i >= 0 && (markerIdx < 0 || i < markerIdx)) {
+                markerIdx = i;
+                markerName = unity::GetName(top);
+            }
+        }
+        Il2CppObject* go = ugui::NewGameObject("SR2Mods.MapIcons");
+        if (!go) return false;
+        container_.Reset(go);
+        ugui::SetLayer(go, ugui::GetLayer(mapGo));
+        Il2CppObject* t = unity::TransformOf(go);
+        ugui::SetParent(t, mapT_.get(), false);
+        ugui::SetAnchors(t, {0.5f, 0.5f}, {0.5f, 0.5f});
+        ugui::SetPivot(t, {0.5f, 0.5f});
+        ugui::SetSizeDelta(t, {0, 0});
+        ugui::SetLocalPosition(t, {0, 0, 0});  // the page's own origin: icon positions are page-local
+        ugui::SetLocalScale(t, {1, 1, 1});
+        containerFog_ = cfg_.underFog;
+        int idx = cfg_.underFog && fogIdx >= 0 ? fogIdx : markerIdx;
+        const char* where = cfg_.underFog && fogIdx >= 0 ? "below the fog layer" : markerIdx >= 0 ? "below the markers" : "on top";
+        if (idx >= 0 && s_.setSiblingIndex) Managed([&] { ugui::Call<void>(s_.setSiblingIndex, t, idx); });
+        SR2_INFO("map_tools: icons: container on page '{}' at child index {} ({}; fog layer '{}' at {}, markers '{}' at {})",
+                 unity::GetName(mapGo), idx, where, fogName, fogIdx, markerName, markerIdx);
+        lastK_ = -1;
+        return true;
+    }
+
+    void HideIcons() {
+        for (Icon& ic : icons_) {
+            if (ic.active && ic.go.Alive()) unity::SetActive(ic.go.get(), false);
+            ic.active = false;
+        }
+    }
+
+    void RefreshIcons() {
+        if (!cfg_.AnyIcon()) {
+            if (container_) DestroyContainer();
+            return;
+        }
+        mapi::PageIconQuery q;
+        for (int i = 0; i < mapi::kIconCatCount; ++i) q.cats[i] = cfg_.icons[i];
+        q.undiscoveredMarkers = cfg_.icons[mapi::kIconTeleporter] || cfg_.icons[mapi::kIconGordo] || cfg_.icons[mapi::kIconOther];
+        Il2CppObject* pageDef = nullptr;
+        if (!mapi::CollectPageIcons(q, buf_, &pageDef)) {
+            if (!minimapOffLogged_) {
+                minimapOffLogged_ = true;
+                SR2_INFO("map_tools: icons: the minimap has no map page right now (it must be on) - no full map icons");
+            }
+            HideIcons();
+            return;
+        }
+        minimapOffLogged_ = false;
+        // The icons belong to the page of the player's zone; the full map may show another map (tabs).
+        Il2CppObject* shownDef = nullptr;
+        if (s_.currentMapDef) Managed([&] { shownDef = ugui::Call<Il2CppObject*>(s_.currentMapDef, mapUI_.get()); });
+        if (!shownDef || shownDef != pageDef) {
+            if (!iconMismatchLogged_) {
+                iconMismatchLogged_ = true;
+                SR2_INFO("map_tools: icons: the full map shows '{}', the icons belong to '{}' - hidden on this map",
+                         shownDef ? unity::GetName(shownDef) : std::string("?"), unity::GetName(pageDef));
+            }
+            HideIcons();
+            return;
+        }
+        if (!EnsureContainer()) return;
+        int layer = ugui::GetLayer(container_.get());
+        while (icons_.size() < buf_.size()) {
+            Il2CppObject* go = ugui::NewGameObject("Icon");
+            if (!go) break;
+            ugui::SetLayer(go, layer);
+            Il2CppObject* t = unity::TransformOf(go);
+            ugui::SetParent(t, unity::TransformOf(container_.get()), false);
+            Icon ic;
+            ic.go.Reset(go);
+            ic.t.Reset(t);
+            ic.img.Reset(ugui::AddComponent(go, ugui::ImageClass()));
+            ugui::GraphicSetRaycastTarget(ic.img.get(), false);  // clicks and drags reach the map
+            ugui::ImageSetPreserveAspect(ic.img.get(), true);
+            ugui::SetAnchors(t, {0.5f, 0.5f}, {0.5f, 0.5f});
+            ugui::SetPivot(t, {0.5f, 0.5f});
+            ic.active = true;
+            icons_.push_back(std::move(ic));
+        }
+        int perCat[mapi::kIconCatCount] = {};
+        for (size_t i = 0; i < icons_.size(); ++i) {
+            Icon& ic = icons_[i];
+            if (!ic.go.Alive() || !ic.t.Alive()) continue;
+            bool show = i < buf_.size() && buf_[i].sprite && unity::IsAlive(buf_[i].sprite);
+            if (show) {
+                const mapi::PageIcon& p = buf_[i];
+                int cat = std::clamp(p.cat, 0, mapi::kIconCatCount - 1);
+                ++perCat[cat];
+                ugui::ImageSetSprite(ic.img.get(), p.sprite);
+                ugui::GraphicSetColor(ic.img.get(), Color{p.r, p.g, p.b, p.a});
+                ugui::SetSizeDelta(ic.t.get(), {cfg_.size[cat], cfg_.size[cat]});
+                ugui::SetLocalPosition(ic.t.get(), {p.x, p.y, 0});
+                if (lastK_ > 0) ugui::SetLocalScale(ic.t.get(), {lastK_, lastK_, 1});
+                ic.cat = cat;
+            }
+            if (show != ic.active) {
+                unity::SetActive(ic.go.get(), show);
+                ic.active = show;
+            }
+        }
+        iconMapDef_ = pageDef;
+        if (!iconsLogged_) {
+            iconsLogged_ = true;
+            std::string parts;
+            for (int c = 0; c < mapi::kIconCatCount; ++c)
+                if (perCat[c]) parts += std::format("{}{} {}", parts.empty() ? "" : ", ", kKinds[c].label, perCat[c]);
+            SR2_INFO("map_tools: icons (first map): {} on '{}'{}{}", buf_.size(), unity::GetName(pageDef),
+                     parts.empty() ? "" : ": ", parts);
+        }
+    }
+
+    // World units per local unit along x (uniform scale assumed, as uGUI pages are).
+    static float Scale(Il2CppObject* t) {
+        Vec3 a = ugui::TransformPoint(t, {0, 0, 0}), b = ugui::TransformPoint(t, {1, 0, 0});
+        return std::hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+    }
+
+    // Constant screen size: icon local scale = root canvas scale / page scale (the page carries the zoom).
+    void UpdateIconScale() {
+        if (!container_.Alive() || icons_.empty() || !mapT_.Alive()) return;
+        if (!canvasT_.Alive()) {
+            Il2CppObject* canvas = ugui::ComponentInParent(container_.get(), ugui::CanvasClass());
+            Il2CppObject* root = canvas ? ugui::CanvasRoot(canvas) : nullptr;
+            if (!root) return;
+            canvasT_.Reset(unity::TransformOf(root));
+        }
+        float page = Scale(mapT_.get()), ref = Scale(canvasT_.get());
+        if (!(page > 1e-9f) || !(ref > 1e-9f) || !std::isfinite(page) || !std::isfinite(ref)) return;
+        float k = ref / page;
+        if (lastK_ > 0 && std::fabs(k - lastK_) <= lastK_ * 0.005f) return;
+        lastK_ = k;
+        for (Icon& ic : icons_)
+            if (ic.t.Alive()) ugui::SetLocalScale(ic.t.get(), {k, k, 1});
+    }
+
+    // -------------------------------------------------------------- legend ---
+    void DestroyHint() {
+        if (hintGo_.Alive()) ugui::Destroy(hintGo_.get());
+        hintGo_.Reset(nullptr);
+        hintLabel_.Reset(nullptr);
+        hintKey_.Reset(nullptr);
+        hintIcons_.clear();
+    }
+
+    static bool IsUnder(Il2CppObject* t, Il2CppObject* ancestor) {
+        for (int guard = 0; t && guard < 64; ++guard, t = ugui::GetParent(t))
+            if (t == ancestor) return true;
+        return false;
+    }
+
+    void UpdateLegend() {
+        if (!cfg_.teleport || !TeleportResolved() || !LegendResolved()) {
+            if (hintGo_) DestroyHint();
+            return;
+        }
+        if (hintGo_.Alive()) {
+            if (hintReapply_ > 0) {
+                --hintReapply_;
+                ApplyHintLook();
+            }
+            return;
+        }
+        if (hintGo_) DestroyHint();  // died with the legend
+        if (time_ < hintRetryAt_) return;
+        hintRetryAt_ = time_ + 0.5f;  // the legend may not show its hints yet
+        EnsureHint();
+    }
+
+    // "[RMB] Teleport": a clone of one of the legend's own hints with its behaviour removed (no input event,
+    // no localisation, no clicks), our key text and label. A child of the same layout, so it lines up.
+    void EnsureHint() {
+        Il2CppObject* iface = F<Il2CppObject*>(mapUI_.get(), s_.uiLegend);
+        if (!ugui::PlausiblePointer(iface)) return;
+        Il2CppObject* legend = F<Il2CppObject*>(iface, s_.ciObject);
+        if (!ugui::IsA(legend, s_.legend)) return;
+        auto* hints = F<Il2CppArray*>(legend, s_.legendHints);
+        if (!ugui::PlausiblePointer(hints)) return;
+        Il2CppObject* tmpl = nullptr;
+        for (size_t i = 0, n = std::min<size_t>(ugui::ArrayCount(hints), 32); i < n && !tmpl; ++i) {
+            Il2CppObject* h = ugui::ArrayItem(hints, i);
+            if (ugui::IsA(h, s_.hint) && unity::ActiveInHierarchy(unity::GameObjectOf(h))) tmpl = h;
+        }
+        if (!tmpl) return;  // the legend has not shown its hints yet
+        Il2CppObject* tmplGo = unity::GameObjectOf(tmpl);
+        Il2CppObject* parent = ugui::GetParent(unity::TransformOf(tmplGo));
+        Il2CppObject* clone = unity::Instantiate(tmplGo, parent);
+        if (!unity::IsAlive(clone)) {
+            if (!hintFailLogged_) SR2_WARN("map_tools: cloning a legend hint failed - no [RMB] Teleport hint");
+            hintFailLogged_ = true;
+            return;
+        }
+        Il2CppObject* go = ugui::IsA(clone, unity::GameObjectClass()) ? clone : unity::GameObjectOf(clone);
+        hintGo_.Reset(go);
+        unity::SetName(go, "SR2Mods.TeleportHint");
+        Il2CppObject* tr = unity::TransformOf(go);
+        ugui::SetAsLastSibling(tr);
+        // Behaviour off: the hint would configure itself from the template's input event and fire it on click.
+        if (Il2CppObject* h = unity::GetComponent(go, s_.hint)) ugui::Destroy(h);
+        if (s_.invokeOnClick)
+            ugui::ForEachInChildren(go, s_.invokeOnClick, true, [&](Il2CppObject* c) {
+                ugui::Destroy(c);
+                return true;
+            });
+        for (Il2CppClass* k : {s_.eventDisplay, s_.lse, s_.selectable}) {
+            if (!k) continue;
+            ugui::ForEachInChildren(go, k, true, [&](Il2CppObject* c) {
+                SetEnabled(c, false);
+                return true;
+            });
+        }
+        ugui::ForEachInChildren(go, ugui::GraphicClass(), true, [&](Il2CppObject* g) {
+            ugui::GraphicSetRaycastTarget(g, false);
+            return true;
+        });
+        // key icons and the label (the TMP text outside every icon)
+        std::vector<Il2CppObject*> iconTs;
+        ugui::ForEachInChildren(go, s_.inputIcon, true, [&](Il2CppObject* ic) {
+            hintIcons_.emplace_back(ic);
+            iconTs.push_back(unity::TransformOf(ic));
+            return true;
+        });
+        if (Il2CppClass* tmp = ugui::TmpTextClass())
+            ugui::ForEachInChildren(go, tmp, true, [&](Il2CppObject* t) {
+                Il2CppObject* tt = unity::TransformOf(t);
+                for (Il2CppObject* it : iconTs)
+                    if (IsUnder(tt, it)) return true;
+                hintLabel_.Reset(t);
+                return false;
+            });
+        hintReapply_ = kReapplyFrames;
+        ApplyHintLook();
+        if (!hintLogged_) {
+            hintLogged_ = true;
+            SR2_INFO("map_tools: [RMB] Teleport hint cloned from the map legend's '{}' ({} key icon(s), label {})",
+                     unity::GetName(tmplGo), hintIcons_.size(), hintLabel_ ? "ok" : "MISSING");
+        }
+    }
+
+    // InputIcon.SetKey by hand (see modules/drone_price_limit/station_dialog.cpp): the first icon shows the
+    // key cap with our text, the others are hidden.
+    void ApplyHintLook() {
+        for (size_t i = 0; i < hintIcons_.size(); ++i) {
+            Il2CppObject* icon = hintIcons_[i].get();
+            if (!unity::IsAlive(icon)) continue;
+            Il2CppObject* go = unity::GameObjectOf(icon);
+            if (i > 0) {
+                unity::SetActive(go, false);
+                continue;
+            }
+            unity::SetActive(go, true);
+            auto obj = [&](size_t off) -> Il2CppObject* {
+                if (!Has(off)) return nullptr;
+                Il2CppObject* o = F<Il2CppObject*>(icon, off);
+                return unity::IsAlive(o) ? o : nullptr;
+            };
+            if (Il2CppObject* b = obj(s_.iconButton)) unity::SetActive(b, false);
+            if (Il2CppObject* d = obj(s_.iconDouble)) unity::SetActive(d, false);
+            if (Il2CppObject* k = obj(s_.iconKey)) unity::SetActive(k, true);
+            SetEnabled(obj(s_.iconKeyImage), false);
+            SetEnabled(obj(s_.iconKeyLse), false);
+            if (Il2CppObject* text = obj(s_.iconKeyText)) {
+                SetEnabled(text, true);
+                ugui::TmpSetText(text, "RMB");
+            }
+        }
+        if (hintLabel_.Alive()) ugui::TmpSetText(hintLabel_.get(), "Teleport");
+    }
+
+    // ------------------------------------------------------------ teleport ---
+    void PlayFailCue() {
+        if (!s_.playCue || !Has(s_.uiFailCue) || !mapUI_.Alive()) return;
+        void* cue = reinterpret_cast<char*>(mapUI_.get()) + s_.uiFailCue;  // UIAudioCueHandle (struct field)
+        Managed([&] { ugui::Call<bool>(s_.playCue, cue, 3 /* NO_WARNING */); });
+    }
+
+    void Refuse(const std::string& why) {
+        SR2_INFO("map_tools: teleport refused: {}", why);
+        PlayFailCue();
+    }
+
+    Il2CppObject* ZoneAt(Vec2 page) {
+        if (!s_.tryFindZoneAt || !Has(s_.areaZoneData) || !mapT_.Alive()) return nullptr;
+        Vec3 w = ugui::TransformPoint(mapT_.get(), {page.x, page.y, 0});  // the UI world position the game uses
+        Il2CppObject* area = nullptr;
+        Managed([&] { area = ugui::Call<Il2CppObject*>(s_.tryFindZoneAt, mapUI_.get(), Vec2{w.x, w.y}); });
+        if (!ugui::IsA(area, s_.zoneArea)) return nullptr;
+        Il2CppObject* zmd = F<Il2CppObject*>(area, s_.areaZoneData);
+        return ugui::PlausiblePointer(zmd) ? zmd : nullptr;
+    }
+
+    void Teleport() {
+        if (!clickLogged_) {
+            clickLogged_ = true;
+            SR2_INFO("map_tools: first right click on the full map received");
+        }
+        if (!TeleportResolved()) return Refuse("teleport symbols missing (see the 'resolved' line)");
+        Il2CppObject* vm = F<Il2CppObject*>(mapUI_.get(), s_.uiViewModel);
+        if (!ugui::IsA(vm, s_.viewModel)) return Refuse("no map view model");
+        // The cursor's page point, as MapUI.LateUpdate computes it: -(mapAnchor + cursorOffset / zoom).
+        Vec2 anchor = F<Vec2>(vm, s_.vmAnchor), cur = F<Vec2>(vm, s_.vmCursor);
+        float zoom = F<float>(vm, s_.vmZoom);
+        Rect mr = F<Rect>(vm, s_.vmMapRect), wr = F<Rect>(vm, s_.vmWorldRect);
+        if (!(zoom > 1e-6f) || std::fabs(mr.w) < 1e-6f || std::fabs(mr.h) < 1e-6f || std::fabs(wr.w) < 1e-6f ||
+            std::fabs(wr.h) < 1e-6f)
+            return Refuse("map projection not ready");
+        Vec2 pm{-(anchor.x + cur.x / zoom), -(anchor.y + cur.y / zoom)};
+        if (Has(s_.vmFullRect)) {
+            Rect fr = F<Rect>(vm, s_.vmFullRect);
+            float x0 = std::min(fr.x, fr.x + fr.w), x1 = std::max(fr.x, fr.x + fr.w);
+            float y0 = std::min(fr.y, fr.y + fr.h), y1 = std::max(fr.y, fr.y + fr.h);
+            if (pm.x < x0 || pm.x > x1 || pm.y < y0 || pm.y > y1) return Refuse("the click is outside the map page");
+        }
+        // inverse of Map.GetMapPosition: map = mapMin + (world - worldMin) * mapSize / worldSize
+        float wx = wr.x + (pm.x - mr.x) * wr.w / mr.w;
+        float wz = wr.y + (pm.y - mr.y) * wr.h / mr.h;
+        if (!std::isfinite(wx) || !std::isfinite(wz)) return Refuse("bad map position");
+
+        if (!player_.Alive()) player_.Reset(ugui::FindFirst(s_.teleportable, false));
+        Il2CppObject* player = player_.get();
+        if (!ugui::IsA(player, s_.teleportable)) return Refuse("no player");
+        // the map shown must be the map of the player's zone
+        if (s_.currentMapDef && s_.getMapForZone && s_.playerCurrentZone && Has(s_.uiDirector)) {
+            Il2CppObject* director = F<Il2CppObject*>(mapUI_.get(), s_.uiDirector);
+            Il2CppObject *shown = nullptr, *mine = nullptr;
+            if (ugui::IsA(director, s_.mapDirector))
+                Managed([&] {
+                    shown = ugui::Call<Il2CppObject*>(s_.currentMapDef, mapUI_.get());
+                    Il2CppObject* zone = ugui::Call<Il2CppObject*>(s_.playerCurrentZone);
+                    if (zone) mine = ugui::Call<Il2CppObject*>(s_.getMapForZone, director, zone);
+                });
+            if (shown && mine && shown != mine) return Refuse("this map is not the map of the zone you are in");
+        }
+        Vec3 pp = ugui::GetPosition(unity::TransformOf(player));
+        // other zones are other scene groups (a loading screen): only inside the player's zone
+        Vec2 ppage{mr.x + (pp.x - wr.x) * mr.w / wr.w, mr.y + (pp.z - wr.y) * mr.h / wr.h};
+        Il2CppObject* zTarget = ZoneAt(pm);
+        Il2CppObject* zPlayer = ZoneAt(ppage);
+        if (zTarget && zPlayer && zTarget != zPlayer)
+            return Refuse(std::format("'{}' is another zone than yours ('{}')", unity::GetName(zTarget), unity::GetName(zPlayer)));
+
+        // ground straight below: the first solid collider from high above (triggers ignored), not the player
+        alignas(16) unsigned char hit[128] = {};
+        int playerLayer = ugui::GetLayer(unity::GameObjectOf(player));
+        int mask = ~(1 << 2);  // Ignore Raycast
+        if (playerLayer >= 0 && playerLayer < 32) mask &= ~(1 << playerLayer);
+        bool found = false;
+        Managed([&] {
+            found = ugui::Call<bool>(s_.raycast, Vec3{wx, kRayTop, wz}, Vec3{0, -1, 0}, static_cast<void*>(hit),
+                                     kRayLength, mask, 1 /* QueryTriggerInteraction.Ignore */);
+        });
+        if (!found) return Refuse(std::format("no ground below ({:.0f}, {:.0f}) - not loaded or outside the world", wx, wz));
+        Vec3 ground = *reinterpret_cast<Vec3*>(hit + s_.hitPoint);
+        if (!std::isfinite(ground.x) || !std::isfinite(ground.y) || !std::isfinite(ground.z) ||
+            std::fabs(ground.x - wx) > 1.0f || std::fabs(ground.z - wz) > 1.0f)
+            return Refuse("bad ground hit");
+        Vec3 dest{wx, ground.y + kLandOffset, wz};
+
+        Il2CppObject* group = nullptr;
+        Managed([&] { group = ugui::Call<Il2CppObject*>(s_.playerSceneGroup, player); });
+        if (!group) return Refuse("the player has no scene group");
+        struct NullableVec3 {  // System.Nullable<Vector3>: no value = keep the rotation
+            bool hasValue;
+            Vec3 value;
+        } noRotation{};
+        bool ok = Managed([&] { ugui::Call<void>(s_.teleportTo, player, dest, group, noRotation, true); });
+        if (!ok) return Refuse("TeleportablePlayer.TeleportTo threw (see above)");
+        SR2_INFO("map_tools: teleported from ({:.1f}, {:.1f}, {:.1f}) to ({:.1f}, {:.1f}, {:.1f}) (map point ({:.1f}, "
+                 "{:.1f}), zone '{}')",
+                 pp.x, pp.y, pp.z, dest.x, dest.y, dest.z, pm.x, pm.y, zTarget ? unity::GetName(zTarget) : std::string("-"));
+        // close the map, like any other way of leaving it
+        if (s_.dmInstance && s_.dmClose)
+            Managed([&] {
+                Il2CppObject* dm = ugui::Call<Il2CppObject*>(s_.dmInstance);
+                if (dm) ugui::Call<Il2CppObject*>(s_.dmClose, dm, mapUI_.get());
+            });
+    }
+};
+
+// The impl owns GC handles and is never deleted (process exit may happen after the IL2CPP runtime is gone).
+class MapToolsModule final : public core::Module {
+public:
+    const char* Name() const override { return kModule; }
+    bool DefaultEnabled() const override { return true; }
+    bool Setup(core::ModuleContext& ctx) override { return impl_->Setup(ctx); }
+    void OnEnable() override { impl_->OnEnable(); }
+    void OnDisable() override { impl_->OnDisable(); }
+
+private:
+    MapTools* impl_ = new MapTools();  // leaked on purpose
+};
+
+}  // namespace
+
+std::unique_ptr<sr2::core::Module> CreateMapTools() { return std::make_unique<MapToolsModule>(); }
+
+}  // namespace sr2::modules
