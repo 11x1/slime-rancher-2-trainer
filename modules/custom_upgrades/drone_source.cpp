@@ -41,7 +41,8 @@
 //     Hen Collector's slot rule), Elder Collector = ElderGroup (found once by name). So an elder target
 //     never offers Hen Collector, and a hen target never offers Elder Collector.
 //   * FindSourceDefinition(our type): a runtime copy of the Coop definition, type ours, name through
-//     a new LocalizedString with Coop's table entry (text via core/text_override), icon = the Hen
+//     a new LocalizedString with Coop's table entry (text via core/text_override), icon = the mod icon
+//     "hen_collector_source" / "elder_collector_source" when embedded (ui/mod_icons), else the Hen
 //     (task config HenType.icon) / the elder hen (ElderGroup's "...Hen" member), sort index Coop + 1
 //     for both (ties keep the list order: Coop, Hen Collector, Elder Collector).
 //   * Pull: a program with our type goes to the save as a copy saying COOP (the live data keeps ours).
@@ -96,6 +97,7 @@
 #include "core/unity.h"
 #include "modules/custom_upgrades/api.h"
 #include "modules/custom_upgrades/quantum_link.h"
+#include "ui/mod_icons.h"
 
 namespace sr2::modules::custom_upgrades::drones {
 namespace {
@@ -127,6 +129,9 @@ constexpr KindInfo kKind[kKinds] = {
     {kElderSourceType, "drone_elder_source.stations", "Elder Collector", kSourceCoop},
     {kQuantumSourceType, "drone_quantum_source.stations", "Quantum Storage Link", kSourceSilo},
 };
+// The mod's own icons of the chicken kinds (assets/icons/<name>.png, embedded when present at build
+// time; build.ps1 regenerates ui/mod_icons_data.inc). Missing -> the game's Hen / elder hen sprite.
+constexpr const char* kOwnIcon[kQuantum] = {"hen_collector_source", "elder_collector_source"};
 int KindOf(int32_t type) {
     for (int k = 0; k < kKinds; ++k)
         if (kKind[k].type == type) return k;
@@ -213,7 +218,8 @@ struct Impl {
     Il2CppObject* definition[kKinds] = {};       // our source definitions (pinned, session)
     size_t offDefIcon = 0;
     Il2CppObject* icon[kKinds] = {};             // Hen / elder hen sprite (pinned, session)
-    bool iconSet[kKinds] = {};                   // the definition has its own icon
+    Il2CppObject* own[kKinds] = {};              // our embedded icon (kOwnIcon), preferred over icon[]
+    bool iconSet[kKinds] = {};                   // the definition shows own[] / icon[]
     // Chicken types (pinned, session): elders = ElderGroup; hens = MeatTypeGroup - elders - UnstableMeat.
     std::vector<Il2CppObject*> elderTypes, henTypes;
     bool elderTried = false, henTried = false;
@@ -641,11 +647,25 @@ void Impl::SetIcon(int kind) {
         Il2CppObject* sprite = quantum::SourceIcon();
         if (unity::IsAlive(sprite) && unity::NewGCHandle(sprite)) icon[kQuantum] = sprite;
     }
-    if (iconSet[kind] || !d || !offDefIcon || !icon[kind]) return;
-    SetRef(d, reinterpret_cast<void**>(reinterpret_cast<char*>(d) + offDefIcon), icon[kind]);
+    // The user's drawing for a chicken kind when it is embedded (assets/icons; the elder one is
+    // optional), sized like the game's chicken sprite (until that is known: the template's icon). It
+    // replaces the chicken sprite, also one already set.
+    const char* ownName = kind < kQuantum ? kOwnIcon[kind] : nullptr;
+    if (ownName && !own[kind] && d && offDefIcon && sr2::ui::mod_icons::Has(ownName)) {
+        Il2CppObject* sizeRef = icon[kind] ? icon[kind] : unity::Field<Il2CppObject*>(d, offDefIcon);
+        if (Il2CppObject* mine = sr2::ui::mod_icons::Get(ownName, sizeRef)) {
+            own[kind] = mine;  // pinned by mod_icons
+            iconSet[kind] = false;
+        }
+    }
+    Il2CppObject* use = own[kind] ? own[kind] : icon[kind];
+    if (iconSet[kind] || !d || !offDefIcon || !use) return;
+    SetRef(d, reinterpret_cast<void**>(reinterpret_cast<char*>(d) + offDefIcon), use);
     iconSet[kind] = true;
-    SR2_INFO("[{}] drone source: {} icon = the {} icon", module, kKind[kind].name,
-             kind == kHen ? "Hen" : kind == kElder ? "Elder Hen" : "Quantum Storage Link gadget");
+    if (own[kind]) SR2_INFO("[{}] drone source: {} icon = the mod icon '{}'", module, kKind[kind].name, ownName);
+    else
+        SR2_INFO("[{}] drone source: {} icon = the {} icon", module, kKind[kind].name,
+                 kind == kHen ? "Hen" : kind == kElder ? "Elder Hen" : "Quantum Storage Link gadget");
 }
 
 Il2CppObject* Impl::Definition(Il2CppObject* defSource, const MethodInfo* mi, int kind) {
