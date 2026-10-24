@@ -41,7 +41,7 @@ Not in profiles and not on the in-game Options "Mods" tab (personal, and the id 
 - Pipe: the first of `\\.\pipe\discord-ipc-0` .. `-9` that opens (`CreateFileW`, read/write, synchronous handle).
 - Frame: `uint32 opcode`, `uint32 length` (little-endian), then UTF-8 JSON. Opcodes 0 HANDSHAKE, 1 FRAME, 2 CLOSE, 3 PING, 4 PONG.
 - Handshake: op 0 `{"v": 1, "client_id": "<id>"}`. Reply within 6 s (was 3 s; on 2026-10-24 15:08 Discord's own log shows two sockets we closed after exactly 3 s without an answer): op 1 with `"evt": "READY"` (and `data.user`, whose `global_name` / `username` goes into the status line) = connected; op 2 CLOSE (`{"code": 4000, "message": "Invalid Client ID"}` and the like) = refused.
-- Presence: op 1 `{"cmd": "SET_ACTIVITY", "args": {"pid": <game pid>, "activity": {"details", "state", "timestamps": {"start"}, "assets": {"large_image", "large_text"}, "status_display_type"}}, "nonce": "<n>"}`. Fields shorter than 2 characters are left out (Discord rejects them), longer than 128 bytes are cut at a UTF-8 boundary.
+- Presence: op 1 `{"cmd": "SET_ACTIVITY", "args": {"pid": <game pid>, "activity": {"type": 0, "details", "state", "timestamps": {"start": <unix ms>}, "assets": {"large_image", "large_text"}, "status_display_type"}}, "nonce": "<n>"}`. Fields shorter than 2 characters are left out (Discord rejects them), longer than 128 bytes are cut at a UTF-8 boundary.
 - Replies are read without blocking (`PeekNamedPipe`, a frame is read only once its header is there). PING is answered with PONG and the same payload; CLOSE or a broken pipe = disconnected.
 - **Results are logged once per change, not per send:** a successful `SET_ACTIVITY` answer logs `Discord shows: <details> | <state>, timer from HH:MM:SS` (or `no timer`) only when that differs from the last confirmed one (Newbucks left out, so selling doesn't log); an `"evt": "ERROR"` answer logs `Discord refused the presence (<what>): <message>` once per distinct message, and again after a success. The card's tooltip has the current "Discord shows: ..." line. A successful answer echoes the activity (`timestamps.start` turned into milliseconds, the image into `mp:external/...`).
 - Sent only when the presence changed; see "Update rate" below. After a reconnect the current presence is sent again.
@@ -54,7 +54,7 @@ Not in profiles and not on the in-game Options "Mods" tab (personal, and the id 
 - **Newbucks are low priority:** a change of only `Presence::extra` goes out at most every 20 s after the previous send (`kMinorGapMs`), so selling never uses up the slots an area change needs; an area / state / timer change is sent as above and carries the current Newbucks with it. Before 2026-10-24 every sale was a send (up to 5 within 3 s, seen in Discord's log), which left later area changes waiting up to 20 s for a slot and filled Discord's own 5-per-20-s presence budget.
 - A change that is undone before it is sent (back to what Discord already shows) is not sent.
 - In practice an area change shows up within about 0.3 s, Newbucks within 20 s.
-- The elapsed timer needs no updates: Discord draws it from `timestamps.start`.
+- The elapsed timer needs no updates: Discord draws it from `timestamps.start`, a fixed point in time (the save's start), and counts up by itself between updates. See "The elapsed timer" below.
 
 ## Reconnecting and the log
 
@@ -82,6 +82,20 @@ Report after the feature/discord-polish-2 build (590ef8b, official app id): pres
 - **Discord's own log** (`%APPDATA%\discord\logs\renderer_js.log`, `[RPCServer:IPC] Socket Message / Socket Emit`) settles it: the game's socket delivered **95 `SET_ACTIVITY` between 16:06:23 and 16:44:15**, each answered within ~20 ms; zone changes reached Discord 0.3 s after the zone log line (Rainbow Fields 16:12:50.256 -> 16:12:50.567, Ember Valley 16:31:58.112 -> .412, Starlight Strand 16:34:19.790 -> 16:34:20.100). The same payload sent by a test program got successful answers echoing details, state and `timestamps.start`. So: no crash, no deadlock, no stuck rate window, no refused payload, the timer start was sent unchanged.
 - What did go wrong on our side: bursts. With Newbucks on, every sale was a send: up to 5 within 3 s (16:36:46.866-16:36:49.615 in Discord's log), so a following area change waited up to 20 s for a slot, and those bursts also used up Discord's own 5-per-20-s presence budget (shared with Spotify and the rest), so what other people see lagged further. A brief loss of the player state would also have reset the timer and flashed "In the main menu" (not proven to have happened, now impossible).
 - Discord's renderer code (cached bundle): `SET_ACTIVITY` -> `LOCAL_ACTIVITY_UPDATE` with no throttling; the detected `SlimeRancher2.exe` game is hidden when an RPC activity has the same application id or name (it does); the gateway update is throttled 5 per 20 s, deferred not dropped.
+
+## The elapsed timer (2026-10-24, "its not realtime, without updating")
+
+User: "i know it can be given a timestamp since when, not the actual elapsed time, so it counts automatically". That is how it already worked: `sessionStart_` (unix seconds) is set once when a save's player state first appears, kept across every presence update and short gaps (`kLeaveMs`), cleared after 3 s in the menu / a load, and sent as `timestamps.start`; never an elapsed value. The round-7 `sr2mods.log` confirms it: every "Discord shows" line from 18:55 to 19:49 says `timer from 18:55:21`.
+
+Changed anyway, to rule out how Discord reads it:
+
+- `timestamps.start` is now sent in **milliseconds** (the unit Discord's Activity docs give). Seconds worked too (Discord's RPC server converts a value that is ~3 digits shorter than `Date.now()`; its echo was already in ms), so this is belt and braces.
+- `"type": 0` (Playing) is sent explicitly; it is the default, and the activity type whose card shows a running "elapsed" timer.
+- **Echo check:** Discord's `SET_ACTIVITY` answer echoes the activity it stored. The pipe thread compares the echoed `timestamps.start` with what it sent: `Discord counts the timer from timestamps.start <ms> (unix ms, fixed for this save)` once per change (so once per save), or a WARN `Discord's echo has timestamps.start X but Y was sent: the timer may not count` if Discord stored something else or nothing. Logged again after a reconnect.
+
+Where it runs: Discord shows the timer in the profile popout / user panel activity card ("00:12:34 elapsed" or "for 12 minutes" in newer clients), not in the member list line. If it still looks frozen with the INFO line above in the log, the payload is right and the display is Discord's own (e.g. a client that renders "for N minutes" only per minute).
+
+Loading another save from inside a save: the player state is gone for the load; the timer restarts only if that is longer than `kLeaveMs` (3 s), which a load through the loading screen normally is. Not seen in game.
 
 ## Why an application id is needed, and the official one
 
