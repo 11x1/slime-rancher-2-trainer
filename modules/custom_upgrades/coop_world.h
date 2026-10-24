@@ -87,12 +87,16 @@ public:
     void Remove(Il2CppObject* plot, bool airNet, bool henCollector);
     // Save game loaded / new game: clones created before belong to the old game.
     void Reset();
+    // The live Hen Collectors' SiloStorages found by the last Tick (identities for that tick only;
+    // cleared by Remove / RemoveAll / Reset).
+    const std::vector<Il2CppObject*>& HenStorages() const { return henStorages_; }
 
 private:
     struct Impl;
     Impl* impl_ = nullptr;
     bool ready_ = false;
     unsigned generation_ = 1;
+    std::vector<Il2CppObject*> henStorages_;
 };
 
 }  // namespace sr2::modules::custom_upgrades::world

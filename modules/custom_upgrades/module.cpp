@@ -221,6 +221,7 @@
 #include "core/unity.h"
 #include "modules/custom_upgrades/api.h"
 #include "modules/custom_upgrades/coop_world.h"
+#include "modules/custom_upgrades/drone_source.h"
 #include "modules/custom_upgrades/plot_menu_slider.h"
 #include "modules/custom_upgrades/plot_props.h"
 #include "modules/custom_upgrades/sale_notify.h"
@@ -526,9 +527,14 @@ public:
         resync_.store(true);
         enabled_.store(true);
         cleaned_ = false;
+        drones_.ResetSeen();
     }
     void OnDisable() override {
         enabled_.store(false);
+        // Before the hooks go off (the Pull detour keeps our source type out of the save): every
+        // program with the Hen Collector source says Coop again. Field writes only; Cleanup gives
+        // the running drones the Coop program on the main thread.
+        drones_.Revert(false, "custom upgrades off");
         if (main_thread::IsMainThread()) Cleanup("module disabled");
         else main_thread::Post([this] { Cleanup("module disabled"); });
     }
@@ -665,6 +671,7 @@ private:
     bool globalUpgItemsTried_ = false;
     Il2CppObject* GlobalUpgradeItem(int32_t upgrade);
     custom_upgrades::world::CoopWorld world_;
+    custom_upgrades::drones::HenSource drones_;
     custom_upgrades::world::SiloButtons silo_;  // Sell-All Button world button
     custom_upgrades::world::PlotProps props_;   // decorative props of owned tiers (plot_props.h)
     std::vector<custom_upgrades::world::PropRequest> WantedProps() const;
@@ -1052,6 +1059,7 @@ void CustomUpgrades::ResetState(const char* why) {
     Bump();
     tierCache_.clear();
     world_.Reset();  // clones of the previous game are destroyed (never read) at the next tick
+    drones_.ResetSeen();  // the loaded save's Hen Collector programs are mapped back at the next tick
     silo_.Reset();
     props_.Reset();
     notices_.Clear();
@@ -1930,6 +1938,8 @@ void CustomUpgrades::Cleanup(const char* why) {
     // Always (also after a fault, also when cleaned already): the receipt's input lock (paused
     // time) must never outlive the module.
     if (receipt_.IsOpen() && main_thread::IsMainThread()) CloseReceipt(why);
+    // The drone source too: also after a fault (field writes only then).
+    drones_.Revert(main_thread::IsMainThread() && !sr2::core::ModuleFaulted(kModule), why);
     if (cleaned_) return;
     cleaned_ = true;
     DestroySliders();  // main thread only (no-op otherwise / without game calls after a fault)
@@ -2121,6 +2131,7 @@ void CustomUpgrades::WorldTick() {
     if (world_.Ready())
         world_.Tick([&](Il2CppObject* plot, custom_upgrades::world::CoopRequest& req) { return WorldQuery(plot, req); },
                     [&]() { return LookupDirector(); });
+    if (drones_.Ready() && !sr2::core::ModuleFaulted(kModule)) drones_.Tick(world_.HenStorages());
     if (silo_.Ready() && !sr2::core::ModuleFaulted(kModule)) {
         // Silos that own the Sell-All Button (the button checks the plot type itself).
         const UpgradeDef* d = FindDef(SILO_SELL_ALL);
@@ -3072,6 +3083,13 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         std::string werr;
         if (!world_.Setup(R, kModule, werr))
             SR2_WARN("[{}] coop world objects unavailable ({}) - Coop Air Net and Hen Collector are not offered", kModule, werr);
+    }
+    // Drone program source "Hen Collector" (optional; missing -> only the Coop source takes from it).
+    if (world_.Ready()) {
+        std::string derr, dreport;
+        if (drones_.Setup(ctx, kModule, derr, dreport)) SR2_INFO("[{}] drone source Hen Collector ready:{}", kModule, dreport);
+        else SR2_WARN("[{}] drone source Hen Collector unavailable ({}) - drones reach the Hen Collector through Coop",
+                      kModule, derr);
     }
 
     // Silo capacity tiers (optional: missing -> Silo Capacity II-IV are not offered).
