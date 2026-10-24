@@ -18,16 +18,19 @@ namespace sr2::ui::layout {
 // Drawn as its own card on the Settings page (not a tab of its own).
 inline constexpr const char* kDiscordModule = "discord_rpc";
 
-enum class Icon { Movement, World, Hud, Ranch, Misc, Profiles, Settings };
+enum class Icon { Movement, World, Hud, Ranch, Misc, Sandbox, Profiles, Settings };
 
 enum class TabKind {
     Module,    // one module's groups as cards (plus nested modules below)
     Cards,     // several small modules, one card each with its own switch
     Profiles,  // the profiles page
     Settings,  // the overlay's own settings (module "ui"), status and Discord Rich Presence (module "discord_rpc")
-    Sandbox,   // module "sandbox": its own page (resource editor), switch only after a confirmation dialog
+    Sandbox,   // module "sandbox": one of its pages (SandboxPage), switch only after a confirmation dialog
     SlimeDj,   // module "slime_dj": its own page (song list, queue, now playing); refresh icon = rescan
 };
+
+// The Sandbox category's tabs, one page each.
+enum class SandboxPage { General, Vacpack, SpawnCraft, Upgrades, Weather };
 
 struct Tab {
     std::string title;
@@ -41,6 +44,7 @@ struct Tab {
     std::string help;                       // tooltip of the (?) next to the switch
     std::vector<std::vector<std::string>> columns;  // Cards: module ids per column
     std::map<std::string, std::string> cardHelp;    // Cards: tooltip of a module's switch (default: its own)
+    SandboxPage sandboxPage = SandboxPage::General;  // Sandbox: which of its pages
 };
 
 struct Category {

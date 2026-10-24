@@ -1,4 +1,4 @@
-// sandbox: edit the character's resources from the overlay (Misc > Sandbox):
+// sandbox: edit the character's resources from the overlay (the Sandbox category):
 // Newbucks, health / energy / radiation, the vacpack's ammo slots, spawning
 // items in front of the player and crafting fabricator gadgets at no cost.
 // Default OFF; the overlay only turns it on after a confirmation dialog.
