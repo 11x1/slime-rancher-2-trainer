@@ -9,7 +9,9 @@
 #include <cstdint>
 #include <format>
 #include <initializer_list>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "core/detour_guard.h"
@@ -100,8 +102,26 @@ Quat LookRotation(V3 f) {
     }
     return q;
 }
+Quat AxisAngle(V3 axis, float deg) {
+    const float h = deg * 3.14159265f / 360.0f;
+    return {axis.x * std::sin(h), axis.y * std::sin(h), axis.z * std::sin(h), std::cos(h)};
+}
+
+std::mutex g_modIconsMu;
+std::unordered_map<std::string, uint32_t> g_modIcons;
 
 }  // namespace
+
+uint32_t ModIcon(const std::string& id) {
+    std::lock_guard<std::mutex> lk(g_modIconsMu);
+    const auto it = g_modIcons.find(id);
+    return it != g_modIcons.end() ? it->second : 0;
+}
+
+void SetModIcon(const std::string& id, uint32_t icon) {
+    std::lock_guard<std::mutex> lk(g_modIconsMu);
+    g_modIcons[id] = icon;
+}
 
 struct PrefabIcons::Impl {
     const char* module = "sandbox";
@@ -111,7 +131,7 @@ struct PrefabIcons::Impl {
     const MethodInfo *goCtor = nullptr, *addComponent = nullptr, *getInChildren = nullptr, *activeSelf = nullptr,
                      *setLayer = nullptr, *destroyImmediate = nullptr, *setHideFlags = nullptr;
     const MethodInfo *trGetPos = nullptr, *trGetRot = nullptr, *trGetScale = nullptr, *trParent = nullptr,
-                     *trSetPos = nullptr, *trSetRot = nullptr, *trSetScale = nullptr;
+                     *trSetPos = nullptr, *trSetRot = nullptr, *trSetScale = nullptr, *trFind = nullptr;
     const MethodInfo *rendEnabled = nullptr, *rendBounds = nullptr, *rendGetMats = nullptr, *rendSetMats = nullptr,
                      *mfGetMesh = nullptr, *mfSetMesh = nullptr, *smrGetMesh = nullptr;
     const MethodInfo *camEnabled = nullptr, *camClear = nullptr, *camBg = nullptr, *camMask = nullptr, *camOrtho = nullptr,
@@ -185,6 +205,21 @@ struct PrefabIcons::Impl {
         }
         return true;
     }
+    // `go` or a parent of it below `stop` (the piece's root) has one of the `skip` names.
+    bool Skipped(Il2CppObject* go, Il2CppObject* stop, const std::vector<std::string>& skip) {
+        if (skip.empty()) return false;
+        Il2CppObject* tr = unity::TransformOf(go);
+        Il2CppObject* stopTr = unity::TransformOf(stop);
+        for (int depth = 0; tr && tr != stopTr && depth < 32; ++depth) {
+            const std::string name = unity::GetName(unity::GameObjectOf(tr));
+            for (const std::string& s : skip)
+                if (name == s) return true;
+            bool ok = false;
+            tr = Call(trParent, tr, {}, "Transform.parent", &ok);
+            if (!ok) return false;
+        }
+        return false;
+    }
     static bool SkipLod(const std::string& name) {
         const size_t p = name.find("LOD");
         return p != std::string::npos && p + 3 < name.size() && name[p + 3] >= '1' && name[p + 3] <= '9';
@@ -245,6 +280,7 @@ bool PrefabIcons::Setup(Resolver& R, const char* module, std::string& why) {
     p->trSetPos = m(transform, "set_position", 1);
     p->trSetRot = m(transform, "set_rotation", 1);
     p->trSetScale = m(transform, "set_localScale", 1);
+    p->trFind = mp(transform, "Find", {"System.String"});
     p->rendEnabled = m(renderer, "get_enabled", 0);
     p->rendBounds = m(renderer, "get_bounds", 0);
     p->rendGetMats = m(renderer, "get_sharedMaterials", 0);
@@ -293,6 +329,13 @@ bool PrefabIcons::Setup(Resolver& R, const char* module, std::string& why) {
 }
 
 Il2CppObject* PrefabIcons::Render(Il2CppObject* prefab, std::string& why) {
+    Piece p;
+    p.prefab = prefab;
+    return RenderPieces({p}, nullptr, why);
+}
+
+Il2CppObject* PrefabIcons::RenderPieces(const std::vector<Piece>& pieces, const float* tint, std::string& why, int* partsOut) {
+    if (partsOut) *partsOut = 0;
     if (!ready_) {
         why = "renderer unavailable";
         return nullptr;
@@ -302,12 +345,7 @@ Il2CppObject* PrefabIcons::Render(Il2CppObject* prefab, std::string& why) {
         why = "stopped after repeated failures";
         return nullptr;
     }
-    if (!prefab || !unity::IsAlive(prefab) || unity::ClassOf(prefab) != I.goClass) {
-        why = "no prefab";
-        return nullptr;
-    }
-
-    // ---- what to copy: enabled mesh renderers on active objects ----
+    // ---- what to copy: enabled mesh renderers on active objects, posed in the composition ----
     struct Part {
         Il2CppObject* mesh;
         Il2CppObject* mats;  // Material[]
@@ -315,38 +353,82 @@ Il2CppObject* PrefabIcons::Render(Il2CppObject* prefab, std::string& why) {
         Quat rot;
     };
     std::vector<Part> parts;
-    V3 rootPos{};
-    Quat rootRot{0, 0, 0, 1};
-    Il2CppObject* rootTr = unity::TransformOf(prefab);
-    if (!rootTr || !I.Get(I.trGetPos, rootTr, "Transform.position", rootPos) || !I.Get(I.trGetRot, rootTr, "Transform.rotation", rootRot)) {
-        why = "prefab transform unreadable";
-        return nullptr;
-    }
-    for (Il2CppClass* k : {I.meshRendererClass, I.skinnedClass}) {
-        bool include = true, ok = false;
-        void* arr = I.Call(I.getInChildren, prefab, {unity::TypeOf(k), &include}, "GameObject.GetComponentsInChildren", &ok);
-        for (size_t i = 0, n = ok ? unity::ArrayLength(arr) : 0; i < n && parts.size() < kMaxParts; ++i) {
-            auto* r = static_cast<Il2CppObject*>(unity::ArrayAt(arr, i));
-            if (!r || !unity::IsAlive(r)) continue;
-            bool enabled = false;
-            if (!I.Get(I.rendEnabled, r, "Renderer.enabled", enabled) || !enabled) continue;
-            Il2CppObject* go = unity::GameObjectOf(r);
-            if (!go || Impl::SkipLod(unity::GetName(go)) || !I.ActiveChain(go)) continue;
-            Il2CppObject* mesh = nullptr;
-            if (k == I.skinnedClass) mesh = I.Call(I.smrGetMesh, r, {}, "SkinnedMeshRenderer.sharedMesh", &ok);
-            else if (Il2CppObject* mf = unity::GetComponent(go, I.meshFilterClass))
-                mesh = I.Call(I.mfGetMesh, mf, {}, "MeshFilter.sharedMesh", &ok);
-            if (!mesh || !unity::IsAlive(mesh)) continue;
-            Il2CppObject* mats = I.Call(I.rendGetMats, r, {}, "Renderer.sharedMaterials", &ok);
-            if (!mats) continue;
-            Part p{mesh, mats, {}, {1, 1, 1}, {0, 0, 0, 1}};
-            Il2CppObject* tr = unity::TransformOf(go);
-            if (!I.Get(I.trGetPos, tr, "Transform.position", p.pos) || !I.Get(I.trGetRot, tr, "Transform.rotation", p.rot) ||
-                !I.Get(I.trGetScale, tr, "Transform.lossyScale", p.scale))
+    // A later piece that can't be used is left out (logged); the first one is the look itself.
+    auto leaveOut = [&](const Piece& pc) {
+        if (&pc == &pieces.front()) return false;
+        SR2_INFO("[{}] icon render: a piece left out ({})", I.module, why);
+        return true;
+    };
+    for (const Piece& pc : pieces) {
+        Il2CppObject* prefab = pc.prefab;
+        if (!prefab || !unity::IsAlive(prefab) || unity::ClassOf(prefab) != I.goClass) {
+            why = "no prefab";
+            if (!leaveOut(pc)) return nullptr;
+            continue;
+        }
+        V3 rootPos{};
+        Quat rootRot{0, 0, 0, 1};
+        Il2CppObject* rootTr = unity::TransformOf(prefab);
+        if (!rootTr || !I.Get(I.trGetPos, rootTr, "Transform.position", rootPos) || !I.Get(I.trGetRot, rootTr, "Transform.rotation", rootRot)) {
+            why = "prefab transform unreadable";
+            if (!leaveOut(pc)) return nullptr;
+            continue;
+        }
+        // The piece's root: the prefab, or its `sub` child.
+        Il2CppObject* top = prefab;
+        V3 subPos = rootPos;
+        Quat subRot = rootRot;
+        if (pc.sub) {
+            bool ok = false;
+            auto* subTr = I.Call(I.trFind, rootTr, {unity::NewString(pc.sub)}, "Transform.Find", &ok);
+            if (!ok || !subTr || !unity::IsAlive(subTr) || !I.Get(I.trGetPos, subTr, "Transform.position", subPos) ||
+                !I.Get(I.trGetRot, subTr, "Transform.rotation", subRot)) {
+                why = std::format("'{}' has no '{}'", unity::GetName(prefab), pc.sub);
+                if (!leaveOut(pc)) return nullptr;
                 continue;
-            parts.push_back(p);
+            }
+            top = unity::GameObjectOf(subTr);
+        }
+        // Where the piece's root goes: its place in the prefab (keepPlace) or the origin, then pos / yaw / tilt
+        // (yaw * place * lean-back, as the dressing sets localRotation * AngleAxis(-tilt, x)).
+        const Quat invRoot = Conj(rootRot), invSub = Conj(subRot);
+        const bool keep = pc.sub && pc.keepPlace;
+        const V3 anchor = keep ? Rotate(invRoot, Sub(subPos, rootPos)) : V3{0, 0, 0};
+        const Quat anchorRot = keep ? QMul(invRoot, subRot) : Quat{0, 0, 0, 1};
+        const Quat pieceRot = QMul(QMul(AxisAngle({0, 1, 0}, pc.yaw), anchorRot), AxisAngle({1, 0, 0}, -pc.tilt));
+        const V3 at = Add(anchor, V3{pc.pos[0], pc.pos[1], pc.pos[2]});
+        const float sc = pc.scale > 0 ? pc.scale : 1.0f;
+        for (Il2CppClass* k : {I.meshRendererClass, I.skinnedClass}) {
+            bool include = true, ok = false;
+            void* arr = I.Call(I.getInChildren, top, {unity::TypeOf(k), &include}, "GameObject.GetComponentsInChildren", &ok);
+            for (size_t i = 0, n = ok ? unity::ArrayLength(arr) : 0; i < n && parts.size() < kMaxParts; ++i) {
+                auto* r = static_cast<Il2CppObject*>(unity::ArrayAt(arr, i));
+                if (!r || !unity::IsAlive(r)) continue;
+                bool enabled = false;
+                if (!I.Get(I.rendEnabled, r, "Renderer.enabled", enabled) || !enabled) continue;
+                Il2CppObject* go = unity::GameObjectOf(r);
+                if (!go || Impl::SkipLod(unity::GetName(go)) || !I.ActiveChain(go) || I.Skipped(go, top, pc.skip)) continue;
+                Il2CppObject* mesh = nullptr;
+                if (k == I.skinnedClass) mesh = I.Call(I.smrGetMesh, r, {}, "SkinnedMeshRenderer.sharedMesh", &ok);
+                else if (Il2CppObject* mf = unity::GetComponent(go, I.meshFilterClass))
+                    mesh = I.Call(I.mfGetMesh, mf, {}, "MeshFilter.sharedMesh", &ok);
+                if (!mesh || !unity::IsAlive(mesh)) continue;
+                Il2CppObject* mats = I.Call(I.rendGetMats, r, {}, "Renderer.sharedMaterials", &ok);
+                if (!mats) continue;
+                Part p{mesh, mats, {}, {1, 1, 1}, {0, 0, 0, 1}};
+                Il2CppObject* tr = unity::TransformOf(go);
+                if (!I.Get(I.trGetPos, tr, "Transform.position", p.pos) || !I.Get(I.trGetRot, tr, "Transform.rotation", p.rot) ||
+                    !I.Get(I.trGetScale, tr, "Transform.lossyScale", p.scale))
+                    continue;
+                // Into the composition: relative to the piece's root, scaled, turned, moved.
+                p.pos = Add(at, Rotate(pieceRot, Mul(Rotate(invSub, Sub(p.pos, subPos)), sc)));
+                p.rot = QMul(pieceRot, QMul(invSub, p.rot));
+                p.scale = Mul(p.scale, sc);
+                parts.push_back(p);
+            }
         }
     }
+    if (partsOut) *partsOut = static_cast<int>(parts.size());
     if (parts.empty()) {
         why = "the prefab has no visible mesh";
         return nullptr;
@@ -360,7 +442,6 @@ Il2CppObject* PrefabIcons::Render(Il2CppObject* prefab, std::string& why) {
         made.clear();
     };
     const V3 origin{0, kOriginY, 0};
-    const Quat inv = Conj(rootRot);
     int layer = kLayer;
     bool haveBounds = false;
     V3 lo{}, hi{};
@@ -369,7 +450,7 @@ Il2CppObject* PrefabIcons::Render(Il2CppObject* prefab, std::string& why) {
         if (!go) continue;
         made.push_back(go);
         I.Do(I.setLayer, go, {&layer}, "GameObject.set_layer");
-        I.SetPose(go, Add(origin, Rotate(inv, Sub(p.pos, rootPos))), QMul(inv, p.rot), &p.scale);
+        I.SetPose(go, Add(origin, p.pos), p.rot, &p.scale);
         Il2CppObject* mf = I.AddComponent(go, I.meshFilterClass, "AddComponent(MeshFilter)");
         Il2CppObject* mr = I.AddComponent(go, I.meshRendererClass, "AddComponent(MeshRenderer)");
         if (!mf || !mr || !I.Do(I.mfSetMesh, mf, {p.mesh}, "MeshFilter.set_sharedMesh") ||
@@ -492,6 +573,15 @@ Il2CppObject* PrefabIcons::Render(Il2CppObject* prefab, std::string& why) {
         if (bg) p = Color32{0, 0, 0, 0};
         else {
             if (!alphaKept) p.a = 255;
+            if (tint) {
+                // Towards the tint colour, keeping the shading (brightness).
+                const float l = (0.30f * p.r + 0.59f * p.g + 0.11f * p.b) / 255.0f;
+                const float v = std::min(1.0f, l * 1.5f + 0.15f) * 255.0f;
+                auto mix = [v](uint8_t c, float t) {
+                    return static_cast<uint8_t>(std::clamp(c + (t * v - c) * 0.65f, 0.0f, 255.0f));
+                };
+                p.r = mix(p.r, tint[0]), p.g = mix(p.g, tint[1]), p.b = mix(p.b, tint[2]);
+            }
             ++shown;
         }
     }

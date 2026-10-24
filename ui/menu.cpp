@@ -1737,9 +1737,10 @@ void TipKeys(const std::vector<KeyRow>& keys) {
 // Item tooltip: the name with its group as a small tag; for slimes, foods and plorts the
 // diet links with icons (favourite food, plort, who loves / makes it; no largos under "Made
 // by"); optional cost lines with icons (crafter), a dim info line, then the left / right click
-// as keycap rows (TipKeys; the tab bar's hints list the rest).
+// as keycap rows (TipKeys; the tab bar's hints list the rest). `mod`: one of the mod's own items (its tile
+// has the "M" badge): a second tag "Added by the mod" in the accent colour.
 void ItemTooltip(const sbx::Snapshot& s, const std::string& name, sbx::Kind kind, uintptr_t id, const char* info = nullptr,
-                 const std::vector<sbx::CostLine>* costs = nullptr, const std::vector<KeyRow>& keys = {}) {
+                 const std::vector<sbx::CostLine>* costs = nullptr, const std::vector<KeyRow>& keys = {}, bool mod = false) {
     const Palette& P = theme::Colors();
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(14), U(10)));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(6), U(4)));
@@ -1753,6 +1754,7 @@ void ItemTooltip(const sbx::Snapshot& s, const std::string& name, sbx::Kind kind
             ImGui::TextUnformatted(name.c_str());
         }
         TagPill(KindTag(kind), KindAccent(kind));
+        if (mod) TagPill("Added by the mod", theme::Current() == theme::Mode::Dark ? P.grab : P.accent);
         if (const sbx::Relation* r = id ? FindRelation(s, id) : nullptr) {
             RelationRow(s, "Favourite", r->favourites, 3);
             RelationRow(s, "Plort", r->plorts, 2);
@@ -2569,6 +2571,7 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
         t.accent = KindAccent(it.kind);
         t.dimmed = it.tarr && s.tarrsOff;
         t.related = Related(hoverRel, it.id);
+        t.mod = it.mod;
         if (const auto pk = g_spawnPick.find(it.id); pk != g_spawnPick.end()) {
             t.selected = true;
             t.amount = pk->second;
@@ -2599,8 +2602,10 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
         Tooltip("Spawns the selected items in front of you, each with its amount.");
     if (r.hovered >= 0 && !ImGui::IsPopupOpen(kSbxCtx)) {
         const sbx::Item& it = *src[static_cast<size_t>(r.hovered)];
-        ItemTooltip(s, it.name, it.kind, it.id, it.tarr && s.tarrsOff ? "Tarrs are disabled in this save's game settings." : nullptr,
-                    nullptr, {{"LMB", "spawn"}, {"RMB", "menu"}});
+        const char* info = it.tarr && s.tarrsOff ? "Tarrs are disabled in this save's game settings."
+                           : it.mod ? "Spawned through the mod (kept in the mod's file): at most 5 at a time."
+                                    : nullptr;
+        ItemTooltip(s, it.name, it.kind, it.id, info, nullptr, {{"LMB", "spawn"}, {"RMB", "menu"}}, it.mod);
     }
     if (r.wheelStep != 0 && r.hovered >= 0) {
         const sbx::Item& it = *src[static_cast<size_t>(r.hovered)];
@@ -2816,6 +2821,7 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
         t.dimmed = !rc.unlocked;
         t.badge = rc.owned;
         t.section = section;
+        t.mod = rc.mod;
         if (const auto pk = g_craftPick.find(rc.id); pk != g_craftPick.end()) {
             t.selected = true;
             t.amount = pk->second;
@@ -2837,9 +2843,10 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
             std::vector<const sbx::Recipe*> v;
             for (const sbx::Recipe& rc : *s.recipes)
                 if (c == kCraftAll || rc.category == c) v.push_back(&rc);
+            // The mod's buildables share their base gadget's position and follow it (modRank 1..; the game's are 0).
             std::stable_sort(v.begin(), v.end(), [](const sbx::Recipe* x, const sbx::Recipe* y) {
                 const int a = x->order < 0 ? INT_MAX : x->order, b = y->order < 0 ? INT_MAX : y->order;
-                return a < b;
+                return a != b ? a < b : x->modRank < y->modRank;
             });
             for (const sbx::Recipe* rc : v) add(*rc, section, false);
         }
@@ -2883,7 +2890,15 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
         const bool mat = isMat[static_cast<size_t>(r.hovered)];
         std::string info;
         if (mat) info = std::format("In the refinery: {}.", rc.owned);
-        else {
+        else if (rc.mod) {
+            // The mod's own buildable (custom_upgrades): given the mod's way, never as itself into the save.
+            info = rc.kind == sbx::Kind::Toy  // the Slime Radio
+                       ? std::format("Spawned in front of you (at most 5 at a time). Radios in this save: {}.", rc.owned)
+                       : std::format("You get its base gadget and a kit to place it as this one (kept in the mod's file, "
+                                       "not in the save). Kits: {}.",
+                                       rc.owned);
+            if (!rc.unlocked) info += " Fabricator card locked: crafting gives it anyway.";
+        } else {
             if (rc.costs.empty() && !rc.cost.empty()) info = "Fabricator cost: " + rc.cost + ". ";
             info += std::format("In your inventory: {}{}.", rc.owned, rc.perCraft > 1 ? " (made in pairs)" : "");
             if (!rc.unlocked) info += " Blueprint not unlocked: crafting puts it in your inventory anyway.";
@@ -2893,8 +2908,8 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
         std::vector<KeyRow> keys{{"LMB", g_craftPick.count(rc.id) ? "deselect" : "select"}, {"Shift+Wheel", "amount"}};
         if (!mat) keys.push_back({"RMB", rc.variants.empty() ? "craft menu" : "variants"});
         if (!ImGui::IsPopupOpen(kCraftCtx))
-            ItemTooltip(s, rc.name, mat ? rc.kind : sbx::Kind::Gadget, mat ? rc.id : 0, info.c_str(), mat ? nullptr : &rc.costs,
-                        keys);
+            ItemTooltip(s, rc.name, mat || rc.mod ? rc.kind : sbx::Kind::Gadget, mat ? rc.id : 0, info.c_str(), mat ? nullptr : &rc.costs,
+                        keys, rc.mod);
     }
     if (r.wheelStep != 0 && r.hovered >= 0) {
         const sbx::Recipe& rc = *src[static_cast<size_t>(r.hovered)];

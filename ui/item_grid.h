@@ -35,6 +35,7 @@ struct Tile {
     int badge = -1;                     // small number top right (e.g. how many you own); < 0: none
     int amount = 0;                     // amount chosen for this tile, bottom right ("x5"); <= 0: none
     int section = 0;                    // index into Options::sections; tiles must be ordered by section
+    bool mod = false;                   // added by the mod (not the game): a small "M" badge top left
 };
 
 inline constexpr int kGlyphOther = -1;  // Tab::glyph: three dots ("everything else")
