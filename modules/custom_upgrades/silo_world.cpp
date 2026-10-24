@@ -24,6 +24,18 @@
 // the middle of each side (silo prefab "patchSilo": Addition 0..3 at 3.05 m from the centre,
 // corner posts at 4.75).
 //
+// Tint (user request: "modify the sell button model colors so I can see it's not the menu-open one"):
+// the clone looks like the plot menu terminal's button, so its cap gets a gold accent. The prefab's
+// ApplyPalette swaps the renderers' shared materials for recoloured ones in its Start (the frame after
+// Instantiate, ColorPaletteApplicator.SetupForTarget), so the tint waits for the next ~1 Hz tick: then
+// Renderer.get_materials (instanced copies of the palette's materials) and every Color property of each
+// material's shader (Shader.GetPropertyCount / GetPropertyType == Color / GetPropertyNameId) blended
+// towards gold, alpha kept. Renderers whose GameObject name has "button_button" (the cap) get kTintCap;
+// if none matches, every renderer of the clone gets the lighter kTintAll. Shader-agnostic on purpose
+// (the tech shaders' property names are not known); the log line lists what was tinted. A later palette
+// change finds our instanced materials in no palette map and leaves them as they are. The instanced
+// materials are not destroyed with the clone (a few per rebuild; the next scene unload frees them).
+//
 // Silo plots: the plot ids module.cpp passes -> SceneContext.GameModel.GetLandPlotModel(id)
 // (a TryGetValue, null if unknown) -> LandPlotModel.gameObj (the LandPlotLocation object) ->
 // GetComponentInChildren<LandPlot>. A demolished / rebuilt plot is a new object: its button went
@@ -37,6 +49,7 @@
 #include <cmath>
 #include <format>
 #include <initializer_list>
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -63,6 +76,9 @@ constexpr std::string_view kName = "sr2mods_SiloSellButton#";
 constexpr const char* kHudOwner = "custom_upgrades.silo_button";
 constexpr unsigned long long kPressGapMs = 400;  // vanilla TIME_BETWEEN_ACTIVATIONS
 constexpr float kMessageRange = 40.0f;
+constexpr float kTintCap = 0.6f;   // blend towards kTintColor: the cap
+constexpr float kTintAll = 0.3f;   // ... every renderer (no cap found)
+constexpr int kShaderPropColor = 0;  // UnityEngine.Rendering.ShaderPropertyType.Color
 
 struct Vec3 {
     float x, y, z;
@@ -73,6 +89,10 @@ struct Quat {
 struct Mat4 {
     float m[16];
 };
+struct Color {
+    float r, g, b, a;
+};
+constexpr Color kTintColor{1.0f, 0.78f, 0.18f, 1.0f};  // gold (the Newbucks coin)
 
 }  // namespace
 
@@ -108,6 +128,19 @@ struct SiloButtons::Impl {
     MatFn worldToCamera = nullptr, projection = nullptr;
     const MethodInfo* worldToCameraMi = nullptr;
     const MethodInfo* projectionMi = nullptr;
+
+    // tint (optional: without these the button keeps the prefab's colours)
+    Il2CppClass* rendererClass = nullptr;
+    const MethodInfo* compsInChildren = nullptr;  // Component.GetComponentsInChildren(Type, bool)
+    const MethodInfo* rendMaterials = nullptr;    // Renderer.get_materials (instanced copies)
+    const MethodInfo* matShader = nullptr;        // Material.get_shader
+    const MethodInfo* matGetColor = nullptr;      // Material.GetColor(int)
+    const MethodInfo* matSetColor = nullptr;      // Material.SetColor(int, Color)
+    const MethodInfo* shPropCount = nullptr;      // Shader.GetPropertyCount()
+    const MethodInfo* shPropType = nullptr;       // Shader.GetPropertyType(int)
+    const MethodInfo* shPropNameId = nullptr;     // Shader.GetPropertyNameId(int)
+    std::map<std::string, Il2CppObject*> tinted;  // plot id -> the button GameObject already tinted
+    bool loggedTint = false;
 
     bool loggedNoSource = false;
     bool broken = false;
@@ -232,6 +265,7 @@ struct SiloButtons::Impl {
         return unity::IsAlive(go) ? go : nullptr;
     }
     void Create(Il2CppObject* plot, Il2CppObject* lookup, const std::string& id, unsigned generation);
+    void Tint(Il2CppObject* button, const std::string& id);
 };
 
 // ---------------------------------------------------------------- setup --
@@ -328,6 +362,28 @@ bool SiloButtons::Setup(Resolver& R, const char* module, std::string& why) {
         if (Il2CppClass* audio = R.Class(kImage, "", "SECTR_AudioSystem", &err))
             p->audioPlay = R.MethodByParams(audio, "Play", {"SECTR_AudioCue", "UnityEngine.Vector3", "System.Boolean"}, &err);
     }
+    {
+        std::string err;  // optional: the gold tint
+        p->rendererClass = R.Class(kCore, "UnityEngine", "Renderer", &err);
+        Il2CppClass* material = R.Class(kCore, "UnityEngine", "Material", &err);
+        Il2CppClass* shader = R.Class(kCore, "UnityEngine", "Shader", &err);
+        if (p->rendererClass && material && shader) {
+            p->compsInChildren = R.MethodByParams(component, "GetComponentsInChildren", {"System.Type", "System.Boolean"}, &err);
+            p->rendMaterials = R.Method(p->rendererClass, "get_materials", 0, &err);
+            p->matShader = R.Method(material, "get_shader", 0, &err);
+            p->matGetColor = R.MethodByParams(material, "GetColor", {"System.Int32"}, &err);
+            p->matSetColor = R.MethodByParams(material, "SetColor", {"System.Int32", "UnityEngine.Color"}, &err);
+            p->shPropCount = R.Method(shader, "GetPropertyCount", 0, &err);
+            p->shPropType = R.MethodByParams(shader, "GetPropertyType", {"System.Int32"}, &err);
+            p->shPropNameId = R.MethodByParams(shader, "GetPropertyNameId", {"System.Int32"}, &err);
+        }
+        if (!p->compsInChildren || !p->rendMaterials || !p->matShader || !p->matGetColor || !p->matSetColor ||
+            !p->shPropCount || !p->shPropType || !p->shPropNameId) {
+            p->rendererClass = nullptr;
+            SR2_WARN("[{}] silo sell button tint unavailable ({}) - the button keeps the prefab's colours", module,
+                     err.empty() ? "a Renderer / Material / Shader method is missing" : err);
+        }
+    }
     impl_ = p;
     ready_ = true;
     return true;
@@ -379,6 +435,66 @@ void SiloButtons::Impl::Create(Il2CppObject* plot, Il2CppObject* lookup, const s
     SR2_INFO("[{}] silo sell button built on plot '{}' (clone of corral '{}')", module, id, unity::GetName(src));
 }
 
+// Gold accent on the cap (see the header comment). Once per button object.
+void SiloButtons::Impl::Tint(Il2CppObject* button, const std::string& id) {
+    tinted[id] = button;
+    if (!rendererClass) return;
+    Il2CppObject* root = unity::TransformOf(button);
+    if (!unity::IsAlive(root)) return;
+    bool inactive = true, ok = false;
+    Il2CppObject* arr = Call(compsInChildren, root, {unity::TypeOf(rendererClass), &inactive},
+                             "GetComponentsInChildren(Renderer)", &ok);
+    if (!ok || !arr) return;
+    std::vector<std::pair<Il2CppObject*, std::string>> renderers;
+    bool anyCap = false;
+    for (size_t i = 0, n = unity::ArrayLength(arr); i < n && i < 32; ++i) {
+        auto* r = static_cast<Il2CppObject*>(unity::ArrayAt(arr, i));
+        if (!unity::IsAlive(r) || !IsA(r, rendererClass)) continue;
+        Il2CppObject* go = unity::GameObjectOf(r);
+        std::string name = go ? unity::GetName(go) : std::string();
+        anyCap |= name.find("button_button") != std::string::npos;
+        renderers.emplace_back(r, std::move(name));
+    }
+    const float t = anyCap ? kTintCap : kTintAll;
+    std::string done;
+    int colours = 0;
+    for (const auto& [r, name] : renderers) {
+        if (anyCap && name.find("button_button") == std::string::npos) continue;
+        Il2CppObject* mats = Call(rendMaterials, r, {}, "Renderer.get_materials", &ok);
+        if (!ok || !mats) continue;
+        int here = 0;
+        for (size_t m = 0, nm = unity::ArrayLength(mats); m < nm && m < 8; ++m) {
+            auto* mat = static_cast<Il2CppObject*>(unity::ArrayAt(mats, m));
+            if (!unity::IsAlive(mat)) continue;
+            Il2CppObject* sh = Call(matShader, mat, {}, "Material.get_shader", &ok);
+            if (!ok || !unity::IsAlive(sh)) continue;
+            const int32_t count = Value<int32_t>(Call(shPropCount, sh, {}, "Shader.GetPropertyCount", &ok));
+            for (int32_t k = 0; ok && k < count && k < 64; ++k) {
+                if (Value<int32_t>(Call(shPropType, sh, {&k}, "Shader.GetPropertyType", &ok), -1) != kShaderPropColor) continue;
+                int32_t nameId = Value<int32_t>(Call(shPropNameId, sh, {&k}, "Shader.GetPropertyNameId", &ok));
+                if (!ok) break;
+                Color c = Value<Color>(Call(matGetColor, mat, {&nameId}, "Material.GetColor", &ok));
+                if (!ok || !std::isfinite(c.r) || !std::isfinite(c.g) || !std::isfinite(c.b)) continue;
+                // HDR colours (emission > 1) keep their intensity: blend the hue, scale by the brightest channel.
+                const float peak = std::max({c.r, c.g, c.b, 1.0f});
+                c.r += (kTintColor.r * peak - c.r) * t;
+                c.g += (kTintColor.g * peak - c.g) * t;
+                c.b += (kTintColor.b * peak - c.b) * t;
+                Call(matSetColor, mat, {&nameId, &c}, "Material.SetColor", &ok);
+                if (ok) ++here;
+            }
+            if (sr2::core::ModuleFaulted(module)) return;
+        }
+        colours += here;
+        done += std::format("{}{} ({})", done.empty() ? "" : ", ", name, here);
+    }
+    if (!loggedTint) {
+        loggedTint = true;
+        SR2_INFO("[{}] silo sell button on plot '{}' tinted gold ({}): {} colour(s) on {}", module, id,
+                 anyCap ? "cap" : "no cap found - whole button, lighter", colours, done.empty() ? "nothing" : done);
+    }
+}
+
 // ---------------------------------------------------------------- api --
 
 void SiloButtons::Tick(const std::vector<std::string>& wanted, const std::function<Il2CppObject*()>& lookup) {
@@ -405,7 +521,10 @@ void SiloButtons::Tick(const std::vector<std::string>& wanted, const std::functi
                 lookupDirector = lookup();
             }
             p.Create(plot, lookupDirector, id, generation_);
+        } else if (want && btn && p.tinted[id] != btn) {
+            p.Tint(btn, id);  // a tick after the build: ApplyPalette.Start has swapped its materials by now
         } else if (!want && btn) {
+            p.tinted.erase(id);
             p.Destroy(btn);
             SR2_INFO("[{}] silo sell button removed from plot '{}' (not owned)", p.module, id);
         }
@@ -424,11 +543,13 @@ void SiloButtons::RemoveAll() {
         for (const std::string& id : built_)
             if (Il2CppObject* plot = impl_->PlotFor(gm, id)) impl_->Scan(plot, generation_, true);
     built_.clear();
+    impl_->tinted.clear();
 }
 
 void SiloButtons::Remove(Il2CppObject* plot) {
     if (!ready_ || !impl_ || !unity::IsAlive(plot) || !impl_->IsA(plot, impl_->plotClass)) return;
     if (Il2CppObject* btn = impl_->Scan(plot, generation_, false)) {
+        std::erase_if(impl_->tinted, [btn](const auto& e) { return e.second == btn; });
         impl_->Destroy(btn);
         SR2_INFO("[{}] silo sell button removed (sold)", impl_->module);
     }
