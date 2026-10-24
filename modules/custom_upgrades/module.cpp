@@ -236,6 +236,7 @@
 #include "modules/custom_upgrades/drone_source.h"
 #include "modules/custom_upgrades/plot_menu_slider.h"
 #include "modules/custom_upgrades/plot_props.h"
+#include "modules/custom_upgrades/gadget_look.h"
 #include "modules/custom_upgrades/quantum_link.h"
 #include "modules/custom_upgrades/dj_buildables.h"
 #include "modules/custom_upgrades/radio_shop.h"
@@ -3262,6 +3263,15 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         std::string werr;
         if (!world_.Setup(R, kModule, werr))
             SR2_WARN("[{}] coop world objects unavailable ({}) - Coop Air Net and Hen Collector are not offered", kModule, werr);
+    }
+    // Game-UI looks of the mod's gadget definitions (label, preview, description; optional: missing ->
+    // the base gadget's label / preview / description).
+    {
+        std::string gerr, greport;
+        if (custom_upgrades::gadget_look::Setup(ctx, kModule, gerr, greport))
+            SR2_INFO("[{}] mod gadget looks ready:{}", kModule, greport);
+        else SR2_WARN("[{}] mod gadget looks unavailable ({}) - mod gadgets show their base gadget's label and preview",
+                      kModule, gerr);
     }
     // Quantum Storage Link gadget (optional; missing -> not offered, nothing else changes).
     {
