@@ -72,8 +72,9 @@ counts. Shown and applied only while custom_upgrades is on (its gate); stored in
 
 - **Where it is bought.** The drone station has no purchase menu, and the fabricator's upgrades are
   vacpack `UpgradeDefinition`s paid in craft materials and saved in the vanilla `PlayerUpgrades`
-  model (a custom entry there is not save-safe). So the station menu gets a `[B] Battery Saver` pill
-  (same clone of the Change prompt as the price limit) right after the drone's status indicators
+  model (a custom entry there is not save-safe). So the station menu gets a `[B] Battery` pill (label
+  `Battery II` with a tier; short like the `Limit` pill so it can't wrap; the same clone of the
+  Change prompt as the price limit) right after the drone's status indicators
   (DetailsPanel > DescriptionArea > StatusRow: Charge / Mode / Location, `DroneProgramMenu._batteryWidget`
   / `_modeWidget` / `_locationWidget`), with the status row's layout kept off it (`SkipLayout`). B, the
   pad's left stick click or a click opens a dialog: the four tiers (effect, price, Owned / Next), the
@@ -113,11 +114,11 @@ counts. Shown and applied only while custom_upgrades is on (its gate); stored in
 5. Two stations with different limits behave independently.
 6. Save, reload: the limit is still there (sidecar `values`). Load an older save: its own limits.
 7. Disable custom_upgrades: limits still work for the session, the dialog shows the "Not saved" note.
-8. Battery Saver (custom_upgrades on): the `[B] Battery Saver` pill sits right of the Location
+8. Battery Saver (custom_upgrades on): the `[B] Battery` pill sits right of the Location
    indicator under the drone description (position, size; log `battery saver action cloned ...`).
    Hidden with custom_upgrades off.
 9. B / left stick click / a click opens the battery dialog; buy I (Newbucks go down by 1500, the pill
-   reads "Battery Saver I"), buy up to IV, sell back (half refund); not enough Newbucks shows the
+   reads "Battery I"), buy up to IV, sell back (half refund); not enough Newbucks shows the
    orange note; B / Esc / backdrop close it; Enter / A press the focused button.
 10. With a tier owned the station's battery lasts longer: compare the charge indicator over a few game
    hours with a station without a tier (log `Battery Saver N active (battery drain x...)`). Save and
