@@ -24,7 +24,7 @@ are listed dimmed with the reason.
 | `library.cpp/.h` | folder scan on a background thread, per-file cache (path + size + write time), ID3v2 reader |
 | `stream.cpp/.h` | one song being decoded on a background thread into 0.5 s chunks (bounded queue) |
 | `beat.cpp/.h` | beat analysis of the decoded PCM on the decoder thread (bass level + onsets per 10 ms) |
-| `walls.cpp/.h` | "Walls dance to the music": corral energy walls and Air Net pulse with the analysis |
+| `walls.cpp/.h` | "Walls dance to the music": beat ripples round the corral energy walls, walls and Air Net glow with the analysis |
 | `codecs.c/.h` | the only TU that compiles stb_vorbis, dr_mp3, dr_wav (CMake target `sr2_codecs`, C, `/W0`) behind a small streaming C API |
 | `ui/slime_dj_bridge.cpp/.h` | snapshot / request exchange with the overlay tab (same pattern as the sandbox) |
 
@@ -215,11 +215,24 @@ User request: "make the plot futuristic walls wave based on beat from the speake
 (after the down-mix) into the stream's `BeatTrack`, so it runs seconds ahead of the play head and
 is ready long before the walls need it. Mono mix, Hann window of ~23 ms rounded to a power of two
 (1024 frames at 44.1/48 kHz), one radix-2 FFT per 10 ms hop. Per hop one 16-bit entry:
-- bass level: energy of the 35-160 Hz bins in dB against a peak that falls 2 dB/s, mapped over a
-  24 dB window to 0..1 (0 while the peak is under -60 dB);
-- onset: spectral flux (rise of `log1p(100 x amplitude)` per bin up to 3 kHz, bass bins x3) that
-  is a local maximum and above a running mean + 1.5 deviations (~0.5 s), at least 120 ms after the
-  previous one, not in the first 0.3 s; strength 0.3..1 from how far above the threshold.
+- bass level: energy of the 35-160 Hz bins in dB, mapped to 0..1 between a peak that falls 6 dB/s
+  and a floor that rises 10 dB/s (follows the dips between kicks), span clamped to 8-24 dB; 0 while
+  a slow peak (falls 2 dB/s) is under -60 dB or the bass is 30 dB under it (breaks);
+- onset: detection function = half spectral flux (rise of `log1p(100 x amplitude)` per bin up to
+  3 kHz, bass bins x3) + half bass level rise (12 dB per hop = 1), a local maximum above a running
+  mean + 1.5 deviations (~0.5 s), at least 180 ms after the previous one (up to 333 BPM), not in
+  the first 0.3 s; strength 0.3..1 from how far above the threshold relative to the recent
+  strongest onset (that peak falls 33 %/s).
+
+*Round 9 ("with hardtekk its very chill even on 200%").* Offline harness (scratchpad, the user's
+own songs from `sr2mods_music`, 60 s each from 0:40): with the old analysis hardtekk / uptempo
+(Septum - The Final Countdown, 102 Boyz - Tokyo Drift hardtekk edit, 200BPM Volksmusik, 1001
+Uptempo Nights, BAD HABIT) gave 250-310 onsets/min (median gap 0.15-0.20 s: kicks plus offbeat
+hats / bass stabs, strength 0.3-1 at random, mean 0.6) and a bass level that sat at 0.7-0.9 with
+short dips (fixed 24 dB window under a slowly falling peak: compressed music never leaves the top).
+After the changes above: 170-205 onsets/min, median gap 0.26-0.34 s (= the 180-230 BPM kick),
+mean strength 0.7-0.8, level per beat swinging from ~0.1 to ~0.95 (0.35-0.9 on the most
+compressed one). The synthetic 120 BPM test track still gives every kick at 0.500 s, strength 1.
 Memory 2 bytes per hop (7 KB per minute, capped at 6 hours). After a seek the track starts at the
 seek frame (`Reset(rate, startFrame)`), entries stay in song frames. Offline test (scratchpad
 harness, synthetic 120 BPM kick/snare/hat/pad track at 44.1 kHz): 39 of 39 kicks after the warm-up
@@ -254,27 +267,55 @@ components). At most 12 corrals.
   (same shader family, `_Intensity` 1). `AirNet.Awake/Update` set `_Health` on its own material
   instance (0x982840 loads `StringLiteral__Health`), `OnCollisionEnter` sets `_HitTime`; we touch
   neither, so a hit or broken net still shows.
-- The barrier ripples (`CorralBarrierRippleCollision.SpawnRippleHere`) use
-  `Shader.SetGlobalVectorArray`, not the renderers.
+- The barrier ripples (the "morph" when something is shot through a wall; round 9: "when shooting
+  something through walls (eg chicken coop), it gets morphed differently than the current impl").
+  IDA: `CorralBarrierRipples` (MonoBehaviour on the FXDirector, `SceneContext.FXDirector` 0xD0 ->
+  `corralBarrierRipples` 0x40) keeps `Vector4[4] worldRippleArray` (0x20), `nextRipple` (0x28) and
+  the id of `_WorldRippleArray` (0x2C). `ResetRipples` (Awake, OnDestroy) fills w with -10000;
+  `SpawnRippleHere(Vector3)` (0xB65EB0) advances the ring, writes (x, y, z, `Time.time`) and calls
+  `Shader.SetGlobalVectorArray`. `CorralBarrierRippleCollision.OnTriggerEnter` (0xB65A40) does the
+  same inline at `Collider.ClosestPointOnBounds` of the barrier for layer-9 objects with a
+  `VacDelaunchTrigger` (vacpack shots).
+  Shader "SR/RanchTech/CorralBarrier" (dumped from `shaders_assets_*.bundle`, DXBC disassembled):
+  tessellated; the domain stage loops over the 4 ripples: age = _Time.y - w, skipped once age >=
+  `_RippleFadeDuration`; t = age / fade; radius = lerp(`_RippleStartSize`, `_RippleSize`, t); every
+  vertex within the radius is pushed away from the centre by `_RipplePushScale` x (1 - d / radius)
+  x (1 - t^4) (object space). Material CorralBarrier: `_RipplePushScale` 0.5, `_RippleStrength` 1,
+  `_RippleFadeDuration` 1, `_RippleSize` 5, `_RippleStartSize` 1 (AirNet: 1 / 5 / 5 / 5 / 0).
+  These are per-material floats, so a property block sets them per renderer; the ring is global.
+
+On every beat (onset): one ripple per animated corral (at most 4 corrals per beat: the ring has 4
+slots; with more, round robin) through `SpawnRippleHere` on the scene's `CorralBarrierRipples`
+(found with `FindObjectOfType` at a box scan, at most every 10 s while unknown, GC handle; used only
+while its array exists). The ripple centre is the middle of one side (between two neighbouring
+corner posts of the lower fields), 1 m inside the corral, 1.7 m up (3.4 m with High Walls), so the
+side bulges outwards; the side is the one nearest the chase angle (a quarter turn per beat), so the
+bulge travels round the corral with the music. Without 4 lower fields (no plausible corners) the
+plot gets no ripples. The y-scale bob of round 8 is gone.
 
 Per frame, per cached renderer: `MaterialPropertyBlock.Clear` + `Renderer.GetPropertyBlock(work)`
-(keeps anything the game put there) + `SetFloat(_Intensity)` + `SetColor(_Color)` +
-`SetPropertyBlock`, and for wall fields `Transform.set_localScale` (direct native calls, no
-searches; one shared work block). The look, with I = intensity, e = smoothed bass level (attack
-30 ms, release 150 ms), p = beat pulse (jumps to the onset strength, decays with 0.2 s), and a
-chase angle that turns a quarter round the corral per beat (smoothed 90 ms); w = how close a
-renderer is to the chase (cos^2 of its corner angle minus the chase, the upper field trailing by
-0.6 rad: a wave going round and up):
-- glow: `_Intensity` = base x (1 + I x (0.8 e + 2.0 p w));
+(keeps anything the game put there) + `SetFloat` / `SetColor` + `SetPropertyBlock` (direct native
+calls, no searches; one shared work block). With I = intensity, D = drive = I x (1 + 0.75 max(0,
+I - 1)) (100 % = 1, 200 % = 3.5), e = smoothed bass level (attack 15 ms, release 100 ms), p = beat
+pulse (jumps to the onset strength, decays with 0.15 s), a chase angle that turns a quarter round
+the corral per beat (smoothed 60 ms), w = how close a renderer is to the chase (cos^2 of its corner
+angle minus the chase, the upper field trailing by 0.6 rad):
+- glow: `_Intensity` = base x (1 + D x (0.8 e + 2.0 p w));
 - colour: `_Color` = base mixed towards a colour wheel (hue +0.11 per beat, spread around the
   corners) by min(1, 0.6 I) x (0.35 + 0.65 max(e, p w));
-- height (wall fields only): localScale.y x (1 + I x (0.04 e + 0.10 p w)).
-Cached per plot (GC handles for renderer, transform and a per-renderer snapshot block taken with
-`GetPropertyBlock` before the first change, plus the original localScale); rebuilt when the plot's
-active walls root or net changes (High Walls / Air Net bought or sold). Restore = `SetPropertyBlock
-(snapshot)` and the original localScale: when the song pauses (after the walls settled), stops or
-changes plot range, the setting goes off, the module is disabled. After a native fault the module
-stops for the session and leaves the walls as they are (handles leaked by design).
+- wall fields only: `_RipplePushScale` = base x min(10, 1 + D x (1.0 e + 2.5 p)) (how far the
+  bulges push, all ripples in flight pump with the bass); `_RippleStrength` = base x (1 + D x (e +
+  2 p)); `_RippleSize` = base x (1 + 0.25 D e); `_RippleFadeDuration` = 0.9 x (4 / corrals per
+  beat) x the tempo (smoothed gap between beats), 0.3 s to 1.5 x base: a ripple has faded before
+  its slot comes round again, and on fast music the rings grow faster.
+Vacpack shots through a dancing wall use the same block, so they bulge more while it dances.
+Cached per plot (GC handles for renderer and a per-renderer snapshot block taken with
+`GetPropertyBlock` before the first change, the 4 ripple points); rebuilt when the plot's active
+walls root or net changes (High Walls / Air Net bought or sold). Restore = `SetPropertyBlock
+(snapshot)`: when the song pauses (after the walls settled), stops or changes plot range, the
+setting goes off, the module is disabled; ripples in flight fade on their own (material fade 1 s).
+After a native fault the module stops for the session and leaves the walls as they are (handles
+leaked by design).
 
 ## Settings
 
@@ -285,8 +326,8 @@ stops for the session and leaves the walls as they are (handles leaked by design
 | `amplify` | off | each other speaker in range: +25 % volume and range, up to 2x |
 | `shuffle` | on | random songs when the queue is empty |
 | `mute_vanilla` | on | silence the music box's own tune while a song plays |
-| `dance_walls` | off | corral energy walls and Air Net pulse with the beat (corrals within hearing range) |
-| `dance_intensity` | 1.0 (100 %) | 10-200 %, how strongly they pulse, grow and change colour (shown while `dance_walls` is on) |
+| `dance_walls` | off | a ripple runs round the corral walls on every beat; walls and Air Net glow and change colour (corrals within hearing range) |
+| `dance_intensity` | 1.0 (100 %) | 10-200 %, how strongly they ripple, glow and change colour; steeper above 100 % (shown while `dance_walls` is on) |
 
 ## Log lines
 
@@ -301,7 +342,11 @@ stops for the session and leaves the walls as they are (handles leaked by design
 - `slime_dj: box scans in the last 60 s: …` (once a minute while scans ran), `slime_dj: no MusicBoxUpgrader.Apply hook (…)`
 - `slime_dj: speaker N ms off the others, moved back in sync`
 - `slime_dj: walls dance at 'patchCorral…': N wall field(s) under '…', M net renderer(s) under '…'; wall _Intensity X
-  _Color (r, g, b), net _Intensity Y[ (other renderers skipped: …)]` (per corral built, first 24)
+  _Color (r, g, b) _RipplePushScale … _RippleStrength … _RippleFadeDuration … _RippleSize …, net _Intensity Y; K ripple
+  point(s)[ (other renderers skipped: …)]` (per corral built, first 24)
+- `slime_dj: walls dance: first beat ripple(s) spawned through CorralBarrierRipples.SpawnRippleHere (N corral(s) per
+  beat)` (once), `slime_dj: walls dance: no CorralBarrierRipples in the scene yet (…)` (once),
+  `slime_dj: walls dance without beat ripples (…); glow and colour only` (Setup, warning)
 - `slime_dj: walls dance at N corral(s)` (when the count changes), `slime_dj: walls dance stopped (setting off|no
   song); walls restored`
 - `slime_dj: 'Walls dance to the music' unavailable (…)` (Setup; a class / method missing)
@@ -322,8 +367,10 @@ game. To check:
 - box cache: no `frame:slime_dj took` warnings in normal play; a Music Box bought on a new corral,
   and corrals after a teleport back to the ranch, get a speaker within ~2 s without a scene search
   (the minute line shows `scene searches 0`).
-- walls dance: that `_Intensity` / `_Color` in a property block visibly change the CorralBarrier
-  and AirNet shaders (if the log shows the values but nothing glows, only the height bob is left;
-  an HDRP GPU Resident Drawer could also ignore property blocks), that the beat looks in time
+- walls dance: round 8 showed the height bob (so property blocks and transforms reach the fields);
+  round 9 build: that the beat ripples bulge the walls outwards and travel round the corral, that
+  `_RipplePushScale` in the block makes them stronger with the bass (if not, the ripples still show
+  at the material's 0.5), that `_Intensity` / `_Color` visibly change the CorralBarrier and AirNet
+  shaders, that hardtekk at 200 % is wild, that the beat looks in time
   (lag constant `kDanceLagSeconds` 40 ms), and that everything is back to normal after Stop /
   Pause / setting off / leaving the ranch.

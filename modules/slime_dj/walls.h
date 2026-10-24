@@ -1,10 +1,11 @@
 #pragma once
 // slime_dj: "Walls dance to the music". The energy walls of a corral whose Music Box plays the
-// song (and its Air Net, if bought) pulse with the beat analysis of the song (beat.h).
+// song (and its Air Net, if bought) dance to the beat analysis of the song (beat.h): a vanilla
+// barrier ripple runs round the walls on every beat, glow and colour follow the bass.
 //
 // Main thread only, inside the module's guarded tick (no hooks). Objects are found once per plot
 // (and again when its walls or net change), held by GC handles; nothing is searched per frame.
-// Everything changed is put back exactly (scale, property block) when the song stops or pauses,
+// Everything changed is put back exactly (property blocks) when the song stops or pauses,
 // the plot leaves the hearing range, the setting is turned off or the module is disabled. See
 // NOTES.md "Walls dance to the music".
 

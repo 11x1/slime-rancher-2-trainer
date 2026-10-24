@@ -95,7 +95,7 @@ Start the game. The log is written to `sr2mods.log` in the same folder. On each 
 
 Slime DJ (Ranch > Slime DJ in the overlay) plays your own songs from the corral Music Box. On its first start the mod creates a `sr2mods_music` folder in the game folder, next to `SlimeRancher2.exe`. Put `.ogg`, `.mp3` or `.wav` files there (subfolders work too), then press Rescan on the Songs card (or the refresh icon in the tab bar); "Open folder" gets you there. Songs are streamed, so long files are fine; the details and limits are in `modules/slime_dj/NOTES.md`. The folder is yours: deploy and uninstall never touch it.
 
-"Walls dance to the music" on the Now playing card (off by default) makes the energy walls of a playing corral, and its Air Net if bought, pulse, grow and change colour with the beat of the song; "Dance intensity" sets how much.
+"Walls dance to the music" on the Now playing card (off by default) sends a ripple round the energy walls of a playing corral on every beat (the same bulge as a shot through the wall), and the walls and the Air Net, if bought, glow and change colour with the song; "Dance intensity" sets how much (above 100 % it gets wild).
 
 ### Discord Rich Presence
 

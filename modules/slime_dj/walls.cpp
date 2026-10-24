@@ -7,22 +7,33 @@
 //     corner) / "corralField": one MeshRenderer, an L-shaped energy field covering half of the two
 //     sides at that corner (mesh bounds 4.9 x 3.2 x 4.9, y 0.17..3.39). High walls add
 //     "corralField (1)" at y 3.38 on top. So 4 fields (standard) or 8 (high walls). Material
-//     "CorralBarrier" (transparent HDRP shader graph): _Intensity 3, _Color white, _EmissionColor,
-//     ripple props. The fields have no collider (the barriers are separate "corralBarrier" boxes),
-//     so scaling them changes nothing in play.
+//     "CorralBarrier" (shader "SR/RanchTech/CorralBarrier", HDRP unlit, tessellated): _Intensity 3,
+//     _Color white, _RipplePushScale 0.5, _RippleStrength 1, _RippleFadeDuration 1, _RippleSize 5,
+//     _RippleStartSize 1. The fields have no collider (the barriers are separate "corralBarrier"
+//     boxes), so nothing here changes play.
 //   * AirNetUpgrader.AirNets = [Base Air Net, High Air Net]; the owned one (for the walls) is
 //     active: "NetTrigger" = MeshRenderer + AirNet + BoxCollider (the net's collider: never moved
 //     or scaled here). Material "AirNet" (same shader family): _Intensity 1. AirNet.Awake/Update
 //     write "_Health" on its own material instance and OnCollisionEnter "_HitTime"; we only set
 //     _Intensity and _Color, in a property block, so a hit / broken net still shows.
-//   * The barrier ripples (CorralBarrierRippleCollision) go through Shader.SetGlobalVectorArray,
-//     not through the renderers.
+//   * The barrier ripples, the "morph" when something is shot through a wall: the shader's domain
+//     stage reads the global _WorldRippleArray (4 x (world x, y, z, start time)) and pushes every
+//     vertex within a growing radius (_RippleStartSize -> _RippleSize over _RippleFadeDuration s)
+//     away from the ripple centre, by _RipplePushScale x (1 - d / radius) x (1 - t^4). The array is
+//     written by CorralBarrierRipples.SpawnRippleHere(Vector3) (FXDirector.corralBarrierRipples,
+//     a ring of 4 slots, start time = Time.time; CorralBarrierRippleCollision.OnTriggerEnter does
+//     the same inline for vacpack shots, IDA 0xB65A40 / 0xB65EB0).
 //
-// Animation per frame, for every cached renderer (direct native calls, no searches):
-//   Renderer.GetPropertyBlock(work) -> SetFloat(_Intensity) / SetColor(_Color) -> SetPropertyBlock,
-//   and for wall fields Transform.set_localScale (taller on the beat). Restore: the renderer's own
-//   block as it was before the first change (snapshot MaterialPropertyBlock per renderer), and the
-//   original localScale.
+// Animation:
+//   * on every beat, per corral (at most 4, the ring has 4 slots), SpawnRippleHere at the middle of
+//     one side, 1 m inside the corral, so that side bulges outwards; the side follows the chase (a
+//     quarter turn round the corral per beat).
+//   * per frame, for every cached renderer (direct native calls, no searches):
+//     Renderer.GetPropertyBlock(work) -> SetFloat(_Intensity, _Ripple*) / SetColor(_Color) ->
+//     SetPropertyBlock. _RipplePushScale / _RippleStrength follow the bass level and the beat pulse;
+//     _RippleFadeDuration follows the tempo so a ripple has faded before its slot is reused.
+//   Restore: the renderer's own block as it was before the first change (snapshot
+//   MaterialPropertyBlock per renderer). Ripples in flight fade out on their own (<= 1.5 s).
 
 #include "modules/slime_dj/walls.h"
 
@@ -51,15 +62,21 @@ constexpr const char* kImage = "Assembly-CSharp";
 constexpr const char* kCore = "UnityEngine.CoreModule";
 constexpr size_t kMaxPlots = 12;
 constexpr size_t kMaxPartsPerPlot = 24;
+constexpr size_t kRippleSlots = 4;                   // CorralBarrierRipples.RIPPLE_ARRAY_SIZE
 constexpr float kPi = 3.14159265358979f;
 // Look
-constexpr float kAttack = 0.03f, kRelease = 0.15f;  // bass level smoothing (s)
-constexpr float kPulseDecay = 0.2f;                  // beat pulse time constant (s)
-constexpr float kChaseTime = 0.09f;                  // the chase turns a quarter per beat, this fast
+constexpr float kAttack = 0.015f, kRelease = 0.10f;  // bass level smoothing (s)
+constexpr float kPulseDecay = 0.15f;                 // beat pulse time constant (s)
+constexpr float kChaseTime = 0.06f;                  // the chase turns a quarter per beat, this fast
 constexpr float kHueStep = 0.11f;                    // colour wheel step per beat
-constexpr float kGlowLevel = 0.8f, kGlowBeat = 2.0f; // _Intensity x (1 + I * (level*a + pulse*b))
-constexpr float kLiftLevel = 0.04f, kLiftBeat = 0.10f;  // wall height x (1 + I * (...))
+constexpr float kGlowLevel = 0.8f, kGlowBeat = 2.0f; // _Intensity x (1 + D * (level*a + pulse*b))
 constexpr float kColourMix = 0.6f;                   // colour share at intensity 1
+constexpr float kPushLevel = 1.0f, kPushBeat = 2.5f; // _RipplePushScale x (1 + D * (level*a + pulse*b))
+constexpr float kPushMax = 10.0f;                    // ... at most this times the material's
+constexpr float kRippleGlowLevel = 1.0f, kRippleGlowBeat = 2.0f;  // _RippleStrength, same form
+constexpr float kRippleGrow = 0.25f;                 // _RippleSize x (1 + D * level * this)
+constexpr float kRippleInset = 1.0f;                 // ripple centre this far inside the wall (m)
+constexpr float kRippleHeight = 1.7f, kRippleHeightHigh = 3.4f;  // above the post base (m)
 constexpr float kRest = 0.004f;                      // below this the walls count as settled
 
 struct Vec3 {
@@ -89,6 +106,13 @@ Color Hsv(float h, float s, float v) {
         default: return {v, p, q, 1};
     }
 }
+
+float AngleDiff(float a, float b) {
+    float d = std::fmod(a - b, 2 * kPi);
+    if (d > kPi) d -= 2 * kPi;
+    if (d < -kPi) d += 2 * kPi;
+    return std::fabs(d);
+}
 }  // namespace
 
 struct WallDancer::Impl {
@@ -112,31 +136,47 @@ struct WallDancer::Impl {
     M<float (*)(Il2CppObject*, int32_t, const MethodInfo*)> matGetFloat;
     M<Color (*)(Il2CppObject*, int32_t, const MethodInfo*)> matGetColor;
     M<int32_t (*)(Il2CppString*, const MethodInfo*)> propertyToId;
-    M<Vec3 (*)(Il2CppObject*, const MethodInfo*)> trGetLocalScale, trGetPosition;
-    M<void (*)(Il2CppObject*, Vec3, const MethodInfo*)> trSetLocalScale;
-    int32_t idIntensity = 0, idColor = 0;
+    M<Vec3 (*)(Il2CppObject*, const MethodInfo*)> trGetPosition;
+    // ripples (optional: without them only the glow / colour part runs)
+    Il2CppClass* ripplesClass = nullptr;  // MonomiPark.SlimeRancher.VFX.EnvironmentInteraction.CorralBarrierRipples
+    size_t offRippleArray = 0;            // Vector4[] worldRippleArray (made in Awake)
+    M<void (*)(Il2CppObject*, Vec3, const MethodInfo*)> spawnRipple;
+    std::string rippleWhy;                // why ripples are unavailable (logged once)
+    enum Prop { kIntensity, kColor, kPush, kStrength, kFade, kSize, kProps };
+    int32_t ids[kProps] = {};
 
     // ---- state
     struct Part {
-        Il2CppGCHandle rend = nullptr, tr = nullptr, saved = nullptr;  // saved: the renderer's own block
-        Vec3 scale{1, 1, 1};
-        float baseIntensity = 1.0f;
+        Il2CppGCHandle rend = nullptr, saved = nullptr;  // saved: the renderer's own block
+        float base[kProps] = {};                         // material values (kColor unused)
+        bool has[kProps] = {};
         Color baseColor{1, 1, 1, 1};
-        bool hasIntensity = false, hasColor = false;
-        bool wall = false;  // wall field (scaled) or net (glow only)
+        bool wall = false;  // wall field or net
         float angle = 0;    // around the plot centre (rad)
         int tier = 0;       // 0 = lower field, 1 = the high walls' upper field
+        Vec3 pos{};         // world position (wall fields: the corner post base)
+    };
+    struct Side {
+        Vec3 at;            // ripple centre
+        float angle;        // around the plot centre
     };
     struct Plot {
         Il2CppGCHandle up = nullptr;    // MusicBoxUpgrader
         Il2CppObject* walls = nullptr;  // active walls root / net (identity only: rebuilt when they change)
         Il2CppObject* net = nullptr;
         std::vector<Part> parts;
+        std::vector<Side> sides;        // 4 when the corners were found, else empty (no ripples)
         bool touched = false;           // something is changed right now
     };
     std::vector<Plot> plots;
-    Il2CppGCHandle work = nullptr;  // shared MaterialPropertyBlock
+    Il2CppGCHandle work = nullptr;     // shared MaterialPropertyBlock
+    Il2CppGCHandle ripples = nullptr;  // the scene's CorralBarrierRipples
+    ULONGLONG ripplesSearch = 0;       // last search (tick count), at most every 10 s
+    bool ripplesLogged = false, ripplesMissingLogged = false;
     float env = 0, pulse = 0, rot = 0, rotTarget = 0, hue = 0;
+    float sinceBeat = 10, beatInterval = 0.5f;  // s; the tempo (smoothed gap between beats)
+    size_t rippleNext = 0;             // round robin over plots when there are more than 4
+    uint64_t ripplesSpawned = 0;
     int builtLogs = 0;
 
     template <class Fn>
@@ -227,11 +267,18 @@ struct WallDancer::Impl {
         Il2CppObject* tr = unity::TransformOf(r);
         if (!tr) return false;
         if (Il2CppObject* mat = rendSharedMaterial.fn(r, rendSharedMaterial.mi); unity::IsAlive(mat)) {
-            pt.hasIntensity = matHasProperty.fn(mat, idIntensity, matHasProperty.mi);
-            pt.hasColor = matHasProperty.fn(mat, idColor, matHasProperty.mi);
-            if (pt.hasIntensity) pt.baseIntensity = matGetFloat.fn(mat, idIntensity, matGetFloat.mi);
-            if (pt.hasColor) pt.baseColor = matGetColor.fn(mat, idColor, matGetColor.mi);
-            if (!std::isfinite(pt.baseIntensity)) pt.hasIntensity = false;
+            for (int k = 0; k < kProps; ++k) {
+                pt.has[k] = ids[k] && matHasProperty.fn(mat, ids[k], matHasProperty.mi);
+                if (!pt.has[k]) continue;
+                if (k == kColor) {
+                    pt.baseColor = matGetColor.fn(mat, ids[k], matGetColor.mi);
+                } else {
+                    pt.base[k] = matGetFloat.fn(mat, ids[k], matGetFloat.mi);
+                    if (!std::isfinite(pt.base[k])) pt.has[k] = false;
+                }
+            }
+            if (!wall)  // the ripple props only matter where the ripples are (the walls)
+                pt.has[kPush] = pt.has[kStrength] = pt.has[kFade] = pt.has[kSize] = false;
         }
         Il2CppObject* saved = NewBlock();
         if (!saved) return false;
@@ -240,24 +287,49 @@ struct WallDancer::Impl {
         mpbClear.fn(saved, mpbClear.mi);
         rendGetBlock.fn(r, saved, rendGetBlock.mi);
         if (wall) {
-            pt.scale = trGetLocalScale.fn(tr, trGetLocalScale.mi);
-            if (!std::isfinite(pt.scale.x) || !std::isfinite(pt.scale.y) || !std::isfinite(pt.scale.z)) return false;
             const std::string name = unity::GetName(unity::GameObjectOf(r));
             pt.tier = name.find("(1)") != std::string::npos ? 1 : 0;
         }
-        const Vec3 pos = trGetPosition.fn(tr, trGetPosition.mi);
-        pt.angle = std::isfinite(pos.x) && std::isfinite(pos.z) ? std::atan2(pos.z - centre.z, pos.x - centre.x) : 0.0f;
+        pt.pos = trGetPosition.fn(tr, trGetPosition.mi);
+        if (!std::isfinite(pt.pos.x) || !std::isfinite(pt.pos.y) || !std::isfinite(pt.pos.z)) pt.pos = centre;
+        pt.angle = std::atan2(pt.pos.z - centre.z, pt.pos.x - centre.x);
         pt.rend = unity::NewGCHandle(r);
-        pt.tr = unity::NewGCHandle(tr);
         pt.saved = unity::NewGCHandle(saved);
-        if (!pt.rend || !pt.tr || !pt.saved) {
+        if (!pt.rend || !pt.saved) {
             Free(pt.rend);
-            Free(pt.tr);
             Free(pt.saved);
             return false;
         }
         plot.parts.push_back(pt);
         return true;
+    }
+
+    // Ripple points: the middle of each side between two neighbouring corners (lower fields),
+    // moved inwards, at wall height.
+    void BuildSides(Plot& plot, const Vec3& centre) {
+        plot.sides.clear();
+        std::vector<const Part*> corners;
+        bool high = false;
+        for (const Part& p : plot.parts) {
+            if (!p.wall) continue;
+            if (p.tier == 0) corners.push_back(&p);
+            else high = true;
+        }
+        if (corners.size() != 4) return;
+        std::sort(corners.begin(), corners.end(), [](const Part* a, const Part* b) { return a->angle < b->angle; });
+        for (size_t i = 0; i < 4; ++i) {
+            const Vec3 a = corners[i]->pos, b = corners[(i + 1) % 4]->pos;
+            Vec3 m{(a.x + b.x) / 2, std::min(a.y, b.y), (a.z + b.z) / 2};
+            const float dx = centre.x - m.x, dz = centre.z - m.z, len = std::sqrt(dx * dx + dz * dz);
+            if (len < 2 * kRippleInset) {  // not a plausible corral
+                plot.sides.clear();
+                return;
+            }
+            Side s;
+            s.angle = std::atan2(m.z - centre.z, m.x - centre.x);
+            s.at = {m.x + dx / len * kRippleInset, m.y + (high ? kRippleHeightHigh : kRippleHeight), m.z + dz / len * kRippleInset};
+            plot.sides.push_back(s);
+        }
     }
 
     void Build(Plot& plot, Il2CppObject* up) {
@@ -279,6 +351,7 @@ struct WallDancer::Impl {
         if (plot.net)
             for (Il2CppObject* r : Renderers(plot.net))
                 if (AddPart(plot, r, false, centre)) ++nets;
+        BuildSides(plot, centre);
         if (builtLogs++ < 24) {
             const Part* w = nullptr;
             const Part* n = nullptr;
@@ -286,14 +359,15 @@ struct WallDancer::Impl {
                 if (p.wall && !w) w = &p;
                 if (!p.wall && !n) n = &p;
             }
+            auto f = [](const Part* p, int k) { return p && p->has[k] ? std::format("{:.2f}", p->base[k]) : std::string("n/a"); };
             SR2_INFO("slime_dj: walls dance at '{}': {} wall field(s) under '{}', {} net renderer(s) under '{}'; "
-                     "wall _Intensity {} _Color {}, net _Intensity {}{}",
+                     "wall _Intensity {} _Color {} _RipplePushScale {} _RippleStrength {} _RippleFadeDuration {} "
+                     "_RippleSize {}, net _Intensity {}; {} ripple point(s){}",
                      unity::GetName(unity::GameObjectOf(up)), fields, plot.walls ? unity::GetName(plot.walls) : "-", nets,
-                     plot.net ? unity::GetName(plot.net) : "-",
-                     w && w->hasIntensity ? std::format("{:.2f}", w->baseIntensity) : std::string("n/a"),
-                     w && w->hasColor ? std::format("({:.2f}, {:.2f}, {:.2f})", w->baseColor.r, w->baseColor.g, w->baseColor.b)
-                                      : std::string("n/a"),
-                     n && n->hasIntensity ? std::format("{:.2f}", n->baseIntensity) : std::string("n/a"),
+                     plot.net ? unity::GetName(plot.net) : "-", f(w, kIntensity),
+                     w && w->has[kColor] ? std::format("({:.2f}, {:.2f}, {:.2f})", w->baseColor.r, w->baseColor.g, w->baseColor.b)
+                                         : std::string("n/a"),
+                     f(w, kPush), f(w, kStrength), f(w, kFade), f(w, kSize), f(n, kIntensity), plot.sides.size(),
                      other.empty() ? std::string() : std::format(" (other renderers skipped: {})", other));
         }
     }
@@ -305,8 +379,6 @@ struct WallDancer::Impl {
             Il2CppObject* r = Target(pt.rend);
             Il2CppObject* saved = Target(pt.saved);
             if (r && saved) rendSetBlock.fn(r, saved, rendSetBlock.mi);
-            if (pt.wall)
-                if (Il2CppObject* tr = Target(pt.tr)) trSetLocalScale.fn(tr, pt.scale, trSetLocalScale.mi);
         }
     }
 
@@ -314,18 +386,80 @@ struct WallDancer::Impl {
         Restore(plot);
         for (Part& pt : plot.parts) {
             Free(pt.rend);
-            Free(pt.tr);
             Free(pt.saved);
         }
         plot.parts.clear();
         Free(plot.up);
     }
 
+    // The scene's CorralBarrierRipples (on the FXDirector), usable: alive, Awake ran (array made).
+    // `search`: look for it when it is not known (at most every 10 s; box scans only, not on a beat).
+    Il2CppObject* Ripples(bool search) {
+        if (!spawnRipple) return nullptr;
+        Il2CppObject* r = Target(ripples);
+        if (!r) {
+            Free(ripples);
+            if (!search) return nullptr;
+            const ULONGLONG now = GetTickCount64();
+            if (ripplesSearch && now - ripplesSearch < 10000) return nullptr;
+            ripplesSearch = now;
+            r = unity::FindObjectOfType(ripplesClass);
+            if (!r || !IsA(r, ripplesClass)) {
+                if (!ripplesMissingLogged) {
+                    ripplesMissingLogged = true;
+                    SR2_INFO("slime_dj: walls dance: no CorralBarrierRipples in the scene yet (glow only; retried every 10 s)");
+                }
+                return nullptr;
+            }
+            ripples = unity::NewGCHandle(r);
+            if (!ripples) return nullptr;
+        }
+        void* arr = unity::Field<void*>(r, offRippleArray);
+        return arr && unity::ArrayLength(arr) >= kRippleSlots ? r : nullptr;
+    }
+
+    // A beat: one ripple per corral (on the side nearest the chase), at most 4 corrals per beat.
+    void SpawnRipples() {
+        bool any = false;
+        for (const Plot& p : plots) any = any || !p.sides.empty();
+        if (!any) return;
+        Il2CppObject* r = Ripples(false);
+        if (!r) return;
+        size_t done = 0;
+        for (size_t i = 0; i < plots.size() && done < kRippleSlots; ++i) {
+            const Plot& plot = plots[(rippleNext + i) % plots.size()];
+            if (plot.sides.empty()) continue;
+            const Side* best = &plot.sides[0];
+            for (const Side& s : plot.sides)
+                if (AngleDiff(s.angle, rotTarget) < AngleDiff(best->angle, rotTarget)) best = &s;
+            spawnRipple.fn(r, best->at, spawnRipple.mi);
+            ++done;
+            ++ripplesSpawned;
+        }
+        rippleNext = plots.empty() ? 0 : (rippleNext + done) % plots.size();
+        if (!ripplesLogged && done) {
+            ripplesLogged = true;
+            SR2_INFO("slime_dj: walls dance: first beat ripple(s) spawned through CorralBarrierRipples.SpawnRippleHere "
+                     "({} corral(s) per beat)", done);
+        }
+    }
+
+    // How many corrals get a ripple per beat (the ring's slots are shared).
+    size_t RipplesPerBeat() const {
+        size_t n = 0;
+        for (const Plot& p : plots) n += p.sides.empty() ? 0 : 1;
+        return std::clamp<size_t>(n, 1, kRippleSlots);
+    }
+
     void Animate(Plot& plot, float intensity) {
         Il2CppObject* work0 = Target(work);
         if (!work0) return;
         plot.touched = true;
+        // Drive: linear up to 100 %, steeper above (200 % = 3.5x), so the top of the slider is wild.
+        const float drive = intensity * (1.0f + 0.75f * std::max(0.0f, intensity - 1.0f));
         const float mix = std::min(1.0f, kColourMix * intensity);
+        // A ripple's slot comes round again after (4 / ripples per beat) beats: fade before that.
+        const float life = static_cast<float>(kRippleSlots / RipplesPerBeat()) * beatInterval;
         for (Part& pt : plot.parts) {
             Il2CppObject* r = Target(pt.rend);
             if (!r) continue;
@@ -334,28 +468,28 @@ struct WallDancer::Impl {
             const float c = 0.5f + 0.5f * std::cos(pt.angle - rot - 0.6f * static_cast<float>(pt.tier));
             const float w = c * c;
             const float beat = pulse * w;
-            if (pt.hasIntensity || pt.hasColor) {
-                mpbClear.fn(work0, mpbClear.mi);
-                rendGetBlock.fn(r, work0, rendGetBlock.mi);  // keeps whatever else the game put there
-                if (pt.hasIntensity) {
-                    const float g = pt.baseIntensity * (1.0f + intensity * (kGlowLevel * env + kGlowBeat * beat));
-                    mpbSetFloat.fn(work0, idIntensity, g, mpbSetFloat.mi);
-                }
-                if (pt.hasColor) {
-                    const Color h = Hsv(hue + pt.angle / (2 * kPi) * 0.3f, 0.85f, 1.0f);
-                    const float k = mix * (0.35f + 0.65f * std::max(env, beat));
-                    const Color b = pt.baseColor;
-                    mpbSetColor.fn(work0, idColor,
-                                   Color{b.r + (h.r - b.r) * k, b.g + (h.g - b.g) * k, b.b + (h.b - b.b) * k, b.a},
-                                   mpbSetColor.mi);
-                }
-                rendSetBlock.fn(r, work0, rendSetBlock.mi);
+            bool any = false;
+            for (bool h : pt.has) any = any || h;
+            if (!any) continue;
+            mpbClear.fn(work0, mpbClear.mi);
+            rendGetBlock.fn(r, work0, rendGetBlock.mi);  // keeps whatever else the game put there
+            auto set = [&](int k, float v) {
+                if (pt.has[k]) mpbSetFloat.fn(work0, ids[k], v, mpbSetFloat.mi);
+            };
+            set(kIntensity, pt.base[kIntensity] * (1.0f + drive * (kGlowLevel * env + kGlowBeat * beat)));
+            if (pt.has[kColor]) {
+                const Color h = Hsv(hue + pt.angle / (2 * kPi) * 0.3f, 0.85f, 1.0f);
+                const float k = mix * (0.35f + 0.65f * std::max(env, beat));
+                const Color b = pt.baseColor;
+                mpbSetColor.fn(work0, ids[kColor],
+                               Color{b.r + (h.r - b.r) * k, b.g + (h.g - b.g) * k, b.b + (h.b - b.b) * k, b.a}, mpbSetColor.mi);
             }
-            if (pt.wall)
-                if (Il2CppObject* tr = Target(pt.tr)) {
-                    const float lift = 1.0f + intensity * (kLiftLevel * env + kLiftBeat * beat);
-                    trSetLocalScale.fn(tr, Vec3{pt.scale.x, pt.scale.y * lift, pt.scale.z}, trSetLocalScale.mi);
-                }
+            // The ripples' push and glow pump with the bass and the beat (all ripples on this field).
+            set(kPush, pt.base[kPush] * std::min(kPushMax, 1.0f + drive * (kPushLevel * env + kPushBeat * pulse)));
+            set(kStrength, pt.base[kStrength] * (1.0f + drive * (kRippleGlowLevel * env + kRippleGlowBeat * pulse)));
+            set(kFade, std::clamp(0.9f * life, 0.3f, std::max(0.3f, 1.5f * pt.base[kFade])));
+            set(kSize, pt.base[kSize] * (1.0f + kRippleGrow * drive * env));
+            rendSetBlock.fn(r, work0, rendSetBlock.mi);
         }
     }
 };
@@ -422,10 +556,27 @@ bool WallDancer::Resolve(std::string& why) {
     bind(P.matGetFloat, byParams(material, "GetFloat", {"System.Int32"}), "Material.GetFloat");
     bind(P.matGetColor, byParams(material, "GetColor", {"System.Int32"}), "Material.GetColor");
     bind(P.propertyToId, byParams(shader, "PropertyToID", {"System.String"}), "Shader.PropertyToID");
-    bind(P.trGetLocalScale, byParams(transform, "get_localScale", {}), "Transform.get_localScale");
-    bind(P.trSetLocalScale, byParams(transform, "set_localScale", {"UnityEngine.Vector3"}), "Transform.set_localScale");
     bind(P.trGetPosition, byParams(transform, "get_position", {}), "Transform.get_position");
     if (!why.empty()) return false;
+
+    // Ripples: optional, a failure only turns them off.
+    {
+        std::string err;
+        P.ripplesClass = R.Class(kImage, "MonomiPark.SlimeRancher.VFX.EnvironmentInteraction", "CorralBarrierRipples", &err);
+        if (!P.ripplesClass) P.rippleWhy = "class CorralBarrierRipples: " + err;
+        if (P.ripplesClass) {
+            if (auto o = R.FieldOffset(P.ripplesClass, "worldRippleArray", &err)) P.offRippleArray = *o;
+            else P.rippleWhy = "field worldRippleArray: " + err;
+        }
+        if (P.rippleWhy.empty()) {
+            const MethodInfo* m = R.MethodByParams(P.ripplesClass, "SpawnRippleHere", {"UnityEngine.Vector3"}, &err);
+            if (!m || !Impl::Bind(P.spawnRipple, m)) P.rippleWhy = "SpawnRippleHere: " + (err.empty() ? std::string("no native body") : err);
+        }
+        if (!P.rippleWhy.empty()) {
+            P.spawnRipple = {};
+            SR2_WARN("slime_dj: walls dance without beat ripples ({}); glow and colour only", P.rippleWhy);
+        }
+    }
     P.ready = true;
     return true;
 }
@@ -433,9 +584,10 @@ bool WallDancer::Resolve(std::string& why) {
 void WallDancer::Sync(const std::vector<Il2CppObject*>& upgraders) {
     Impl& P = *p_;
     if (!P.ready) return;
-    if (!P.idIntensity) {  // main thread, first use
-        P.idIntensity = P.propertyToId.fn(unity::NewString("_Intensity"), P.propertyToId.mi);
-        P.idColor = P.propertyToId.fn(unity::NewString("_Color"), P.propertyToId.mi);
+    if (!P.ids[Impl::kIntensity]) {  // main thread, first use
+        static constexpr const char* kNames[Impl::kProps] = {"_Intensity", "_Color", "_RipplePushScale",
+                                                              "_RippleStrength", "_RippleFadeDuration", "_RippleSize"};
+        for (int k = 0; k < Impl::kProps; ++k) P.ids[k] = P.propertyToId.fn(unity::NewString(kNames[k]), P.propertyToId.mi);
     }
     if (!Impl::Target(P.work)) {
         Impl::Free(P.work);
@@ -470,6 +622,7 @@ void WallDancer::Sync(const std::vector<Il2CppObject*>& upgraders) {
         P.Build(plot, up);
         P.plots.push_back(std::move(plot));
     }
+    if (!P.plots.empty()) P.Ripples(true);  // find (or re-find) the ripple ring here, not on a beat
 }
 
 void WallDancer::Tick(float dt, const BeatTrack::Sample* beat, float intensity) {
@@ -479,10 +632,14 @@ void WallDancer::Tick(float dt, const BeatTrack::Sample* beat, float intensity) 
     const float level = beat ? beat->level : 0.0f;
     P.env += (level - P.env) * (1.0f - std::exp(-dt / (level > P.env ? kAttack : kRelease)));
     P.pulse *= std::exp(-dt / kPulseDecay);
-    if (beat && beat->beat > 0) {
+    P.sinceBeat += dt;
+    const bool onBeat = beat && beat->beat > 0;
+    if (onBeat) {
         P.pulse = std::max(P.pulse, beat->beat);
         P.rotTarget += kPi / 2;
         P.hue += kHueStep;
+        if (P.sinceBeat < 1.5f) P.beatInterval += (std::max(P.sinceBeat, 0.15f) - P.beatInterval) * 0.25f;
+        P.sinceBeat = 0;
     }
     P.rot += (P.rotTarget - P.rot) * (1.0f - std::exp(-dt / kChaseTime));
     if (P.rotTarget > 64 * kPi) {  // keep the angles small
@@ -495,6 +652,7 @@ void WallDancer::Tick(float dt, const BeatTrack::Sample* beat, float intensity) 
         if (settled) P.Restore(plot);
         else P.Animate(plot, std::clamp(intensity, 0.0f, 2.0f));
     }
+    if (onBeat) P.SpawnRipples();  // after Animate: the new ripple starts with this frame's push / fade
 }
 
 void WallDancer::Clear() {
@@ -502,6 +660,7 @@ void WallDancer::Clear() {
     for (Impl::Plot& plot : P.plots) P.Drop(plot);
     P.plots.clear();
     P.env = P.pulse = 0;
+    P.sinceBeat = 10;
 }
 
 }  // namespace sr2::modules::slime_dj
