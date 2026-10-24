@@ -70,10 +70,28 @@ public:
     // Drop anything queued (save loaded / new game / module off).
     void Clear();
 
+    // ---- free-text notices (map_tools teleport, sandbox teleport to waypoint) ----
+    // The same drone-style pop-up with any sprite and text: our own NotificationEntry(provider, null group,
+    // icon, name, NotificationEntryStyle.Default) appended to the list's _pendingNotifications (its Update
+    // shows pending entries page by page). The name is a LocalizedString of our own (the _localizedName of
+    // an Instantiate'd ZoneDefinition, a pool of 4) whose text core/text_override replaces, so it needs the
+    // UI's LocalizeStringEvent sink (text_override::SinkActive()).
+    // Worker thread, after Setup: false = unavailable (`why`).
+    bool SetupText(sr2::il2cpp::Resolver& R, std::string& why);
+    bool TextReady() const { return textReady_; }
+    // Main thread: queue one notice; false = not possible now (no text sink) - callers just log.
+    bool QueueText(Il2CppObject* icon, const std::string& text);
+    // Main thread: the game's teleporter sprite for such notices (the icon of a TELEPORTER gadget definition,
+    // home teleporter, found once among the loaded GadgetDefinitions and kept); nullptr if none.
+    Il2CppObject* TeleporterIcon();
+
+    struct Impl;  // public for the free-text helpers in the .cpp
+
 private:
-    struct Impl;
+
     Impl* impl_ = nullptr;
     bool ready_ = false;
+    bool textReady_ = false;
 };
 
 }  // namespace sr2::modules::custom_upgrades::ui

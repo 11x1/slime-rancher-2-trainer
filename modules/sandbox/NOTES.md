@@ -145,7 +145,7 @@ Teleport:
 1. Ground: `Physics.Raycast((x, 1500, z), down, out hit, 3000, DefaultRaycastLayers, QueryTriggerInteraction.Ignore)`; the target is 1 m above the hit. No hit: refused with a message.
 2. `TeleportNetwork.CompleteInSceneTeleport(SceneGroup, Vector3 position, Vector3 eulerRotation)` (public, 0x65BA00), the game's in-scene teleport: it takes the player's `TeleportablePlayer` and calls `TeleportTo(position, group, rotation, overlayEnabled: true)`, which sets the controller position and rotation, zeroes the velocity, `PlayerModel.SetCurrentSceneGroup`, `RegionLoader.InitializeRegionProxies` (loads the regions around the target), moves a held item along, disables screen effects and updates the audio listener. Rotation: the player's current heading (`Transform.eulerAngles` with x / z zeroed).
 
-Log: `[sandbox] Teleported to the map marker: (x, y, z) -> (x, y, z), N m`.
+Log: `[sandbox] Teleported to the map marker: (x, y, z) -> (x, y, z), N m`. The result (success or the "Not teleported: …" reason) also shows as a HUD pop-up in the drone notification list with the teleporter icon (`custom_upgrades/sale_notify.h` `SaleNotices::QueueText`, the same helper as the full map's right-click teleport); it waits while the HUD suppresses notices.
 
 **Not seen in game:** the ground hit (the first collider from above wins: a roof, a tree or an invisible ceiling collider would put you on top of it; over the slime sea you land on whatever collider is below), and whether distant terrain colliders are loaded before `InitializeRegionProxies` runs (if not, the raycast finds nothing and the teleport is refused rather than dropping you).
 

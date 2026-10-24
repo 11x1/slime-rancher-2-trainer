@@ -34,6 +34,7 @@
 #include "core/log.h"
 #include "core/module.h"
 #include "core/unity.h"
+#include "modules/custom_upgrades/sale_notify.h"
 #include "ui/sandbox_bridge.h"
 #include "ui/sandbox_extras_bridge.h"
 
@@ -139,10 +140,17 @@ bool CallValue(const MethodInfo* m, void* obj, std::initializer_list<void*> args
     return true;
 }
 
+// The HUD's drone-style pop-ups (custom_upgrades/sale_notify.h), for "teleport to marker" with the teleporter icon.
+sr2::modules::custom_upgrades::ui::SaleNotices g_notices;
+bool g_inTeleport = false;  // Done() is reporting a teleport: also a pop-up
+unsigned long long g_lastNoticeTick = 0;
+
 void Done(bool ok, const std::string& text) {
     if (ok) SR2_INFO("[{}] {}", kModule, text);
     else SR2_WARN("[{}] {}", kModule, text);
     sr2::ui::sandbox::SetStatus(text, !ok);
+    if (g_inTeleport && g_notices.TextReady())
+        g_notices.QueueText(g_notices.TeleporterIcon(), ok ? std::string("Teleported to the map marker") : text);
 }
 
 // ------------------------------------------------------------ health ----
@@ -220,7 +228,14 @@ bool MarkerLocation(const Scene& s, Vec3& pos, std::string& why) {
     return true;
 }
 
+void DoTeleportImpl();
 void DoTeleport() {
+    g_inTeleport = true;
+    DoTeleportImpl();
+    g_inTeleport = false;
+}
+
+void DoTeleportImpl() {
     if (!g_teleportWhy.empty()) {
         Done(false, "Not teleported: " + g_teleportWhy);
         return;
@@ -536,6 +551,11 @@ void SetupPlayerExtras(sr2::core::ModuleContext& ctx) {
         g_raiseEvent = method(ev, "RaiseEvent", 0, w);
         if (!w.empty()) SR2_WARN("[{}] unlock ranch expansions unavailable: {}", kModule, w);
     }
+    {
+        std::string nerr;
+        if (!g_notices.Setup(R, kModule, nerr, "teleport") || !g_notices.SetupText(R, nerr))
+            SR2_INFO("[{}] teleport to marker: no HUD pop-ups ({})", kModule, nerr);
+    }
     SR2_INFO("[{}] player extras: infinite health {}, teleport to marker {}, unlock expansions {}", kModule,
              g_healthWhy.empty() ? (g_hookReady ? "ok (hook + top-up)" : "ok (top-up only)") : "off",
              g_teleportWhy.empty() ? "ok" : "off", g_expansionWhy.empty() ? "ok" : "off");
@@ -561,6 +581,11 @@ void PlayerExtrasTick(bool snapshot) {
         TopUpHealth();
     }
     if (snapshot) Publish();
+    if (g_notices.Ready()) {  // queued pop-ups wait for the HUD (menus / the overlay may suppress it)
+        float dt = g_lastNoticeTick ? static_cast<float>(now - g_lastNoticeTick) / 1000.0f : 0.0f;
+        g_lastNoticeTick = now;
+        g_notices.Frame(dt);
+    }
 }
 
 }  // namespace sr2::modules::sandbox
