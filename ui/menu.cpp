@@ -908,7 +908,8 @@ void BeginCard(const char* id, float w) {
     ImGui::PushStyleColor(ImGuiCol_Border, P.cardBorder);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(16), U(14)));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(10), U(6)));
-    ImGui::BeginChild(id, ImVec2(w, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY, ImGuiWindowFlags_NoScrollbar);
+    ImGui::BeginChild(id, ImVec2(w, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_NavFlattened,
+                      ImGuiWindowFlags_NoScrollbar);
 }
 
 void EndCard() {
@@ -3999,7 +4000,7 @@ void DrawSidebar(const Host& h, const std::vector<Category>& cats, const ModuleV
     const Palette& P = theme::Colors();
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(12), U(14)));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(8), U(4)));
-    ImGui::BeginChild("##side", ImVec2(U(kSideW), height), ImGuiChildFlags_AlwaysUseWindowPadding,
+    ImGui::BeginChild("##side", ImVec2(U(kSideW), height), ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground);
     const float w = ImGui::GetContentRegionAvail().x;
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -4445,7 +4446,7 @@ bool Draw(const Host& h) {
         DrawSidebar(h, cats, ui, ws.y);
         ImGui::SetCursorPos(ImVec2(U(kSideW), 0));
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(10), U(8)));
-        ImGui::BeginChild("##main", ImVec2(ws.x - U(kSideW), ws.y), ImGuiChildFlags_None,
+        ImGui::BeginChild("##main", ImVec2(ws.x - U(kSideW), ws.y), ImGuiChildFlags_NavFlattened,
                           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground);
         closed = DrawTopBar(cat, ti, views);
         const Tab& tab = cat.tabs[static_cast<size_t>(ti)];
@@ -4464,7 +4465,8 @@ bool Draw(const Host& h) {
         const bool sbxBar = sbxView && SandboxHintBarShown(tab, *sbxView);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(18), 0));
         ImGui::BeginChild(("##body_" + page).c_str(), ImVec2(0, sbxBar ? -U(kSbxBarH) : 0.0f),
-                          ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoBackground);
+                          ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened,
+                          ImGuiWindowFlags_NoBackground);
         KeepPageScroll(page);
         // The columns' span (the content region: without the padding and the scrollbar), for the hint bar.
         const float colX0 = ImGui::GetCursorScreenPos().x, colX1 = colX0 + ImGui::GetContentRegionAvail().x;
