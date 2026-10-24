@@ -523,6 +523,7 @@ struct MenuInjection {
     std::vector<Injected> items;
     std::vector<HiddenVanilla> hidden;
     std::vector<Il2CppObject*> storageTitles;  // vanilla "Additional Storage" _title objects we relabel
+    std::string storageReport;                 // last logged Additional Storage card state (logged on change)
     bool failed = false;               // clone/verification failed: never retried for this config
 };
 
@@ -665,6 +666,7 @@ private:
     void RestoreVanilla(MenuInjection& inj);
     void MergeStorageCards(Il2CppObject* plot, MenuInjection& inj, const std::vector<std::pair<Il2CppObject*, int32_t>>& cards);
     void RefreshAvailability(Il2CppObject* plot, const MenuInjection& inj);
+    void ReportStorageCards(Il2CppObject* plot, MenuInjection& inj);
     bool Shown(Il2CppObject* plot, const UpgradeDef& d);
     Il2CppObject* MarketIcon();
     void SetTexts(const Injected& in, const std::string& title, const std::string& desc, const std::string& prompt);
@@ -2063,6 +2065,35 @@ void CustomUpgrades::AfterMenuUpdate(Il2CppObject* root) {
         if (p->config == config) inj = p.get();
     if (!inj || inj->failed) return;
     RegisterTexts(plot, *inj);  // again: the original may have changed what the pre hook read
+    if (PlotType(plot) == kPlotSilo) ReportStorageCards(plot, *inj);
+}
+
+// Round 8: "silo additional storage is separate upgrades again" (no code path found that undoes the merge).
+// After the game built / refreshed the menu: which Additional Storage cards are in the list now, logged when
+// it changes. More than one means something put them back after BeforeMenuUpdate (logged as a warning).
+void CustomUpgrades::ReportStorageCards(Il2CppObject* plot, MenuInjection& inj) {
+    if (!inj.list) return;
+    std::string listed;
+    int count = 0;
+    for (size_t i = 0, n = unity::ListCount(inj.list); i < n && i < 64; ++i) {
+        auto* item = static_cast<Il2CppObject*>(unity::ListAt(inj.list, i));
+        if (!IsA(item, upgItemClass_) || !unity::IsAlive(item)) continue;
+        const int32_t u = unity::Field<int32_t>(item, offItemUpgrade_);
+        const auto at = std::find(std::begin(kUpgStorageSections), std::end(kUpgStorageSections), u);
+        if (at == std::end(kUpgStorageSections)) continue;
+        ++count;
+        listed += std::format("{}STORAGE{} at {}{}", listed.empty() ? "" : ", ", 2 + (at - std::begin(kUpgStorageSections)), i,
+                              VanillaOwned(plot, u) ? " (owned)" : "");
+    }
+    std::string report = std::format("{} card(s): {}; {} vanilla card(s) out of the list", count,
+                                     listed.empty() ? "none" : listed, inj.hidden.size());
+    if (report == inj.storageReport) return;
+    inj.storageReport = report;
+    if (count > 1) {
+        SR2_WARN("[{}] silo menu: Additional Storage NOT merged after the game's update - {}", kModule, report);
+    } else {
+        SR2_INFO("[{}] silo menu: Additional Storage {}", kModule, report);
+    }
 }
 
 void CustomUpgrades::Cleanup(const char* why) {
