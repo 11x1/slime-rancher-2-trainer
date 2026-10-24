@@ -80,6 +80,10 @@ RVAs are only for reference (GameAssembly.dll 1.3.0). The code finds everything 
   * Generic per-save values (`custom_upgrades::PlotValue` / `SetPlotValue` / `SaveValue` /
     `SetSaveValue`, api.h) live in the same file. sell_upgrades stores the ash of a sold Ash
     Trough there; drone_price_limit the per-station limits (`drone_price_limit.station.<actor id>`).
+  * The sandbox writes its own top-level `"sandbox"` entry (the "cheated" mark) into the same
+    files, also while custom upgrades are off (modules/sandbox/NOTES.md, "Cheated saves").
+    `WriteSidecar` keeps that entry when its `save_number` matches the file it writes; a file with
+    only that entry (no `format` / `plots` / `values`) counts as no sidecar for custom upgrades.
 * Why the game folder and not the Steam save folder: Steam Cloud syncs
   `LocalLow\MonomiPark\SlimeRancher2\Steam\<id>\` (steam_autocloud.vdf). Extra files there would
   be uploaded to the game's cloud quota and land on PCs without the mod, and unknown files in the
