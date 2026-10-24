@@ -84,6 +84,11 @@
 //     and no sidecar value (never sold, sold but not saved, custom_upgrades off) or module
 //     off: vanilla fill. Known limit: a demolished incinerator rebuilt on the same spot
 //     keeps the sidecar value. The ash stays a vanilla-producible amount.
+//     The FillableAshSource sits on the trough's child "Ash Level" (GetComponentInChildren, as
+//     vanilla does; a plain GetComponent on AshTrough never found it, so before this fix every
+//     re-purchase kept the vanilla full trough). After every completed Ash Trough purchase the
+//     trough model (AshTroughUpgrader.AshTrough, hidden by the sale) is checked and switched
+//     on if vanilla Apply did not (log "trough model shown" / "was still hidden - shown now").
 //   * EXCLUDED: silo STORAGE2/3/4 and STORAGE_CAPACITY_INCREASE (they change the silo's
 //     slot layout / per-slot capacity of stored items; reverting means rewriting slot
 //     data and could lose or over-fill stored items).
@@ -301,7 +306,8 @@ public:
     struct AshRebuy {
         Il2CppObject* plot = nullptr;
         Il2CppObject* model = nullptr;
-        float saved = -1.0f;  // ash from the save's sidecar (custom_upgrades::PlotValue); < 0 = none
+        float saved = -1.0f;   // ash from the save's sidecar (custom_upgrades::PlotValue); < 0 = none
+        bool record = false;   // ash remembered (in memory or `saved`): restore it after the purchase
     };
     AshRebuy BeforeVanillaBuy(Il2CppObject* closure);
     void AfterVanillaBuy(const AshRebuy& r);
@@ -392,6 +398,7 @@ private:
     std::unordered_map<Il2CppObject*, AshRecord> ashRecords_;
     void RememberAsh(Il2CppObject* model, float ash);
     Il2CppObject* FindAshSource(Il2CppObject* plot);
+    Il2CppObject* AshTroughObject(Il2CppObject* plot);  // AshTroughUpgrader.AshTrough (the trough model)
 
 public:
     // ---- resolved (Setup, worker thread) ----
@@ -1298,18 +1305,26 @@ void SellUpgrades::RememberAsh(Il2CppObject* model, float ash) {
     ashRecords_.emplace(model, AshRecord{h, ash});
 }
 
-Il2CppObject* SellUpgrades::FindAshSource(Il2CppObject* plot) {
+Il2CppObject* SellUpgrades::AshTroughObject(Il2CppObject* plot) {
     if (!ash_.klass) return nullptr;
     Il2CppArray* arr = getComponents_(plot, Type(upgraderClass_));
     for (size_t i = 0, c = unity::ArrayLength(arr); i < c; ++i) {
         auto* comp = static_cast<Il2CppObject*>(unity::ArrayAt(arr, i));
         if (!unity::IsAlive(comp) || !IsA(comp, ash_.klass)) continue;
         Il2CppObject* go = unity::Field<Il2CppObject*>(comp, ash_.off1);  // AshTroughUpgrader.AshTrough
-        if (!unity::IsAlive(go)) continue;
-        Il2CppObject* src = unity::GetComponent(go, ashSourceClass_);
-        if (unity::IsAlive(src) && IsA(src, ashSourceClass_)) return src;
+        if (unity::IsAlive(go)) return go;
     }
     return nullptr;
+}
+
+// The FillableAshSource is on the trough's child "Ash Level" (patchIncinerator prefab: AshTrough ->
+// Meshes (floor, walls) + Ash Level), the way vanilla OnInitialPurchase finds it
+// (GetComponentInChildren). GetComponent on AshTrough itself never found it ("trough not found").
+Il2CppObject* SellUpgrades::FindAshSource(Il2CppObject* plot) {
+    Il2CppObject* go = AshTroughObject(plot);
+    if (!go || !ashSourceClass_) return nullptr;
+    Il2CppObject* src = getComponentInChildren_(unity::TransformOf(go), Type(ashSourceClass_), true);
+    return unity::IsAlive(src) && IsA(src, ashSourceClass_) ? src : nullptr;
 }
 
 // Per-save copy of the remembered ash (custom_upgrades sidecar of the .sav file): survives a
@@ -1335,7 +1350,7 @@ bool SellUpgrades::RefuseBuyAfterSale(Il2CppObject* closure) {
 }
 
 SellUpgrades::AshRebuy SellUpgrades::BeforeVanillaBuy(Il2CppObject* closure) {
-    if (!ashRestoreOk_ || !main_thread::IsMainThread()) return {};
+    if (!ash_.klass || !main_thread::IsMainThread()) return {};
     if (!IsA(closure, closureClass_)) return {};
     if (unity::Field<int32_t>(closure, offClosureUpgrade_) != ASH_TROUGH) return {};
     auto* root = unity::Field<Il2CppObject*>(closure, offClosureThis_);
@@ -1344,20 +1359,34 @@ SellUpgrades::AshRebuy SellUpgrades::BeforeVanillaBuy(Il2CppObject* closure) {
     if (!IsA(plot, plotClass_) || !unity::IsAlive(plot) || HasUpgrade(plot, ASH_TROUGH)) return {};
     Il2CppObject* model = unity::Field<Il2CppObject*>(plot, offPlotModel_);
     if (!IsA(model, modelClass_)) return {};
-    if (ashRecords_.count(model)) return {plot, model, -1.0f};
+    if (!ashRestoreOk_) return {plot, model, -1.0f, false};  // the trough check only
+    if (ashRecords_.count(model)) return {plot, model, -1.0f, true};
     const float saved = SavedAsh(plot);  // after a reload: the copy in the save's sidecar
-    if (saved < 0.0f) return {};
-    return {plot, model, saved};
+    return {plot, model, saved, saved >= 0.0f};
 }
 
 void SellUpgrades::AfterVanillaBuy(const AshRebuy& r) {
     if (!main_thread::IsMainThread()) return;
-    auto it = ashRecords_.find(r.model);
-    const bool inMemory = it != ashRecords_.end();
-    if (!inMemory && r.saved < 0.0f) return;
     // Only after a completed purchase on the same plot / model (cancelled or failed: keep the record).
     if (!unity::IsAlive(r.plot) || !IsA(r.plot, plotClass_) || !HasUpgrade(r.plot, ASH_TROUGH)) return;
     if (unity::Field<Il2CppObject*>(r.plot, offPlotModel_) != r.model) return;
+    const std::string id = PlotId(r.plot);
+    // The trough model: vanilla AshTroughUpgrader.Apply (0x983930) sets AshTrough active again; the
+    // sale deactivated it. Checked (and switched on if Apply did not run) so a re-purchase always shows it.
+    Il2CppObject* trough = AshTroughObject(r.plot);
+    if (!trough) {
+        SR2_WARN("[{}] Ash Trough bought on plot '{}': AshTroughUpgrader.AshTrough not found (no trough model)", kModule, id);
+    } else if (!unity::ActiveInHierarchy(trough)) {  // its parent is the plot root (active)
+        SetActive(trough, true);
+        SR2_WARN("[{}] Ash Trough bought on plot '{}': trough model was still hidden - shown now (active: {})", kModule,
+                 id, unity::ActiveInHierarchy(trough) ? "yes" : "no");
+    } else {
+        SR2_INFO("[{}] Ash Trough bought on plot '{}': trough model shown", kModule, id);
+    }
+    if (!r.record) return;
+    auto it = ashRecords_.find(r.model);
+    const bool inMemory = it != ashRecords_.end();
+    if (!inMemory && r.saved < 0.0f) return;
     const float remembered = inMemory ? it->second.ash : r.saved;
     if (inMemory) {
         const Il2CppGCHandle h = it->second.handle;
@@ -1366,7 +1395,6 @@ void SellUpgrades::AfterVanillaBuy(const AshRebuy& r) {
     }
     custom_upgrades::SetPlotValue(r.plot, kAshValueKey, "");  // used up (saved with the next game save)
 
-    const std::string id = PlotId(r.plot);
     Il2CppObject* src = FindAshSource(r.plot);
     if (!src) {
         SR2_WARN("[{}] Ash Trough bought back on plot '{}': trough not found, vanilla fill kept", kModule, id);
