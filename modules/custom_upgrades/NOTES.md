@@ -225,10 +225,10 @@ dialog.
   under "Icon Background" bound to the popup's positive / negative InputEvent). On the clone the
   InputEventButton is disabled (it would perform that InputEvent on pointer down / up), the label's
   LocalizeStringEvent is disabled and the TMP text set to "Cancel" / "Sell"; a polled Toggle on its
-  root was meant to take the click (Button.onClick is empty in the prefab). The keyboard / pad focus is a teal
-  (Cancel) / pink (Sell) ring behind the focused button, fitted to its self-sized rect for 30 frames
-  after a build; disabled Sell = `Selectable.interactable` false (the prefab's disabled colours).
-  Fallback when any piece is missing: our own SDF buttons with "(Esc / B)" / "(Enter / A)" in the
+  root was meant to take the click (Button.onClick is empty in the prefab). (The teal / pink focus ring
+  of round 4 is gone, see "Buttons like the popup's" below.) Disabled Sell = `Selectable.interactable`
+  false (the prefab's disabled colours).
+  Fallback when any piece is missing: our own SDF buttons with "(C / B)" / "(Enter / A)" in the
   label. Log: `silo receipt: buttons cloned from the game's popup, rows fit|scroll (N px, canvas H high)`.
 - **Regression after feature/polish-4 ("Sell menu didn't show up").** The receipt never opened: log
   `silo receipt: not opened: panel failed`, then `the receipt could not be opened - selling at once`;
@@ -249,10 +249,31 @@ dialog.
   Closing deactivates the root first (`OnDisable` -> `Unpause` at once), then destroys it. Every close
   path (cancel, sell, load, module off, fault, scene change) goes through that, so the game cannot
   stay paused because of the dialog.
-- **Keys** (polled from `Keyboard.current` / `Gamepad.current`, nothing hooked): Left / Right, A / D,
-  Tab, d-pad, left stick switch Cancel / Sell; Enter / Space / pad A press the focused one (Sell is
-  focused first); Esc / pad B cancel. Mouse: the two buttons, a click on the dimmed backdrop cancels.
-  Input is ignored for 0.3 s after opening or refreshing, so the press that opened it never confirms.
+- **Buttons like the popup's** (feedback round 4: "buttons ugly, very big, no padding on the right,
+  cancel on C, the keys aren't on the left side of the buttons like the game has them"). Popup prefab
+  (UnityPy, `gamecore_scenes`, `PopupPrompt`): Panel 960 wide with `LayoutManager` + `EncapsulateChildren`,
+  ButtonPanel 64 px in from each side, Accept (positive) on the LEFT at x -169, Cancel on the right at
+  +169, each `TextButton_NoneSelectable` 321.5 x 58.6: `Label Background` (SDF pill, label 42 pt at x 30)
+  and `Icon Background` (the `InputEventDisplay` key glyph, 64 px icons) laid out by the button's
+  `HorizontalLayout` / `EncapsulateChildren` / `ResizeToPreferred`. Those are the game's own layout
+  behaviours (`MonomiPark.SlimeRancher.UI.Framework.Layout`); only a `LayoutManager` above them runs them
+  (`OnEnable` / `LateUpdate` -> `ApplyLayout`). Our clones had none, so they were never laid out: the
+  prefab size and the glyph left over the label. Now each clone gets its own `LayoutManager` (the glyph
+  on the left inside the pill, as in the game), sits in a zero-size slot scaled 0.72 (the receipt's 40 pt
+  title vs the popup's 55 pt; on the slot, not the button, whose ButtonAnimator may animate its scale),
+  and hangs off its outer edge: Sell's left edge at the left padding, Cancel's right edge at the right
+  padding (pivot 0 / 1, re-placed for 30 frames). Game order: Sell left, Cancel right. Not focusable
+  (TextButton_**NoneSelectable**): no focus ring any more. Log once: `Sell button laid out W x H (x0.72 on
+  screen)` and the key line below. Fallback (no LayoutManager class): prefab layout, unscaled.
+- **Keys** (polled, nothing hooked). Sell: the popup's positive `InputEvent` (`PopupPrompt._positiveInput`,
+  read through its `PollValue` Func, the bound action's value: the key its glyph shows), Enter, pad A.
+  Cancel: **C** (user request), Esc, pad B and the popup's negative InputEvent. Cancel's glyph shows the
+  negative event's binding; while it shows a keyboard key its key text is set to "C" (its
+  LocalizeStringEvent off, extra icons of the group hidden); a gamepad glyph stays (B). A key still held
+  when the dialog opens is not a press (edge from the open state). Own-button fallback: Left / Right, A /
+  D, Tab, d-pad, stick move the focus, Enter / Space / pad A press it. Mouse: the two buttons, a click on
+  the dimmed backdrop cancels. Input is ignored for 0.3 s after opening or refreshing, so the press that
+  opened it never confirms.
 - **What is sold.** Sell quotes the silo again. Only an identical quote (same types, counts and
   prices, market still open) is sold, with the quote as the plan: at most the shown count per type
   (`Summarize(..., plan)`). Anything else refreshes the receipt with an orange note ("Prices or
