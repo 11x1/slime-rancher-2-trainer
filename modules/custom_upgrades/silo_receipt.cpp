@@ -6,8 +6,9 @@
 //   one row per plort type: inner box (kBacker), icon, localized name, "x N", unit price, line total
 //   separator, "Total" + "N plorts" + grand total with the Newbucks coin
 //   note line (orange; empty unless the receipt was refreshed / the market closed)
-//   [(E) Sell]                                                        [(C) Cancel]
-//   (game order: the popup has its positive button on the left, the key glyph on the left inside each)
+//   [(C) Cancel]                                                        [(E) Sell]
+//   (user request: Cancel left, Sell right - the game's popup has its positive button on the left; the
+//   key glyph on the left inside each button, as in the game)
 // The panel never gets taller than the canvas (Screen size through the CanvasScaler formula): rows
 // shrink (56 -> 40 px) when there are many types, then the row list scrolls (uGUI ScrollRect in a
 // RectMask2D viewport, a thin Scrollbar on the right; mouse wheel / Up / Down / W / S / d-pad / left
@@ -28,7 +29,7 @@
 // LayoutManager (the game's component; OnEnable / LateUpdate lay the button out as in the popup: key
 // glyph on the left inside the pill, label after it, the button sized to both). The popup's buttons are
 // 321 x 59 with a 42 pt label for a 55 pt title; the receipt's title is 40 pt, so the clones are scaled to
-// kGameButtonScale. They are placed by their outer edge (Sell's left edge at kPad, Cancel's right edge at
+// kGameButtonScale. They are placed by their outer edge (Cancel's left edge at kPad, Sell's right edge at
 // kPanelW - kPad), so the padding stays whatever width the layout gives them (re-placed for 30 frames).
 // Like the popup's buttons (TextButton_NoneSelectable) they are not focusable: no focus ring, the keys
 // shown on them act directly. Sell = the popup's positive InputEvent (its PollValue, the binding the
@@ -1033,8 +1034,9 @@ bool SiloReceipt::Impl::BuildPanel(const Receipt& r, const std::string& note) {
     if (!note.empty()) Text(prt, "Note", kPad, noteY, kInnerW, 40, note, 22.0f, kOrange, kAlignCenter, true);
 
     // Buttons: the game's own (popup Accept / Cancel), else ours with the keys in the label.
-    // Game order: Sell (positive) on the left, Cancel on the right, each by its outer edge.
-    const float bx[2] = {kPanelW - kPad - kButtonW, kPad};
+    // Cancel on the left, Sell on the right (user request "switch sell and cancel button locations"), each
+    // by its outer edge.
+    const float bx[2] = {kPad, kPanelW - kPad - kButtonW};
     for (int i = 0; i < 2; ++i) {
         // A zero-size slot on the button's outer edge point carries the scale; the button hangs off its
         // pivot (0 = left edge, 1 = right edge) at the slot's centre.
@@ -1042,8 +1044,8 @@ bool SiloReceipt::Impl::BuildPanel(const Receipt& r, const std::string& note) {
         Il2CppObject* slotRt = slot ? unity::TransformOf(slot) : nullptr;
         Il2CppObject* game = slotRt ? GameButton(slotRt, i == 1, i == 0 ? "Cancel" : "Sell") : nullptr;
         if (game) {
-            btnPivotX[i] = i == 1 ? 0.0f : 1.0f;
-            const Vec2 edge{i == 1 ? kPad : kPanelW - kPad, btnY + kGameButtonRowH * 0.5f};
+            btnPivotX[i] = i == 0 ? 0.0f : 1.0f;
+            const Vec2 edge{i == 0 ? kPad : kPanelW - kPad, btnY + kGameButtonRowH * 0.5f};
             Rect(slotRt, {0, 1}, {0, 1}, {0.5f, 0.5f}, {edge.x, -edge.y}, {0, 0});
             if (layoutMgrClass && trSetLocalScale) {
                 float scale[3] = {kGameButtonScale, kGameButtonScale, 1.0f};
@@ -1301,9 +1303,9 @@ SiloReceipt::Result SiloReceipt::Tick(float unscaledDt) {
         p.ScrollBy(rows);
     }
     if (gameButtons) return Result::kNone;
-    // Our own buttons (fallback): focus + submit. Sell is on the left, Cancel on the right.
+    // Our own buttons (fallback): focus + submit. Cancel is on the left, Sell on the right.
     if (left || right || tab) {
-        const int want = tab ? 1 - p.focus : left ? 1 : 0;
+        const int want = tab ? 1 - p.focus : left ? 0 : 1;
         if (want != p.focus && (want == 0 || p.canSell)) {
             p.focus = want;
             p.StyleButtons();
