@@ -3,6 +3,10 @@
 User idea: a refinery / Fabricator vacuum upgrade that lets you collect shadow slimes; on your own
 ranch they don't disappear and they eat food (maybe a new food source for them).
 
+**Status:** built as the Fabricator upgrade **Shadow Catcher** (`modules/custom_upgrades/shadow_catcher.cpp`,
+card in `vacpack_upgrades.cpp`; design and test cases in `modules/custom_upgrades/NOTES.md` "Shadow
+Catcher"). The save blocker is resolved: the save stores Shadow slime actors natively (section 6).
+
 Sources: asset bundles read with UnityPy (`identifiabletypes_assets_*.bundle`,
 `identifiabletypegroups_assets_*.bundle`, `corescenes_scenes_*.bundle`), the Il2CppInspectorRedux dump
 and IDA decompilation of GameAssembly.dll 1.3.0. **[data]** = read from the assets, **[code]** =
@@ -60,10 +64,70 @@ decompiled, **[inferred]** = not checked. RVAs for reference only.
 | **(b) No despawn on the own ranch** | Detour `ShadowSlimeScatter.Action` (pre): when the slime stands on the ranch, clear `_latestAlertObject` / push `_destroyTime` to infinity (or skip `DoAlert`); and `ProducePlortsOnHit`'s despawn branch (reset `_numPlortsSpawned` or skip the despawn) for ranch slimes. "On the ranch": the slime's `RegionMember` regions / zone vs the Conservatory scene group, or simply inside a corral (`CorralRegion` / `LandPlot` under it). Check the feral-lifetime path too. | medium (2-3 days) | Saving: a shadow slime left in a corral is a normal actor of type Shadow in the save. Whether the save's persistence-id table (`SaveReferenceTranslation.GetPersistenceId`, the dictionary sandbox checks) contains "Shadow" is **not verified** - the sandbox's spawn list logs the types it leaves out ("left out N type(s) the save can't store"). If it is missing, a ranch shadow slime cannot be saved at all and (b) is blocked. A mod-free load keeps them as vanilla shadow slimes (they vanish once alerted) - harmless. |
 | **(c) They eat food** | Runtime diet change: add foods to the Shadow `SlimeDefinition.Diet` (`MajorFoodIdentifiableTypeGroups` / `AdditionalFoodIdents`, produce stays ShadowPlort), give it a hunger recovery rate (its `defaultPropertyValues` override sets `EmotionHungerRecoveryRate` 0), then let the diet rebuild its eat map (`SlimeDiet.RefreshEatMap`-style call, not traced) so `SlimeEat` finds the food. Existing food (e.g. a craft resource or a fruit) = data changes only. A **new** food item = a new IdentifiableType: same save problem as the lava tank (persistence ids, vanilla save must never hold it). | medium with an existing food; high with a new one | Economy: shadow plorts become farmable; check their market value. Diet changes apply to every shadow slime (also wild ones) unless the eat check is detoured per slime. |
 
-## 5. Suggested order
+## 5. Suggested order (historical; see section 6 for what was built)
 
 1. Check in game (sandbox spawn list log) whether "Shadow" is saveable. If not, stop at (a) + a "they
    still vanish" warning, or keep ranch shadow slimes in the sidecar like the Hen Collector's chickens.
 2. (a) with the scatter suppression - the visible part of the idea.
 3. (b) for corrals only (simplest "on the ranch" test).
 4. (c) with an existing food first.
+
+## 6. Save: resolved, and what was built
+
+### Can the save store a Shadow slime actor? Yes.
+
+- **Actor list** **[code]**: `GameModelPullHelpers.PullActors` (0x5E5C00) walks `GameModel.AllActors()` and
+  writes `BuildActorData(actor)` for every actor whose type is **not** in `GameModel.ignoreOnLoad`
+  (`IdentifiableTypeGroup.IsMember`). There is no other type filter, no "persist" flag and no despawn on
+  save. `PushActors` / `PushActorData` (0x5EC010 / 0x5EB980) load every saved actor back: they only skip
+  one with a non-finite position, throw for an unknown type id and skip an unknown scene group.
+- **`ignoreOnLoad`** **[data]**: the `GameModel` MonoBehaviour in `corescenes_scenes_*.bundle` points it at
+  the group **"SceneObjectGroup"**, whose only member is **Player**. So Shadow is saved like any slime.
+- **Persistence id** **[data, log]**: the Sandbox spawn list leaves out every actor type whose
+  `ReferenceId` is not a key of the save's `SaveReferenceTranslation` table (`Sandbox::Saveable`). The
+  user's sr2mods.log (2026-10-24) lists the 12 left-out types (SpicyTofu, GingerVeggie, GlitchTarr, ...,
+  LemonPhase): **Shadow is not among them**, so it has a persistence id. (Shadow is also a member of
+  `IdentifiableTypesGroup`, the big all-types group, besides `ShadowAlertableGroup`, `SmallSlimeGroup` and
+  `SlimesSinkInShallowWaterGroup`.)
+- **Runtime-only state**: the scatter's `_latestAlertObject` / `_destroyTime` and `ProducePlortsOnHit.
+  _numPlortsSpawned` are not saved, so a loaded shadow slime starts calm with a fresh plort count.
+  `SlimeFeral.UpdateInstance` (0xBBD5D0) never poofs a slime on the ranch (`CellDirector.IsOnRanch`) or in
+  the wilds: it pushes `_expireAt` an hour on.
+- **Vacpack slots**: different story. `AmmoModel.Push` copies saved slots by index and
+  `AmmoSlotManager.ValidateAndAdjustSlots` (on `SetModel`) clears a slot whose definition does not allow
+  its id, and no vanilla slot allows Shadow. So shadow slimes in the vacpack are kept out of the vanilla
+  save and stored in the sidecar instead (below).
+
+### More hooks found
+
+- `ShadowSlimeScatter.Relevancy` (0x8A2120) is 1 while the player is within `PlayerReactRadius` (not only
+  when alerted); the plexer then selects the behaviour and `Selected` (0x8A23F0) calls `TriggerAlert(player)`.
+  `ScatterIfPlayerNear` is called from `SubbehaviourPlexer.FixedUpdateInstance`. `StartFleeing`
+  (`IFleeBehavior`, called by `ProducePlortsOnHit.ProcessCollisionEnter` after a hit plort) and
+  `DoJump` also go through `TriggerAlert`; `OnDisruptionLevelChanged` calls `DoAlert` directly.
+- `ProducePlortsOnHit.ProducePlort` (0x885CA0) returns early once `_numPlortsSpawned >= PlortCount`;
+  `LateUpdateAll` (0x8856B0) does the despawn (`Destroyer.DestroyActor(..., "ProducePlortsOnHit")`). The
+  component is also on Gold slimes (`PlortIdentifiableType` tells them apart).
+- Vac capture path **[code]**: `VacuumItem.ConsumeVacuumable` (0xA645B0): a `Vacuumable` with `Size` 0 and
+  `CanCapture` goes to `StartConsuming` -> `Vacuumable.TryConsume` (0x644640) ->
+  `AmmoSlotManager.MaybeAddToAnySlot` -> `TryFindSlot` -> `AmmoSlotDefinition.IsAllowed`; no other check.
+  The shadow prefab's `Vacuumable`: `Size` 0, `_preventForcesFromWeaponVacuum` 0 **[data]**.
+- Eating **[code]**: `SlimeEat.WillNowEat` = `DoesEat(id)` (`_allEats`, built from `Diet.EatMap` in
+  `CalculateAllEats` = `InitFood`) && (feral || `_keepEatingWhenFull` || `IsHungryFor(id)`). The shadow
+  prefab's `SlimeEat` has `MinDriveToEat` 0.333 like the Pink slime's **[data]**, but its hunger never rises.
+  `GotoConsumable.Relevancy` uses `KeepEatingWhenFullDrive` (0.9-1) for a slime that keeps eating when full.
+  `SlimeDefinitions.RefreshDefinitions` rebuilds every `EatMap` (new lists).
+
+### What the Shadow Catcher does (all only while it is owned)
+
+| part | how |
+|---|---|
+| (a) vac them | `AmmoSlotDefinition.IsAllowed` detour: true for the Shadow `SlimeDefinition` on the player's regular slot definitions (same type group as `AmmoSlot1`, so the six vanilla slots and Extra Tank III / IV; not the water slot, silos, drones, feeders). Shadow slimes don't notice the player any more (`ScatterIfPlayerNear` skipped, `Relevancy` 0 unless alerted), so you can walk up to them; a hit still alerts them as in vanilla. |
+| (b) stay on the ranch | on the ranch (`CellDirector.IsOnRanch(scatter._member)`): `DoAlert` skipped, an old alert cleared (`_latestAlertObject` null, `_destroyTime` 1e300, face `_isFleeing` false), `Action` skipped, `Relevancy` 0; `ProducePlort` resets the hit-plort counter. They save as normal actors. |
+| (c) eat | the Shadow diet's `EatMap` gets copies of the Pink slime's food entries (no plorts, no transformations) producing Shadow plorts; each kept slime gets `_keepEatingWhenFull` and `InitFood`. |
+| save of the vacpack | `AmmoModel.Pull` (player): an empty `AmmoSlot` replaces each slot holding Shadow slimes in the save's copy; `custom_upgrades.vacpack.shadow_slots` = `v=count;...` (vanilla slot index). The tick puts them back after a load. |
+
+Not done / limits: no new food item (an existing diet copied instead); the diet change is global, so a
+feral wild shadow slime could eat too (non-feral wild ones never get hungry and don't keep eating); kept
+slimes eat whenever food reaches them (no hunger rhythm), so they can empty a garden corral; emotions of a
+vacuumed shadow slime are lost (only type and count are stored, like the extra slots).

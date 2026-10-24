@@ -71,6 +71,7 @@
 #include "core/unity.h"
 #include "modules/custom_upgrades/api.h"
 #include "modules/custom_upgrades/fabricator_levels.h"
+#include "modules/custom_upgrades/shadow_catcher.h"
 #include "ui/overlay.h"
 #include "ui/settings_view.h"
 
@@ -111,6 +112,7 @@ enum class Kind {
     kCapacity,      // more levels of Tank Booster (ADD on AmmoLimit)
     kSlots,         // more levels of Extra Tank (ADD on AmmoSlotsAvailable)
     kDroneBattery,  // own card, no modifier (empty effect list); drone_battery.cpp reads the level
+    kShadowCatcher, // own card, no modifier; shadow_catcher.cpp does the work while it is owned
 };
 struct Spec {
     int32_t id;         // own card: our _uniqueId (custom range); tiers: 0 (they are vanilla levels)
@@ -149,6 +151,11 @@ const Spec kSpecs[] = {
       {1.5f, 10000, "Drone Battery Saver II"},
       {1.75f, 15000, "Drone Battery Saver III"},
       {2.0f, 25000, "Drone Battery Saver IV"}}},
+    // Shadow Catcher: one level, 40k Newbucks plus Tank Booster VII's refinery items with the first one
+    // (70 Hyper plorts) swapped for 25 Shadow plorts once the Shadow slime is found (PatchShadowCard):
+    // late game, and the plorts come from the place the slimes live.
+    {custom_upgrades::kIdBase + 0x0104, 0, kShadowCatcherKey, "", "ShadowCatcher", 6, Kind::kShadowCatcher, 1,
+     {{0.0f, 40000, "Shadow Catcher"}, {}, {}, {}}},
 };
 constexpr int kSpecCount = static_cast<int>(sizeof(kSpecs) / sizeof(kSpecs[0]));
 
@@ -163,6 +170,7 @@ int ScaleAmount(const Spec& s, int amount) {
     switch (s.kind) {
         case Kind::kSlots: return amount;
         case Kind::kDroneBattery: return std::max(1, (amount + 1) / 2);
+        case Kind::kShadowCatcher: return amount;
         default: return amount <= 5 ? amount + 2 : amount * 2;
     }
 }
@@ -228,6 +236,7 @@ struct State {
     size_t offAmModel = 0, offAmodelSlots = 0, offAmSelected = 0;
     size_t offSlotId = 0, offSlotCount = 0, offSlotDef = 0;
     size_t offSdProp = 0, offSdThreshold = 0, offSdHotkey = 0;
+    size_t offSdGroup = 0;  // AmmoSlotDefinition._slotTypeGroup (Shadow Catcher's player slots)
     size_t offCatDefs = 0, offFabDef = 0;
     size_t offRtItems = 0, offRtCount = 0;  // FabricateCategoryRuntime`1 _itemList / _categoryCount
     size_t offPcCurrency = 0, offPcIdent = 0, offPcComponent = 0;  // PurchaseCost (value-type offsets)
@@ -286,6 +295,13 @@ struct State {
     bool batteryArt = false;  // the battery saver card has the Drone Station's icon / pedia entry
     bool migrated = false;    // old per-station battery tiers checked for this save
     bool tiersMigrated = false;  // old separate Tank Booster / Extra Tank cards checked for this save
+    // Shadow Catcher
+    using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
+    ObjectNewFn objectNew = nullptr;
+    bool shadowIcon = false, shadowCost = false;  // the card got the Shadow slime's icon / Shadow plort cost
+    Il2CppObject* shadowRestored = nullptr;      // AmmoModel whose stashed shadow slimes were put back (identity)
+    std::string shadowPending;                   // stash entries not put back yet ("v=count;...")
+    bool loggedShadowWait = false;
     // HUD row
     Il2CppGCHandle hudHandle = nullptr;  // AmmoSlotUI
     float hudWidth = 0.0f;               // its width before we widened it (0 = untouched)
@@ -557,7 +573,7 @@ bool CreateDefs(Il2CppObject* items) {
             // list). It used to keep the cloned one as ADD 0 on AmmoLimit, so each of its level changes
             // re-evaluated the vacpack capacity and, when that threw (round 8), left Tank Booster-sized
             // modifiers behind (x1880 slots) - see NOTES.md "Drone Battery Saver".
-            if (s.kind == Kind::kDroneBattery &&
+            if ((s.kind == Kind::kDroneBattery || s.kind == Kind::kShadowCatcher) &&
                 (!ListRemoveRange(effects, 0, static_cast<int32_t>(unity::ListCount(effects))) || unity::ListCount(effects))) {
                 SR2_WARN("[{}] vacpack: {} level {} kept its vacpack modifier - no vacpack upgrades", kModule, s.name, k + 1);
                 return false;
@@ -587,7 +603,11 @@ bool CreateDefs(Il2CppObject* items) {
             // texts
             std::string title = s.level[k].title;
             std::string desc;
-            if (s.kind == Kind::kDroneBattery) {
+            if (s.kind == Kind::kShadowCatcher) {
+                desc = "A shadow-tuned vac nozzle. Shadow slimes no longer notice you sneaking up, your vacpack can "
+                       "hold them, and on your ranch they stay for good and eat fruit, veggies and meat, making "
+                       "shadow plorts.";
+            } else if (s.kind == Kind::kDroneBattery) {
                 const float f = s.level[k].value;
                 desc = std::format("Quantum power cells for your ranch drones: every drone station's drone uses {}% of its "
                                    "normal battery, so a full charge lasts {:g}x as long.",
@@ -1013,6 +1033,184 @@ void VanillaOrder(const Player& p) {
              g.vanillaSlotCount);
 }
 
+// ---- Shadow Catcher ----
+
+const Ours* ShadowOurs() {
+    for (const Ours& o : g.ours)
+        if (o.spec && o.spec->kind == Kind::kShadowCatcher && o.def) return &o;
+    return nullptr;
+}
+
+// The card takes the Shadow slime's icon, and its first refinery item becomes 25 Shadow plorts, once
+// shadow_catcher.cpp found the Shadow slime (it may come after the card was made).
+void PatchShadowCard() {
+    const Ours* o = ShadowOurs();
+    if (!o || (g.shadowIcon && g.shadowCost)) return;
+    Il2CppObject* shadow = shadow::ShadowType();
+    Il2CppObject* plort = shadow::ShadowPlort();
+    if (!shadow) return;
+    if (!g.shadowIcon) {
+        g.shadowIcon = true;
+        const size_t offIcon = FieldOff(shadow, "icon");
+        Il2CppObject* icon = offIcon ? unity::Field<Il2CppObject*>(shadow, offIcon) : nullptr;
+        if (unity::IsAlive(icon)) SetRef(o->def, g.offUdIcon, icon);
+        SR2_INFO("[{}] vacpack: Shadow Catcher card uses {}", kModule,
+                 unity::IsAlive(icon) ? std::format("the Shadow slime's icon '{}'", unity::GetName(icon))
+                                      : std::string("Tank Booster's icon (the Shadow slime has none)"));
+    }
+    if (!g.shadowCost && plort) {
+        g.shadowCost = true;
+        Il2CppObject* lvl = LevelAt(o->def, 0);
+        char* pc = lvl ? reinterpret_cast<char*>(lvl) + g.offUlCosts : nullptr;
+        void* ident = pc ? *reinterpret_cast<void**>(pc + g.offPcIdent) : nullptr;
+        auto itemsOff = ident ? Resolver::Get().FieldOffset(unity::ClassOf(static_cast<Il2CppObject*>(ident)), "_items")
+                              : std::nullopt;
+        void* arr = itemsOff ? unity::Field<void*>(ident, *itemsOff) : nullptr;
+        if (!arr || unity::ListCount(ident) == 0) {
+            SR2_WARN("[{}] vacpack: Shadow Catcher has no refinery item to swap for Shadow plorts", kModule);
+            return;
+        }
+        char* e = unity::ArrayData<char>(arr);
+        *reinterpret_cast<int32_t*>(e) = 25;
+        void** type = reinterpret_cast<void**>(e + 8);
+        if (g.wbarrier) g.wbarrier(static_cast<Il2CppObject*>(arr), type, plort);
+        else *type = plort;
+        std::string paid;
+        for (size_t c = 0, n = unity::ListCount(ident); c < n; ++c) {
+            char* x = unity::ArrayData<char>(arr) + c * kIdentCostSize;
+            paid += std::format("{}{} {}", paid.empty() ? "" : ", ", *reinterpret_cast<int32_t*>(x),
+                                unity::GetName(*reinterpret_cast<Il2CppObject**>(x + 8)));
+        }
+        SR2_INFO("[{}] vacpack: Shadow Catcher costs {} Newbucks + {}", kModule, o->spec->level[0].newbucks, paid);
+    }
+}
+
+// Owned flag and the player's regular slot definitions for shadow_catcher.cpp's IsAllowed detour (the
+// ones sharing AmmoSlot1's type group: the six vanilla slots and the Extra Tank III / IV clones, not
+// the water slot).
+void PublishShadow(const Player& p, Il2CppObject* dict) {
+    const Ours* o = ShadowOurs();
+    shadow::SetOwned(o && DictGet(dict, o->spec->id) >= 0);
+    std::vector<Il2CppObject*> defs;
+    auto* arr = g.offSdGroup ? unity::Field<Il2CppArray*>(p.state, g.offPsDefs) : nullptr;
+    auto* first = static_cast<Il2CppObject*>(unity::ArrayAt(arr, 0));
+    Il2CppObject* group = first ? unity::Field<Il2CppObject*>(first, g.offSdGroup) : nullptr;
+    for (size_t i = 0, n = unity::ArrayLength(arr); i < n && group; ++i) {
+        auto* d = static_cast<Il2CppObject*>(unity::ArrayAt(arr, i));
+        if (IsA(d, g.slotDefClass) && unity::Field<Il2CppObject*>(d, g.offSdGroup) == group) defs.push_back(d);
+    }
+    shadow::SetPlayerSlots(defs);
+}
+
+// Puts "v=count" entries back: into vanilla slot v (in the live layout), else any slot that takes them.
+// Returns the entries that found no slot.
+std::string PutShadows(const Player& p, const std::string& stash, int& put) {
+    std::string left;
+    Il2CppObject* shadow = shadow::ShadowType();
+    auto* live = unity::Field<Il2CppArray*>(p.ammoModel, g.offAmodelSlots);
+    const int n = static_cast<int>(unity::ArrayLength(live));
+    const bool ext = Extended(live);
+    size_t pos = 0;
+    while (pos < stash.size()) {
+        size_t end = stash.find(';', pos);
+        if (end == std::string::npos) end = stash.size();
+        const std::string_view e(stash.data() + pos, end - pos);
+        pos = end + 1;
+        const size_t eq = e.find('=');
+        int v = -1, count = 0;
+        if (eq == std::string_view::npos) continue;
+        std::from_chars(e.data(), e.data() + eq, v);
+        std::from_chars(e.data() + eq + 1, e.data() + e.size(), count);
+        if (v < 0 || count <= 0) continue;
+        const int want = ext ? ExtIndexOfVanilla(v) : v;
+        bool ok = false;
+        for (int k = -1; k < n && !ok; ++k) {  // its own slot first, then any other
+            int32_t idx = k < 0 ? want : k, cnt = count;
+            if ((k >= 0 && k == want) || idx < 0 || idx >= n) continue;
+            bool overflow = true;  // never lose slimes to a lower maximum
+            bool called = false;
+            Il2CppObject* r = Invoke(g.maybeAdd, p.ammo, {shadow, &idx, &cnt, &overflow}, "AmmoSlotManager.MaybeAddResource",
+                                     &called);
+            ok = called && Unbox<bool>(r);
+        }
+        if (ok) put += count;
+        else left += std::format("{}{}={}", left.empty() ? "" : ";", v, count);
+    }
+    return left;
+}
+
+// After a load: the shadow slimes the last game save kept in the sidecar go back into the vacpack. Needs
+// the Shadow slime found and the Shadow Catcher owned (the slots take them only then); otherwise they
+// wait in shadowPending (written back with every save).
+void RestoreShadows(const Player& p) {
+    if (!p.ammoModel || !p.ammo) return;
+    Il2CppObject* shadow = shadow::ShadowType();
+    if (p.ammoModel != g.shadowRestored) {
+        if (!shadow) return;  // not found yet: the sidecar keeps them, try again next tick
+        g.shadowRestored = p.ammoModel;
+        g.shadowPending = g.host.value ? g.host.value(kShadowStashKey) : std::string();
+        g.loggedShadowWait = false;
+    }
+    if (g.shadowPending.empty()) return;
+    if (!shadow::Owned()) {
+        if (!g.loggedShadowWait)
+            SR2_INFO("[{}] vacpack: shadow slimes wait in the sidecar until the Shadow Catcher is owned: {}", kModule,
+                     g.shadowPending);
+        g.loggedShadowWait = true;
+        return;
+    }
+    int put = 0;
+    const std::string before = g.shadowPending;
+    g.shadowPending = PutShadows(p, before, put);
+    if (g.shadowPending != before)
+        SR2_INFO("[{}] vacpack: {} shadow slime(s) back in the vacpack from the sidecar ({}){}", kModule, put, before,
+                 g.shadowPending.empty() ? "" : std::format(", no room yet for {}", g.shadowPending));
+}
+
+// AmmoModel.Pull (the player's): the save's slot array with an empty slot in place of every slot that
+// holds Shadow slimes (a mod-free load would drop them anyway: no vanilla slot allows them), their
+// counts to the sidecar. `arr` is in the vanilla layout; it may be the live array, so a copy is made.
+Il2CppArray* StripShadows(Il2CppObject* self, Il2CppArray* arr) {
+    Il2CppObject* shadow = shadow::ShadowType();
+    if (!shadow || !arr || !g.objectNew || !g.arrayNew) return arr;
+    const size_t n = unity::ArrayLength(arr);
+    std::string stash;
+    std::vector<size_t> hit;
+    for (size_t v = 0; v < n; ++v) {
+        auto* slot = static_cast<Il2CppObject*>(unity::ArrayAt(arr, v));
+        if (!slot || unity::Field<Il2CppObject*>(slot, g.offSlotId) != shadow) continue;
+        const int count = unity::Field<int32_t>(slot, g.offSlotCount);
+        if (count > 0) stash += std::format("{}{}={}", stash.empty() ? "" : ";", v, count);
+        hit.push_back(v);
+    }
+    // The sidecar value: the live shadow slimes plus the ones still waiting. Before this model's restore
+    // ran (a save in the first second after a load) the sidecar's value is kept as it is.
+    if (self == g.shadowRestored) {
+        std::string value = stash;
+        if (!g.shadowPending.empty()) value += (value.empty() ? "" : ";") + g.shadowPending;
+        if (g.host.setValue) g.host.setValue(kShadowStashKey, value);
+        if (!value.empty()) SR2_INFO("[{}] vacpack: shadow slimes kept in the sidecar, not in the save: {}", kModule, value);
+    } else if (!hit.empty()) {
+        SR2_WARN("[{}] vacpack: saved before the stashed shadow slimes were put back - the sidecar keeps its old value, "
+                 "{} not kept", kModule, stash);
+    }
+    if (hit.empty()) return arr;
+    Il2CppArray* out = g.arrayNew(g.ammoSlotClass, n);
+    if (!out) return arr;
+    for (size_t v = 0; v < n; ++v) SetArrayRef(out, v, static_cast<Il2CppObject*>(unity::ArrayAt(arr, v)));
+    for (size_t v : hit) {
+        auto* live = static_cast<Il2CppObject*>(unity::ArrayAt(arr, v));
+        Il2CppObject* empty = g.objectNew(g.ammoSlotClass);
+        if (!empty) return arr;
+        bool ok = false;
+        Invoke(MethodOf(empty, ".ctor", 0), empty, {}, "AmmoSlot..ctor", &ok);
+        if (!ok) return arr;
+        SetRef(empty, g.offSlotDef, unity::Field<Il2CppObject*>(live, g.offSlotDef));
+        SetArrayRef(out, v, empty);
+    }
+    return out;
+}
+
 // ---- HUD row ----
 Il2CppObject* HudRow() {
     Il2CppObject* ui = g.hudHandle ? unity::GCHandleTarget(g.hudHandle) : nullptr;
@@ -1246,15 +1444,27 @@ void ResetDetour(Il2CppObject* self, Il2CppObject* model, const MethodInfo* mi) 
 // The player's ammo for the save: the vanilla slots in the vanilla order (the water slot back at
 // its index), the extra slots' contents to the sidecar. A mod-free load sees an untouched vanilla
 // vacpack.
+// Then the Shadow Catcher's shadow slimes leave the save's copy (StripShadows).
 void PullAmmoDetour(Il2CppObject* self, Il2CppArray** slots, const MethodInfo* mi) {
     g.origPullAmmo(self, slots, mi);
-    if (!slots || !*slots || !g.vanillaSlotCount || !On() || !g.arrayNew) return;
+    if (!slots || !*slots || !On() || !g.arrayNew) return;
     g_ammoGuard.Run([&] {
         // The body is shared with TrackedActorsModel.Pull (out HashSet): the owner check comes first.
         Player p;
         if (!GetPlayer(p) || p.ammoModel != self) return;  // a silo, a drone, TrackedActorsModel...
         Il2CppArray* arr = *slots;
-        if (!Extended(arr)) return;
+        Il2CppArray* out = arr;
+        auto publish = [&] {
+            out = StripShadows(self, out);
+            if (out == arr) return;
+            void** dst = reinterpret_cast<void**>(slots);
+            if (g.wbarrier) g.wbarrier(nullptr, dst, out);
+            else *dst = out;
+        };
+        if (!g.vanillaSlotCount || !Extended(arr)) {
+            publish();
+            return;
+        }
         if (self == g.restoredAmmo) {
             const std::string stash = StashOf(arr);
             g.host.setValue(kStashKey, stash);
@@ -1266,9 +1476,8 @@ void PullAmmoDetour(Il2CppObject* self, Il2CppArray** slots, const MethodInfo* m
         if (!cut) return;
         for (int v = 0; v < g.vanillaSlotCount; ++v)
             SetArrayRef(cut, static_cast<size_t>(v), static_cast<Il2CppObject*>(unity::ArrayAt(arr, ExtIndexOfVanilla(v))));
-        void** out = reinterpret_cast<void**>(slots);
-        if (g.wbarrier) g.wbarrier(nullptr, out, cut);
-        else *out = cut;
+        out = cut;
+        publish();
     });
 }
 
@@ -1418,9 +1627,14 @@ void VacpackUpgrades::Tick() {
             SR2_INFO("[{}] vacpack: '{}' level {} -> {} ({}, from the sidecar){}", kModule, unity::GetName(o.parent),
                      have + 1, want + 1, RomanTitle(*o.spec, want - VanillaMax(o) - 1), ok ? "" : " FAILED");
         }
+        // Shadow Catcher: owned flag and player slots for its IsAllowed detour (before anything puts
+        // shadow slimes back into the vacpack), the card's icon / Shadow plort cost.
+        PublishShadow(p, dict);
+        PatchShadowCard();
         // Extra slots' contents, once per player ammo model; the HUD row wide enough to centre them.
         auto* live = p.ammoModel ? unity::Field<Il2CppArray*>(p.ammoModel, g.offAmodelSlots) : nullptr;
         if (p.ammoModel && p.ammoModel != g.restoredAmmo) RestoreStash(p);
+        RestoreShadows(p);
         g.hudFindTimer += 1.0f;  // ~1 Hz
         if (Extended(live)) WidenHud();
         int slotsLevel = -1;
@@ -1502,6 +1716,21 @@ void VacpackUpgrades::Cleanup(const char* why) {
         }
         if (havePlayer) VanillaOrder(p);
         RestoreHud();
+        // Shadow Catcher off: the slots stop taking shadow slimes. Ones already in the vacpack stay until a
+        // save is made without our Pull detour; a load then drops them (no vanilla slot allows them).
+        shadow::SetOwned(false);
+        shadow::SetPlayerSlots({});
+        if (Il2CppObject* shadowType = havePlayer && p.ammoModel ? shadow::ShadowType() : nullptr) {
+            auto* live = unity::Field<Il2CppArray*>(p.ammoModel, g.offAmodelSlots);
+            int count = 0;
+            for (size_t i = 0, n = unity::ArrayLength(live); i < n; ++i)
+                if (auto* s = static_cast<Il2CppObject*>(unity::ArrayAt(live, i)); s && unity::Field<Il2CppObject*>(s, g.offSlotId) == shadowType)
+                    count += unity::Field<int32_t>(s, g.offSlotCount);
+            if (count > 0)
+                SR2_WARN("[{}] {}: {} shadow slime(s) in the vacpack - a game save made now keeps them in the save, and the "
+                         "next load drops them; shoot them out or turn custom upgrades back on before saving", kModule, why,
+                         count);
+        }
         if (removed || slotsBack || unextended)
             SR2_INFO("[{}] {}: vacpack upgrades off ({} list entr{} removed, {} vanilla upgrade(s) back to their own levels{}"
                      "{})", kModule, why, removed, removed == 1 ? "y" : "ies", unextended,
@@ -1512,6 +1741,8 @@ void VacpackUpgrades::Cleanup(const char* why) {
 
 void VacpackUpgrades::Reset() {
     g.restoredAmmo = nullptr;
+    g.shadowRestored = nullptr;
+    g.shadowPending.clear();
     g.migrated = false;
     g.tiersMigrated = false;
     g.loggedRemap = false;
@@ -1552,6 +1783,7 @@ bool VacpackUpgrades::Setup(sr2::core::ModuleContext& ctx, Host host, std::strin
     g.wbarrier = reinterpret_cast<WBarrierFn>(GetProcAddress(api().module, "il2cpp_gc_wbarrier_set_field"));
     g.arrayNew = reinterpret_cast<ArrayNewFn>(GetProcAddress(api().module, "il2cpp_array_new"));
     if (!g.arrayNew) why = "il2cpp_array_new export missing";
+    g.objectNew = reinterpret_cast<State::ObjectNewFn>(GetProcAddress(api().module, "il2cpp_object_new"));
 
     Il2CppClass* upModel = cls(kDataNs, "UpgradeModel");
     g.upgradeDefClass = cls("", "UpgradeDefinition");
@@ -1605,6 +1837,12 @@ bool VacpackUpgrades::Setup(sr2::core::ModuleContext& ctx, Host host, std::strin
         if (auto o = R.FieldOffset(propDef, "DefaultValue")) g.offPropDefault = *o;  // texts only (fallback 20)
     if (auto o = R.FieldOffset(g.upgradeDefClass, "_requireComponentToBeVisibleToPlayer")) g.offUdNeedsComponent = *o;
     if (auto o = R.FieldOffset(g.ammoMgrClass, "_selectedAmmoIdx")) g.offAmSelected = *o;
+    // Shadow Catcher: the player's regular slots = AmmoSlot1's type group (no group -> it changes nothing).
+    if (auto o = R.FieldOffset(g.slotDefClass, "_slotTypeGroup")) g.offSdGroup = *o;
+    if (!g.offSdGroup || !g.objectNew)
+        SR2_WARN("[{}] vacpack: Shadow Catcher can't {}", kModule,
+                 !g.offSdGroup ? "find the player's slots (AmmoSlotDefinition._slotTypeGroup)"
+                               : "keep shadow slimes out of the save (no il2cpp_object_new) - they are dropped on load");
 
     g.tryGetPlayer = method(scu, "TryGetPlayerState", 1);
     g.getUpgradeModel = method(g.playerModelClass, "GetUpgradeModel", 0);

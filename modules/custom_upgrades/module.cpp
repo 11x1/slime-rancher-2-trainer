@@ -21,7 +21,9 @@
 //   Not plot upgrades: the Fabricator vacpack upgrades Tank Booster IX-XII (125 / 150 / 175 / 200
 //   per slot, more levels of the vanilla Tank Booster card), Extra Tank III-IV (a 7th / 8th slot,
 //   more levels of the vanilla Extra Tank card) and Drone Battery Saver I-IV (own card; every drone
-//   station uses 1/1.25 .. 1/2 of the battery; effect in drone_battery.cpp), in vacpack_upgrades.cpp
+//   station uses 1/1.25 .. 1/2 of the battery; effect in drone_battery.cpp) and Shadow Catcher (own
+//   card; the vacpack holds shadow slimes, they stay and eat on the ranch; effect in
+//   shadow_catcher.cpp), in vacpack_upgrades.cpp
 //   (own hooks, levels and extra slot contents in this module's sidecar as per-save values).
 //
 //   Silo capacity (vanilla, prefab + disassembly): the silo's SiloStorage has 12 slot definitions
@@ -239,6 +241,7 @@
 #include "modules/custom_upgrades/sale_notify.h"
 #include "modules/custom_upgrades/silo_receipt.h"
 #include "modules/custom_upgrades/silo_world.h"
+#include "modules/custom_upgrades/shadow_catcher.h"
 #include "modules/custom_upgrades/vacpack_upgrades.h"
 #include "ui/mod_icons.h"
 
@@ -707,6 +710,7 @@ private:
     custom_upgrades::world::PlotProps props_;   // decorative props of owned tiers (plot_props.h)
     custom_upgrades::vacpack::VacpackUpgrades vacpack_;  // Fabricator vacpack upgrades (vacpack_upgrades.h)
     custom_upgrades::drones::BatterySaver battery_;      // Drone Battery Saver effect (drone_battery.h)
+    custom_upgrades::shadow::ShadowCatcher shadow_;      // Shadow Catcher effect (shadow_catcher.h)
     std::vector<custom_upgrades::world::PropRequest> WantedProps() const;
     custom_upgrades::ui::PlotMenuSlider sliderHens_;      // Hen Collector limits, side by side (one pair
     custom_upgrades::ui::PlotMenuSlider sliderRoosters_;  // at a time; the hens slider builds the row)
@@ -2139,6 +2143,7 @@ void CustomUpgrades::Cleanup(const char* why) {
     dj_.Cleanup(why);  // Slime DJ buildables undressed, our variants out of the favourites and variant lists
     RestoreCapacities(why);  // silos back to their vanilla capacity per slot (contents stay)
     vacpack_.Cleanup(why);   // vacpack upgrade levels off, our definitions out of the game's lists
+    shadow_.Cleanup(why);    // Shadow diet back to vanilla, kept shadow slimes behave as in vanilla again
     int removed = 0, restored = 0;
     for (auto& inj : injections_) {
         for (Injected& in : inj->items) {
@@ -2334,6 +2339,8 @@ void CustomUpgrades::WorldTick() {
     if (props_.Ready() && !sr2::core::ModuleFaulted(kModule))
         props_.Tick(WantedProps(), [&]() { return LookupDirector(); });
     if (capacityOk_ && !sr2::core::ModuleFaulted(kModule)) CapacityTick();
+    // Shadow Catcher first: it finds the Shadow slime the vacpack tick's card and stash need.
+    if (shadow_.Ready() && !sr2::core::ModuleFaulted(kModule)) shadow_.Tick();
     if (vacpack_.Ready() && !sr2::core::ModuleFaulted(kModule)) vacpack_.Tick();
 }
 
@@ -3506,8 +3513,14 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         }
         std::string verr, vreport;
         if (vacpack_.Setup(ctx, std::move(host), verr, vreport)) report += vreport;
-        else SR2_WARN("[{}] vacpack upgrades unavailable ({}) - Tank Booster IX-XII, Extra Tank III-IV and Drone Battery "
-                      "Saver I-IV are not offered", kModule, verr);
+        else SR2_WARN("[{}] vacpack upgrades unavailable ({}) - Tank Booster IX-XII, Extra Tank III-IV, Drone Battery "
+                      "Saver I-IV and Shadow Catcher are not offered", kModule, verr);
+    }
+    // Shadow Catcher effect (optional; needs the vacpack upgrades, which sell it and publish its state).
+    if (vacpack_.Ready()) {
+        std::string serr, sreport;
+        if (shadow_.Setup(ctx, serr, sreport)) report += sreport;
+        else SR2_WARN("[{}] shadow catcher unavailable ({}) - owning the upgrade changes nothing", kModule, serr);
     }
 
     main_thread::AddFrameCallback(kModule, [](float dt) {

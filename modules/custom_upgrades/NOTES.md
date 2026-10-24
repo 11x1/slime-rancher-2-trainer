@@ -894,6 +894,7 @@ right, and that nothing of the stripped clones still logs errors.
 | Tank Booster IX-XII | 4 | 125 / 150 / 175 / 200 items per slot (absolute, like every vanilla level) | levels 9-12 of the vanilla Tank Booster card |
 | Extra Tank III-IV | 2 | a 7th / 8th vacpack slot, placed before the water slot | levels 3-4 of the vanilla Extra Tank card |
 | Drone Battery Saver I-IV (id `0x53520103`) | 4 | every drone station's drone uses 1/1.25, 1/1.5, 1/1.75, 1/2 of the battery (80 / 67 / 57 / 50 %) | own card, once the Drone Station blueprint is owned |
+| Shadow Catcher (id `0x53520104`) | 1 | the vacpack holds shadow slimes; they don't notice you; on the ranch they stay and eat (`shadow_catcher.cpp`) | own card, always shown |
 
 **Merged into the vanilla cards** (feedback round after build 1aacffc: "Tank Booster IX is upgradeable before the
 previous tank booster ... base tank is 50, bought IX -> now 75"; "merge ... so they have more tiers and ours isn't a
@@ -1078,6 +1079,72 @@ extra slots before the water slot, the number keys (7 / 8) and their HUD labels,
 the battery saver's refund lines. Known rough edges: the save's "viewed upgrades" set (`ViewedItemsV02`) may get the
 Battery Saver id (harmless for a mod-free load); pinning the Battery Saver as the recipe was not checked for a mod-free
 load.
+
+### Shadow Catcher
+
+Idea from `.claude/notes/ideas.md`: "a vacuum upgrade to collect shadow slimes, no despawn on your own ranch, and
+eating food". Research, RVAs and the save question: `re/shadow-slimes.md` (section 6). Card in
+`vacpack_upgrades.cpp` (kind `kShadowCatcher`), effect in `shadow_catcher.cpp`.
+
+- **Card.** Own card like the Battery Saver (clone of `AmmoCapacity`, empty effect list, id `0x53520104`, per-save
+  value `custom_upgrades.vacpack.shadow_catcher`, out of the save's upgrade copy, not counted for TinkerTailorSlimes),
+  always shown, at the end of the vacpack category. Cost (our choice): 40,000 Newbucks + Tank Booster VII's refinery
+  items with the first one (70 Hyper plorts) swapped for **25 Shadow plorts** once the Shadow slime is found (log
+  `vacpack: Shadow Catcher costs ...`); icon = the Shadow slime's (log `Shadow Catcher card uses ...`).
+- **Owned flag.** The vacpack tick publishes `shadow::SetOwned` and the player's regular slot definitions (the ones with
+  AmmoSlot1's `_slotTypeGroup`: six vanilla slots + Extra Tank III / IV) every second, before anything puts shadow
+  slimes back into the vacpack (after a load the previous save's flag holds for up to a second).
+- **Vac.** `AmmoSlotDefinition.IsAllowed` detour: Shadow on a published player slot -> true (pointer compares first;
+  silos, drones, feeders, the water slot keep vanilla rules). The capture path has no other check. Shooting one out
+  is vanilla `Expel` (a fresh shadow slime).
+- **Calm.** Owned: `ShadowSlimeScatter.ScatterIfPlayerNear` skipped and `Relevancy` 0 while not alerted, so shadow
+  slimes no longer flee from the player walking up (vanilla: alert at 10 m, gone 10-15 s later). Hitting one still
+  alerts it and its neighbours (vanilla `StartFleeing`), so labyrinth plort farming is unchanged.
+- **Ranch.** Shadow slimes are tracked when one of their scatter hooks runs (GC handle; the tick frees dead ones).
+  The ~1 Hz tick asks `CellDirector.IsOnRanch(scatter._member)` (the game's own test, also used by the feral
+  lifetime). Kept: `DoAlert` and `Action` skipped, an old alert cleared, `Relevancy` 0, and the
+  `ProducePlortsOnHit.ProducePlort` detour resets the hit-plort counter so the "despawn after 10 plorts" never fires.
+  They save natively (actor type Shadow has a persistence id; only the player is in `ignoreOnLoad`). Logs:
+  `shadow catcher: shadow slime '...' is on the ranch: kept ...` / `left the ranch ...`, and `N shadow slime(s) loaded
+  nearby, K kept on the ranch` when the numbers change.
+- **Eating.** Shadow's diet is empty and its hunger never rises. While owned, copies of the **Pink** slime's food
+  entries (fruit, veggies, meat; no plorts / largo transformations) producing the Shadow plort go into the Shadow
+  diet's `EatMap` (log `N food entries for the Shadow diet ...`; re-added if `RefreshDefinitions` rebuilds the list);
+  each kept slime's `SlimeEat` gets `_keepEatingWhenFull` and `InitFood`. Not kept any more / not owned: flag off;
+  not owned / module off: our entries removed. Wild shadow slimes get the entries too (global diet) but never eat
+  unless feral (no hunger, no keep-eating flag).
+- **Vacpack save.** No vanilla slot allows Shadow, so a load would drop them (`ValidateAndAdjustSlots`). The
+  `AmmoModel.Pull` detour gives the save an empty `AmmoSlot` (new object, same definition) in place of each slot
+  with shadow slimes and writes `custom_upgrades.vacpack.shadow_slots` = `v=count;...` (vanilla slot index); in the
+  Extra Tank slots they go through the extra-slot stash. The tick puts them back after a load (own slot first, then
+  any slot that takes them; log `N shadow slime(s) back in the vacpack from the sidecar`); not owned -> they wait
+  in the sidecar (log `shadow slimes wait in the sidecar ...`). A mod-free load: no shadow slimes in the vacpack
+  (vanilla would drop them anyway), ranch shadow slimes load as vanilla ones (they scatter and vanish once the
+  player comes near).
+- **Module off.** Owned flag off, diet back, kept slimes back to vanilla. Shadow slimes still in the vacpack are kept
+  in the save made next (no Pull detour) and dropped by the load after it: logged as a WARN at cleanup.
+
+Limits: no new food item; no hunger rhythm (kept slimes eat whatever reaches them, the chomper's
+`TimePerEatWhenFull` is the only pacing, so they can empty a garden-fed corral); a vacuumed shadow slime loses its
+emotions; feral wild shadow slimes could eat (global diet). Shadow plort price was not checked (economy).
+
+**Test cases (not run yet):**
+1. Fabricator > vacpack upgrades: "Shadow Catcher" card at the end with the Shadow slime icon, 40,000 Newbucks + 25
+   Shadow plorts + Sloomber / Magma Comb / Royal Jelly; buy it (log `ShadowCatcher -> level 1`, `shadow catcher:
+   owned`).
+2. Grey Labyrinth: walk up to shadow slimes - they no longer scatter; vac one - it goes into a regular slot (not the
+   water slot); hit one with a plort - it and its neighbours still flee and vanish.
+3. Shoot it out on the ranch (in a corral): log `is on the ranch: kept`; stand next to it for a minute - it stays;
+   hit it with items more than 10 times - plorts, no despawn.
+4. Feed it fruit / veggies / meat (shoot them at it, or a feeder): it eats and makes Shadow plorts (log `food
+   entries ... added to the Shadow diet`).
+5. Save with shadow slimes in the vacpack (log `shadow slimes kept in the sidecar`), reload: they come back
+   (log `back in the vacpack from the sidecar`); the ranch shadow slime is still in its corral after the reload.
+6. Carry one off the ranch and release it: `left the ranch`, it may scatter if hit.
+7. Turn custom upgrades off: shadow slimes on the ranch behave as vanilla again (vanish when you come near); with
+   shadow slimes in the vacpack the WARN line appears.
+8. Mod-free load of such a save: loads fine, no shadow slimes in the vacpack, ranch shadow slimes present until
+   alerted.
 
 ### Lava tank: not built (research)
 
