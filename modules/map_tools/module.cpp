@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <format>
 #include <map>
 #include <memory>
@@ -49,6 +50,8 @@
 #include "core/resolver.h"
 #include "core/settings.h"
 #include "core/unity.h"
+#include "modules/common/discordant_walls.h"
+#include "modules/custom_upgrades/api.h"
 #include "modules/custom_upgrades/sale_notify.h"
 #include "modules/map_tools/ground_teleport.h"
 #include "modules/minimap/api.h"
@@ -80,6 +83,8 @@ constexpr int kReapplyFrames = 4;      // re-assert the cloned legend hint's key
 constexpr float kHintDiagDelay = 3.0f; // no hint this long after the map opened: log why (once per session)
 constexpr float kTravelTimeout = 90.0f;  // zone change: give up if the player is not in the new zone by then
 constexpr float kTravelPoll = 0.5f;      // zone change: arrival checked this often
+constexpr float kWallPoll = 3.0f;        // Nullifier wall registry read this often (any time)
+constexpr const char* kWallKey = "map_tools.null_walls";  // per-save sidecar value: the walls seen
 
 template <class T>
 T& F(void* obj, size_t off) {
@@ -415,6 +420,10 @@ public:
         }
         s_.playCue = c.Bind(c.Class("MonomiPark.SlimeRancher.UI.Framework.Audio", "UIAudioCueHandle"), "PlayAudioCue", 1);
         {
+            std::string werr;  // Nullifier walls for the full map's other tabs (cached per save)
+            if (!walls::Resolve(werr)) c.missing.push_back("Nullifier walls: " + werr);
+        }
+        {
             std::string gerr;  // the ground teleport shared with the sandbox's "teleport to waypoint"
             if (!ground_teleport::Resolve(gerr)) c.missing.push_back("ground teleport: " + gerr);
         }
@@ -547,6 +556,16 @@ private:
     float iconAcc_ = 1e9f, lastK_ = -1;
     Il2CppObject* iconMapDef_ = nullptr;  // identity only
     bool iconsLogged_ = false, iconMismatchLogged_ = false, minimapOffLogged_ = false;
+    // Nullifier walls seen this session / in the save's sidecar (kWallKey), for maps the walls are not loaded on
+    struct CachedWall {
+        float x = 0, y = 0, z = 0;
+        bool intact = true;
+    };
+    std::vector<CachedWall> wallCache_;
+    std::string wallSaved_;   // the sidecar value last read or written
+    float wallPollAt_ = 0;
+    std::vector<walls::Wall> wallLive_;
+    Il2CppObject* wallsLoggedDef_ = nullptr;  // identity only: page the cached walls were last logged for
     std::vector<mapi::PageIcon> buf_;
 
     // legend
@@ -677,6 +696,8 @@ private:
 
         Step("notices");
         if (notices_.Ready()) notices_.Frame(dt);
+        Step("walls");
+        PollWalls();
         Step("travel");
         TickTravel();
 
@@ -961,11 +982,16 @@ private:
         if (!shownDef || shownDef != pageDef) {
             if (!iconMismatchLogged_) {
                 iconMismatchLogged_ = true;
-                SR2_INFO("map_tools: icons: the full map shows '{}', the icons belong to '{}' - hidden on this map",
-                         shownDef ? unity::GetName(shownDef) : std::string("?"), unity::GetName(pageDef));
+                SR2_INFO("map_tools: icons: the full map shows '{}', the icons belong to '{}' - hidden on this map{}",
+                         shownDef ? unity::GetName(shownDef) : std::string("?"), unity::GetName(pageDef),
+                         cfg_.icons[mapi::kIconNullWall] ? " (only the cached Nullifier walls are drawn here)" : "");
             }
-            HideIcons();
-            return;
+            // Another tab (e.g. the Grey Labyrinth while the player is elsewhere): the cached walls only.
+            if (!shownDef || !CachedWallIcons(shownDef)) {
+                HideIcons();
+                return;
+            }
+            pageDef = shownDef;
         }
         if (!EnsureContainer()) return;
         int layer = ugui::GetLayer(container_.get());
@@ -1016,6 +1042,106 @@ private:
             SR2_INFO("map_tools: icons (first map): {} on '{}'{}{}", buf_.size(), unity::GetName(pageDef),
                      parts.empty() ? "" : ": ", parts);
         }
+    }
+
+    // ------------------------------------------------------------ walls ---
+    // The full map's other tabs have no live wall data: the Labyrinth's walls exist only while its scene group is
+    // loaded (they register in DiscordantWall._activeWalls when it loads, all of them, and are destroyed when it
+    // unloads), and nothing else in the game knows them (no save data per wall: harmonized = a Nullifier gadget
+    // next to it; no map marker). So every wall seen is remembered: position and intact flag, merged from the live
+    // registry (modules/common/discordant_walls.h, inactive walls of proxied regions included) every kWallPoll
+    // seconds, kept in the save's sidecar (custom_upgrades per-save value kWallKey, written with the next game
+    // save), read back when another save is loaded. One visit to the Labyrinth fills it.
+    void PollWalls() {
+        if (time_ < wallPollAt_) return;
+        wallPollAt_ = time_ + kWallPoll;
+        if (custom_upgrades::Active()) {
+            std::string v = custom_upgrades::SaveValue(kWallKey);
+            if (v != wallSaved_) {  // another save (or its sidecar) loaded
+                wallSaved_ = v;
+                wallCache_ = ParseWalls(v);
+                SR2_INFO("map_tools: Nullifier walls: {} cached in the loaded save", wallCache_.size());
+            }
+        }
+        if (!walls::Resolved()) return;
+        wallLive_.clear();
+        if (!walls::Collect(wallLive_, nullptr, true) || wallLive_.empty()) return;
+        int added = 0, updated = 0;
+        for (const walls::Wall& w : wallLive_) {
+            if (!std::isfinite(w.x) || !std::isfinite(w.y) || !std::isfinite(w.z)) continue;
+            CachedWall* hit = nullptr;
+            for (CachedWall& c : wallCache_)
+                if (std::hypot(c.x - w.x, c.z - w.z) < 4.0f) {
+                    hit = &c;
+                    break;
+                }
+            if (!hit) {
+                wallCache_.push_back({w.x, w.y, w.z, w.intact});
+                ++added;
+                continue;
+            }
+            if (hit->intact != w.intact || std::fabs(hit->x - w.x) > 0.5f || std::fabs(hit->y - w.y) > 0.5f ||
+                std::fabs(hit->z - w.z) > 0.5f) {
+                *hit = {w.x, w.y, w.z, w.intact};
+                ++updated;
+            }
+        }
+        if (!added && !updated) return;
+        std::string v;
+        for (const CachedWall& c : wallCache_)
+            v += std::format("{}{:.1f},{:.1f},{:.1f},{}", v.empty() ? "" : ";", c.x, c.y, c.z, c.intact ? 1 : 0);
+        bool stored = custom_upgrades::Active() && custom_upgrades::SetSaveValue(kWallKey, v);
+        if (stored) wallSaved_ = v;
+        SR2_INFO("map_tools: Nullifier walls: {} new, {} changed, {} remembered{}", added, updated, wallCache_.size(),
+                 stored ? " (kept in the save's sidecar with the next save)" : " (this session only: custom_upgrades is off)");
+    }
+
+    static std::vector<CachedWall> ParseWalls(const std::string& v) {
+        std::vector<CachedWall> out;
+        size_t pos = 0;
+        while (pos < v.size() && out.size() < 256) {
+            size_t end = v.find(';', pos);
+            std::string item = v.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+            pos = end == std::string::npos ? v.size() : end + 1;
+            CachedWall c;
+            int intact = 1;
+            if (sscanf_s(item.c_str(), "%f,%f,%f,%d", &c.x, &c.y, &c.z, &intact) != 4) continue;
+            if (!std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z)) continue;
+            c.intact = intact != 0;
+            out.push_back(c);
+        }
+        return out;
+    }
+
+    // The cached intact walls on the page shown (`shownDef`), projected with the view model's rects (the page's
+    // anchors, as the right-click teleport's inverse): buf_. False when there is none to draw.
+    bool CachedWallIcons(Il2CppObject* shownDef) {
+        buf_.clear();
+        if (!cfg_.icons[mapi::kIconNullWall] || wallCache_.empty()) return false;
+        float rgba[4] = {1, 1, 1, 1};
+        Il2CppObject* sprite = mapi::NullWallSprite(rgba);
+        Il2CppObject* vm = F<Il2CppObject*>(mapUI_.get(), s_.uiViewModel);
+        if (!sprite || !Has(s_.vmMapRect) || !Has(s_.vmWorldRect) || !ugui::IsA(vm, s_.viewModel)) return false;
+        Rect mr = F<Rect>(vm, s_.vmMapRect), wr = F<Rect>(vm, s_.vmWorldRect);
+        if (std::fabs(wr.w) < 1e-6f || std::fabs(wr.h) < 1e-6f) return false;
+        bool clip = Has(s_.vmFullRect);
+        Rect fr = clip ? F<Rect>(vm, s_.vmFullRect) : Rect{};
+        float x0 = std::min(fr.x, fr.x + fr.w), x1 = std::max(fr.x, fr.x + fr.w);
+        float y0 = std::min(fr.y, fr.y + fr.h), y1 = std::max(fr.y, fr.y + fr.h);
+        int intact = 0;
+        for (const CachedWall& c : wallCache_) {
+            if (!c.intact) continue;
+            ++intact;
+            float px = mr.x + (c.x - wr.x) * mr.w / wr.w, py = mr.y + (c.z - wr.y) * mr.h / wr.h;
+            if (!std::isfinite(px) || !std::isfinite(py) || (clip && (px < x0 || px > x1 || py < y0 || py > y1))) continue;
+            buf_.push_back({mapi::kIconNullWall, px, py, sprite, rgba[0], rgba[1], rgba[2], rgba[3]});
+        }
+        if (wallsLoggedDef_ != shownDef) {
+            wallsLoggedDef_ = shownDef;
+            SR2_INFO("map_tools: icons: {} of {} cached intact Nullifier wall(s) on '{}' ({} remembered)", buf_.size(), intact,
+                     unity::GetName(shownDef), wallCache_.size());
+        }
+        return !buf_.empty();
     }
 
     // World units per local unit along x (uniform scale assumed, as uGUI pages are).

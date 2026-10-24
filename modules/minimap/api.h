@@ -67,4 +67,8 @@ struct PageIconQuery {
 // the minimap is not running or has no page right now.
 bool CollectPageIcons(const PageIconQuery& query, std::vector<PageIcon>& out, Il2CppObject** mapDefinition);
 
+// The Nullifier wall icon sprite (procedural, pinned by the minimap) and its tint, for callers that place wall
+// icons themselves (the full map's other tabs). Main thread; nullptr when the minimap is not running.
+Il2CppObject* NullWallSprite(float rgba[4]);
+
 }  // namespace sr2::modules::minimap::api
