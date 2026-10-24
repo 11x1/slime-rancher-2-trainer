@@ -36,7 +36,7 @@ Categories (`icon_*`, each with `size_*` in 1080p pixels, 12-64):
 |---|---|---|
 | treasure pods | on | locked `TreasurePod`s (pod registry) |
 | resource nodes | off | READY spawners with a live node |
-| Nullifier walls | on | intact `DiscordantWall`s |
+| Nullifier walls | on | intact `DiscordantWall`s, also those of unloaded (proxied) regions, which are registered but inactive (they were missing before: `modules/wall_markers/NOTES.md`, "Inactive walls") |
 | placed gadgets (+ drone ports, teleporters/warp depots/links, decorations) | on (decorations off) | `GameModel.identifiablesByIdent` gadgets |
 | undiscovered ancient teleporters / gordos / plort doors and landmarks | off | page markers the full map does not show yet (`CanBeShown` false) and are not done (popped gordo, solved door): spoilers |
 

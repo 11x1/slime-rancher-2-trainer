@@ -451,6 +451,7 @@ private:
         bool cats[kCatCount];
         for (int c = 0; c < kCatCount; ++c) cats[c] = q.cats[c];
         const IconStats saved = stats_;
+        stats_ = IconStats{};  // counted fresh for the page (the minimap's own counts are restored below)
         std::vector<IconItem> items;
         scanCats_ = cats;
         scanMax_ = kMaxPageIcons;
@@ -460,7 +461,18 @@ private:
         };
         bool ignoreFog = false;
         if (cats[kTreasurePod] && !view_.hasPagePods && sym_.treasurePod && sym_.podGetState) ScanPods(items, onPage);
-        if (cats[kNullWall] && walls::Resolved()) ScanNullWalls(items, onPage);
+        if (cats[kNullWall] && walls::Resolved()) {
+            // the whole page: also the walls of proxied (unloaded) regions, which are registered but inactive
+            wallsInactive_ = true;
+            ScanNullWalls(items, onPage);
+            wallsInactive_ = false;
+            if (stats_.wallsActive + stats_.wallsInactive != pageWallsLogged_) {
+                pageWallsLogged_ = stats_.wallsActive + stats_.wallsInactive;
+                SR2_INFO("minimap: full map: Nullifier walls {} active + {} inactive (unloaded regions, {} positioned "
+                         "from when they were loaded), {} shown",
+                         stats_.wallsActive, stats_.wallsInactive, stats_.wallsFromCache, stats_.wallsShown);
+            }
+        }
         if (cats[kPlaced] && sym_.tryGetGameModel && sym_.gameModel && sym_.gadgetModel &&
             game::Has(sym_.gmIdentsByIdent) && game::Has(sym_.imLastPos) && game::Has(sym_.imIdent))
             ScanPlacedGadgets(items, onPage, ignoreFog);
@@ -3421,7 +3433,7 @@ private:
 
     struct IconStats {
         int podsShown = 0, nodesReady = 0, nodesLive = 0, nodesShown = 0, fogged = 0;
-        int wallsActive = 0, wallsIntact = 0, wallsShown = 0;
+        int wallsActive = 0, wallsIntact = 0, wallsShown = 0, wallsInactive = 0, wallsFromCache = 0;
         int gDrone = 0, gDroneRanch = 0, gTele = 0, gDecor = 0, gOther = 0, gPre = 0, gShown = 0;
     };
     IconStats stats_;
@@ -3467,7 +3479,7 @@ private:
     void ScanNullWalls(std::vector<IconItem>& items, Near& nearFn) {
         wallBuf_.clear();
         walls::Stats st;
-        if (!walls::Collect(wallBuf_, &st)) {
+        if (!walls::Collect(wallBuf_, &st, wallsInactive_)) {
             if (!wallLayoutWarned_) {
                 wallLayoutWarned_ = true;
                 SR2_WARN("minimap: DiscordantWall._activeWalls has an unexpected type - no Nullifier wall icons");
@@ -3476,6 +3488,8 @@ private:
         }
         stats_.wallsActive = st.active;
         stats_.wallsIntact = st.intact;
+        stats_.wallsInactive = st.inactive;
+        stats_.wallsFromCache = st.fromCache;
         Il2CppObject* icon = sprWall_.Alive() ? sprWall_.get() : sprDot_.get();
         for (const walls::Wall& w : wallBuf_) {
             if (items.size() >= scanMax_) break;
@@ -3487,6 +3501,8 @@ private:
         }
     }
     std::vector<walls::Wall> wallBuf_;
+    bool wallsInactive_ = false;  // full map scan: inactive walls too (walls::Collect includeInactive)
+    int pageWallsLogged_ = 0;     // last wall count logged for the full map
     std::unordered_map<Il2CppObject*, Vec3> podPos_;  // registered pod -> world position (pods never move)
     bool wallLayoutWarned_ = false;
 
