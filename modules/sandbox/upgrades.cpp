@@ -201,12 +201,18 @@ std::string CleanText(const std::string& s) {
 }
 
 // --------------------------------------------------------------- player ----
-Il2CppObject* UpgradeModel() {
+Il2CppObject* PlayerState() {
     Il2CppObject* player = nullptr;
     bool found = false;
     if (!CallValue(g_tryGetPlayerState, nullptr, {&player}, "SceneContextUtility.TryGetPlayerState", found) || !found ||
         !IsA(player, g_playerStateClass) || !unity::IsAlive(player))
         return nullptr;
+    return player;
+}
+
+Il2CppObject* UpgradeModel() {
+    Il2CppObject* player = PlayerState();
+    if (!player) return nullptr;
     Il2CppObject* model = unity::Field<Il2CppObject*>(player, g_offPlayerModel);
     if (!IsA(model, g_playerModelClass)) return nullptr;
     Il2CppObject* um = Call(g_getUpgradeModel, model, {}, "PlayerModel.GetUpgradeModel");
@@ -417,8 +423,8 @@ void AfterChange() {
 // {ModifiableFloat Property @0, LinkedListNode<FloatModifier> Node @8}), calls ModifiableFloat.
 // BatchModifiers(add, remove) per property and only at the very end stores the new nodes in
 // _appliedModifiers. When anything in between throws (the round-8 log: a NullReferenceException on every
-// Tank Booster / Extra Tank change in that session, from inside the game's property update; cause not
-// seen), the new modifiers stay on the property but are not remembered: the next level change adds the
+// Tank Booster / Extra Tank change in that session, from inside the game's property update; the cause, a
+// destroyed HUD slot view still subscribed to the slot, is removed by PruneSlotListeners), the new modifiers stay on the property but are not remembered: the next level change adds the
 // next level's modifier on top (Tank Booster XII is ADD 180: 20 + 180 + 180 + ... = 1880), and nodes that
 // were removed but are still remembered make every later ApplyUpgrade of that upgrade throw "The
 // LinkedList node does not belong to current LinkedList" (the Drone Battery Saver's errors). The old
@@ -655,12 +661,93 @@ HealResult Heal(Il2CppObject* um, const char* why) {
     return r;
 }
 
+// ------------------------------------------------- stale slot listeners ----
+// The source of the NullReferenceException that every Tank Booster / Extra Tank change threw in the round-9
+// log (IDA on 1.3.0, round 10). The chain:
+//   UpgradeModel.SetUpgradeLevel -> OnUpgradeChanged -> ActorUpgradeHandler.ApplyUpgrade (0x8646B0) ->
+//   ModifiableValue<float>.BatchModifiers (0x1814D3730: adds, removes, then 0x1800AC530 recomputes the value
+//   and invokes OnValueChanged unconditionally) -> AmmoSlot.<Setup>b__32_2 / _3 (0xA3B960, the slot's
+//   subscription to its AmmoLimit / unlock property) -> AmmoSlot.OnSlotChanged(slot) -> every subscriber,
+//   among them AmmoSlotViewHolder.UpdateAmmoDisplay (0x67FE80, the HUD slot view) -> Image.set_sprite on a
+//   destroyed view -> ThrowHelper.ThrowNullReferenceException (0x345DA50: a plain NullReferenceException in
+//   player builds, the message in the log).
+// The destroyed views: the HUD row (AmmoSlotAdapter, an AdapterView) rebinds its list on every
+// OnSlotChanged (AmmoSlotAdapter.OnSlotChanged -> Refresh -> BindDataList(List, int), 0x1F281F0) and
+// destroys the view holders past the new count when fewer slots are unlocked (Destroyer.Destroy). Their
+// AmmoSlotViewHolder.BindData (0x67EFE0) subscriptions to the slot's OnSlotChanged / OnAmmoChanged are only
+// removed when the holder is bound to another slot; nothing removes them on destroy (no OnDestroy), and
+// AmmoSlotAdapter.Start never unsubscribes either. Vanilla never has fewer unlocked slots, so this needs a
+// lowered Extra Tank (Sandbox; the first throw in that log came 5 s after "Extra Tank: IV -> not bought"):
+// from then on any change of a slot's properties (every Tank Booster change: AmmoLimit is every slot's;
+// raising Extra Tank: the slots unlocked) reaches a destroyed holder and throws, which leaves the new
+// modifiers on the property unremembered (the 1880 per slot). The same holders would throw from game code
+// as well (AmmoSlot.OnAmmoChanged when the slot fills).
+// Fix: remove every subscriber of the player's AmmoSlot.OnSlotChanged / OnAmmoChanged whose target is a
+// destroyed UnityEngine.Object (Delegate.GetInvocationList, Delegate.get_Target, AmmoSlot.remove_*). Run
+// before each level change here (the views destroyed by an earlier change are gone by then: Destroy runs at
+// the end of that frame) and with the effects check every few seconds while Sandbox is on.
+std::string g_listenWhy;  // "" = the prune is available
+Il2CppClass* g_unityObjectClass = nullptr;
+size_t g_offPsAmmo = 0, g_offAmModel = 0, g_offAmSlots = 0;  // PlayerState.Ammo / AmmoSlotManager._ammoModel / AmmoModel.Slots
+size_t g_offSlotChanged = 0, g_offAmmoChanged = 0;            // AmmoSlot.OnSlotChanged / OnAmmoChanged (event fields)
+const MethodInfo* g_removeSlotChanged = nullptr;              // AmmoSlot.remove_OnSlotChanged
+const MethodInfo* g_removeAmmoChanged = nullptr;              // AmmoSlot.remove_OnAmmoChanged
+
+// Listeners of destroyed objects removed from the player's slots; logged when there were any. `why` for the log.
+int PruneSlotListeners(const char* why) {
+    if (!g_listenWhy.empty() || sr2::core::ModuleFaulted(kModule)) return 0;
+    Il2CppObject* ps = PlayerState();
+    Il2CppObject* mgr = ps ? unity::Field<Il2CppObject*>(ps, g_offPsAmmo) : nullptr;
+    Il2CppObject* model = mgr ? unity::Field<Il2CppObject*>(mgr, g_offAmModel) : nullptr;
+    void* slots = model ? unity::Field<void*>(model, g_offAmSlots) : nullptr;
+    struct Event {
+        size_t off;
+        const MethodInfo* remove;
+        const char* name;
+    };
+    const Event events[] = {{g_offSlotChanged, g_removeSlotChanged, "OnSlotChanged"},
+                            {g_offAmmoChanged, g_removeAmmoChanged, "OnAmmoChanged"}};
+    int removed = 0, failed = 0;
+    std::unordered_map<std::string, int> kinds;  // "AmmoSlotViewHolder.OnSlotChanged" -> count
+    for (size_t i = 0, n = unity::ArrayLength(slots); i < n && i < 64; ++i) {
+        auto* slot = static_cast<Il2CppObject*>(unity::ArrayAt(slots, i));
+        if (!slot) continue;
+        for (const Event& ev : events) {
+            Il2CppObject* d = unity::Field<Il2CppObject*>(slot, ev.off);
+            if (!d) continue;
+            auto* list = reinterpret_cast<Il2CppArray*>(Call(LiveMethod(d, "GetInvocationList", 0), d, {}, "Delegate.GetInvocationList"));
+            for (size_t j = 0, m = unity::ArrayLength(list); j < m && j < 256; ++j) {
+                auto* e = static_cast<Il2CppObject*>(unity::ArrayAt(list, j));
+                Il2CppObject* target = e ? Call(LiveMethod(e, "get_Target", 0), e, {}, "Delegate.get_Target") : nullptr;
+                if (!target || !IsA(target, g_unityObjectClass) || unity::IsAlive(target)) continue;
+                bool ok = false;
+                Call(ev.remove, slot, {e}, ev.name, &ok);
+                if (!ok) {
+                    ++failed;
+                    continue;
+                }
+                ++removed;
+                const char* cls = api().il2cpp_class_get_name ? api().il2cpp_class_get_name(api().il2cpp_object_get_class(target)) : nullptr;
+                ++kinds[std::format("{}.{}", cls ? cls : "?", ev.name)];
+            }
+        }
+    }
+    if (removed || failed) {
+        std::string list;
+        for (const auto& [k, c] : kinds) list += std::format("{}{} x{}", list.empty() ? "" : ", ", k, c);
+        SR2_WARN("[{}] vacpack slots ({}): {} listener(s) of destroyed HUD objects removed ({}){}", kModule, why, removed,
+                 list.empty() ? "none" : list, failed ? std::format(", {} could not be removed", failed) : std::string());
+    }
+    return removed;
+}
+
 // SetUpgradeLevel(def, to), then the effects checked (Heal; heal = false when the caller heals once after
 // several changes); for a discoverable upgrade reset to -1, level 0's components come back if missing (it
 // stays discovered). `note` gets what happened besides the level. True once the level is stored: a
 // subscriber of OnUpgradeChanged that threw (logged) no longer counts as refused, the heal puts the effects
-// right.
+// right. The slots' stale listeners go first (PruneSlotListeners: the cause of those throws).
 bool SetLevel(Il2CppObject* um, Il2CppObject* spend, Il2CppObject* def, int to, std::string& note, bool heal = true) {
+    PruneSlotListeners("before a level change");
     int32_t v = to;
     bool ok = false;
     Call(g_setLevel, um, {def, &v}, "UpgradeModel.SetUpgradeLevel", &ok);
@@ -768,6 +855,7 @@ void DoUndiscover(uintptr_t id) {
     if (gate.empty()) return Done(false, name + " is never hidden: it can't be undiscovered");
     const int from = Level(um, def);
     if (from >= 0) {
+        PruneSlotListeners("before a level change");
         int32_t none = -1;
         bool ok = false;
         Call(g_setLevel, um, {def, &none}, "UpgradeModel.SetUpgradeLevel", &ok);
@@ -1005,6 +1093,23 @@ void SetupUpgrades(sr2::core::ModuleContext& ctx, UpgradesHost host) {
                 SR2_WARN("[{}] upgrades manager: upgrade effects are not checked or repaired ({})", kModule, h);
             }
         }
+        {
+            std::string& l = g_listenWhy;  // optional (see PruneSlotListeners)
+            g_unityObjectClass = cls("UnityEngine.CoreModule", "UnityEngine", "Object", l);
+            Il2CppClass* mgr = cls(kImage, "MonomiPark.SlimeRancher.Player", "AmmoSlotManager", l);
+            Il2CppClass* ammoModel = cls(kImage, "MonomiPark.SlimeRancher.DataModel", "AmmoModel", l);
+            Il2CppClass* slot = cls(kImage, "MonomiPark.SlimeRancher.Player", "AmmoSlot", l);
+            off(g_playerStateClass, "<Ammo>k__BackingField", g_offPsAmmo, l);
+            off(mgr, "_ammoModel", g_offAmModel, l);
+            off(ammoModel, "Slots", g_offAmSlots, l);
+            off(slot, "OnSlotChanged", g_offSlotChanged, l);
+            off(slot, "OnAmmoChanged", g_offAmmoChanged, l);
+            g_removeSlotChanged = method(slot, "remove_OnSlotChanged", 1, l);
+            g_removeAmmoChanged = method(slot, "remove_OnAmmoChanged", 1, l);
+            if (!l.empty())
+                SR2_WARN("[{}] upgrades manager: stale vacpack HUD listeners are not removed ({}); lowering Extra Tank can "
+                         "make later vacpack upgrade changes throw", kModule, l);
+        }
         off(g_playerStateClass, "_model", g_offPlayerModel, w);
         off(upModel, "upgradeDefinitions", g_offUmDefs, w);
         off(g_upgradeDefClass, "_icon", g_offUdIcon, w);
@@ -1094,9 +1199,12 @@ void UpgradesTick(bool snapshot) {
     if (!Live()) return;
     // The effects check every few seconds while a save is loaded (also right after a load, and after a
     // Fabricator purchase or the custom upgrades' sidecar levels, which change levels without this page).
-    if (g_why.empty() && g_healWhy.empty() && GetTickCount64() - g_lastHeal >= kHealMs) {
+    // The slots' listeners of destroyed HUD views with it (also a source of throws from game code).
+    if (g_why.empty() && GetTickCount64() - g_lastHeal >= kHealMs) {
         g_lastHeal = GetTickCount64();
-        if (Il2CppObject* um = UpgradeModel()) Heal(um, "check");
+        PruneSlotListeners("check");
+        if (g_healWhy.empty())
+            if (Il2CppObject* um = UpgradeModel()) Heal(um, "check");
     }
     if (!snapshot) return;
     if (GetTickCount64() - g_lastPublish >= kPublishMs) Publish();

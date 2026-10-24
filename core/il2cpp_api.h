@@ -52,6 +52,7 @@ static_assert(sizeof(Il2CppGCHandle) == sizeof(void*), "Il2CppGCHandle must be p
     X(false, Il2CppChar*, il2cpp_string_chars, (Il2CppString*))                                                   \
     X(false, int32_t, il2cpp_string_length, (Il2CppString*))                                                      \
     X(false, void, il2cpp_format_exception, (const Il2CppException*, char*, int))                                 \
+    X(false, void, il2cpp_format_stack_trace, (const Il2CppException*, char*, int))                               \
     X(false, bool, il2cpp_is_vm_thread, (Il2CppThread*))                                                          \
     X(false, Il2CppThread*, il2cpp_thread_current, ())                                                            \
     X(false, Il2CppString*, il2cpp_string_new, (const char*))                                                     \
