@@ -366,6 +366,17 @@ stayed correctly. `LandPlotUIRoot.Upgrade` has one caller, `<PromptForUpgrade>b_
 sale. sell_upgrades now refuses that confirm in the sale's frame and the next (log `purchase of
 ... right after a sale refused`). Removal itself (CoopNests, IncineratorGlow) logged fine.
 
+Feedback round 5, Ash Trough sold part-filled and bought back: "I see nothing visually added". The
+trough model is vanilla (`patchIncinerator/AshTrough`: floor, four low walls, child `Ash Level` =
+FillableAshSource); the sale hides it, vanilla `AshTroughUpgrader.Apply` (0x983930: `SetActive(true)`
+for ASH_TROUGH) shows it again on the purchase (`LandPlot.AddUpgrade` -> `ApplyUpgrades`), and on
+load. The log of that test had `Ash Trough bought back ...: trough not found, vanilla fill kept`:
+sell_upgrades looked for the FillableAshSource on `AshTrough` itself, so the remembered ash was never
+restored (the trough came back full, as vanilla). Fixed in sell_upgrades (GetComponentInChildren);
+after every Ash Trough purchase it now also checks the trough model and switches it on if it is still
+hidden (log `trough model shown` / `was still hidden - shown now`), so the next test tells which case it
+was.
+
 Not checked in game yet: the Music Box II speaker (its Animator runs without the game's music box
 script; it may stand still or play its idle), the scattered coop layout, the -x sprinkler head,
 and whether the phantom purchase is gone. Also not checked yet: sizes and heights (hay bales, nests, pillow), whether the incinerator's
