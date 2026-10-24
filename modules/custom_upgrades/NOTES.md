@@ -269,39 +269,74 @@ load of such a save.
 hook per address, so the DJ code never hooks those methods itself). Without the Quantum Storage Link's Setup nothing
 of it is offered. Slime DJ plays the song through `slime_dj/api.h` emitters.
 
-- **DJ Booth** = a variant of the **Scientist Desk** decoration (same prefab). Dressing on the placed desk: the lab
-  clutter (glass, vials, beaker, clipboard, pens, wrench, bubble scroll) and its bubbling sound switched off, a small
-  boombox on the desk as the mixer (facing -z), two big boomboxes on the floor at x = +-1.75 as speakers (facing +z,
-  both emitters, kind Booth), and behind the desk (z -1.55) the **Flower Pillow**'s mesh, colliders and its
-  `SlimeAttachmentPoint` subtree **with its scripts** (`SlimeAttachPoint` + `Attractor`, base slimes only, as on the
-  vanilla pillow): slimes are drawn to it and sit there. Every other clone is script-free.
+- **DJ Booth** = a variant of the **Scientist Desk** decoration (same prefab). It faces +z (where the big speakers
+  look); the DJ sits behind it (-z). Dressing on the placed desk: the lab clutter (glass, vials, beaker, clipboard,
+  pens, wrench, bubble scroll, `scientistDesk_misc01` = the tubes between the flasks, the light above the glass) and
+  its bubbling sound switched off; on the desk a boombox lying face up in the middle as the **deck** (its two speaker
+  cones read as turntables; `AxisY(180) * AxisX(-90)`, lifted by its half depth) and two small boomboxes on the
+  **front corners** (x +-0.8, z 0.3, 0.4 size) facing the audience like the big ones; two big boomboxes on the floor
+  at x = +-1.75 (both emitters, kind Booth); behind the desk (z -1.8) the Boombox's **bench** (colliders kept) with
+  the **Flower Pillow**'s mesh, colliders and its `SlimeAttachmentPoint` subtree **with its scripts** on top, so the
+  slime sits about 0.7 m higher than on the floor and shows over the desk. **Largos**: `_allowLargo` is set on the
+  cloned attach point before its Awake (`OnTriggerEnter` drops largos without it), its trigger sphere is 1.5x, and the
+  seat moved back from z -1.55 to -1.8 so a largo does not clip into the desk. Every other clone is script-free.
+- **E on the booth**: a `GadgetMusicPlayer` (gadgetMusic, onInteractCue, cooldown copied from the Boombox prefab) and a
+  `GadgetUIInteractable` (prompt prefabs, input event, gadget-mode block copied) are added to the desk root, the player
+  first (the interactable's Awake takes `GetComponentInParent<IGadgetInteractor>`). `UIDetector` sphere-casts and
+  takes the interactables of the hit collider and its parents, so the desk's own box collider (layer 27, as the
+  Boombox's) brings up the prompt. Undress destroys both (`DestroyImmediate`, so a new dressing in the same tick can
+  add them again).
 - **DJ Speaker** / **DJ Speaker (tilted)** / **DJ Speaker (facing up)** = three variants of the **Boombox**
-  decoration. The placed boombox's `model_boombox` is scaled x1.25 and leans back 0 / 30 / 80 degrees
-  (`localRotation * AngleAxis(-tilt, x)`); an emitter child at 1.3 m (kind Speaker). Yaw is the game's own rotate keys
-  (free_placement's rotation step works too). **Stacking**: placed speakers get `Gadget.AllowGadgetStackingOnTop =
-  true` (instance field; the prefab says false), the Boombox prefab already has `CanStackOnStackableGadgets`, so
-  speakers (and any decoration that may stack) go on top of speakers with the game's own rule; the stack relation is
-  the vanilla `_stackedGadgetsIds`. Toggle-variant while holding cycles Boombox -> Speaker -> tilted -> up; on a placed
+  decoration. Round 8 ("only see 1 speaker"): the bench, the vanilla `model_boombox` and its `Collision` ball are
+  switched off; a **stack** of two boombox clones stands in their place (1.3 size on the floor, 0.85 on top at 1 m),
+  the variant tilts the top one back 0 / 30 / 80 degrees (lifted so its back does not sink into the base), and one
+  `BoxCollider` (1.2 x 1.7 x 0.9, layer 27) covers the stack. The base is the emitter (kind Speaker). Yaw is the
+  game's own rotate keys. A placed gadget has no Rigidbody (prefab), so a DJ Speaker can't roll; the rolling "pill"
+  was the Slime Radio (see below). **Stacking**: placed speakers get `Gadget.AllowGadgetStackingOnTop = true`
+  (instance field; the prefab says false), the Boombox prefab already has `CanStackOnStackableGadgets`, so speakers
+  (and any decoration that may stack) go on top of speakers with the game's own rule; the stack relation is the
+  vanilla `_stackedGadgetsIds`. Toggle-variant while holding cycles Boombox -> Speaker -> tilted -> up; on a placed
   one it cycles plain -> Speaker (a kit) -> tilted -> up -> plain (kit back). The game always asks for the first
   variant there (`ToggleVariant` indexes from the vanilla definition), so the detour picks the next kind itself; the
   variants are offered on a placed one while a kit is left or while you aim at a listed one
   (`GadgetDirector.TargetedGadget`).
-- **Dance**: while `slime_dj::SongPlaying()`, every boombox of ours (clones and the placed speakers) gets the
-  Boombox's own animator bool (`GadgetMusicPlayer._gadgetActive`, a static hash read once a Boombox exists) and its
-  `FX_MusicalNotes` on; a placed speaker whose own Boombox track plays (`gadgetMusicInstance`) is left alone and its
-  emitter goes to volume 0 until the track ends.
-- **Plain Boomboxes play too** (round 7: "boomboxes have no music sadly"; the log had a placed vanilla Boombox and no DJ
-  Speaker, so nothing played). The scan already lists every Boombox gadget (`identifiablesByIdent[Boombox]`); each
-  loaded one that is not a DJ Speaker gets a plain record (no holder, nothing changed on it): an emitter on its
-  `model_boombox` (kind Speaker, full range / volume) and the same dance + notes. Up to 40; dropped when it is picked
-  up / unloaded or becomes a DJ Speaker (then dressed as one). Log: `dj buildables: N plain Boombox(es) play the Slime
-  DJ song (A added, R emitter(s) registered; D dropped)`. Needs custom upgrades on (as all DJ buildables).
+- **On / off with E** (round 8: "activated = off, deactivated -> on, always shows the music icons"; "only play music
+  if we have a slime behind the desk, otherwise the default speaker music"). Before, every DJ speaker / plain Boombox
+  played the song all the time and E started the vanilla track, which muted our emitter. Now
+  `GadgetMusicPlayer.OnInteract` and `.ShowDeactivatePrompt` are hooked (nothing else hooks them; `dj.` hook names)
+  and answer only for the player of one of our records (booth: the added one; speaker / plain Boombox: the vanilla
+  one); everything else runs the original. E flips the record's state (sidecar `dj.on`, actor ids; default off, as a
+  vanilla Boombox) and `Apply` (also every tick) picks what plays:
+  - off: nothing (emitter volume 0, no dance, no notes; a running vanilla track is stopped);
+  - on and a Slime DJ song loaded (booth: and a slime sits on the pillow, `SlimeAttachPoint._isJointActive` with a
+    live `_slime`): the song from the record's emitters (volume 1); the boomboxes dance and show their notes while
+    the song plays;
+  - on otherwise: the Boombox's own track (`BoomboxMusic`) as filler, started / stopped through the original
+    `OnInteract` (trampoline, cooldown field cleared first). The game plays one gadget track at a time
+    (`GadgetDirector.CurrentGadgetMusicPlayer`); when it stops ours (another Boombox switched on, louder music), the
+    record switches itself off instead of fighting for it.
+  The prompt says "deactivate" while a record is on. Logs: `dj buildables: <label> actor N switched on|off
+  (interact)`, `... plays the Slime DJ song|the Boombox's own track (no slime behind the desk|no Slime DJ song
+  loaded)|nothing`, `DJ Booth actor N: a slime sits behind the desk|nobody behind the desk any more`.
+- **Dance**: the Boombox's own animator bool (`GadgetMusicPlayer._gadgetActive`, a static hash read once a Boombox
+  exists) and `FX_MusicalNotes`, only while the record plays (the old "notes on whenever a song plays anywhere" is
+  gone).
+- **Plain Boomboxes play too** (round 7: "boomboxes have no music sadly"). The scan already lists every Boombox gadget
+  (`identifiablesByIdent[Boombox]`); each loaded one that is not a DJ Speaker gets a plain record (no holder, nothing
+  changed on it): an emitter on its `model_boombox` (kind Speaker) and the same E / dance rules (switched on: the
+  song, or the vanilla track without a song). Up to 40; dropped when it is picked up / unloaded or becomes a DJ
+  Speaker (then dressed as one, its on state kept: same actor id). Log: `dj buildables: N plain Boombox(es) play the
+  Slime DJ song when switched on (A added, R emitter(s) registered; D dropped)`. Needs custom upgrades on.
 - **Slime Radio** = a vanilla **Night Light** toy actor. Fabricator card (after the DJ Speaker's) whose definition is a
   Boombox clone that is never a variant and never enters the inventory: fabricating spends its cost and spawns the toy
   1.8 m in front of the camera (`InstantiationHelpers.InstantiateActor`, as the sandbox spawner; posted out of the
   Fabricator call), at most 5 per click; its actor id goes into `dj.radios`. Dressing: `model_nightlight` (mesh,
-  handle, light) off, a boombox model at 0.6 size instead, an emitter (kind Radio, 0.6x range, 80 % volume). Slimes
-  play with it like with any toy (its physics and toy scripts are the Night Light's). There is no toy shop entry: the toy
+  handle, light) off, a boombox model at 0.6 size instead, an emitter (kind Radio, 0.6x range, 80 % volume; it plays
+  whenever a song plays, no E: it is a toy). Round 8 ("rolls over, feels like a pill hitbox"): the toy's root collider
+  is a ball (r 0.47, Rigidbody 0.5 kg, no constraints), so it rolled. Now it is stood up (euler x / z = 0), its
+  rotation about x / z is frozen (`RigidbodyConstraints` 16 | 64, put back each tick if the vacuum reset it), the
+  ball collider is off and its small bottom box collider is resized to the boombox (centre y -0.27, 0.62 x 0.46 x
+  0.4 toy units); all restored on undress. Slimes play with it like with any toy. There is no toy shop entry: the toy
   shop's purchase path was not researched (`ToyShopUI` itself has no members in the dump); the Fabricator card reuses
   the hooks the DJ gadgets need anyway.
 - **Fabricator** (Decorations): DJ Booth after the Scientist Desk (cost: the desk's Newbucks x2.5, items x2), DJ
@@ -311,7 +346,8 @@ of it is offered. Slime DJ plays the song through `slime_dj/api.h` emitters.
   never our definition. Placing the variant uses a kit (no kit: a plain decoration is placed, logged), picking one up
   gives it back and holds the variant again; removed any other way (stored, picked up with a stack) the tick gives the
   kit back.
-- **Sidecar**: `dj.booths` (actor ids), `dj.speakers` (`id:kind`), `dj.radios`, `dj.booth_kits`, `dj.speaker_kits`.
+- **Sidecar**: `dj.booths` (actor ids), `dj.speakers` (`id:kind`), `dj.radios`, `dj.booth_kits`, `dj.speaker_kits`,
+  `dj.on` (actor ids switched on with E; an id leaves it when its actor is picked up / gone).
 - **Save**: like the Quantum Storage Link (ReferenceId alias in `_reverseIndex`, `GetPersistenceId` detour mapping
   our definitions to the vanilla one for the favourite slots; Cleanup puts the vanilla gadget into those slots).
 - **Without the mod**: DJ Booths load as plain Scientist Desks (clutter back), DJ Speakers as plain upright Boomboxes
@@ -331,6 +367,13 @@ side), a slime sitting on the pillow, the speaker tilt direction (front up, not 
 speakers, the dance and notes while a song plays (log `boombox dance animator parameter hash ...`), the radio spawn
 (in front of you, not inside the Fabricator) and its look, slimes playing with the radio, the emitters playing,
 save + reload (rebuilt from the sidecar), turning custom upgrades off (plain again, favourites back), a mod-free load.
+
+Seen in game (round 8, 2026-10-24): booth placed and dressed, big speakers face the right way, a slime sat behind it
+(hidden by the desk), the song played; a largo could not sit; leftover flask tubes; DJ Speakers placed / dressed;
+the radio rolled; E on a DJ speaker inverted the state and the notes always showed. Round-8 changes (above) not
+checked yet: the deck / corner speaker / bench positions (all estimated from prefab numbers: the deck's lift and the
+stack heights may need a nudge), E prompt on the booth, filler vs song switching with a slime, a largo on the seat,
+the speaker stack and its collider (stacking on it), the radio staying upright.
 
 ## Mod buildables: Fabricator cards, unlock, API (round 7 fix)
 
