@@ -18,6 +18,7 @@
 #include <format>
 #include <initializer_list>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -46,6 +47,7 @@ using sr2::il2cpp::Resolver;
 constexpr const char* kModule = bridge::kModule;
 constexpr const char* kImage = "Assembly-CSharp";
 constexpr unsigned long long kReadMs = 250;  // 4 Hz: a handful of runtime_invoke calls, Publish only signals on change
+constexpr unsigned long long kLeaveMs = 3000;  // out of a save this long before the menu presence (and timer reset)
 constexpr int kNewbuckPersistenceId = 1;  // CurrencyUtility.NEWBUCK_PERSISTENCE_ID
 
 bool IsA(Il2CppObject* obj, Il2CppClass* k) {
@@ -101,7 +103,7 @@ private:
         return true;
     }
     void Tick();
-    rpc::Presence Read();
+    std::optional<rpc::Presence> Read();
     const Zone* ZoneInfo(Il2CppObject* zone);
     bool Newbucks(Il2CppObject* player, int& out);
 
@@ -109,6 +111,7 @@ private:
     int frameCb_ = 0;
     unsigned long long lastRead_ = 0;
     int64_t sessionStart_ = 0;  // unix seconds the save was loaded (0 = in the menu)
+    unsigned long long outSince_ = 0;  // GetTickCount64 since no live PlayerState while sessionStart_ is set
     std::unordered_map<uintptr_t, Zone> zones_;  // ZoneDefinition identity -> info (assets stay loaded)
     std::string gameWhy_;  // "" = game state readable (else the presence only says "Playing")
 
@@ -244,6 +247,8 @@ bool DiscordRpc::Setup(sr2::core::ModuleContext& ctx) {
 void DiscordRpc::OnEnable() {
     enabled_.store(true);
     lastRead_ = 0;
+    sessionStart_ = 0;
+    outSince_ = 0;
     rpc::SetActive(true);
     SR2_INFO("[{}] enabled", kModule);
 }
@@ -286,7 +291,8 @@ bool DiscordRpc::Newbucks(Il2CppObject* player, int& out) {
     return CallValue(getCurrency_, player, {cur}, "PlayerState.GetCurrency", out);
 }
 
-rpc::Presence DiscordRpc::Read() {
+// nullopt: keep what was published (the player state was missing only briefly).
+std::optional<rpc::Presence> DiscordRpc::Read() {
     rpc::Presence p;
     // Member list: Game name / Area / Activity -> status_display_type 0 name, 2 details, 1 state.
     static constexpr int kDisplayType[] = {0, 2, 1};
@@ -302,11 +308,24 @@ rpc::Presence DiscordRpc::Read() {
         return p;
     }
     if (!inGame) {
+        // A short gap (a load inside the save, a missed read) keeps the save's presence and its timer;
+        // only kLeaveMs without a player state is the menu, and the next save starts a new timer.
+        const unsigned long long now = GetTickCount64();
+        if (sessionStart_) {
+            if (!outSince_) outSince_ = now;
+            if (now - outSince_ < kLeaveMs) return std::nullopt;
+            SR2_INFO("[{}] left the save: the presence shows the main menu, the timer stops", kModule);
+        }
         sessionStart_ = 0;
+        outSince_ = 0;
         p.details = "In the main menu";
         return p;
     }
-    if (!sessionStart_) sessionStart_ = static_cast<int64_t>(std::time(nullptr));
+    outSince_ = 0;
+    if (!sessionStart_) {
+        sessionStart_ = static_cast<int64_t>(std::time(nullptr));
+        SR2_INFO("[{}] in a save: the elapsed timer starts now", kModule);
+    }
     p.inGame = true;
     p.start = sessionStart_;
     const Zone* zone = nullptr;
@@ -322,16 +341,17 @@ rpc::Presence DiscordRpc::Read() {
     p.state = zone && zone->ranch ? "On the ranch" : "Exploring";
     int bucks = 0;
     if (settings::GetBool(kModule, bridge::kKeyNewbucks) && Newbucks(player, bucks))
-        p.state += std::format(" \xC2\xB7 {} Newbucks", Thousands(bucks));
+        p.extra = std::format(" \xC2\xB7 {} Newbucks", Thousands(bucks));
     return p;
 }
 
 void DiscordRpc::Tick() {
+    rpc::Watchdog();  // two atomic loads; also while off (the pipe thread then still clears and closes)
     if (!Live()) return;
     const unsigned long long now = GetTickCount64();
     if (now - lastRead_ < kReadMs) return;
     lastRead_ = now;
-    rpc::Publish(Read());
+    if (auto p = Read()) rpc::Publish(*p);
 }
 
 }  // namespace
