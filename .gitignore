@@ -55,3 +55,6 @@ venv/
 
 # Claude Code agent worktrees
 /.claude/worktrees/
+
+# Icons extracted from the game files (reference only, not ours to commit)
+assets/icons/game/
