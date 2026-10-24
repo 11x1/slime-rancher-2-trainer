@@ -23,6 +23,8 @@
 #include "core/main_thread.h"
 #include "core/module.h"
 #include "core/paths.h"
+#include "core/settings.h"
+#include "core/text_override.h"
 #include "core/unity.h"
 #include "modules/sandbox/achievements.h"
 
@@ -38,7 +40,7 @@ constexpr const char* kModule = "sandbox";
 constexpr const char* kSaves = "sandbox_saves";  // HookManager module + DetourGuard fault name
 constexpr const char* kImage = "Assembly-CSharp";
 constexpr const char* kSidecarSuffix = ".sav.json";  // same naming as custom_upgrades
-constexpr const char* kTag = " [Sandbox]";
+constexpr const char* kRowText = "Sandbox: Used";  // the save details row of a marked save
 constexpr unsigned long long kPollMs = 1000;
 constexpr unsigned long long kPendingMs = 180000;  // a BeginLoad that never reached the game is dropped after this
 constexpr unsigned long long kMenuCacheMs = 2000;  // save list: a sidecar is stat'ed at most this often
@@ -54,26 +56,35 @@ size_t g_offAsdProvider = 0;                      // AutoSaveDirector._storagePr
 size_t g_offMetaGameName = 0, g_offMetaSaveNumber = 0;  // GameMetadata (value-type offsets)
 Il2CppClass* g_fileProviderClass = nullptr;       // FileStorageProvider
 size_t g_offProviderSavePath = 0;                 // FileStorageProvider.savePath
-// save list tag (optional)
+// "Sandbox: Used" row in the save list's details panel (optional)
 bool g_menuOk = false;
-Il2CppClass* g_loadModelClass = nullptr;  // LoadGameBehaviorModel (ContinueGameBehaviorModel derives from it)
-size_t g_offModelSummary = 0;             // LoadGameBehaviorModel.<GameDataSummary>k__BackingField
-Il2CppClass* g_summaryClass = nullptr;    // Persist.Summary
+Il2CppClass* g_rootClass = nullptr;        // MainMenu.SaveGamesRootUI
+size_t g_offRootItems = 0;                 // SaveGamesRootUI._gameSummaryItems (GameSummaryItemCollection)
+Il2CppClass* g_summaryModelClass = nullptr;  // MainMenu.Model.GameSummaryModel
+size_t g_offModelSummary = 0;              // GameSummaryModel._gameSummary
+Il2CppClass* g_summaryClass = nullptr;     // Persist.Summary
 size_t g_offSumSaveName = 0, g_offSumSaveNumber = 0;
-Il2CppClass* g_locStringClass = nullptr;  // UnityEngine.Localization.LocalizedString
-size_t g_offLocArgs = 0;                  // LocalizedString.<Arguments>k__BackingField (IList<object>)
-Il2CppClass* g_stringClass = nullptr;     // System.String
+Il2CppClass* g_tarrDefClass = nullptr;     // TarrEnabledGameSummaryItemDefinition (the template of our row)
+size_t g_offDefIcon = 0;                   // GameSummaryItemDefinition._icon
+size_t g_offTarrOn = 0, g_offTarrOff = 0;  // TarrEnabledGameSummaryItemDefinition._enabledString / _disabledString
+Il2CppClass* g_tarrVmClass = nullptr;      // TarrEnabledGameSummaryItemViewModel
+const MethodInfo* g_tarrVmCtor = nullptr;  // .ctor(TarrEnabledGameSummaryItemDefinition, GameSummaryModel)
+Il2CppClass* g_spriteClass = nullptr;      // UnityEngine.Sprite (the row's icon, by name)
+using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
+ObjectNewFn g_objectNew = nullptr;         // il2cpp_object_new
+Il2CppGCHandle g_rowDef = nullptr;         // our clone of the Tarr row definition (kept for good)
+bool g_rowFailed = false;                  // building it failed once: no row (logged)
 
 using BeginLoadFn = void (*)(Il2CppObject*, const void*, Il2CppObject*, const MethodInfo*);
 using CleanupFn = void (*)(Il2CppObject*, Il2CppString*, const MethodInfo*);
-using LabelFn = Il2CppObject* (*)(Il2CppObject*, const MethodInfo*);
+using FetchFn = Il2CppObject* (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
 BeginLoadFn g_origBeginLoad = nullptr;
 CleanupFn g_origCleanup = nullptr;
-LabelFn g_origLabel = nullptr;
+FetchFn g_origFetch = nullptr;
 
 sr2::core::DetourGuard g_beginLoadGuard{kSaves, "AutoSaveDirector.BeginLoad"};
 sr2::core::DetourGuard g_cleanupGuard{kSaves, "AutoSaveDirector.CleanupAutosaves"};
-sr2::core::DetourGuard g_labelGuard{kSaves, "LoadGameBehaviorModel.get_Label"};
+sr2::core::DetourGuard g_fetchGuard{kSaves, "SaveGamesRootUI.FetchGameSummaryItemData"};
 sr2::core::DetourGuard g_pollGuard{kSaves, "poll"};
 
 // ---- session (main thread only) ----
@@ -88,6 +99,13 @@ struct Session {
 Session g_s;
 bool g_pending = false;  // BeginLoad seen, the game is not running yet
 unsigned long long g_pendingSince = 0, g_lastPoll = 0;
+// Sandbox on / off per save (main thread). The module's `enabled` setting is global, so this keeps it per
+// save: off at startup and whenever a save is left; a marked save gets back its own last state on load
+// (the mark's "enabled"); a save without the mark loads with Sandbox off, unless it was switched on (after its
+// confirmation) on the title screen since: then the next save loaded is the one it is meant for.
+bool g_startupDone = false;
+bool g_lastOn = false;  // Sandbox on at the last poll
+bool g_armed = false;   // switched on while no save was running: applies to the next save loaded
 
 struct MenuEntry {
     std::filesystem::file_time_type time{};
@@ -97,8 +115,8 @@ struct MenuEntry {
     unsigned long long checked = 0;
 };
 std::map<std::wstring, MenuEntry> g_menuCache;  // sidecar path -> mark (main thread)
-std::set<std::string> g_menuLogged;             // one log line per tagged save file
-std::map<Il2CppClass*, const MethodInfo*> g_setItem;  // IList<object>.set_Item by list class
+std::set<std::string> g_menuLogged;             // one log line per save shown with the row
+std::map<Il2CppClass*, const MethodInfo*> g_listAdd;  // List<IListItemViewModel>.Add by list class
 
 bool IsA(Il2CppObject* obj, Il2CppClass* k) {
     const auto& a = api();
@@ -155,6 +173,7 @@ struct Mark {
     bool cheated = false;
     std::string since, save;
     unsigned long long number = 0;
+    int enabled = -1;  // Sandbox on (1) / off (0) when that file was last written; -1 = not recorded (older mark)
 };
 
 bool ReadJson(const std::filesystem::path& p, sr2::json::Value& root, std::string& err) {
@@ -188,6 +207,7 @@ bool ReadMark(const std::filesystem::path& p, Mark& m) {
     m.save = s["save"].asString();
     const double n = s["save_number"].asNumber(0);
     m.number = n > 0 ? static_cast<unsigned long long>(n) : 0;
+    if (s["enabled"].isBool()) m.enabled = s["enabled"].asBool() ? 1 : 0;
     return m.cheated;
 }
 
@@ -202,7 +222,9 @@ bool Marked(const std::string& save, unsigned long long number, Mark* out = null
 }
 
 // Sets "sandbox" in the sidecar of `save`, keeping whatever else is in it (custom_upgrades' data).
-bool WriteMark(const std::string& save, const std::string& game, unsigned long long number, const std::string& since) {
+// `enabled`: whether Sandbox is on in that save now (restored when it is loaded again).
+bool WriteMark(const std::string& save, const std::string& game, unsigned long long number, const std::string& since,
+               bool enabled) {
     const auto path = SidecarPath(save);
     std::error_code ec;
     sr2::json::Value root = sr2::json::Value::Object();
@@ -224,6 +246,7 @@ bool WriteMark(const std::string& save, const std::string& game, unsigned long l
     mark.set("game", sr2::json::Value(game));
     mark.set("save", sr2::json::Value(save));
     mark.set("save_number", sr2::json::Value(static_cast<double>(number)));
+    mark.set("enabled", sr2::json::Value(enabled));
     root.set("sandbox", std::move(mark));
     std::filesystem::create_directories(path.parent_path(), ec);
     const std::string text = sr2::json::Serialize(root);
@@ -317,6 +340,38 @@ std::string NewestSave(Il2CppObject* asd, const std::string& game) {
 }
 
 // ---- session logic (main thread) ----
+// Switches Sandbox (the module's persisted `enabled` setting, as the overlay's switch does). `now`: from the
+// poll (a frame callback), applied at once (the module manager switches the module on this thread); from a
+// detour it is posted, so no hook is switched inside another hook.
+void SetSandbox(bool on, const std::string& why, bool now) {
+    if (AchievementsPaused() == on) return;
+    SR2_INFO("[{}] Sandbox {}: {}", kModule, on ? "on" : "off", why);
+    auto apply = [on] {
+        if (AchievementsPaused() != on) sr2::core::settings::Set(kModule, "enabled", on ? 1.0 : 0.0);
+        g_lastOn = AchievementsPaused();
+    };
+    if (now) apply();
+    else main_thread::Post(apply);
+}
+
+// A save is being loaded or found running: Sandbox as that save had it. A marked save gets its last state
+// back (older marks without it keep the current state); a save without the mark starts with Sandbox off,
+// unless Sandbox was switched on on the title screen for it (g_armed).
+void ApplySaveState(bool cheated, int markEnabled, const std::string& file, bool now) {
+    if (cheated) {
+        if (markEnabled >= 0)
+            SetSandbox(markEnabled == 1, std::format("save '{}' had it {} when it was last saved", file,
+                                                     markEnabled == 1 ? "on" : "off"),
+                       now);
+    } else if (!g_armed) {
+        SetSandbox(false, std::format("save '{}' has no Sandbox mark, so it starts with Sandbox off (each save keeps "
+                                      "its own Sandbox switch)",
+                                      file),
+                   now);
+    }
+    g_armed = false;
+}
+
 void MarkNow(Il2CppObject* asd, const char* why) {
     if (!g_s.known || g_s.game.empty()) return;
     if (g_s.file.empty()) g_s.file = NewestSave(asd, g_s.game);
@@ -329,7 +384,7 @@ void MarkNow(Il2CppObject* asd, const char* why) {
                  kModule, why, g_s.game, g_s.number);
         return;
     }
-    const bool ok = WriteMark(g_s.file, g_s.game, g_s.number, g_s.since);
+    const bool ok = WriteMark(g_s.file, g_s.game, g_s.number, g_s.since, AchievementsPaused());
     SR2_INFO("[{}] {}: save '{}' (game '{}', save #{}) marked as cheated{} - Steam achievements stay disabled in it",
              kModule, why, g_s.file, g_s.game, g_s.number, ok ? "" : " (sidecar not written, this session only)");
 }
@@ -337,6 +392,7 @@ void MarkNow(Il2CppObject* asd, const char* why) {
 // A save is running that we did not see being loaded (or whose number changed unexpectedly):
 // look for this game's sidecar with that save number.
 void Evaluate(Il2CppObject* asd, const std::string& game, unsigned long long number) {
+    const bool fresh = !g_s.known || g_s.game != game;  // not just a save number that moved within the game
     g_s = {};
     g_s.game = game;
     g_s.number = number;
@@ -371,6 +427,7 @@ void Evaluate(Il2CppObject* asd, const std::string& game, unsigned long long num
     SR2_INFO("[{}] save game '{}' (save #{}, file '{}') is running: {}", kModule, game, number, g_s.file,
              cheated ? std::format("marked as cheated (Sandbox used since {})", found.since)
                      : std::string("no Sandbox mark"));
+    if (fresh) ApplySaveState(cheated, found.enabled, g_s.file.empty() ? game : g_s.file, /*now=*/true);
 }
 
 void OnBeginLoad(const void* identifier) {
@@ -394,6 +451,7 @@ void OnBeginLoad(const void* identifier) {
     SR2_INFO("[{}] loading save '{}' (game '{}'): {}", kModule, file, game,
              cheated ? std::format("marked as cheated (Sandbox used since {}) - achievements stay blocked", m.since)
                      : std::string("no Sandbox mark"));
+    ApplySaveState(cheated, cheated ? m.enabled : -1, file, /*now=*/false);  // posted: we are inside the hook
 }
 
 void OnSaved(Il2CppObject* asd, Il2CppString* gameName) {
@@ -421,7 +479,7 @@ void OnSaved(Il2CppObject* asd, Il2CppString* gameName) {
                  kModule, game, number);
         return;
     }
-    if (WriteMark(g_s.file, game, number, g_s.since))
+    if (WriteMark(g_s.file, game, number, g_s.since, AchievementsPaused()))
         SR2_INFO("[{}] new save file '{}' (save #{}) marked as cheated, like the save it was made from", kModule,
                  g_s.file, number);
 }
@@ -430,16 +488,35 @@ void Poll() {
     const unsigned long long now = GetTickCount64();
     if (now - g_lastPoll < kPollMs) return;
     g_lastPoll = now;
-    if (!InGame()) {
+    const bool on = AchievementsPaused();  // Sandbox is on
+    const bool inGame = InGame();
+    if (!g_startupDone) {
+        g_startupDone = true;
+        // sr2mods.json keeps `enabled` from the last session's save: no save is running, so it does not apply.
+        if (!inGame && !g_pending && on) {
+            SetSandbox(false, "no save is loaded yet (each save keeps its own Sandbox switch)", true);
+            return;
+        }
+    }
+    if (!inGame) {
         if (g_pending && now - g_pendingSince < kPendingMs) return;  // loading
         g_pending = false;
         if (g_s.known || !g_s.game.empty() || SaveCheated()) {
             if (SaveCheated())
                 SR2_INFO("[{}] left save game '{}' (title screen) - its Sandbox mark no longer applies", kModule,
                          g_s.game);
+            const std::string left = g_s.game;
             g_s = {};
             SetSaveCheated(false);
+            g_armed = false;
+            SetSandbox(false, std::format("left save game '{}' (each save keeps its own Sandbox switch)", left), true);
+        } else if (on && !g_lastOn) {
+            g_armed = true;  // switched on (confirmed) on the title screen: for the save loaded next
+            SR2_INFO("[{}] Sandbox switched on with no save loaded: it stays on for the save you load next", kModule);
+        } else if (!on) {
+            g_armed = false;
         }
+        g_lastOn = AchievementsPaused();
         return;
     }
     Il2CppObject* asd = AutoSave();
@@ -458,6 +535,7 @@ void Poll() {
                 g_s.since.clear();
                 g_s.markNumber = 0;
                 SetSaveCheated(false);
+                SetSandbox(false, std::format("save '{}' has no valid Sandbox mark", g_s.file), true);
             }
         } else {
             Evaluate(asd, game, number);
@@ -465,7 +543,15 @@ void Poll() {
     } else if (!g_s.known || game != g_s.game || number != g_s.number) {
         Evaluate(asd, game, number);
     }
-    if (AchievementsPaused() && !SaveCheated()) MarkNow(asd, "Sandbox is on");
+    const bool nowOn = AchievementsPaused();
+    if (nowOn && !SaveCheated()) {
+        MarkNow(asd, "Sandbox is on");
+    } else if (nowOn != g_lastOn && SaveCheated() && g_s.known && !g_s.file.empty()) {
+        // Switched in a marked save: its sidecar records the new state, restored when it is loaded again.
+        if (WriteMark(g_s.file, g_s.game, g_s.number, g_s.since, nowOn))
+            SR2_INFO("[{}] save '{}': Sandbox {} - kept for this save", kModule, g_s.file, nowOn ? "on" : "off");
+    }
+    g_lastOn = nowOn;
 }
 
 // ---- save list tag ----
@@ -494,38 +580,92 @@ bool MenuMarked(const std::string& save, unsigned long long number) {
     return e.cheated;
 }
 
-void TagLabel(Il2CppObject* model, Il2CppObject* label) {
-    if (!label || !IsA(model, g_loadModelClass)) return;
+// Our row's definition: a clone of the save list's Tarr row definition (TarrEnabledGameSummaryItemDefinition,
+// from SaveGamesRootUI._gameSummaryItems) whose two texts (_enabledString / _disabledString, fresh
+// LocalizedString instances in the clone) are registered with core/text_override as "Sandbox: Used", and whose
+// icon is the Fabricator's tools sprite when loaded (else none: the row shows the panel's unknown icon). Built
+// once; kept with a GC handle.
+Il2CppObject* RowDefinition(Il2CppObject* root) {
+    if (g_rowDef) {
+        Il2CppObject* def = unity::GCHandleTarget(g_rowDef);
+        if (def && unity::IsAlive(def)) return def;
+        Il2CppGCHandle h = g_rowDef;  // unloaded: build it again; the handle is freed outside the hook
+        main_thread::Post([h] { unity::FreeGCHandle(h); });
+        g_rowDef = nullptr;
+    }
+    if (g_rowFailed) return nullptr;
+    auto fail = [](const std::string& why) -> Il2CppObject* {
+        g_rowFailed = true;
+        SR2_WARN("[{}] save list: no \"{}\" row ({})", kModule, kRowText, why);
+        return nullptr;
+    };
+    Il2CppObject* items = unity::Field<Il2CppObject*>(root, g_offRootItems);
+    if (!items || !unity::IsAlive(items)) return nullptr;  // not set up yet: try again next time
+    auto listOff = Resolver::Get().FieldOffset(api().il2cpp_object_get_class(items), "items");  // ListAsset<T>.items
+    void* list = listOff ? unity::Field<void*>(items, *listOff) : nullptr;
+    Il2CppObject* tmpl = nullptr;
+    for (size_t i = 0, n = unity::ListCount(list); i < n && !tmpl; ++i) {
+        auto* d = static_cast<Il2CppObject*>(unity::ListAt(list, i));
+        if (IsA(d, g_tarrDefClass) && unity::IsAlive(d)) tmpl = d;
+    }
+    if (!tmpl) return fail("the panel has no Tarr row to copy");
+    Il2CppObject* def = unity::Instantiate(tmpl, nullptr);
+    if (!def || !IsA(def, g_tarrDefClass)) return fail("Object.Instantiate failed");
+    Il2CppObject* on = unity::Field<Il2CppObject*>(def, g_offTarrOn);
+    Il2CppObject* off = unity::Field<Il2CppObject*>(def, g_offTarrOff);
+    // The texts must be the clone's own instances, or the override would rename the real Tarr row too.
+    if (!on || !off || on == unity::Field<Il2CppObject*>(tmpl, g_offTarrOn) ||
+        off == unity::Field<Il2CppObject*>(tmpl, g_offTarrOff))
+        return fail("the copy shares its texts with the Tarr row");
+    sr2::core::text_override::Set(on, kRowText);
+    sr2::core::text_override::Set(off, kRowText);
+    Il2CppObject* icon = nullptr;
+    if (g_spriteClass)
+        for (Il2CppObject* s : unity::FindObjectsOfTypeAll(g_spriteClass))  // once
+            if (unity::IsAlive(s) && unity::GetName(s) == "iconCategoryUtilities") {
+                icon = s;
+                break;
+            }
+    unity::Field<Il2CppObject*>(def, g_offDefIcon) = icon;
+    g_rowDef = unity::NewGCHandle(def);
+    SR2_INFO("[{}] save list: \"{}\" row ready (a copy of the Tarr row{})", kModule, kRowText,
+             icon ? ", Fabricator tools icon" : ", no icon");
+    return def;
+}
+
+// SaveGamesRootUI.FetchGameSummaryItemData(model) (1.3.0 RVA 0x7351A0, decompiled) builds the details panel's
+// rows (Newbucks, zone, day, discoveries, Tarrs, slime aggression) from _gameSummaryItems, one
+// GameSummaryItemViewModel each, when a save is selected. For a marked save one more row is appended: a
+// TarrEnabledGameSummaryItemViewModel (its .ctor(definition, model)) of our definition, so it is drawn by the
+// same view holder in the same style. Nothing while the text sink is down (the row would read "Tarrs ...").
+void AddSummaryRow(Il2CppObject* root, Il2CppObject* model, Il2CppObject* list) {
+    if (!list || !IsA(model, g_summaryModelClass) || !sr2::core::text_override::SinkActive()) return;
     Il2CppObject* summary = unity::Field<Il2CppObject*>(model, g_offModelSummary);
     if (!summary || !IsA(summary, g_summaryClass)) return;
     const std::string save = unity::ToUtf8(unity::Field<Il2CppString*>(summary, g_offSumSaveName));
     const unsigned long long number = unity::Field<unsigned long long>(summary, g_offSumSaveNumber);
     if (save.empty() || !MenuMarked(save, number)) return;
-    // get_Label builds a new LocalizedString each call, its one argument being Summary.DisplayName.
-    if (!IsA(label, g_locStringClass)) return;
-    Il2CppObject* args = unity::Field<Il2CppObject*>(label, g_offLocArgs);
-    if (!args || unity::ListCount(args) < 1) return;
-    auto* first = static_cast<Il2CppObject*>(unity::ListAt(args, 0));
-    if (!first || api().il2cpp_object_get_class(first) != g_stringClass) return;
-    const std::string name = unity::ToUtf8(reinterpret_cast<Il2CppString*>(first));
-    if (name.ends_with(kTag)) return;
-    Il2CppClass* k = api().il2cpp_object_get_class(args);
-    auto sit = g_setItem.find(k);
-    if (sit == g_setItem.end()) {
-        const MethodInfo* m = nullptr;
-        for (Il2CppClass* c = k; c && !m; c = api().il2cpp_class_get_parent ? api().il2cpp_class_get_parent(c) : nullptr)
-            m = api().il2cpp_class_get_method_from_name ? api().il2cpp_class_get_method_from_name(c, "set_Item", 2)
-                                                        : nullptr;
-        sit = g_setItem.emplace(k, m).first;
-        if (!m) SR2_WARN("[{}] save list: {}.set_Item not found - no [Sandbox] tag", kModule, unity::ClassName(args));
-    }
-    if (!sit->second) return;
-    int32_t index = 0;
-    void* params[] = {&index, unity::NewString(name.empty() ? std::string("[Sandbox]") : name + kTag)};
+    Il2CppObject* def = RowDefinition(root);
+    if (!def) return;
+    Il2CppObject* vm = g_objectNew(g_tarrVmClass);
+    if (!vm) return;
     bool ok = false;
-    Invoke(sit->second, args, params, "save list label argument", &ok);
+    void* ctorArgs[] = {def, model};
+    Invoke(g_tarrVmCtor, vm, ctorArgs, "TarrEnabledGameSummaryItemViewModel..ctor", &ok);
+    if (!ok) return;
+    Il2CppClass* k = api().il2cpp_object_get_class(list);
+    auto it = g_listAdd.find(k);
+    if (it == g_listAdd.end()) {
+        const MethodInfo* m = api().il2cpp_class_get_method_from_name ? api().il2cpp_class_get_method_from_name(k, "Add", 1)
+                                                                      : nullptr;
+        it = g_listAdd.emplace(k, m).first;
+        if (!m) SR2_WARN("[{}] save list: {}.Add not found - no \"{}\" row", kModule, unity::ClassName(list), kRowText);
+    }
+    if (!it->second) return;
+    void* addArgs[] = {vm};
+    Invoke(it->second, list, addArgs, "save details row", &ok);
     if (ok && g_menuLogged.insert(save).second)
-        SR2_INFO("[{}] save list: '{}' ({}) tagged [Sandbox] (marked as cheated)", kModule, name, save);
+        SR2_INFO("[{}] save list: '{}' shows \"{}\" (marked as cheated)", kModule, save, kRowText);
 }
 
 // ---- detours ----
@@ -543,10 +683,10 @@ void CleanupDetour(Il2CppObject* self, Il2CppString* gameName, const MethodInfo*
     });
 }
 
-Il2CppObject* LabelDetour(Il2CppObject* self, const MethodInfo* mi) {
-    Il2CppObject* r = g_origLabel(self, mi);
-    if (g_menuOk) g_labelGuard.Run([&] {
-        if (main_thread::IsMainThread()) TagLabel(self, r);
+Il2CppObject* FetchDetour(Il2CppObject* self, Il2CppObject* model, const MethodInfo* mi) {
+    Il2CppObject* r = g_origFetch(self, model, mi);
+    if (g_menuOk) g_fetchGuard.Run([&] {
+        if (main_thread::IsMainThread() && IsA(self, g_rootClass)) AddSummaryRow(self, model, r);
     });
     return r;
 }
@@ -618,32 +758,47 @@ bool SetupCheatedSave(sr2::core::ModuleContext& ctx) {
         return false;
 
     {
-        // Optional: the "[Sandbox]" tag in the save list. Missing names only turn the tag off.
+        // Optional: the "Sandbox: Used" row in the save list's details panel. Missing names only turn it off.
         std::string mw;
-        g_loadModelClass = cls(kImage, "MonomiPark.SlimeRancher.UI.MainMenu.Model", "LoadGameBehaviorModel", mw);
+        constexpr const char* kMenu = "MonomiPark.SlimeRancher.UI.MainMenu";
+        g_rootClass = cls(kImage, kMenu, "SaveGamesRootUI", mw);
+        g_summaryModelClass = cls(kImage, "MonomiPark.SlimeRancher.UI.MainMenu.Model", "GameSummaryModel", mw);
         g_summaryClass = cls(kImage, "MonomiPark.SlimeRancher.Persist", "Summary", mw);
-        g_locStringClass = cls("Unity.Localization", "UnityEngine.Localization", "LocalizedString", mw);
-        g_stringClass = cls("mscorlib", "System", "String", mw);
-        off(g_loadModelClass, "<GameDataSummary>k__BackingField", g_offModelSummary, mw);
+        Il2CppClass* itemDef = cls(kImage, "MonomiPark.SlimeRancher.UI.MainMenu.Definition.GameSummary",
+                                   "GameSummaryItemDefinition", mw);
+        g_tarrDefClass = cls(kImage, "MonomiPark.SlimeRancher.UI.MainMenu.Definition.GameSummary",
+                             "TarrEnabledGameSummaryItemDefinition", mw);
+        g_tarrVmClass = cls(kImage, "MonomiPark.SlimeRancher.UI.MainMenu.ViewModel.GameSummaryItem",
+                            "TarrEnabledGameSummaryItemViewModel", mw);
+        off(g_rootClass, "_gameSummaryItems", g_offRootItems, mw);
+        off(g_summaryModelClass, "_gameSummary", g_offModelSummary, mw);
         off(g_summaryClass, "SaveName", g_offSumSaveName, mw);
         off(g_summaryClass, "SaveNumber", g_offSumSaveNumber, mw);
-        off(g_locStringClass, "<Arguments>k__BackingField", g_offLocArgs, mw);
-        const MethodInfo* label = g_loadModelClass ? R.Method(g_loadModelClass, "get_Label", 0, &mw) : nullptr;
-        if (mw.empty() && label) {
+        off(itemDef, "_icon", g_offDefIcon, mw);
+        off(g_tarrDefClass, "_enabledString", g_offTarrOn, mw);
+        off(g_tarrDefClass, "_disabledString", g_offTarrOff, mw);
+        if (g_tarrVmClass) g_tarrVmCtor = R.Method(g_tarrVmClass, ".ctor", 2, &mw);
+        g_objectNew = api().module ? reinterpret_cast<ObjectNewFn>(GetProcAddress(api().module, "il2cpp_object_new"))
+                                   : nullptr;
+        if (!g_objectNew && mw.empty()) mw = "il2cpp_object_new not found";
+        std::string sw;
+        g_spriteClass = cls("UnityEngine.CoreModule", "UnityEngine", "Sprite", sw);  // the icon only
+        const MethodInfo* fetch = g_rootClass ? R.Method(g_rootClass, "FetchGameSummaryItemData", 1, &mw) : nullptr;
+        if (mw.empty() && fetch && g_tarrVmCtor) {
             std::string hookErr;
-            void* target = Resolver::Get().MethodPointer(label, &hookErr);
+            void* target = Resolver::Get().MethodPointer(fetch, &hookErr);
             auto& hm = sr2::core::HookManager::Get();
-            const std::string full = std::format("{}.LoadGameBehaviorModel.get_Label", kSaves);
-            if (target && hm.Create(kSaves, full, target, reinterpret_cast<void*>(&LabelDetour),
-                                    reinterpret_cast<void**>(&g_origLabel), &hookErr) &&
+            const std::string full = std::format("{}.SaveGamesRootUI.FetchGameSummaryItemData", kSaves);
+            if (target && hm.Create(kSaves, full, target, reinterpret_cast<void*>(&FetchDetour),
+                                    reinterpret_cast<void**>(&g_origFetch), &hookErr) &&
                 hm.Enable(full, &hookErr)) {
                 g_menuOk = true;
-                rvas += std::format(", LoadGameBehaviorModel.get_Label +0x{:X}", Resolver::Rva(target));
+                rvas += std::format(", SaveGamesRootUI.FetchGameSummaryItemData +0x{:X}", Resolver::Rva(target));
             } else {
                 mw = hookErr;
             }
         }
-        if (!g_menuOk) SR2_WARN("[{}] cheated saves: no [Sandbox] tag in the save list ({})", kModule, mw);
+        if (!g_menuOk) SR2_WARN("[{}] cheated saves: no \"{}\" row in the save list ({})", kModule, kRowText, mw);
     }
 
     if (!main_thread::AddFrameCallback(kSaves, [](float) { g_pollGuard.Run([] { Poll(); }); }))
