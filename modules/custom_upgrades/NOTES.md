@@ -287,7 +287,14 @@ of it is offered. Slime DJ plays the song through `slime_dj/api.h` emitters.
   (`GadgetDirector.TargetedGadget`).
 - **Dance**: while `slime_dj::SongPlaying()`, every boombox of ours (clones and the placed speakers) gets the
   Boombox's own animator bool (`GadgetMusicPlayer._gadgetActive`, a static hash read once a Boombox exists) and its
-  `FX_MusicalNotes` on; a placed speaker whose own Boombox track plays (`gadgetMusicInstance`) is left alone.
+  `FX_MusicalNotes` on; a placed speaker whose own Boombox track plays (`gadgetMusicInstance`) is left alone and its
+  emitter goes to volume 0 until the track ends.
+- **Plain Boomboxes play too** (round 7: "boomboxes have no music sadly"; the log had a placed vanilla Boombox and no DJ
+  Speaker, so nothing played). The scan already lists every Boombox gadget (`identifiablesByIdent[Boombox]`); each
+  loaded one that is not a DJ Speaker gets a plain record (no holder, nothing changed on it): an emitter on its
+  `model_boombox` (kind Speaker, full range / volume) and the same dance + notes. Up to 40; dropped when it is picked
+  up / unloaded or becomes a DJ Speaker (then dressed as one). Log: `dj buildables: N plain Boombox(es) play the Slime
+  DJ song (A added, R emitter(s) registered; D dropped)`. Needs custom upgrades on (as all DJ buildables).
 - **Slime Radio** = a vanilla **Night Light** toy actor. Fabricator card (after the DJ Speaker's) whose definition is a
   Boombox clone that is never a variant and never enters the inventory: fabricating spends its cost and spawns the toy
   1.8 m in front of the camera (`InstantiationHelpers.InstantiateActor`, as the sandbox spawner; posted out of the

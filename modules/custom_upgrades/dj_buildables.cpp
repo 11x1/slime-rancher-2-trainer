@@ -40,6 +40,8 @@
 //     point behind it; speaker = its boombox tilted / scaled, stacking allowed on top, an emitter; radio =
 //     the night light hidden, a small boombox instead, an emitter. Every clone is script-free except the
 //     pillow's attachment point. While a song plays the boomboxes dance and show their notes.
+//   * Plain placed Boomboxes (not DJ Speakers) are left as they are but play the song too: an emitter
+//     on their model_boombox, and the same dance (SyncPlain).
 
 #include "modules/custom_upgrades/dj_buildables.h"
 
@@ -257,9 +259,13 @@ struct Impl : variant_ext::Extension {
         std::vector<Il2CppObject*> fx;
         std::vector<bool> fxWas;
         int anim = -1;                         // dance state applied (-1 = none yet)
+        bool own = false;                      // boombox: its own track plays (our song muted on it)
         std::vector<Il2CppGCHandle> handles;
     };
     std::map<int64_t, Rec> recs;
+    // Plain (vanilla) Boomboxes: not dressed, but each plays the Slime DJ song (an emitter on its
+    // model_boombox) and dances with it. Kind -1, no holder.
+    std::map<int64_t, Rec> plain;
     std::unordered_set<int64_t> seenIds;
     int stableTicks = 0;
     unsigned generation = 1;
@@ -511,7 +517,9 @@ struct Impl : variant_ext::Extension {
     bool Build(int64_t id, Il2CppObject* root, Rec& rec);
     void Undress(Rec& rec, bool restore);
     void DropRec(int64_t id, bool restore);
+    void AnimateRec(Rec& rec, int want);
     void Animate();
+    void SyncPlain(const std::unordered_map<int64_t, Il2CppObject*>& present, const std::map<int64_t, int>& listed);
     void Scan();
     void SpawnRadios(int count);
 
@@ -1105,22 +1113,92 @@ void Impl::DropRec(int64_t id, bool restore) {
     recs.erase(it);
 }
 
-// Boomboxes dance and show their notes while a Slime DJ song plays.
+// Boomboxes dance and show their notes while a Slime DJ song plays. A Boombox playing its own track
+// (interacted with) keeps its animation and our song goes silent on it until the track ends.
+void Impl::AnimateRec(Rec& rec, int want) {
+    const bool own = rec.player && unity::IsAlive(rec.player) && unity::Field<Il2CppObject*>(rec.player, offMusicInstance);
+    if (own != rec.own) {
+        rec.own = own;
+        const sdj::EmitterKind ek = rec.fam == kBooth ? sdj::EmitterKind::kBooth : sdj::EmitterKind::kSpeaker;
+        for (Il2CppObject* e : rec.emitters)  // registering again only changes the scales
+            sdj::RegisterEmitter(e, ek, 1.0f, own ? 0.0f : 1.0f);
+        if (!own) rec.anim = -1;  // its track ended: apply the song's dance state again
+    }
+    if (rec.anim == want) return;
+    rec.anim = want;
+    if (own) return;  // the Boombox plays its own track: leave its animation alone
+    bool on = want != 0, ok = false;
+    int32_t h = animHash;
+    for (Il2CppObject* a : rec.animators)
+        if (unity::IsAlive(a) && h) Call(animSetBool, a, {&h, &on}, "Animator.SetBool", &ok);
+    for (size_t i = 0; i < rec.fx.size(); ++i)
+        if (unity::IsAlive(rec.fx[i])) unity::SetActive(rec.fx[i], on || rec.fxWas[i]);
+}
+
 void Impl::Animate() {
+    if (!animHash && animHashRead && (!recs.empty() || !plain.empty())) {
+        ReadAnimHash();  // the Boombox's static hash appears once a Boombox existed
+        if (animHash)
+            for (auto* m : {&recs, &plain})
+                for (auto& [id, rec] : *m) rec.anim = -1;
+    }
     const int want = sdj::SongPlaying() ? 1 : 0;
-    for (auto& [id, rec] : recs) {
-        if (rec.anim == want) continue;
-        rec.anim = want;
-        const bool own = rec.player && unity::IsAlive(rec.player) && unity::Field<Il2CppObject*>(rec.player, offMusicInstance);
-        if (own) continue;  // the Boombox plays its own track: leave its animation alone
-        bool on = want != 0, ok = false;
-        int32_t h = animHash;
-        for (Il2CppObject* a : rec.animators)
-            if (unity::IsAlive(a) && h) Call(animSetBool, a, {&h, &on}, "Animator.SetBool", &ok);
-        for (size_t i = 0; i < rec.fx.size(); ++i)
-            if (unity::IsAlive(rec.fx[i])) unity::SetActive(rec.fx[i], on || rec.fxWas[i]);
+    for (auto* m : {&recs, &plain})
+        for (auto& [id, rec] : *m) {
+            AnimateRec(rec, want);
+            if (Faulted()) return;
+        }
+}
+
+// Every loaded Boombox that is not a DJ Speaker gets a plain record: the Slime DJ song plays from its
+// head (model_boombox, 0.72 m up) and it dances while a song plays. Users expected "boomboxes play the
+// DJ music"; the round-7 log had a placed plain Boombox, no DJ Speaker, and nothing played there.
+void Impl::SyncPlain(const std::unordered_map<int64_t, Il2CppObject*>& present, const std::map<int64_t, int>& listed) {
+    constexpr size_t kMaxPlain = 40;  // slime_dj gives 48 emitters a speaker
+    int added = 0, dropped = 0, registered = 0;
+    for (auto it = plain.begin(); it != plain.end();) {
+        auto p = present.find(it->first);
+        const bool same = p != present.end() && p->second && p->second == it->second.root && unity::IsAlive(it->second.root);
+        if (same && !listed.count(it->first)) {
+            ++it;
+            continue;
+        }
+        Undress(it->second, same);  // still there (turned into a DJ Speaker): stops dancing
+        it = plain.erase(it);
+        ++dropped;
+    }
+    for (const auto& [id, go] : present) {
+        if (!go || listed.count(id) || plain.count(id)) continue;
+        if (plain.size() >= kMaxPlain) break;
+        if (!animHash) ReadAnimHash();
+        Rec rec;
+        rec.fam = kSpeaker;
+        rec.kind = -1;
+        rec.root = go;
+        Keep(rec, go);
+        Il2CppObject* model = Find(go, "model_boombox");
+        if (Il2CppObject* a = InChildren(go, animatorClass)) {
+            rec.animators.push_back(a);
+            Keep(rec, a);
+        }
+        if (Il2CppObject* fx = Find(go, "model_boombox/bbox_base_jnt/bbox_head_jnt/FX_MusicalNotes")) {
+            rec.fx.push_back(fx);
+            rec.fxWas.push_back(ActiveSelf(fx));
+            Keep(rec, fx);
+        }
+        rec.player = unity::GetComponent(go, musicPlayerClass);
+        if (rec.player) Keep(rec, rec.player);
+        Il2CppObject* em = model ? model : go;
+        rec.emitters.push_back(em);
+        Keep(rec, em);
+        registered += sdj::RegisterEmitter(em, sdj::EmitterKind::kSpeaker) ? 1 : 0;
+        plain[id] = std::move(rec);
+        ++added;
         if (Faulted()) return;
     }
+    if (added || dropped)
+        SR2_INFO("[{}] dj buildables: {} plain Boombox(es) play the Slime DJ song ({} added, {} emitter(s) registered; {} dropped)",
+                 module, plain.size(), added, registered, dropped);
 }
 
 void Impl::Scan() {
@@ -1148,6 +1226,10 @@ void Impl::Scan() {
         }
         std::map<int64_t, int> listed = Actors(f);
         const std::map<int64_t, int> before = listed;
+        if (f == kSpeaker) {
+            SyncPlain(present, listed);
+            if (Faulted()) return;
+        }
         int kits = Kits(f);
         const int kitsBefore = kits;
         for (auto it = listed.begin(); it != listed.end();) {
@@ -1456,6 +1538,8 @@ void DjBuildables::Cleanup(const char* why) {
         ++dressed;
     }
     p.recs.clear();
+    for (auto& [id, rec] : p.plain) p.Undress(rec, calls);  // plain Boomboxes: emitters off, dance off
+    p.plain.clear();
     if (!p.defsBuilt) return;
     int favs = 0;
     bool unregistered = false;
@@ -1506,6 +1590,11 @@ void DjBuildables::Reset() {
         Impl::FreeLater(std::move(rec.handles));  // the old game's objects go with its scene
     }
     p.recs.clear();
+    for (auto& [id, rec] : p.plain) {
+        for (Il2CppObject* e : rec.emitters) sdj::UnregisterEmitter(e);
+        Impl::FreeLater(std::move(rec.handles));
+    }
+    p.plain.clear();
     p.seenIds.clear();
     p.stableTicks = 0;
     ++p.generation;
