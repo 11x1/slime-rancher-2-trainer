@@ -129,10 +129,10 @@ constexpr const char* kActorsKey = "quantum_link.actors";
 constexpr const char* kDefName = "QuantumStorageLink";
 constexpr const char* kTitle = "Quantum Storage Link";
 constexpr const char* kDescription =
-    "A Refinery Link tuned to the Quantum Cloud. Ranch drones with the source \"Quantum Storage Link\" take "
-    "items out of the Quantum Cloud here and bring them to their destination. Place it as the Refinery "
-    "Link's variant (each one uses a Quantum Storage Link you fabricated). Unlocked with the Refinery Link blueprint.";
-constexpr const char* kUnlockHint = "Unlocked with the Refinery Link blueprint.";
+    "A Refinery Link wired to your Quantum Cloud: ranch drones set to the source \"Quantum Storage Link\" pick "
+    "up cloud items here and deliver them. To place one: fabricate it, hold a Refinery Link in gadget mode, press "
+    "the Variant key until it shows Quantum Storage Link, then place it. Needs the Refinery Link blueprint.";
+constexpr const char* kUnlockHint = "Needs the Refinery Link blueprint.";
 constexpr const char* kHolderPrefix = "sr2qlink#";
 constexpr const char* kMatTag = " [sr2q]";
 constexpr int kSlots = 8;            // storage slots per link (cloud types mirrored at once)
@@ -290,6 +290,9 @@ struct Impl {
     bool loggedRegister = false, loggedAlias = false;
     std::string cardState;  // last logged Fabricator card state (logged when it changes)
     bool loggedNoDef = false;
+    bool loggedRefineryFallback = false;
+    std::map<std::string, int32_t> countLogged;  // category -> entry count last logged by FixPageCount
+    int defWaits = 0;  // ticks EnsureDefinition found no Refinery Link (logged once, after a while)
 
     // links (main thread)
     struct RendRec {
@@ -529,6 +532,7 @@ struct Impl {
 
     // ---- build ----
     bool EnsureDefinition();
+    Il2CppObject* FindRefineryLink(Il2CppObject* lookup);
     void ScaleCost();
     void Register();
     void FindFx();
@@ -786,7 +790,22 @@ bool Impl::EnsureDefinition() {
     };
     bool ok = false;
     Il2CppObject* b = Call(getRefinery, lookup, {}, "LookupDirector.get_RefineryLink", &ok);
-    if (!ok || !IsA(b, gadgetDefClass) || !unity::IsAlive(b)) return false;  // not ready yet
+    if (!ok || !IsA(b, gadgetDefClass) || !unity::IsAlive(b)) {
+        // Round 8: in the user's game the property stayed null for a whole session (no card, no
+        // log). The Refinery Link is also a member of GadgetWarpGroup: found there by name.
+        Il2CppObject* byName = FindRefineryLink(lookup);
+        if (!byName) {
+            if (++defWaits == 30)
+                SR2_WARN("[{}] quantum link: no Refinery Link definition yet (LookupDirector.RefineryLink {}, none named "
+                         "'RefineryLink' in the gadget groups) - still waiting", module, ok ? "null" : "failed");
+            return false;  // not ready yet
+        }
+        if (!loggedRefineryFallback)
+            SR2_INFO("[{}] quantum link: LookupDirector.RefineryLink is {} - using '{}' from the gadget groups", module,
+                     ok ? "null" : "unreadable", unity::GetName(byName));
+        loggedRefineryFallback = true;
+        b = byName;
+    }
     Il2CppObject* prefab = unity::Field<Il2CppObject*>(b, offPrefab);
     if (!unity::IsAlive(prefab)) return fail("the Refinery Link has no prefab");
     Il2CppObject* d = unity::Instantiate(b, nullptr);
@@ -819,6 +838,25 @@ bool Impl::EnsureDefinition() {
     SR2_INFO("[{}] quantum link: definition '{}' built from '{}' (variant of the Refinery Link, same prefab '{}')", module,
              rid, baseRefId, unity::GetName(prefab));
     return true;
+}
+
+// The gadget definition named "RefineryLink" in LookupDirector._gadgetDefinitions and its member
+// groups (GadgetWarpGroup, index 13 in 1.3.0). Only while the definition is not built (once per tick).
+Il2CppObject* Impl::FindRefineryLink(Il2CppObject* lookup) {
+    std::vector<Il2CppObject*> groups{unity::Field<Il2CppObject*>(lookup, offGadgets)};
+    for (size_t gi = 0; gi < groups.size() && gi < 64; ++gi) {
+        Il2CppObject* grp = groups[gi];
+        if (!IsA(grp, groupClass)) continue;
+        void* members = unity::Field<void*>(grp, offMembers);
+        for (size_t i = 0, n = unity::ListCount(members); i < n && i < 1000; ++i) {
+            auto* t = static_cast<Il2CppObject*>(unity::ListAt(members, i));
+            if (IsA(t, gadgetDefClass) && unity::IsAlive(t) && unity::GetName(t) == "RefineryLink") return t;
+        }
+        void* subs = unity::Field<void*>(grp, offSubGroups);
+        for (size_t i = 0, n = unity::ListCount(subs); i < n && i < 64; ++i)
+            groups.push_back(static_cast<Il2CppObject*>(unity::ListAt(subs, i)));
+    }
+    return nullptr;
 }
 
 // The Refinery Link's crafting cost, Newbucks x3 and items x2 (on our own deep copies).
@@ -959,17 +997,20 @@ void Impl::InsertItem(Il2CppObject* category, Il2CppObject* list, Il2CppObject* 
 
 // FabricateCategoryRuntime caches the category's member count (_categoryCount = TotalCount) at
 // construction: FabricatorItemGrid.SetCategory sizes its pages from it (pages = ceil(TotalCount / grid
-// size), 36 or 16) and the category title shows "unlocked / TotalCount". Raised by our cards only when
-// they would otherwise fall onto a page that does not exist; else the title stays the vanilla count.
+// size)) and the category title shows "unlocked / TotalCount". Always raised to the item count (round 8:
+// "a 41st blueprint ... can't see what it is"; whatever the grid size, every card gets a page, and the
+// title counts the cards the grid shows).
 void Impl::FixPageCount(Il2CppObject* runtime, Il2CppObject* category, int added) {
     if (!offRtCount || added <= 0) return;
     int32_t& total = unity::Field<int32_t>(runtime, offRtCount);
     const int32_t items = static_cast<int32_t>(unity::ListCount(unity::Field<void*>(runtime, offRtItems)));
-    auto pages = [](int32_t n, int32_t per) { return (n + per - 1) / per; };
     if (items <= total) return;
-    if (pages(items, 36) == pages(total, 36) && pages(items, 16) == pages(total, 16)) return;
-    SR2_INFO("[{}] Fabricator category '{}': page count raised for {} mod card(s) ({} -> {} entries)", module,
-             unity::GetName(category), added, total, items);
+    const std::string name = unity::GetName(category);
+    auto it = countLogged.find(name);
+    if (it == countLogged.end() || it->second != items)
+        SR2_INFO("[{}] Fabricator category '{}': entry count raised for {} mod card(s) ({} -> {} entries)", module, name,
+                 added, total, items);
+    countLogged[name] = items;
     total = items;
 }
 

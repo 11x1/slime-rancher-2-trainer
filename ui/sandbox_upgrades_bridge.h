@@ -40,7 +40,7 @@ struct ModBlueprint {
     std::string id;           // buildables.h id ("dj_booth")
     std::string name;         // "DJ Booth"
     std::string base;         // the vanilla base gadget ("Scientist Desk")
-    std::string hint;         // "Unlocked with the Scientist Desk blueprint."
+    std::string hint;         // "Needs the Scientist Desk blueprint."
     uint32_t icon = 0;        // ui/item_icons.h id (the base's icon), 0 = none
     bool unlocked = false;    // the card is unlocked now
     bool baseUnlocked = false;  // the base gadget's blueprint is owned
