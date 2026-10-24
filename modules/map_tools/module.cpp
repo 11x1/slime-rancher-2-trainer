@@ -15,11 +15,12 @@
 //     button = waypoint) is hooked to notice right clicks. The cursor's page point is the one the game's
 //     MapUI.LateUpdate uses (-MapViewModel.CursorPosition), turned into a world position with the view
 //     model's map / world rects (the inverse of Map.GetMapPosition) of the tab shown. In the player's zone
-//     (MapUI.TryFindZoneAt, ZoneDetectionArea._zoneMapData): the ground is found with Physics.Raycast straight
-//     down, then TeleportablePlayer.TeleportTo(position, current scene group) (the game's own in-scene
-//     teleport: controller, region loader, held item, audio). In another discovered zone: the game's
-//     zone-to-zone travel TeleportNetwork.TeleportToDestinationImpl into a node of the static teleport network
-//     in that zone (loading screen), then the same ground teleport once the player is there. The map closes
+//     (MapUI.TryFindZoneAt, ZoneDetectionArea._zoneMapData) or a zone of the player's scene group: the shared
+//     ground teleport (ground_teleport.h: far spots are streamed out, so the player is parked there until the
+//     area's colliders exist, then lands on the ground; TeleportablePlayer.TeleportTo, the game's in-scene
+//     teleport). In another discovered zone: the game's zone-to-zone travel
+//     TeleportNetwork.TeleportToDestinationImpl into a node of the static teleport network that arrives in one
+//     of the zone's scene groups (ZoneSceneGroupMapping._mappings), then the same ground teleport. The map closes
 //     (UIDisplayManager.CloseDisplayByObjectInHierarchy). A refused click plays the map's "failed to place
 //     waypoint" cue. A "[RMB] Teleport" hint is cloned from the map's input legend; every teleport and refusal
 //     also shows as a drone-style HUD pop-up with the teleporter icon (custom_upgrades/sale_notify.h).
@@ -49,6 +50,7 @@
 #include "core/settings.h"
 #include "core/unity.h"
 #include "modules/custom_upgrades/sale_notify.h"
+#include "modules/map_tools/ground_teleport.h"
 #include "modules/minimap/api.h"
 #include "modules/minimap/ugui.h"
 
@@ -60,6 +62,7 @@ namespace unity = sr2::core::unity;
 namespace main_thread = sr2::core::main_thread;
 namespace ugui = sr2::modules::minimap::ugui;
 namespace mapi = sr2::modules::minimap::api;
+namespace ground_teleport = sr2::modules::ground_teleport;
 using il2cpp::Resolver;
 using ugui::Color;
 using ugui::Rect;
@@ -74,12 +77,9 @@ inline bool Has(size_t off) { return off != kNoOff; }
 constexpr float kIconRefresh = 2.0f;   // full map icons re-collected this often while the map is open
 constexpr int kClosedTicks = 3;        // no MapUI.LateUpdate for this many frames = map closed
 constexpr int kReapplyFrames = 4;      // re-assert the cloned legend hint's key / label for a few frames
-constexpr float kRayTop = 3000.0f;     // teleport: ground ray from this height straight down
-constexpr float kRayLength = 6000.0f;
-constexpr float kLandOffset = 1.0f;    // teleport: above the hit point (no spawn inside the ground)
+constexpr float kHintDiagDelay = 3.0f; // no hint this long after the map opened: log why (once per session)
 constexpr float kTravelTimeout = 90.0f;  // zone change: give up if the player is not in the new zone by then
-constexpr float kSpotRetry = 8.0f;       // zone change: retry the ground at the clicked point this long
-constexpr float kSpotRetryStep = 0.5f;
+constexpr float kTravelPoll = 0.5f;      // zone change: arrival checked this often
 
 template <class T>
 T& F(void* obj, size_t off) {
@@ -192,19 +192,20 @@ struct Sym {
     Il2CppClass *mapUI = nullptr, *map = nullptr, *viewModel = nullptr, *fogReveal = nullptr, *fogElement = nullptr;
     Il2CppClass *mapDirector = nullptr, *zoneArea = nullptr, *clickMarker = nullptr, *pointerEvent = nullptr;
     Il2CppClass *legend = nullptr, *hint = nullptr, *inputIcon = nullptr, *eventDisplay = nullptr, *invokeOnClick = nullptr;
-    Il2CppClass *componentIface = nullptr, *lse = nullptr, *selectable = nullptr;
-    Il2CppClass *teleportable = nullptr, *displayManager = nullptr, *raycastHit = nullptr;
+    Il2CppClass *componentIface = nullptr, *lse = nullptr, *selectable = nullptr, *registrar = nullptr;
+    Il2CppClass *teleportable = nullptr, *displayManager = nullptr;
     // hook targets
     void *lateUpdate = nullptr, *setRevealState = nullptr, *isZoneHidden = nullptr, *onPointerClick = nullptr;
     // calls
     ugui::Fn currentMapDef, tryFindZoneAt, revealZonesInMap, getMapForZone, playerCurrentZone;
-    ugui::Fn teleportTo, playerSceneGroup, dmInstance, dmClose, playCue, raycast;
+    ugui::Fn playerSceneGroup, dmInstance, dmClose, playCue;
     ugui::Fn behSetEnabled, setSiblingIndex, getSiblingIndex;
     // cross-zone travel
     Il2CppClass *teleportNetwork = nullptr, *zoneSgMapping = nullptr, *sceneLoaderClass = nullptr;
     ugui::Fn tpToDestImpl, nodeId, zsgTryGet, loadInProgress, isZoneHiddenFn, lsGetLocalized;
     size_t tnDefinition = kNoOff, listItems = kNoOff, tsdDestinations = kNoOff, tddNode = kNoOff, tddGroup = kNoOff;
     size_t zmdPrimary = kNoOff, zoneLocName = kNoOff;
+    size_t zsgMappings = kNoOff, sglItems = kNoOff;  // ZoneSceneGroupMapping._mappings, SceneGroupList.items
     // MapUI
     size_t uiMap = kNoOff, uiViewModel = kNoOff, uiFogReveal = kNoOff, uiLegend = kNoOff, uiDirector = kNoOff,
            uiFailCue = kNoOff;
@@ -216,11 +217,9 @@ struct Sym {
     size_t areaZoneData = kNoOff;
     size_t clickDragging = kNoOff, peButton = kNoOff;
     // legend
-    size_t ciObject = kNoOff, legendHints = kNoOff;
+    size_t ciObject = kNoOff, legendHints = kNoOff, regPassThrough = kNoOff;
     size_t iconButton = kNoOff, iconKey = kNoOff, iconKeyText = kNoOff, iconKeyImage = kNoOff, iconKeyLse = kNoOff,
            iconDouble = kNoOff;
-    // RaycastHit (raw struct offsets)
-    size_t hitPoint = kNoOff;
 };
 
 struct ResolveCtx {
@@ -375,6 +374,9 @@ public:
         s_.ciObject = c.Field(s_.componentIface, "_object");
         s_.legend = c.Class(nsCtl, "InputLegend");
         s_.legendHints = c.Field(s_.legend, "_hints");
+        // MapUI._inputLegend may hold an InputLegendFocusRegistrar that forwards (_passThrough) to the real legend
+        s_.registrar = c.Class(nsCtl, "InputLegendFocusRegistrar");
+        s_.regPassThrough = c.Field(s_.registrar, "_passThrough");
         s_.hint = c.Class(nsCtl, "InputHint");
         s_.inputIcon = c.Class(nsCtl, "InputIcon");
         s_.eventDisplay = c.Class(nsCtl, "InputEventDisplay");
@@ -390,7 +392,6 @@ public:
 
         // teleport
         s_.teleportable = c.Class("", "TeleportablePlayer");
-        s_.teleportTo = c.Bind(s_.teleportable, "TeleportTo", 4);
         s_.playerSceneGroup = c.Bind(s_.teleportable, "get_SceneGroup", 0);
         s_.displayManager = c.Class("MonomiPark.SlimeRancher.UI.Framework.Displays", "UIDisplayManager");
         s_.dmInstance = c.Bind(s_.displayManager, "get_Instance", 0);
@@ -402,13 +403,9 @@ public:
             if (!s_.dmClose && !e.empty()) c.missing.push_back(e);
         }
         s_.playCue = c.Bind(c.Class("MonomiPark.SlimeRancher.UI.Framework.Audio", "UIAudioCueHandle"), "PlayAudioCue", 1);
-        Il2CppClass* physics = c.Class("UnityEngine.PhysicsModule", "UnityEngine", "Physics");
-        s_.raycast = c.Bind(physics, "Raycast", 6);  // (Vector3, Vector3, out RaycastHit, float, int, QueryTriggerInteraction)
-        s_.raycastHit = c.Class("UnityEngine.PhysicsModule", "UnityEngine", "RaycastHit");
-        if (s_.raycastHit) {
-            size_t off = 0;
-            if (ugui::StructFieldOffset(s_.raycastHit, "m_Point", off)) s_.hitPoint = off;
-            else c.missing.push_back("RaycastHit.m_Point");
+        {
+            std::string gerr;  // the ground teleport shared with the sandbox's "teleport to waypoint"
+            if (!ground_teleport::Resolve(gerr)) c.missing.push_back("ground teleport: " + gerr);
         }
 
         // Unity
@@ -432,6 +429,8 @@ public:
         s_.nodeId = c.Bind(c.Class(nsTp, "TeleporterNodeDefinition"), "get_NodeId", 0);
         s_.zoneSgMapping = c.Class("MonomiPark.SlimeRancher.Map", "ZoneSceneGroupMapping");
         s_.zsgTryGet = c.Bind(s_.zoneSgMapping, "TryGetValue", 2);
+        s_.zsgMappings = c.Field(s_.zoneSgMapping, "_mappings");
+        s_.sglItems = c.Field(c.Class("MonomiPark.SlimeRancher.SceneManagement", "SceneGroupList"), "items");
         s_.zmdPrimary = c.Field(c.Class("MonomiPark.SlimeRancher.World", "ZoneMapData"), "_primaryZone");
         s_.zoneLocName = c.Field(c.Class("MonomiPark.SlimeRancher.World", "ZoneDefinition"), "_localizedName");
         s_.lsGetLocalized = c.Bind(c.Class("Unity.Localization", "UnityEngine.Localization", "LocalizedString"),
@@ -542,6 +541,8 @@ private:
     int hintReapply_ = 0;
     float hintRetryAt_ = 0;
     bool hintFailLogged_ = false, hintLogged_ = false;
+    float hintSince_ = -1;  // first try of this map open (diagnostics after kHintDiagDelay)
+    bool hintDiagLogged_ = false;
 
     // teleport
     Ref player_, net_, zoneMap_, sceneLoader_;
@@ -549,17 +550,23 @@ private:
     float zoneMapRetry_ = 0;
     std::map<Il2CppObject*, std::string> zoneNames_;
     std::vector<Ref> zonePins_;
+    std::map<Il2CppObject*, std::vector<Ref>> zoneGroups_;  // ZoneDefinition -> its scene groups (BuildZoneGroups)
+    bool zoneGroupsBuilt_ = false, routesLogged_ = false;
+    std::map<Il2CppObject*, std::string> nodeNames_;        // TeleporterNodeDefinition (asset) -> node id
     struct Travel {  // a zone change in progress (cross-zone click)
         bool active = false;
         float x = 0, z = 0;
-        Ref group;  // destination SceneGroup
-        std::string zone;
+        Ref group;    // destination SceneGroup
+        Ref origin;   // the player's scene group at the click
+        Ref zoneDef;  // destination ZoneDefinition
+        std::string zone, node;
         float started = 0, nextTry = 0, arrivedAt = -1;
+        bool sawLoading = false;
     } travel_;
     sr2::modules::custom_upgrades::ui::SaleNotices notices_;  // the HUD's drone-style pop-ups (free text)
 
     bool TeleportResolved() const {
-        return hookClick_ && s_.teleportTo && s_.playerSceneGroup && s_.raycast && Has(s_.hitPoint) &&
+        return hookClick_ && ground_teleport::Resolved() && s_.playerSceneGroup &&
                Has(s_.uiViewModel) && Has(s_.vmAnchor) && Has(s_.vmCursor) && Has(s_.vmZoom) && Has(s_.vmMapRect) &&
                Has(s_.vmWorldRect) && s_.teleportable;
     }
@@ -614,8 +621,11 @@ private:
         SR2_ERROR("map_tools: {} - map tools disabled for the rest of this session", why);
         core::MarkModuleFaulted(kModule, why);
         for (Ref* r : {&mapUI_, &map_, &mapT_, &container_, &canvasT_, &hintGo_, &hintLabel_, &hintKey_, &player_, &net_,
-                       &zoneMap_, &sceneLoader_, &travel_.group})
+                       &zoneMap_, &sceneLoader_, &travel_.group, &travel_.origin, &travel_.zoneDef})
             r->Abandon();
+        for (auto& [z, groups] : zoneGroups_)
+            for (Ref& r : groups) r.Abandon();
+        zoneGroups_.clear();
         for (Ref& r : zonePins_) r.Abandon();
         zonePins_.clear();
         zoneNames_.clear();
@@ -711,6 +721,7 @@ private:
 
     void OnMapClosed() {
         Step("map closed");
+        hintSince_ = -1;
         RestoreStaticFog();
         DestroyContainer();
         DestroyHint();
@@ -1045,31 +1056,87 @@ private:
         if (hintGo_) DestroyHint();  // died with the legend
         if (time_ < hintRetryAt_) return;
         hintRetryAt_ = time_ + 0.5f;  // the legend may not show its hints yet
-        EnsureHint();
+        if (hintSince_ < 0) hintSince_ = time_;
+        std::string why;
+        if (EnsureHint(why) || hintDiagLogged_ || time_ - hintSince_ < kHintDiagDelay) return;
+        hintDiagLogged_ = true;
+        SR2_INFO("map_tools: no [RMB] Teleport hint {:.0f} s after the map opened: {}", kHintDiagDelay, why);
+    }
+
+    // The map's key bar: MapUI._inputLegend (ComponentInterface<IInputLegend>)._object. That can be an
+    // InputLegendFocusRegistrar, which forwards to another IInputLegend through its own _passThrough
+    // (ComponentInterface<IInputLegend>), possibly several hops; the chain ends at the InputLegend. Fallback: the
+    // first active InputLegend under the last component of the chain, then under the MapUI.
+    Il2CppObject* FindLegend(std::string& chain) {
+        auto under = [&](Il2CppObject* comp) -> Il2CppObject* {
+            if (!comp || !unity::IsAlive(comp)) return nullptr;
+            Il2CppObject* found = nullptr;
+            ugui::ForEachInChildren(unity::GameObjectOf(comp), s_.legend, false, [&](Il2CppObject* l) {
+                found = l;
+                return false;
+            });
+            return found;
+        };
+        Il2CppObject* iface = F<Il2CppObject*>(mapUI_.get(), s_.uiLegend);
+        Il2CppObject* obj = ugui::PlausiblePointer(iface) ? F<Il2CppObject*>(iface, s_.ciObject) : nullptr;
+        Il2CppObject* last = nullptr;
+        chain = "MapUI._inputLegend";
+        for (int hop = 0; hop < 8; ++hop) {
+            if (!ugui::PlausiblePointer(obj)) {
+                chain += " -> null";
+                break;
+            }
+            chain += " -> " + unity::ClassName(obj);
+            if (ugui::IsA(obj, s_.legend)) return obj;
+            if (!ugui::IsA(obj, unity::ComponentClass()) || !unity::IsAlive(obj)) break;
+            last = obj;
+            if (!s_.registrar || !Has(s_.regPassThrough) || !ugui::IsA(obj, s_.registrar)) break;
+            Il2CppObject* ci = F<Il2CppObject*>(obj, s_.regPassThrough);
+            obj = ugui::PlausiblePointer(ci) ? F<Il2CppObject*>(ci, s_.ciObject) : nullptr;
+        }
+        if (Il2CppObject* l = under(last)) {
+            chain += " (InputLegend found under '" + unity::GetName(unity::GameObjectOf(last)) + "')";
+            return l;
+        }
+        if (Il2CppObject* l = under(mapUI_.get())) {
+            chain += " (InputLegend found under the MapUI)";
+            return l;
+        }
+        return nullptr;
     }
 
     // "[RMB] Teleport": a clone of one of the legend's own hints with its behaviour removed (no input event,
     // no localisation, no clicks), our key text and label. A child of the same layout, so it lines up.
-    void EnsureHint() {
-        Il2CppObject* iface = F<Il2CppObject*>(mapUI_.get(), s_.uiLegend);
-        if (!ugui::PlausiblePointer(iface)) return;
-        Il2CppObject* legend = F<Il2CppObject*>(iface, s_.ciObject);
-        if (!ugui::IsA(legend, s_.legend)) return;
+    bool EnsureHint(std::string& why) {
+        std::string chain;
+        Il2CppObject* legend = FindLegend(chain);
+        if (!legend) {
+            why = "no InputLegend (" + chain + ")";
+            return false;
+        }
         auto* hints = F<Il2CppArray*>(legend, s_.legendHints);
-        if (!ugui::PlausiblePointer(hints)) return;
+        if (!ugui::PlausiblePointer(hints)) {
+            why = "the legend has no _hints array (" + chain + ")";
+            return false;
+        }
         Il2CppObject* tmpl = nullptr;
-        for (size_t i = 0, n = std::min<size_t>(ugui::ArrayCount(hints), 32); i < n && !tmpl; ++i) {
+        size_t count = std::min<size_t>(ugui::ArrayCount(hints), 32);
+        for (size_t i = 0; i < count && !tmpl; ++i) {
             Il2CppObject* h = ugui::ArrayItem(hints, i);
             if (ugui::IsA(h, s_.hint) && unity::ActiveInHierarchy(unity::GameObjectOf(h))) tmpl = h;
         }
-        if (!tmpl) return;  // the legend has not shown its hints yet
+        if (!tmpl) {  // the legend has not shown its hints yet
+            why = std::format("none of the legend's {} hints is active ({})", count, chain);
+            return false;
+        }
         Il2CppObject* tmplGo = unity::GameObjectOf(tmpl);
         Il2CppObject* parent = ugui::GetParent(unity::TransformOf(tmplGo));
         Il2CppObject* clone = unity::Instantiate(tmplGo, parent);
         if (!unity::IsAlive(clone)) {
             if (!hintFailLogged_) SR2_WARN("map_tools: cloning a legend hint failed - no [RMB] Teleport hint");
             hintFailLogged_ = true;
-            return;
+            why = "Object.Instantiate failed";
+            return false;
         }
         Il2CppObject* go = ugui::IsA(clone, unity::GameObjectClass()) ? clone : unity::GameObjectOf(clone);
         hintGo_.Reset(go);
@@ -1094,6 +1161,9 @@ private:
             ugui::GraphicSetRaycastTarget(g, false);
             return true;
         });
+        // InputHint fades its CanvasGroup with a spring: the clone keeps the template's alpha of this frame
+        if (Il2CppClass* cgk = ugui::CanvasGroupClass())
+            if (Il2CppObject* cg = unity::GetComponent(go, cgk)) ugui::CanvasGroupSetAlpha(cg, 1.0f);
         // key icons and the label (the TMP text outside every icon)
         std::vector<Il2CppObject*> iconTs;
         ugui::ForEachInChildren(go, s_.inputIcon, true, [&](Il2CppObject* ic) {
@@ -1113,9 +1183,10 @@ private:
         ApplyHintLook();
         if (!hintLogged_) {
             hintLogged_ = true;
-            SR2_INFO("map_tools: [RMB] Teleport hint cloned from the map legend's '{}' ({} key icon(s), label {})",
-                     unity::GetName(tmplGo), hintIcons_.size(), hintLabel_ ? "ok" : "MISSING");
+            SR2_INFO("map_tools: [RMB] Teleport hint cloned from the map legend's '{}' ({} key icon(s), label {}; {})",
+                     unity::GetName(tmplGo), hintIcons_.size(), hintLabel_ ? "ok" : "MISSING", chain);
         }
+        return true;
     }
 
     // InputIcon.SetKey by hand (see modules/drone_price_limit/station_dialog.cpp): the first icon shows the
@@ -1215,15 +1286,79 @@ private:
     }
 
     struct Route {
-        Ref node;   // TeleporterNodeDefinition (its NodeId)
-        Ref group;  // destination SceneGroup
+        Ref node;              // TeleporterNodeDefinition (its NodeId); empty when inScene
+        Ref group;             // destination SceneGroup
+        bool inScene = false;  // the zone is in the player's own scene group: no load
+        std::string name;      // node id
+        std::string others;    // the other candidate nodes (log)
     };
 
-    // A way into `zone`: a destination of the game's static teleport network (TeleportNetwork._networkDefinition:
-    // TeleportSystemDefinition.DestinationNodes = {DestinationNode, DestinationSceneGroup}) whose scene group maps
-    // to the zone (ZoneSceneGroupMapping.TryGetValue). These are exactly the nodes the game's own zone-to-zone
-    // teleporters arrive at, so they exist once their scene group is loaded.
-    bool FindRoute(Il2CppObject* zone, Route& out, std::string& why) {
+    // Scene groups of a zone: ZoneSceneGroupMapping._mappings (List<ZoneMapping{Zone, SceneGroups[],
+    // SceneGroupListAsset}>), every entry of that zone. One scene group can hold several zones (The Conservatory
+    // and Rainbow Fields are one group, ConservatoryFields), and the mapping's TryGetValue(group) answers only the
+    // first zone of a group, so the route search goes zone -> groups. Built once per mapping asset.
+    void BuildZoneGroups() {
+        if (zoneGroupsBuilt_ || !zoneMap_.Alive() || !Has(s_.zsgMappings)) return;
+        zoneGroupsBuilt_ = true;
+        zoneGroups_.clear();
+        Il2CppObject* list = F<Il2CppObject*>(zoneMap_.get(), s_.zsgMappings);
+        if (!ugui::PlausiblePointer(list)) return;
+        Ref pin(list);
+        auto add = [&](Il2CppObject* zone, Il2CppObject* group) {
+            if (!zone || !group || !unity::IsAlive(zone) || !unity::IsAlive(group)) return;
+            auto& v = zoneGroups_[zone];
+            for (const Ref& r : v)
+                if (r.get() == group) return;
+            if (v.empty()) zonePins_.emplace_back(zone);  // the map key stays the same object
+            v.emplace_back(group);
+        };
+        ugui::ForEachListStructPair(list, "Zone", "SceneGroups", [&](Il2CppObject* zone, Il2CppObject* arr) {
+            auto* a = reinterpret_cast<Il2CppArray*>(arr);
+            for (size_t i = 0, n = std::min<size_t>(ugui::ArrayCount(a), 64); i < n; ++i) add(zone, ugui::ArrayItem(a, i));
+            return true;
+        });
+        if (Has(s_.sglItems))
+            ugui::ForEachListStructPair(list, "Zone", "SceneGroupListAsset", [&](Il2CppObject* zone, Il2CppObject* asset) {
+                if (!asset || !unity::IsAlive(asset)) return true;
+                Il2CppObject* items = F<Il2CppObject*>(asset, s_.sglItems);
+                if (!ugui::PlausiblePointer(items)) return true;
+                for (size_t i = 0, n = std::min<size_t>(unity::ListCount(items), 64); i < n; ++i)
+                    add(zone, static_cast<Il2CppObject*>(unity::ListAt(items, i)));
+                return true;
+            });
+        SR2_INFO("map_tools: zone <-> scene group mapping: {} zone(s) with scene groups", zoneGroups_.size());
+    }
+
+    // Is `group` one of the zone's scene groups? Without a mapping entry for the zone: the mapping's own
+    // TryGetValue(group) == zone.
+    bool GroupInZone(Il2CppObject* zone, Il2CppObject* group) {
+        if (!zone || !group) return false;
+        BuildZoneGroups();
+        auto it = zoneGroups_.find(zone);
+        if (it != zoneGroups_.end()) {
+            for (const Ref& r : it->second)
+                if (r.get() == group) return true;
+            return false;
+        }
+        if (!zoneMap_.Alive() || !s_.zsgTryGet) return false;
+        Il2CppObject* z = nullptr;
+        bool got = false;
+        Managed([&] { got = ugui::Call<bool>(s_.zsgTryGet, zoneMap_.get(), group, &z); });
+        return got && z == zone;
+    }
+
+    std::string NodeName(Il2CppObject* node) {
+        auto it = nodeNames_.find(node);
+        if (it != nodeNames_.end()) return it->second;
+        Il2CppString* id = nullptr;
+        Managed([&] { id = ugui::Call<Il2CppString*>(s_.nodeId, node); });
+        std::string n = id ? unity::ToUtf8(id) : std::string();
+        if (n.empty()) n = unity::GetName(node);
+        return nodeNames_.emplace(node, n).first->second;
+    }
+
+    // The teleport network and the zone mapping (found lazily; the mapping with one asset scan, re-tried every 30 s).
+    bool EnsureNetwork(std::string& why) {
         if (!net_.Alive()) net_.Reset(ugui::FindFirst(s_.teleportNetwork, false));
         if (!ugui::IsA(net_.get(), s_.teleportNetwork)) {
             why = "no TeleportNetwork";
@@ -1236,17 +1371,23 @@ private:
                 zoneMap_.Reset(m);
                 return false;
             });
+            zoneGroupsBuilt_ = false;
             SR2_INFO("map_tools: zone <-> scene group mapping {}", zoneMap_ ? "found" : "not loaded");
         }
         if (!zoneMap_.Alive()) {
             why = "the zone <-> scene group mapping is not loaded";
             return false;
         }
+        return true;
+    }
+
+    // Every destination of the game's static teleport network (TeleportNetwork._networkDefinition:
+    // TeleportSystemDefinition.DestinationNodes = {DestinationNode, DestinationSceneGroup}): the nodes the game's
+    // own zone-to-zone teleporters arrive at, registered once their scene group is loaded.
+    template <class Fn>
+    int ForEachDestination(Fn&& fn) {
         Il2CppObject* def = F<Il2CppObject*>(net_.get(), s_.tnDefinition);
-        if (!ugui::PlausiblePointer(def) || !unity::IsAlive(def)) {
-            why = "no static teleport network";
-            return false;
-        }
+        if (!ugui::PlausiblePointer(def) || !unity::IsAlive(def)) return -1;
         Il2CppObject* systems = F<Il2CppObject*>(def, s_.listItems);
         Ref pinSystems(systems);
         int checked = 0;
@@ -1261,49 +1402,107 @@ private:
                 Il2CppObject* group = F<Il2CppObject*>(d, s_.tddGroup);
                 if (!unity::IsAlive(node) || !unity::IsAlive(group)) continue;
                 ++checked;
-                Il2CppObject* z = nullptr;
-                bool got = false;
-                Managed([&] { got = ugui::Call<bool>(s_.zsgTryGet, zoneMap_.get(), group, &z); });
-                if (!got || z != zone) continue;
-                out.node.Reset(node);
-                out.group.Reset(group);
-                return true;
+                fn(node, group);
             }
         }
-        why = std::format("none of the {} teleport destinations leads into it", checked);
-        return false;
+        return checked;
     }
 
-    // Ground straight below (x, z): the first solid collider from high above (triggers ignored), not the player.
-    bool Ground(Il2CppObject* player, float wx, float wz, Vec3& dest) {
-        alignas(16) unsigned char hit[128] = {};
-        int playerLayer = ugui::GetLayer(unity::GameObjectOf(player));
-        int mask = ~(1 << 2);  // Ignore Raycast
-        if (playerLayer >= 0 && playerLayer < 32) mask &= ~(1 << playerLayer);
-        bool found = false;
-        Managed([&] {
-            found = ugui::Call<bool>(s_.raycast, Vec3{wx, kRayTop, wz}, Vec3{0, -1, 0}, static_cast<void*>(hit),
-                                     kRayLength, mask, 1 /* QueryTriggerInteraction.Ignore */);
+    // A way into `zone`: in-scene when the player's scene group is one of the zone's groups (the Conservatory from
+    // Rainbow Fields), else a destination of the static teleport network that arrives in one of its groups. Nodes
+    // named "OneWay" come last (the Grey Labyrinth's 'TeleporterOneWayLabyrinthHub' arrival never completed in a
+    // test: the load ran and the player was back in the start zone).
+    bool FindRoute(Il2CppObject* zone, Il2CppObject* myGroup, Route& out, std::string& why) {
+        if (!EnsureNetwork(why)) return false;
+        if (myGroup && GroupInZone(zone, myGroup)) {
+            out.inScene = true;
+            out.group.Reset(myGroup);
+            return true;
+        }
+        Il2CppObject *best = nullptr, *bestGroup = nullptr;
+        bool bestOneWay = true;
+        std::vector<std::string> names;
+        int checked = ForEachDestination([&](Il2CppObject* node, Il2CppObject* group) {
+            if (!GroupInZone(zone, group)) return;
+            std::string n = NodeName(node);
+            bool oneWay = n.find("OneWay") != std::string::npos;
+            names.push_back(n);
+            if (!best || (bestOneWay && !oneWay)) {
+                best = node;
+                bestGroup = group;
+                bestOneWay = oneWay;
+                out.name = n;
+            }
         });
-        if (!found) return false;
-        Vec3 ground = *reinterpret_cast<Vec3*>(hit + s_.hitPoint);
-        if (!std::isfinite(ground.x) || !std::isfinite(ground.y) || !std::isfinite(ground.z) ||
-            std::fabs(ground.x - wx) > 1.0f || std::fabs(ground.z - wz) > 1.0f)
+        if (checked < 0) {
+            why = "no static teleport network";
             return false;
-        dest = {wx, ground.y + kLandOffset, wz};
+        }
+        if (!best) {
+            std::string groups;
+            if (auto it = zoneGroups_.find(zone); it != zoneGroups_.end())
+                for (const Ref& r : it->second) groups += (groups.empty() ? "" : ", ") + unity::GetName(r.get());
+            why = groups.empty() ? std::format("none of the {} teleport destinations leads into it (no scene group mapping "
+                                               "entry for the zone)",
+                                               checked)
+                                 : std::format("none of the {} teleport destinations arrives in its scene group(s) {}", checked,
+                                               groups);
+            return false;
+        }
+        for (const std::string& n : names)
+            if (n != out.name) out.others += (out.others.empty() ? "" : ", ") + n;
+        out.node.Reset(best);
+        out.group.Reset(bestGroup);
         return true;
     }
 
-    // TeleportablePlayer.TeleportTo(position, current scene group, keep rotation).
-    bool InSceneTeleport(Il2CppObject* player, Vec3 dest) {
-        Il2CppObject* group = nullptr;
-        Managed([&] { group = ugui::Call<Il2CppObject*>(s_.playerSceneGroup, player); });
-        if (!group) return false;
-        struct NullableVec3 {  // System.Nullable<Vector3>: no value = keep the rotation
-            bool hasValue;
-            Vec3 value;
-        } noRotation{};
-        return Managed([&] { ugui::Call<void>(s_.teleportTo, player, dest, group, noRotation, true); });
+    // Once per session (first cross-zone click): which arrival point every zone of the mapping would use.
+    void LogRoutes() {
+        if (routesLogged_ || !zoneMap_.Alive()) return;
+        routesLogged_ = true;
+        BuildZoneGroups();
+        std::vector<Il2CppObject*> zones;
+        for (auto& [z, groups] : zoneGroups_) zones.push_back(z);
+        for (Il2CppObject* z : zones) {
+            if (!unity::IsAlive(z)) continue;
+            std::string groups;
+            for (const Ref& r : zoneGroups_[z]) groups += (groups.empty() ? "" : ", ") + unity::GetName(r.get());
+            Route r;
+            std::string why;
+            if (FindRoute(z, nullptr, r, why))
+                SR2_INFO("map_tools: route: '{}' (scene groups {}): arrival '{}' in '{}'{}{}", ZoneName(z), groups, r.name,
+                         unity::GetName(r.group.get()), r.others.empty() ? "" : "; other arrivals: ", r.others);
+            else
+                SR2_INFO("map_tools: route: '{}' (scene groups {}): no arrival ({})", ZoneName(z), groups, why);
+        }
+    }
+
+    // The shared ground teleport (ground_teleport.h) at the clicked point; the result comes now or a few seconds
+    // later (far away: the area is loaded first). `afterTravel`: this ends a zone change (age = seconds since the
+    // click).
+    bool StartGround(float wx, float wz, const std::string& zoneName, bool hasZone, bool afterTravel, float age,
+                     std::string& why) {
+        return ground_teleport::Start(
+            kModule, wx, wz,
+            [this, zoneName, hasZone, afterTravel, age, wx, wz](const ground_teleport::Result& r) {
+                if (g_dead.load()) return;
+                if (r.ok) {
+                    SR2_INFO("map_tools: {}teleported from ({:.1f}, {:.1f}, {:.1f}) to ({:.1f}, {:.1f}, {:.1f}) (zone '{}'{}){}",
+                             afterTravel ? "arrived and " : "", r.from.x, r.from.y, r.from.z, r.to.x, r.to.y, r.to.z, zoneName,
+                             r.parked ? std::format(", area loaded first in {:.1f} s", r.seconds) : std::string(),
+                             afterTravel ? std::format(", {:.1f} s after the click", age + r.seconds) : std::string());
+                    Notice(hasZone ? "Teleported to " + zoneName : std::string("Teleported"));
+                } else if (afterTravel) {
+                    SR2_INFO("map_tools: arrived in '{}', but no ground below ({:.0f}, {:.0f}) ({}) - staying at the arrival "
+                             "point",
+                             zoneName, wx, wz, r.why);
+                    Notice("Teleported to " + zoneName + " (spot not loaded, at the teleporter)");
+                } else {
+                    SR2_INFO("map_tools: teleport refused: no ground below ({:.0f}, {:.0f}): {}", wx, wz, r.why);
+                    Notice("Teleport refused: no ground there");
+                }
+            },
+            &why);
     }
 
     Il2CppObject* Player() {
@@ -1326,6 +1525,7 @@ private:
         }
         if (!TeleportResolved()) return Refuse("teleport symbols missing (see the 'resolved' line)", "not available");
         if (travel_.active) return Refuse("a zone change for the last click is still running", "still travelling", false);
+        if (ground_teleport::Busy()) return Refuse("the last teleport is still loading its spot", "still teleporting", false);
         Il2CppObject* vm = F<Il2CppObject*>(mapUI_.get(), s_.uiViewModel);
         if (!ugui::IsA(vm, s_.viewModel)) return Refuse("no map view model", "map not ready");
         // The cursor's page point, as MapUI.LateUpdate computes it: -(mapAnchor + cursorOffset / zoom). The view
@@ -1377,7 +1577,7 @@ private:
         std::string zoneName = targetZone ? ZoneName(targetZone) : std::string("-");
 
         // Same zone (or outside every zone area on the player's own map, e.g. the sea next to the island):
-        // in-scene teleport, the ground must be there now.
+        // in-scene teleport.
         bool sameZone = myMap && (!zTarget || !zPlayer || zTarget == zPlayer);
         Route route;
         if (!sameZone) {
@@ -1388,20 +1588,18 @@ private:
             std::string why;
             if (!TravelResolved())
                 return Refuse("zone travel symbols missing (see the 'resolved' line)", "zone travel not available");
-            if (!FindRoute(targetZone, route, why))
+            if (EnsureNetwork(why)) LogRoutes();
+            if (!FindRoute(targetZone, myGroup, route, why))
                 return Refuse(std::format("no way into '{}': {}", zoneName, why), "no way into " + zoneName);
-            if (route.group.get() == myGroup) sameZone = true;  // another zone of the same scene group: no load
+            if (route.inScene) sameZone = true;  // another zone of the player's scene group: no load
         }
         if (sameZone) {
-            Vec3 dest{};
-            if (!Ground(player, wx, wz, dest))
-                return Refuse(std::format("no ground below ({:.0f}, {:.0f}) - not loaded or outside the world", wx, wz),
-                              "no ground there");
-            if (!InSceneTeleport(player, dest)) return Refuse("TeleportablePlayer.TeleportTo threw (see above)", "failed");
-            SR2_INFO("map_tools: teleported from ({:.1f}, {:.1f}, {:.1f}) to ({:.1f}, {:.1f}, {:.1f}) (map point ({:.1f}, "
-                     "{:.1f}), zone '{}')",
-                     pp.x, pp.y, pp.z, dest.x, dest.y, dest.z, pm.x, pm.y, zoneName);
-            Notice(targetZone ? "Teleported to " + zoneName : std::string("Teleported"));
+            std::string why;
+            SR2_INFO("map_tools: teleport to ({:.1f}, {:.1f}) (map point ({:.1f}, {:.1f}), zone '{}') from ({:.1f}, {:.1f}, "
+                     "{:.1f})",
+                     wx, wz, pm.x, pm.y, zoneName, pp.x, pp.y, pp.z);
+            if (!StartGround(wx, wz, zoneName, targetZone != nullptr, false, 0, why))
+                return Refuse("ground teleport: " + why, why);
             CloseMap();
             return;
         }
@@ -1411,7 +1609,6 @@ private:
         Il2CppString* nodeId = nullptr;
         Managed([&] { nodeId = ugui::Call<Il2CppString*>(s_.nodeId, route.node.get()); });
         if (!nodeId) return Refuse(std::format("the route into '{}' has no node id", zoneName), "no way into " + zoneName);
-        std::string nodeName = unity::ToUtf8(nodeId);
         bool ok = Managed([&] {
             ugui::Call<void>(s_.tpToDestImpl, net_.get(), player, nodeId, route.group.get(), false, false);
         });
@@ -1421,31 +1618,38 @@ private:
         travel_.x = wx;
         travel_.z = wz;
         travel_.group.Reset(route.group.get());
+        travel_.origin.Reset(myGroup);
+        travel_.zoneDef.Reset(targetZone);
         travel_.zone = zoneName;
+        travel_.node = route.name;
         travel_.started = time_;
-        SR2_INFO("map_tools: travelling to '{}' (scene group '{}', arrival node '{}'), then to ({:.1f}, {:.1f})", zoneName,
-                 unity::GetName(route.group.get()), nodeName, wx, wz);
+        SR2_INFO("map_tools: travelling to '{}' (scene group '{}', arrival node '{}'{}{}), then to ({:.1f}, {:.1f})", zoneName,
+                 unity::GetName(route.group.get()), route.name, route.others.empty() ? "" : "; other arrivals: ",
+                 route.others, wx, wz);
         CloseMap();
     }
 
-    // After a zone change: wait for the load and the player in the new scene group, then the ground at the clicked
-    // point (regions may still be loading: retried for kSpotRetry s), else stay at the arrival node.
+    // After a zone change: wait for the load and the player in one of the zone's scene groups, then the ground
+    // teleport at the clicked point (which loads the spot's area first if needed; no ground: the player stays at
+    // the arrival node). A load that ends with the player back in the start group = the game's travel failed.
     void TickTravel() {
         if (!travel_.active) return;
         float age = time_ - travel_.started;
         if (age > kTravelTimeout) {
-            SR2_WARN("map_tools: travel to '{}': not arrived after {:.0f} s - given up", travel_.zone, kTravelTimeout);
+            SR2_WARN("map_tools: travel to '{}' (arrival node '{}'): not arrived after {:.0f} s - given up", travel_.zone,
+                     travel_.node, kTravelTimeout);
             Notice("Teleport to " + travel_.zone + " did not finish");
             travel_ = {};
             return;
         }
         if (time_ < travel_.nextTry) return;
-        travel_.nextTry = time_ + kSpotRetryStep;
+        travel_.nextTry = time_ + kTravelPoll;
         if (s_.sceneLoaderClass && s_.loadInProgress) {
             if (!sceneLoader_.Alive()) sceneLoader_.Reset(ugui::FindFirst(s_.sceneLoaderClass, false));
             bool loading = false;
             if (sceneLoader_.Alive()) Managed([&] { loading = ugui::Call<bool>(s_.loadInProgress, sceneLoader_.get()); });
             if (loading) {
+                travel_.sawLoading = true;
                 travel_.arrivedAt = -1;
                 return;
             }
@@ -1454,29 +1658,28 @@ private:
         if (!player) return;
         Il2CppObject* group = nullptr;
         Managed([&] { group = ugui::Call<Il2CppObject*>(s_.playerSceneGroup, player); });
-        if (group != travel_.group.get()) return;
-        if (travel_.arrivedAt < 0) {
-            travel_.arrivedAt = time_;  // let the arrival settle one step before the first try
-            return;
-        }
-        Vec3 dest{};
-        if (Ground(player, travel_.x, travel_.z, dest)) {
-            if (InSceneTeleport(player, dest)) {
-                SR2_INFO("map_tools: arrived in '{}' and teleported to ({:.1f}, {:.1f}, {:.1f}) {:.1f} s after the click",
-                         travel_.zone, dest.x, dest.y, dest.z, age);
-                Notice("Teleported to " + travel_.zone);
-            } else {
-                Notice("Teleported to " + travel_.zone + " (arrival point)");
+        bool there = group && (group == travel_.group.get() ||
+                               (group != travel_.origin.get() && GroupInZone(travel_.zoneDef.get(), group)));
+        if (!there) {
+            if (travel_.sawLoading && group && group == travel_.origin.get()) {
+                SR2_WARN("map_tools: travel to '{}' failed: the load ended with the player back in '{}' (arrival node '{}' "
+                         "in '{}' not reached)",
+                         travel_.zone, unity::GetName(group), travel_.node, unity::GetName(travel_.group.get()));
+                Notice("Teleport to " + travel_.zone + " failed");
+                travel_ = {};
             }
-            travel_ = {};
             return;
         }
-        if (time_ - travel_.arrivedAt >= kSpotRetry) {
-            SR2_INFO("map_tools: arrived in '{}', but no ground below ({:.0f}, {:.0f}) after {:.0f} s - staying at the "
-                     "arrival point",
-                     travel_.zone, travel_.x, travel_.z, kSpotRetry);
-            Notice("Teleported to " + travel_.zone + " (spot not loaded, at the teleporter)");
-            travel_ = {};
+        if (travel_.arrivedAt < 0) {
+            travel_.arrivedAt = time_;  // let the arrival settle one step before the ground teleport
+            return;
+        }
+        float wx = travel_.x, wz = travel_.z;
+        std::string zone = travel_.zone, why;
+        travel_ = {};
+        if (!StartGround(wx, wz, zone, true, true, age, why)) {
+            SR2_INFO("map_tools: arrived in '{}', no ground teleport ({}) - staying at the arrival point", zone, why);
+            Notice("Teleported to " + zone + " (arrival point)");
         }
     }
 };

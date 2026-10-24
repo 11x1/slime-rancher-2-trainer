@@ -4,10 +4,11 @@
 //   applying the damage while the toggle is on, plus a 10 Hz top-up to the
 //   maximum (like infinite energy) for health lost any other way.
 // - Teleport to marker: MapDirector.TryGetPlayerNavigationMarkerLocation for
-//   the current scene group and zone (the marker's position has y = 0), a
-//   downward raycast for the ground, then TeleportNetwork.CompleteInSceneTeleport,
-//   the game's own in-scene teleport (TeleportablePlayer.TeleportTo: controller
-//   position, scene group, region proxies, held item, screen effects, audio).
+//   the current scene group and zone (the marker's position has y = 0), then
+//   the ground teleport shared with the full map's right-click teleport
+//   (modules/map_tools/ground_teleport.h: far targets are not loaded, so the
+//   player is parked there until the area's colliders exist, then lands on the
+//   ground; TeleportablePlayer.TeleportTo, the game's in-scene teleport).
 // - Unlock ranch expansions: for every AccessDoorUIActivator whose door is
 //   locked, what AccessDoorUIActivator.OnPurchaseMenuResult does after the
 //   purchase, minus spending, analytics and the achievement: door OPEN, linked
@@ -35,6 +36,7 @@
 #include "core/module.h"
 #include "core/unity.h"
 #include "modules/custom_upgrades/sale_notify.h"
+#include "modules/map_tools/ground_teleport.h"
 #include "ui/sandbox_bridge.h"
 #include "ui/sandbox_extras_bridge.h"
 
@@ -50,9 +52,6 @@ constexpr const char* kModule = "sandbox";
 constexpr const char* kImage = "Assembly-CSharp";
 constexpr unsigned long long kHealthMs = 100;      // infinite-health top-up
 constexpr unsigned long long kExpansionMs = 5000;  // rescan the expansion doors (only while the page is open)
-constexpr float kRayTop = 1500.0f;                 // ground search: from this height straight down
-constexpr float kRayLength = 3000.0f;
-constexpr float kAboveGround = 1.0f;               // land this far above the hit, then fall
 constexpr int kDoorLocked = 0, kDoorOpen = 1, kDoorClosed = 2;  // AccessDoor.State
 
 struct Vec3 {
@@ -82,16 +81,9 @@ const MethodInfo* g_tryGetSceneContext = nullptr;  // SceneContextUtility.TryGet
 const MethodInfo* g_scRegions = nullptr;           // SceneContext.get_RegionRegistry
 const MethodInfo* g_scMap = nullptr;               // SceneContext.get_MapDirector
 const MethodInfo* g_scZoneTracker = nullptr;       // SceneContext.get_PlayerZoneTracker
-const MethodInfo* g_scTeleport = nullptr;          // SceneContext.get_TeleportNetwork
-const MethodInfo* g_scPlayer = nullptr;            // SceneContext.get_Player (GameObject)
 const MethodInfo* g_currentGroup = nullptr;        // RegionRegistry.get_CurrentSceneGroup
 const MethodInfo* g_currentZone = nullptr;         // PlayerZoneTracker.GetCurrentZone
 const MethodInfo* g_markerLocation = nullptr;      // MapDirector.TryGetPlayerNavigationMarkerLocation(out Vector3, SceneGroup, ZoneDefinition)
-const MethodInfo* g_inSceneTeleport = nullptr;     // TeleportNetwork.CompleteInSceneTeleport(SceneGroup, Vector3, Vector3)
-const MethodInfo* g_raycast = nullptr;             // Physics.Raycast(Vector3, Vector3, out RaycastHit, float, int, QueryTriggerInteraction)
-size_t g_offHitDistance = 0;                       // RaycastHit.m_Distance (in the unboxed struct)
-const MethodInfo* g_trPosition = nullptr;          // Transform.get_position
-const MethodInfo* g_trEuler = nullptr;             // Transform.get_eulerAngles
 
 std::string g_expansionWhy;                        // "" = expansion unlock available
 Il2CppClass* g_activatorClass = nullptr;           // MonomiPark.SlimeRancher.UI.AccessDoor.AccessDoorUIActivator
@@ -142,14 +134,14 @@ bool CallValue(const MethodInfo* m, void* obj, std::initializer_list<void*> args
 
 // The HUD's drone-style pop-ups (custom_upgrades/sale_notify.h), for "teleport to marker" with the teleporter icon.
 sr2::modules::custom_upgrades::ui::SaleNotices g_notices;
-bool g_inTeleport = false;  // Done() is reporting a teleport: also a pop-up
 unsigned long long g_lastNoticeTick = 0;
 
-void Done(bool ok, const std::string& text) {
+// `teleport`: also a HUD pop-up.
+void Done(bool ok, const std::string& text, bool teleport = false) {
     if (ok) SR2_INFO("[{}] {}", kModule, text);
     else SR2_WARN("[{}] {}", kModule, text);
     sr2::ui::sandbox::SetStatus(text, !ok);
-    if (g_inTeleport && g_notices.TextReady())
+    if (teleport && g_notices.TextReady())
         g_notices.QueueText(g_notices.TeleporterIcon(), ok ? std::string("Teleported to the map marker") : text);
 }
 
@@ -228,67 +220,35 @@ bool MarkerLocation(const Scene& s, Vec3& pos, std::string& why) {
     return true;
 }
 
-void DoTeleportImpl();
 void DoTeleport() {
-    g_inTeleport = true;
-    DoTeleportImpl();
-    g_inTeleport = false;
-}
-
-void DoTeleportImpl() {
-    if (!g_teleportWhy.empty()) {
-        Done(false, "Not teleported: " + g_teleportWhy);
-        return;
-    }
+    auto fail = [](const std::string& why) { Done(false, "Not teleported: " + why, true); };
+    if (!g_teleportWhy.empty()) return fail(g_teleportWhy);
     Scene s;
     std::string why;
     Vec3 marker{};
-    if (!GetScene(s)) {
-        Done(false, "Not teleported: load a save first.");
-        return;
-    }
-    if (!MarkerLocation(s, marker, why)) {
-        Done(false, "Not teleported: " + why);
-        return;
-    }
-    // The marker only has x / z (the map is flat; PlaceNavigationMarker stores y = 0): find the ground below it.
-    alignas(16) unsigned char hit[64] = {};
-    Vec3 origin{marker.x, kRayTop, marker.z}, down{0, -1, 0};
-    float maxDist = kRayLength;
-    int layers = -5;   // Physics.DefaultRaycastLayers (everything but Ignore Raycast)
-    int triggers = 1;  // QueryTriggerInteraction.Ignore
-    bool any = false;
-    if (!CallValue(g_raycast, nullptr, {&origin, &down, hit, &maxDist, &layers, &triggers}, "Physics.Raycast", any) || !any) {
-        Done(false, std::format("Not teleported: no ground found below the marker ({:.0f}, {:.0f})", marker.x, marker.z));
-        return;
-    }
-    const float d = *reinterpret_cast<float*>(hit + g_offHitDistance);
-    if (!std::isfinite(d)) {
-        Done(false, "Not teleported: the ground check returned no distance");
-        return;
-    }
-    Vec3 target{marker.x, kRayTop - d + kAboveGround, marker.z};
-
-    Il2CppObject* go = Call(g_scPlayer, s.context, {}, "SceneContext.Player");
-    Il2CppObject* tr = go && unity::IsAlive(go) ? unity::TransformOf(go) : nullptr;
-    Vec3 from{}, euler{};
-    if (!tr || !CallValue(g_trPosition, tr, {}, "Transform.get_position", from) ||
-        !CallValue(g_trEuler, tr, {}, "Transform.get_eulerAngles", euler)) {
-        Done(false, "Not teleported: the player is not available right now");
-        return;
-    }
-    euler.x = euler.z = 0;  // keep the heading, stand upright
-    Il2CppObject* net = Call(g_scTeleport, s.context, {}, "SceneContext.TeleportNetwork");
-    if (!net || !unity::IsAlive(net)) {
-        Done(false, "Not teleported: the teleport network is not available");
-        return;
-    }
-    bool ok = false;
-    Call(g_inSceneTeleport, net, {s.group, &target, &euler}, "TeleportNetwork.CompleteInSceneTeleport", &ok);
-    const float dx = target.x - from.x, dz = target.z - from.z;
-    Done(ok, ok ? std::format("Teleported to the map marker: ({:.0f}, {:.0f}, {:.0f}) -> ({:.0f}, {:.0f}, {:.0f}), {:.0f} m",
-                              from.x, from.y, from.z, target.x, target.y, target.z, std::sqrt(dx * dx + dz * dz))
-                : "Not teleported: the game's teleport call failed");
+    if (!GetScene(s)) return fail("load a save first.");
+    if (!MarkerLocation(s, marker, why)) return fail(why);
+    // The marker only has x / z (the map is flat; PlaceNavigationMarker stores y = 0): the shared ground teleport
+    // finds the ground below it, loading the area first when it is far away (the result may come a few seconds
+    // later, on the main thread).
+    const float mx = marker.x, mz = marker.z;
+    bool started = sr2::modules::ground_teleport::Start(
+        kModule, mx, mz,
+        [mx, mz](const sr2::modules::ground_teleport::Result& r) {
+            if (!r.ok) {
+                Done(false, std::format("Not teleported: no ground found below the marker ({:.0f}, {:.0f}): {}", mx, mz, r.why),
+                     true);
+                return;
+            }
+            Done(true,
+                 std::format("Teleported to the map marker: ({:.0f}, {:.0f}, {:.0f}) -> ({:.0f}, {:.0f}, {:.0f}), {:.0f} m{}",
+                             r.from.x, r.from.y, r.from.z, r.to.x, r.to.y, r.to.z,
+                             std::hypot(r.to.x - r.from.x, r.to.z - r.from.z),
+                             r.parked ? std::format(" (area loaded first, {:.1f} s)", r.seconds) : std::string()),
+                 true);
+        },
+        &why);
+    if (!started) fail(why);
 }
 
 // -------------------------------------------------------- expansions ----
@@ -392,6 +352,7 @@ void Publish() {
         Scene s;
         Vec3 pos{};
         if (!GetScene(s)) st.teleportWhy = "Load a save first.";
+        else if (sr2::modules::ground_teleport::Busy()) st.teleportWhy = "A teleport is still running.";
         else st.canTeleport = MarkerLocation(s, pos, st.teleportWhy);
     }
     if (!g_expansionWhy.empty()) {
@@ -462,15 +423,6 @@ void SetupPlayerExtras(sr2::core::ModuleContext& ctx) {
     auto method = [&](Il2CppClass* k, const char* name, int argc, std::string& why) {
         return FindMethod(R, k, name, argc, why);
     };
-    auto byParams = [&](Il2CppClass* k, const char* name, std::initializer_list<std::string_view> params,
-                        std::string& why) -> const MethodInfo* {
-        if (!k) return nullptr;
-        std::string err;
-        const MethodInfo* m = R.MethodByParams(k, name, params, &err);
-        if (!m && why.empty()) why = std::format("{}: {}", name, err);
-        return m;
-    };
-
     Il2CppClass* scu = nullptr;
     {
         // Infinite health: the top-up needs these; the Damage hook is optional on top.
@@ -505,34 +457,15 @@ void SetupPlayerExtras(sr2::core::ModuleContext& ctx) {
         Il2CppClass* regions = cls(kImage, "MonomiPark.SlimeRancher.Regions", "RegionRegistry", w);
         Il2CppClass* tracker = cls(kImage, "", "PlayerZoneTracker", w);
         Il2CppClass* map = cls(kImage, "MonomiPark.SlimeRancher.Map", "MapDirector", w);
-        Il2CppClass* net = cls(kImage, "MonomiPark.SlimeRancher.World.Teleportation", "TeleportNetwork", w);
-        Il2CppClass* physics = cls("UnityEngine.PhysicsModule", "UnityEngine", "Physics", w);
-        Il2CppClass* hit = cls("UnityEngine.PhysicsModule", "UnityEngine", "RaycastHit", w);
-        Il2CppClass* transform = cls("UnityEngine.CoreModule", "UnityEngine", "Transform", w);
         g_tryGetSceneContext = method(scu, "TryGetSceneContext", 1, w);
         g_scRegions = method(sceneCtx, "get_RegionRegistry", 0, w);
         g_scMap = method(sceneCtx, "get_MapDirector", 0, w);
         g_scZoneTracker = method(sceneCtx, "get_PlayerZoneTracker", 0, w);
-        g_scTeleport = method(sceneCtx, "get_TeleportNetwork", 0, w);
-        g_scPlayer = method(sceneCtx, "get_Player", 0, w);
         g_currentGroup = method(regions, "get_CurrentSceneGroup", 0, w);
         g_currentZone = method(tracker, "GetCurrentZone", 0, w);
         g_markerLocation = method(map, "TryGetPlayerNavigationMarkerLocation", 3, w);
-        // Two 3-argument overloads; the public one takes (SceneGroup, Vector3 position, Vector3 euler rotation).
-        g_inSceneTeleport = byParams(net, "CompleteInSceneTeleport",
-                                     {"MonomiPark.SlimeRancher.SceneManagement.SceneGroup", "UnityEngine.Vector3",
-                                      "UnityEngine.Vector3"},
-                                     w);
-        g_raycast = byParams(physics, "Raycast",
-                             {"UnityEngine.Vector3", "UnityEngine.Vector3", "UnityEngine.RaycastHit&", "System.Single",
-                              "System.Int32", "UnityEngine.QueryTriggerInteraction"},
-                             w);
-        size_t o = 0;
-        off(hit, "m_Distance", o, w);
-        if (o >= 2 * sizeof(void*)) g_offHitDistance = o - 2 * sizeof(void*);
-        else if (w.empty()) w = "RaycastHit.m_Distance has no struct offset";
-        g_trPosition = method(transform, "get_position", 0, w);
-        g_trEuler = method(transform, "get_eulerAngles", 0, w);
+        std::string gerr;
+        if (w.empty() && !sr2::modules::ground_teleport::Resolve(gerr)) w = "ground teleport: " + gerr;
         if (!w.empty()) SR2_WARN("[{}] teleport to map marker unavailable: {}", kModule, w);
     }
     {
