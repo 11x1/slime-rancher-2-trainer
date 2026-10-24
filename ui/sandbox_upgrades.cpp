@@ -14,6 +14,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "hud_edit.h"
+#include "imgui_internal.h"  // ImGuiSelectableFlags_SpanAvailWidth
 #include "item_grid.h"
 #include "sandbox_upgrades_bridge.h"
 #include "theme.h"
@@ -170,10 +172,10 @@ void WheelLevels(const ub::Upgrade& u) {
 // The entries shared by the upgrade's right-click menu and the slot tier menu.
 void LevelMenuItems(const ub::Upgrade& u, bool discovery) {
     const int cur = Level(u), last = u.levels - 1;
-    if (ImGui::MenuItem("Upgrade", "Shift+wheel up", false, cur < last)) RequestLevel(u, cur + 1);
-    if (ImGui::MenuItem("Downgrade", "Shift+wheel down", false, cur >= 0)) RequestLevel(u, cur - 1);
-    if (ImGui::MenuItem("Max", "Ctrl+wheel up", false, cur < last)) RequestLevel(u, last);
-    if (ImGui::MenuItem("Reset (not bought)", "Ctrl+wheel down", false, cur >= 0)) RequestLevel(u, -1);
+    if (KeyMenuItem("Upgrade", "Shift+Wheel", "up", cur < last, g_scale)) RequestLevel(u, cur + 1);
+    if (KeyMenuItem("Downgrade", "Shift+Wheel", "down", cur >= 0, g_scale)) RequestLevel(u, cur - 1);
+    if (KeyMenuItem("Max", "Ctrl+Wheel", "up", cur < last, g_scale)) RequestLevel(u, last);
+    if (KeyMenuItem("Reset (not bought)", "Ctrl+Wheel", "down", cur >= 0, g_scale)) RequestLevel(u, -1);
     if (!discovery || !u.discoverable) return;
     ImGui::Separator();
     if (ImGui::MenuItem("Discover", nullptr, false, !u.discovered)) RequestOp(ub::Op::Discover, u.id);
@@ -264,9 +266,18 @@ void UpgradesTab(const Helpers& h, const ub::State& st) {
         const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem | ImGuiHoveredFlags_AllowWhenOverlappedByItem);
         if (pressed) openMenu = u.id;
         WheelLevels(u);
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort) && !ImGui::IsPopupOpen(kUpgradeCtx))
-            h.tooltip(std::format("{}: {}{}\nShift+wheel: +-1 level, Ctrl+wheel: max / none. Right-click: more.", u.name,
-                                  TierText(u, level), u.discoverable ? "\nHidden in the Fabricator until found." : ""));
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort) && !ImGui::IsPopupOpen(kUpgradeCtx)) {
+            // The item tooltips' look: name, tag, the tier in its colour, keycaps for the controls.
+            Tip tip;
+            tip.name = u.name;
+            tip.tag = "Upgrade";
+            tip.tagCol = h.upgradeAccent;
+            const bool custom = u.vanillaLevels > 0 && level >= u.vanillaLevels;
+            tip.lines.push_back({TierText(u, level), custom ? P.warn : level >= 0 ? P.ok : P.dim});
+            if (u.discoverable && !u.discovered) tip.lines.push_back({"Hidden in the Fabricator until found.", P.dim});
+            tip.keys = {{"Shift+Wheel", "±1 level"}, {"Ctrl+Wheel", "max / not bought"}, {"RMB", "more"}};
+            h.tip(tip);
+        }
         dl->AddRectFilled(a, b, hovered ? P.frameHover : P.frame, U(8));
         // Icon tile, dimmed while not bought.
         item_grid::Tile t;
@@ -358,11 +369,16 @@ void BlueprintTab(const Helpers& h, const sbx::Snapshot& s, int cat, const std::
         ImGui::OpenPopup(kBlueprintCtx);
     }
     if (r.hovered >= 0 && !ImGui::IsPopupOpen(kBlueprintCtx)) {
+        // Name, the category as the tag, owned count; the state shows on the tile (faded = locked) and in
+        // what the left click does.
         const sbx::Recipe* rec = list[static_cast<size_t>(r.hovered)];
-        h.tooltip(std::format("{}\n{}{}\nClick: {}. Right-click: more.", rec->name,
-                              Unlocked(*rec) ? "Blueprint unlocked" : "Blueprint locked",
-                              rec->owned > 0 ? std::format(" ({} owned)", rec->owned) : std::string(),
-                              Unlocked(*rec) ? "lock" : "unlock"));
+        Tip tip;
+        tip.name = rec->name;
+        tip.tag = title;
+        tip.tagCol = h.gadgetAccent;
+        if (rec->owned > 0) tip.lines.push_back({std::format("{} in your inventory", rec->owned), 0});
+        tip.keys = {{"LMB", Unlocked(*rec) ? "lock blueprint" : "unlock blueprint"}, {"RMB", "more"}};
+        h.tip(tip);
     }
     Popup(h, kBlueprintCtx, [&] {
         const sbx::Recipe* rec = nullptr;
@@ -391,19 +407,13 @@ void DrawCard(const Helpers& h, const sbx::Snapshot& s, float w) {
     h.heading("Upgrades & Blueprints", P.head);
     const auto st = ub::Get();
     const int nCats = s.recipeCategories ? static_cast<int>(s.recipeCategories->size()) : 0;
-    if (ImGui::BeginTabBar("##sbx_upg_tabs")) {
-        auto tab = [&](int index, const char* label) {
-            const bool open = ImGui::BeginTabItem(label);
-            if (open) {
-                g_tab = index;
-                ImGui::EndTabItem();
-            }
-        };
-        tab(0, "Upgrades");
-        for (int i = 0; i < nCats; ++i) tab(1 + i, std::format("{}###cat{}", (*s.recipeCategories)[static_cast<size_t>(i)], i).c_str());
-        ImGui::EndTabBar();
-    }
+    // The overlay's sub-tabs (the tab bar's strip, smaller), drawn before the content, so a click shows
+    // the new tab in the same frame.
+    std::vector<std::string> labels{"Upgrades"};
+    for (int i = 0; i < nCats; ++i) labels.push_back((*s.recipeCategories)[static_cast<size_t>(i)]);
     if (g_tab > nCats) g_tab = 0;
+    h.subTabs("##sbx_upg_tabs", labels, g_tab);
+    ImGui::Dummy(ImVec2(0, U(2)));
     if (g_tab == 0) {
         if (!st || GetTickCount64() - st->tick > 3000) DimText("Reading your upgrades...");
         else if (!st->inGame || st->upgrades.empty()) DimText(st->why.empty() ? "No upgrades found." : st->why);
@@ -416,6 +426,35 @@ void DrawCard(const Helpers& h, const sbx::Snapshot& s, float w) {
         BlueprintTab(h, s, g_tab - 1, (*s.recipeCategories)[static_cast<size_t>(g_tab - 1)]);
     }
     h.endCard();
+}
+
+bool ShowingUpgrades() { return g_tab == 0; }
+
+bool KeyMenuItem(const char* label, const char* keys, const char* after, bool enabled, float scale) {
+    if (!keys) return ImGui::MenuItem(label, nullptr, false, enabled);
+    const Palette& P = theme::Colors();
+    const float cap = scale * 0.8f, gap = 28.0f * scale;
+    const float afterW = after ? 4.0f * scale + ImGui::CalcTextSize(after).x : 0.0f;
+    const float keysW = hud_edit::KeyComboWidth(keys, cap) + afterW;
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::PushID(label);
+    const bool r = ImGui::Selectable("##item", false,
+                                     ImGuiSelectableFlags_SpanAvailWidth | (enabled ? 0 : ImGuiSelectableFlags_Disabled),
+                                     ImVec2(ImGui::CalcTextSize(label).x + gap + keysW, 0));
+    ImGui::PopID();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float lh = ImGui::GetTextLineHeight(), cy = std::round(p.y + lh * 0.5f);
+    const float alpha = enabled ? 1.0f : 0.45f;
+    dl->AddText(p, ImGui::GetColorU32(ImGuiCol_Text, alpha), label);
+    const float right = ImGui::GetItemRectMax().x - ImGui::GetStyle().ItemSpacing.x * 0.5f;
+    const float kx = right - keysW;
+    hud_edit::DrawKeyCombo(dl, kx, cy, keys, cap, alpha);
+    if (after) {
+        const ImU32 dim = P.dim;
+        dl->AddText(ImVec2(right - afterW + 4.0f * scale, p.y), (dim & ~IM_COL32_A_MASK) |
+                    (static_cast<ImU32>(static_cast<float>((dim >> IM_COL32_A_SHIFT) & 0xFF) * alpha) << IM_COL32_A_SHIFT), after);
+    }
+    return r;
 }
 
 void SlotTierMenu(const Helpers& h, bool open) {
