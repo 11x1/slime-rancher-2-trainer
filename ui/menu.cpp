@@ -31,6 +31,7 @@
 #include "sandbox_bridge.h"
 #include "sandbox_extras_bridge.h"
 #include "sandbox_upgrades.h"
+#include "sandbox_weather.h"
 #include "slime_dj_bridge.h"
 #include "slime_icons.h"
 #include "spotlight.h"
@@ -1391,6 +1392,16 @@ sandbox_upgrades::Helpers SbxHelpers() {
     h.subTabs = &SubTabs;
     h.gadgetAccent = KindAccent(sbx::Kind::Gadget);
     h.upgradeAccent = theme::Colors().tabSel;
+    return h;
+}
+
+// The same helpers for the Weather card (sandbox_weather.cpp), plus the switch and the accent button.
+sandbox_weather::Helpers SbxWeatherHelpers() {
+    sandbox_weather::Helpers h{g_scale, &BeginCard, &EndCard, &CardHeading, &Tooltip, &PushFloatingStyle, &PopFloatingStyle,
+                               &FloatingSurface};
+    h.subTabs = &SubTabs;
+    h.toggle = &Switch;
+    h.accentButton = &AccentButton;
     return h;
 }
 
@@ -3284,6 +3295,8 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
     ImGui::Dummy(ImVec2(0, gapY));
     sandbox_upgrades::DrawCard(SbxHelpers(), *snap, full);  // Upgrades & Blueprints (sandbox_upgrades.cpp)
     hoverCard(sandbox_upgrades::ShowingUpgrades() ? SbxHover::Upgrades : SbxHover::Blueprints);
+    ImGui::Dummy(ImVec2(0, gapY));
+    sandbox_weather::DrawCard(SbxWeatherHelpers(), full);  // Weather (sandbox_weather.cpp)
     if (!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) && !ImGui::GetDragDropPayload()) {
         const double now = ImGui::GetTime();
         if (hover != SbxHover::None) {

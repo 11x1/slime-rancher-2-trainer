@@ -113,6 +113,9 @@ constexpr const char* kPinReason =
 constexpr const char* kToggleKeys[] = {kToggleInfiniteEnergy, kToggleInfiniteHealth};
 std::map<std::string, bool> g_toggles;
 unsigned g_togglesVersion = 1;
+// The loaded save's other Sandbox data (SaveData): JSON values by key, kept in the mark like the toggles.
+constexpr const char* kDataKeys[] = {kDataWeather};
+std::map<std::string, sr2::json::Value> g_data;
 
 struct MenuEntry {
     std::filesystem::file_time_type time{};
@@ -182,6 +185,7 @@ struct Mark {
     unsigned long long number = 0;
     int enabled = -1;  // Sandbox on (1) / off (0) when that file was last written; -1 = not recorded (older mark)
     std::map<std::string, bool> toggles;  // "toggles" (missing keys: off)
+    std::map<std::string, sr2::json::Value> data;  // kDataKeys present in the mark (SaveData)
 };
 
 bool ReadJson(const std::filesystem::path& p, sr2::json::Value& root, std::string& err) {
@@ -217,6 +221,8 @@ bool ReadMark(const std::filesystem::path& p, Mark& m) {
     m.number = n > 0 ? static_cast<unsigned long long>(n) : 0;
     if (s["enabled"].isBool()) m.enabled = s["enabled"].asBool() ? 1 : 0;
     for (const char* k : kToggleKeys) m.toggles[k] = s["toggles"][k].asBool(false);
+    for (const char* k : kDataKeys)
+        if (const sr2::json::Value* v = s.find(k); v && !v->isNull()) m.data[k] = *v;
     return m.cheated;
 }
 
@@ -262,6 +268,8 @@ bool WriteMark(const std::string& save, const std::string& game, unsigned long l
         toggles.set(k, sr2::json::Value(it != g_toggles.end() && it->second));
     }
     mark.set("toggles", std::move(toggles));
+    for (const auto& [k, v] : g_data)
+        if (!v.isNull()) mark.set(k, v);
     root.set("sandbox", std::move(mark));
     std::filesystem::create_directories(path.parent_path(), ec);
     const std::string text = sr2::json::Serialize(root);
@@ -358,6 +366,8 @@ std::string NewestSave(Il2CppObject* asd, const std::string& game) {
 // The toggles of the save being loaded (its mark), or all off (no mark, title screen).
 void LoadToggles(const Mark* m, const std::string& what) {
     g_toggles.clear();
+    g_data.clear();
+    if (m) g_data = m->data;
     std::string on;
     if (m)
         for (const auto& [k, v] : m->toggles) {
@@ -782,6 +792,20 @@ void SetSaveToggle(const char* key, bool on) {
 }
 
 unsigned SaveTogglesVersion() { return g_togglesVersion; }
+
+const sr2::json::Value& SaveData(const char* key) {
+    const auto it = g_data.find(key);
+    return it != g_data.end() ? it->second : sr2::json::Value::null();
+}
+
+void SetSaveData(const char* key, sr2::json::Value value) {
+    if (value.isNull()) g_data.erase(key);
+    else g_data[key] = std::move(value);
+    // As SetSaveToggle: a marked save records it now, else the next mark takes it along.
+    if (SaveCheated() && g_s.known && !g_s.file.empty() &&
+        WriteMark(g_s.file, g_s.game, g_s.number, g_s.since, AchievementsPaused()))
+        SR2_INFO("[{}] save '{}': {} written to its sidecar", kModule, g_s.file, key);
+}
 
 bool SetupCheatedSave(sr2::core::ModuleContext& ctx) {
     auto& R = ctx.resolver();
