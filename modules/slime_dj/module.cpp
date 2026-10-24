@@ -36,6 +36,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -81,7 +82,7 @@ constexpr const char* kAudio = "UnityEngine.AudioModule";
 constexpr const wchar_t* kFolderName = L"sr2mods_music";
 constexpr const char* kSpeakerName = "sr2dj_Speaker";
 constexpr size_t kMaxSpeakers = 12;      // music boxes
-constexpr size_t kMaxEmitters = 24;      // registered emitters (api.h)
+constexpr size_t kMaxEmitters = 48;      // registered emitters (api.h; every placed Boombox is one)
 constexpr uint32_t kRingChunks = 16;     // 8 s ring at 0.5 s chunks
 constexpr uint32_t kStartChunks = 4;     // written before the first Play (2 s)
 constexpr int kWritesPerTick = 3;        // chunks copied per frame once playing
@@ -138,6 +139,11 @@ struct Speaker {
     float rangeScale = 1.0f, volScale = 1.0f;
     float boost = 1.0f;    // amplify (other speakers in range)
     int drift = 0;         // scans in a row it was off the clock speaker
+    // Our GameObject is active in the hierarchy (checked every box scan). Unity refuses Play() on a
+    // disabled AudioSource and stops it for good when its object is switched off, so a speaker that
+    // is off waits (no clock, no join) and rejoins when it is on again.
+    bool live = true;
+    int age = 0;           // box scans since it (re)joined the song
 };
 
 struct Current {
@@ -333,11 +339,15 @@ private:
         as(srcSetMute_, "set_mute", 1);
         as(srcGetMute_, "get_mute", 0);
         as(srcGetTimeSamples_, "get_timeSamples", 0);
+        as(srcIsPlaying_, "get_isPlaying", 0);
         as(srcSetTimeSamples_, "set_timeSamples", 1);
         as(srcPause_, "Pause", 0);
         as(srcUnPause_, "UnPause", 0);
         as(srcStop_, "Stop", 0);
         bind(srcPlay_, byParams(audioSourceClass_, "Play", {}), "AudioSource.Play()");
+        // optional: keeps the song clip through scene changes (Resources.UnloadUnusedAssets destroyed it)
+        if (!Bind(objSetHideFlags_, method(uobject, "set_hideFlags", 1, false)))
+            SR2_WARN("slime_dj: Object.set_hideFlags not found; a zone change may stop the song");
         return why.empty();
     }
 
@@ -628,15 +638,19 @@ private:
         sp.box = unity::NewGCHandle(box);
         sp.go = unity::NewGCHandle(go);
         sp.src = unity::NewGCHandle(src);
+        sp.live = unity::ActiveInHierarchy(go);  // an emitter can be registered while its scene is still off
         ApplyRange(sp, src);
         if (e) {
-            SR2_INFO("slime_dj: speaker on emitter '{}' (kind {}, range x{:.2f}, volume x{:.2f})", unity::GetName(box),
-                     static_cast<int>(e->kind), e->range, e->volume);
+            SR2_INFO("slime_dj: speaker on emitter '{}' (kind {}, range x{:.2f}, volume x{:.2f}{})", unity::GetName(box),
+                     static_cast<int>(e->kind), e->range, e->volume, sp.live ? "" : ", switched off for now");
         } else if (!speakerLogged_) {
             speakerLogged_ = true;
             SR2_INFO("slime_dj: speaker on music box '{}' at '{}': {} vanilla source(s), {}; hearing range {:.0f} m",
                      unity::GetName(box), unity::GetName(anchor), sp.vanilla.size(),
                      found.empty() ? "no SECTR cue" : found, sp.maxD);
+        } else {
+            SR2_INFO("slime_dj: speaker on music box '{}' at '{}' ({} vanilla source(s))", unity::GetName(box),
+                     unity::GetName(anchor), sp.vanilla.size());
         }
         return sp.box && sp.go && sp.src;
     }
@@ -749,6 +763,45 @@ private:
         }
     }
 
+    // Every box scan. A speaker whose object is switched off (plot or actor built in a scene that is
+    // not active yet, a region unloaded, the Music Box GameObject toggled by a sale + purchase) cannot
+    // play: it leaves the song (clipGen 0) and TickSong lets it rejoin at the clock's position once its
+    // object is on again. One that is on but stopped (switched off and on between two scans: Unity
+    // stopped it and nothing plays it again) is rejoined too. Before this a stopped speaker stayed
+    // silent for good, and as the clock it dragged every other speaker back to its frozen position.
+    void CheckSpeakers() {
+        int off = 0, restarted = 0;
+        for (Speaker& sp : speakers_) {
+            Il2CppObject* go = Target(sp.go);
+            Il2CppObject* src = Target(sp.src);
+            sp.live = go && src && unity::ActiveInHierarchy(go);
+            if (!sp.live) {
+                ++off;
+                if (sp.clipGen && src) srcStop_.fn(src, srcStop_.mi);
+                sp.clipGen = 0;
+                sp.paused = false;
+                sp.drift = 0;
+                continue;
+            }
+            // (age: Play() of this frame may not report isPlaying yet; check from the next scan on)
+            if (cur_ && cur_->started && sp.clipGen == cur_->clipGen && !sp.paused && sp.age++ > 0 &&
+                !srcIsPlaying_.fn(src, srcIsPlaying_.mi)) {
+                sp.clipGen = 0;
+                sp.drift = 0;
+                ++restarted;
+            }
+        }
+        if (restarted && (restartLogs_ += restarted) <= 10)
+            SR2_INFO("slime_dj: {} speaker(s) had stopped (object switched off and on); rejoined in sync", restarted);
+        const size_t nEm = static_cast<size_t>(std::count_if(speakers_.begin(), speakers_.end(), [](const Speaker& sp) { return sp.emitter; }));
+        const std::array<int, 5> counts{boxes_, emitters_, static_cast<int>(speakers_.size() - nEm), static_cast<int>(nEm), off};
+        if (counts != lastCounts_) {
+            lastCounts_ = counts;
+            SR2_INFO("slime_dj: {} music box(es), {} emitter(s) registered; speakers: {} on boxes, {} on emitters ({} switched off)",
+                     counts[0], counts[1], counts[2], counts[3], counts[4]);
+        }
+    }
+
     // Amplify: every speaker counts the others within its hearing range (positions every box scan).
     void UpdateBoost() {
         const bool on = cfg_.amplify && trGetPosition_ && speakers_.size() > 1;
@@ -784,7 +837,7 @@ private:
         const int64_t limit = static_cast<int64_t>(kDriftSeconds * c.rate);
         for (Speaker& sp : speakers_) {
             Il2CppObject* src = Target(sp.src);
-            if (!src || src == master || sp.clipGen != c.clipGen || sp.paused) {
+            if (!src || src == master || !sp.live || sp.clipGen != c.clipGen || sp.paused) {
                 sp.drift = 0;
                 continue;
             }
@@ -921,6 +974,10 @@ private:
                                             static_cast<int32_t>(c.channels), static_cast<int32_t>(c.rate), false,
                                             clipCreate_.mi);
         if (!unity::IsAlive(clip) || !IsA(clip, audioClipClass_)) return false;
+        // HideFlags.DontUnloadUnusedAsset: a zone change (Resources.UnloadUnusedAssets) destroyed the clip
+        // while no speaker held it ("the AudioClip was destroyed", user log 2026-10-24). StopCurrent still
+        // destroys it.
+        if (objSetHideFlags_) objSetHideFlags_.fn(clip, 32, objSetHideFlags_.mi);
         c.clip = unity::NewGCHandle(clip);
         Il2CppObject* buf = arrayNew_(singleClass_, static_cast<uintptr_t>(c.chunk) * c.channels);
         if (!buf || unity::ArrayLength(buf) != static_cast<size_t>(c.chunk) * c.channels) return false;
@@ -963,10 +1020,14 @@ private:
         return true;
     }
 
+    // The clock: the first speaker that plays the song (or is paused with the others). One that
+    // stopped since the last box scan (its object switched off) is passed over, so the play head
+    // never freezes on it.
     Il2CppObject* Master() {
+        if (!cur_) return nullptr;
         for (Speaker& sp : speakers_)
-            if (cur_ && sp.clipGen == cur_->clipGen)
-                if (Il2CppObject* src = Target(sp.src)) return src;
+            if (sp.live && sp.clipGen == cur_->clipGen)
+                if (Il2CppObject* src = Target(sp.src); src && (sp.paused || srcIsPlaying_.fn(src, srcIsPlaying_.mi))) return src;
         return nullptr;
     }
 
@@ -986,9 +1047,10 @@ private:
         Il2CppObject* master = Master();
         if (c.started && master) {
             const int32_t ts = srcGetTimeSamples_.fn(master, srcGetTimeSamples_.mi);
-            if (master != c.lastMaster) {
-                c.lastMaster = master;  // another speaker took over: continue from its position
-            } else if (ts >= 0 && static_cast<uint32_t>(ts) < c.ring) {
+            // Another speaker taking over continues from the same position: every speaker plays in
+            // sync (and stopped ones are never the clock), so the delta stays valid across them.
+            c.lastMaster = master;
+            if (ts >= 0 && static_cast<uint32_t>(ts) < c.ring) {
                 const uint32_t delta = (static_cast<uint32_t>(ts) + c.ring - static_cast<uint32_t>(c.lastTs)) % c.ring;
                 if (delta < c.ring - c.chunk) c.playPos += delta;  // a tiny step back = another speaker's jitter
             }
@@ -1018,7 +1080,7 @@ private:
         if (master) joinAt = srcGetTimeSamples_.fn(master, srcGetTimeSamples_.mi);
         for (Speaker& sp : speakers_) {
             Il2CppObject* src = Target(sp.src);
-            if (!src || !clip) continue;
+            if (!src || !clip || !sp.live) continue;  // switched off: rejoins when it is on again
             if (sp.clipGen != c.clipGen) {
                 if (!ready) continue;
                 srcSetClip_.fn(src, clip, srcSetClip_.mi);
@@ -1027,6 +1089,7 @@ private:
                 srcPlay_.fn(src, srcPlay_.mi);
                 sp.clipGen = c.clipGen;
                 sp.paused = false;
+                sp.age = 0;
                 if (!master) {  // first speaker (song start, or back after every box was gone)
                     master = src;
                     c.started = true;
@@ -1082,6 +1145,7 @@ private:
             emitters_ = static_cast<int>(emitters.size());
             if (cur_) {
                 SyncSpeakers(boxes, emitters);
+                CheckSpeakers();
                 UpdateBoost();
                 Resync(Master());
             }
@@ -1090,7 +1154,8 @@ private:
         if (!cur_ && !viewed) boxes_ = -1;
         TickSong();
         TickMix();
-        dj::emitters::SetPlaying(cur_ && cur_->started && !cur_->userPaused && !speakers_.empty(),
+        dj::emitters::SetPlaying(cur_ && cur_->started && !cur_->userPaused &&
+                                     std::any_of(speakers_.begin(), speakers_.end(), [](const Speaker& sp) { return sp.live; }),
                                  cur_ ? cur_->name : std::string());
         publishAcc_ += dt;
         if (viewed && publishAcc_ >= kPublishInterval) {
@@ -1250,6 +1315,8 @@ private:
         srcSetDoppler_, srcSetVolume_;
     M<void (*)(Il2CppObject*, int32_t, const MethodInfo*)> srcSetRolloff_, srcSetPriority_, srcSetTimeSamples_;
     M<int32_t (*)(Il2CppObject*, const MethodInfo*)> srcGetTimeSamples_;
+    M<bool (*)(Il2CppObject*, const MethodInfo*)> srcIsPlaying_;
+    M<void (*)(Il2CppObject*, int32_t, const MethodInfo*)> objSetHideFlags_;  // optional
     M<void (*)(Il2CppObject*, const MethodInfo*)> srcPlay_, srcPause_, srcUnPause_, srcStop_;
     // SECTR_AudioSource.Volume, SECTR_AudioBus getters
     M<float (*)(Il2CppObject*, const MethodInfo*)> sectrGetVolume_, busEffVolume_;
@@ -1269,7 +1336,8 @@ private:
     unsigned clipGen_ = 0;
     int failuresInARow_ = 0;
     std::vector<Speaker> speakers_;
-    int boxes_ = -1, emitters_ = 0, resyncs_ = 0;
+    int boxes_ = -1, emitters_ = 0, resyncs_ = 0, restartLogs_ = 0;
+    std::array<int, 5> lastCounts_{-1, -1, -1, -1, -1};
     unsigned emitterGen_ = 0;
     Il2CppGCHandle musicBus_ = nullptr, masterBus_ = nullptr, cueBus_ = nullptr;
     float boxScan_ = 0, busRetry_ = 0, publishAcc_ = 0;
