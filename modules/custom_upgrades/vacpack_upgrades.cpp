@@ -754,11 +754,12 @@ void PullAmmoDetour(Il2CppObject* self, Il2CppArray** slots, const MethodInfo* m
     g.origPullAmmo(self, slots, mi);
     if (!slots || !*slots || !g.vanillaSlotCount || !On() || !g.arrayNew) return;
     g_ammoGuard.Run([&] {
+        // The body is shared with TrackedActorsModel.Pull (out HashSet): the owner check comes first.
+        Player p;
+        if (!GetPlayer(p) || p.ammoModel != self) return;  // a silo, a drone, TrackedActorsModel...
         Il2CppArray* arr = *slots;
         const size_t n = unity::ArrayLength(arr);
         if (n <= static_cast<size_t>(g.vanillaSlotCount)) return;
-        Player p;
-        if (!GetPlayer(p) || p.ammoModel != self) return;  // a silo, a drone, TrackedActorsModel...
         if (self == g.restoredAmmo) {
             const std::string stash = StashOf(arr);
             g.host.setValue(kStashKey, stash);
