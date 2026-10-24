@@ -30,6 +30,8 @@ No hooks, no scene scans: `DiscordantWall._activeWalls` is read through `il2cpp_
 
 Position: centre of `_harmonizerDetectionCollider.bounds` (world AABB) when it has a size, else the wall's transform position.
 
+**Inactive walls (full map).** In-game log (1.3.0): on entering the Labyrinth all 17 walls register and are active for a few seconds, then `17 registered, 17 alive, 0 active`: the walls are only `Awake`n once, while the scene group loads; afterwards every region away from the player is proxied (`Region.Root` deactivated), so their walls stay registered but inactive. The full map (`minimap::api::CollectPageIcons`, used by `map_tools`) therefore calls `Collect(out, stats, includeInactive = true)`: inactive walls are returned too, with their last harmonized flag and the collider-bounds centre remembered from when they were last active (a disabled collider reports empty bounds; `discordant_walls.cpp` keeps a wall -> centre map, dropped when the registry empties), else the transform position. The minimap and the world markers keep active walls only. Log: `minimap: full map: Nullifier walls A active + I inactive (unloaded regions, C positioned from when they were loaded), S shown` when the count changes.
+
 Shared by the minimap (`modules/common/discordant_walls.*`).
 
 ## Markers

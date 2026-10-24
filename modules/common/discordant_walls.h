@@ -30,6 +30,7 @@ namespace sr2::modules::walls {
 struct Wall {
     float x = 0, y = 0, z = 0;   // world position (collider bounds centre, else the transform)
     bool intact = true;          // not harmonized (_targetHarmonizationAmount < 0.5)
+    bool active = true;          // isActiveAndEnabled (false: its region is unloaded / proxied, state may be stale)
 };
 
 struct Stats {
@@ -38,6 +39,8 @@ struct Stats {
     int active = 0;      // isActiveAndEnabled
     int intact = 0;      // active and not harmonized
     int fromBounds = 0;  // positions taken from the detection collider's bounds
+    int inactive = 0;    // includeInactive: inactive walls returned (positions from the cache / transform)
+    int fromCache = 0;   // ... of those, positions remembered from when the wall was active
 };
 
 // Worker thread (Setup). Idempotent and thread-safe; false + reason if the
@@ -47,6 +50,14 @@ bool Resolved();
 
 // Main thread. Appends every ACTIVE wall (intact and harmonized) to `out`.
 // Returns false only if the registry is unusable (layout mismatch).
-bool Collect(std::vector<Wall>& out, Stats* stats = nullptr);
+//
+// includeInactive: also the registered walls that are inactive. The Labyrinth's
+// walls all wake up (register) when its scene group loads, then every region
+// away from the player is proxied (its Root deactivated), so most walls are
+// registered but inactive. Their harmonized flag is the last one they had
+// (good enough for the full map); their position is the collider-bounds centre
+// remembered from when they were last active (a disabled collider has empty
+// bounds), else the transform position.
+bool Collect(std::vector<Wall>& out, Stats* stats = nullptr, bool includeInactive = false);
 
 }  // namespace sr2::modules::walls

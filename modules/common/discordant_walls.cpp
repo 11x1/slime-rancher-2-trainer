@@ -6,6 +6,7 @@
 #include <cmath>
 #include <format>
 #include <mutex>
+#include <unordered_map>
 
 #include "core/il2cpp_api.h"
 #include "core/resolver.h"
@@ -42,6 +43,9 @@ struct Syms {
 };
 
 Syms g_s;
+// Wall -> collider-bounds centre seen while it was active (main thread only). Walls live as long as their
+// scene; the map is dropped when the registry empties (scene group unloaded) and kept small otherwise.
+std::unordered_map<Il2CppObject*, Vec3> g_centres;
 std::mutex g_resolveMutex;
 std::atomic<int> g_state{0};  // 0 not tried, 1 ok, -1 failed
 std::string g_err;
@@ -135,7 +139,7 @@ bool Resolve(std::string& err) {
 
 bool Resolved() { return g_state.load() == 1; }
 
-bool Collect(std::vector<Wall>& out, Stats* stats) {
+bool Collect(std::vector<Wall>& out, Stats* stats, bool includeInactive) {
     if (!Resolved()) return false;
     const Syms& s = g_s;
     Stats st;
@@ -144,6 +148,7 @@ bool Collect(std::vector<Wall>& out, Stats* stats) {
     auto* data = static_cast<char*>(s.staticData(s.wall));
     Il2CppObject* list = data ? *reinterpret_cast<Il2CppObject**>(data + s.staticOff) : nullptr;
     if (!list) {
+        g_centres.clear();
         if (stats) *stats = st;
         return true;
     }
@@ -151,17 +156,30 @@ bool Collect(std::vector<Wall>& out, Stats* stats) {
     size_t n = core::unity::ListCount(list);
     if (n > 4096) return false;
     st.listed = static_cast<int>(n);
+    if (n == 0 || g_centres.size() > 4 * n + 64) g_centres.clear();
     for (size_t i = 0; i < n; ++i) {
         auto* w = static_cast<Il2CppObject*>(core::unity::ListAt(list, i));
         if (!Plausible(w) || !IsA(w, s.wall) || !core::unity::IsAlive(w)) continue;
         ++st.valid;
-        if (!s.activeAndEnabled.fn(w, s.activeAndEnabled.mi)) continue;
-        ++st.active;
         Wall wall;
+        wall.active = s.activeAndEnabled.fn(w, s.activeAndEnabled.mi);
+        if (!wall.active && !includeInactive) continue;
+        if (wall.active) ++st.active;
+        else ++st.inactive;
         float target = core::unity::Field<float>(w, s.offTarget);
         wall.intact = !(target >= 0.5f);  // NaN counts as intact
         bool placed = false;
-        if (s.haveCollider) {
+        if (!wall.active) {
+            auto it = g_centres.find(w);
+            if (it != g_centres.end()) {
+                wall.x = it->second.x;
+                wall.y = it->second.y;
+                wall.z = it->second.z;
+                placed = true;
+                ++st.fromCache;
+            }
+        }
+        if (!placed && s.haveCollider) {
             auto* col = core::unity::Field<Il2CppObject*>(w, s.offCollider);
             if (Plausible(col) && IsA(col, s.collider) && core::unity::IsAlive(col)) {
                 Bounds b = s.getBounds.fn(col, s.getBounds.mi);
@@ -171,6 +189,7 @@ bool Collect(std::vector<Wall>& out, Stats* stats) {
                     wall.z = b.center.z;
                     placed = true;
                     ++st.fromBounds;
+                    if (wall.active) g_centres[w] = b.center;
                 }
             }
         }
@@ -183,7 +202,7 @@ bool Collect(std::vector<Wall>& out, Stats* stats) {
             wall.y = p.y;
             wall.z = p.z;
         }
-        if (wall.intact) ++st.intact;
+        if (wall.intact && wall.active) ++st.intact;
         out.push_back(wall);
     }
     if (stats) *stats = st;
