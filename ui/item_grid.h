@@ -38,19 +38,28 @@ struct Tile {
 };
 
 inline constexpr int kGlyphOther = -1;  // Tab::glyph: three dots ("everything else")
+inline constexpr int kGlyphPin = -2;    // Tab::glyph: a push pin ("pinned")
 
 // An icon-only tab left of the search box.
 struct Tab {
     uint32_t icon = 0;       // item_icons id; 0 draws `glyph`
     int glyph = 0;           // fallback drawing: 0 = "all" (four squares), kGlyphOther = "other" (three dots),
-                             // else a letter (e.g. 'P')
+                             // kGlyphPin = a push pin, else a letter (e.g. 'R')
     ImU32 tint = 0;          // fallback glyph colour (0: text colour)
     std::string tip;         // tooltip (the tab has no title)
 };
 
+inline constexpr int kMaxTabs = 24;
+
 struct State {
     char search[64] = {};
     int tab = 0;             // selected tab (index into Options::tabs)
+    // The tab row as drawn last frame (PredictTab).
+    ImVec2 tabMin[kMaxTabs] = {}, tabMax[kMaxTabs] = {};
+    int tabCount = 0;
+    int tabFrame = -1;       // ImGui frame count of that draw
+    ImGuiID tabWindow = 0;   // the window the tabs were drawn in
+    bool predicted = false;  // PredictTab switched the tab this frame (Draw reports tabChanged)
 };
 
 struct Options {
@@ -93,8 +102,14 @@ int WheelStep(float wheel);
 bool Matches(const std::string& name, const char* needle);
 
 // The header row (tabs, search box, button) and the grid below it. The caller
-// filters tiles by State::tab itself (before calling, from the last frame's tab).
+// filters tiles by State::tab itself, before calling: call PredictTab first, so a
+// tab clicked this frame already filters this frame's tiles (else the old tab's
+// tiles show for one frame under the new tab). Tabs switch on the press.
 Result Draw(const char* id, const std::vector<Tile>& tiles, State& st, const Options& o);
+
+// A press on one of last frame's tab rectangles this frame (over the same window,
+// nothing in front of it): sets State::tab now. True if it switched.
+bool PredictTab(State& st);
 
 // One tile at the cursor (used for the vacpack slots too): background, accent,
 // icon or name, badge, amount. `hot` / `selected` change the frame. Pure

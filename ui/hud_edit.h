@@ -75,6 +75,10 @@ void Hover(float uiScale, bool allowed);
 // `alpha` fades the whole chip (lighter hints).
 float DrawKeycap(ImDrawList* dl, float x, float cy, const char* key, float uiScale, float alpha = 1.0f);
 float KeycapWidth(const char* key, float uiScale);
+// Several keys joined by '+' ("Ctrl+LMB", "Shift+Wheel"): one keycap per key with a
+// dim '+' between them. Same arguments as DrawKeycap; returns the width.
+float DrawKeyCombo(ImDrawList* dl, float x, float cy, const char* keys, float uiScale, float alpha = 1.0f);
+float KeyComboWidth(const char* keys, float uiScale);
 // Any thread. The last Hover had an element under the mouse or a press on one:
 // the overlay keeps the mouse from the game (press, drag, release).
 bool WantsMouse();
