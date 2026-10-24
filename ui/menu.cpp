@@ -1336,35 +1336,6 @@ float SbxRowStart(const char* label) {
     return x0;
 }
 
-void SandboxPlayer(const sbx::Snapshot& s, float w) {
-    const Palette& P = theme::Colors();
-    BeginCard("sbx_player", w);
-    CardHeading("Player", P.head);
-    const float avail = ImGui::GetContentRegionAvail().x, bw = U(84);
-    auto row = [&](const char* label, const std::string& value, const char* button, sbx::Op op, const char* tip) {
-        ImGui::PushID(label);
-        const float x0 = SbxRowStart(label);
-        ImGui::SameLine(x0 + std::floor(avail * 0.40f));
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.soft), "%s", value.c_str());
-        ImGui::SameLine(x0 + avail - bw);
-        if (ImGui::Button(button, ImVec2(bw, 0))) SbxRequest(op);
-        HoverTip(tip);
-        ImGui::PopID();
-    };
-    row("Health", std::format("{} / {}", s.health, s.maxHealth), "Refill", sbx::Op::RefillHealth,
-        "Set health to its maximum (PlayerState.SetHealth).");
-    row("Energy", std::format("{} / {}", s.energy, s.maxEnergy), "Refill", sbx::Op::RefillEnergy,
-        "Set energy to its maximum (PlayerState.SetEnergy).");
-    row("Radiation", std::to_string(s.rads), "Clear", sbx::Op::ClearRads, "Set radiation to 0 (PlayerState.SetRad).");
-    const float x0 = SbxRowStart("Infinite energy");
-    ImGui::SameLine(x0 + avail - U(kSwitchW));
-    if (Switch("##infenergy", s.infiniteEnergy)) SbxRequest(sbx::Op::InfiniteEnergy, s.infiniteEnergy ? 0 : 1);
-    HoverTip("Keeps energy at its maximum. For this session only: off again after a restart or when Sandbox is "
-             "turned off.");
-    EndCard();
-}
-
 // Tile accent per item kind: a quiet "rarity" colour along the tile's bottom edge.
 ImU32 KindAccent(sbx::Kind k) {
     switch (k) {
@@ -2390,7 +2361,7 @@ void SandboxStatus(const Host& h) {
     ImGui::PopTextWrapPos();
 }
 
-// "Extras" card (modules/sandbox/player_extras.cpp, sandbox_extras_bridge.h): infinite health, teleport to
+// Player-card extras (modules/sandbox/player_extras.cpp, sandbox_extras_bridge.h): infinite health, teleport to
 // the map marker and unlocking the ranch expansions (after a confirmation, it is a permanent save change).
 namespace sbxx = ::sr2::ui::sandbox::extras;
 constexpr const char* kSbxExpPopup = "##sandbox_expansions";
@@ -2442,36 +2413,65 @@ void SandboxExpansionsConfirm(const sbxx::State& st) {
     ImGui::PopStyleVar(2);
 }
 
-void SandboxExtras(const Host& h, float w) {
+void SandboxPlayer(const Host& h, const sbx::Snapshot& s, float w) {
     const Palette& P = theme::Colors();
+    BeginCard("sbx_player", w);
+    CardHeading("Player", P.head);
+    const float avail = ImGui::GetContentRegionAvail().x, bw = U(84);
+    auto row = [&](const char* label, const std::string& value, const char* button, sbx::Op op, const char* tip) {
+        ImGui::PushID(label);
+        const float x0 = SbxRowStart(label);
+        ImGui::SameLine(x0 + std::floor(avail * 0.40f));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.soft), "%s", value.c_str());
+        ImGui::SameLine(x0 + avail - bw);
+        if (ImGui::Button(button, ImVec2(bw, 0))) SbxRequest(op);
+        HoverTip(tip);
+        ImGui::PopID();
+    };
+    row("Health", std::format("{} / {}", s.health, s.maxHealth), "Refill", sbx::Op::RefillHealth,
+        "Set health to its maximum (PlayerState.SetHealth).");
+    row("Energy", std::format("{} / {}", s.energy, s.maxEnergy), "Refill", sbx::Op::RefillEnergy,
+        "Set energy to its maximum (PlayerState.SetEnergy).");
+    row("Radiation", std::to_string(s.rads), "Clear", sbx::Op::ClearRads, "Set radiation to 0 (PlayerState.SetRad).");
+    const float x0 = SbxRowStart("Infinite energy");
+    ImGui::SameLine(x0 + avail - U(kSwitchW));
+    if (Switch("##infenergy", s.infiniteEnergy)) SbxRequest(sbx::Op::InfiniteEnergy, s.infiniteEnergy ? 0 : 1);
+    HoverTip("Keeps energy at its maximum. For this session only: off again after a restart or when Sandbox is "
+             "turned off.");
+    // Infinite health and the two buttons come from the extras bridge (player_extras.cpp).
     const auto st = sbxx::Get();
-    BeginCard("sbx_extras", w);
-    CardHeading("Extras", P.head);
     if (!st || h.nowMs - st->tick > 3000) {
         DimText("Reading...");
         EndCard();
         return;
     }
-    const float avail = ImGui::GetContentRegionAvail().x;
-    const float x0 = SbxRowStart("Infinite health");
-    ImGui::SameLine(x0 + avail - U(kSwitchW));
+    const float x1 = SbxRowStart("Infinite health");
+    ImGui::SameLine(x1 + avail - U(kSwitchW));
     if (Switch("##infhealth", st->infiniteHealth)) sbxx::Request(sbxx::Op::InfiniteHealth, st->infiniteHealth ? 0 : 1);
     HoverTip(st->healthHook ? "Ignores all damage and keeps health at its maximum. For this session only: off again after "
                               "a restart or when Sandbox is turned off."
                             : "Keeps health at its maximum (refilled 10 times a second; a single hit bigger than your "
                               "maximum still knocks you out). For this session only.");
+    // Side by side when both labels fit in half the card, else one per row.
+    const char* kTeleport = "Teleport to waypoint";
+    const char* kUnlock = "Unlock ranch expansions";
     const float sp = ImGui::GetStyle().ItemSpacing.x;
-    const ImVec2 bs(std::floor((avail - sp) / 2), U(32));
+    const float half = std::floor((avail - sp) / 2);
+    const float need = std::max(ImGui::CalcTextSize(kTeleport).x, ImGui::CalcTextSize(kUnlock).x) +
+                       2 * ImGui::GetStyle().FramePadding.x;
+    const bool split = half >= need;
+    const ImVec2 bs(split ? half : avail, U(32));
     ImGui::BeginDisabled(!st->canTeleport);
-    if (ImGui::Button("Teleport to waypoint", bs)) sbxx::Request(sbxx::Op::TeleportToMarker);
+    if (ImGui::Button(kTeleport, bs)) sbxx::Request(sbxx::Op::TeleportToMarker);
     ImGui::EndDisabled();
     HoverTip(st->canTeleport ? "Moves you to the marker you placed on the map (onto the ground below it), with the "
                                "game's own teleport."
                              : st->teleportWhy);
-    ImGui::SameLine();
+    if (split) ImGui::SameLine();
     const bool canUnlock = st->lockedExpansions > 0;
     ImGui::BeginDisabled(!canUnlock);
-    if (ImGui::Button("Unlock ranch expansions", bs)) g_sbxExpConfirm = true;
+    if (ImGui::Button(kUnlock, bs)) g_sbxExpConfirm = true;
     ImGui::EndDisabled();
     HoverTip(canUnlock ? std::format("Opens the {} locked expansion(s) of your ranch as if bought (free). Asks first; "
                                      "the change is saved.",
@@ -2514,14 +2514,12 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
         SandboxStatus(h);
         return;
     }
-    // Newbucks | Player, Extras and the vacpack across both columns, then Spawner | Crafter.
+    // Newbucks | Player, the vacpack across both columns, then Spawner | Crafter.
     const float full = ImGui::GetContentRegionAvail().x, w = ColumnWidth();
     const float gapY = U(kGap) - ImGui::GetStyle().ItemSpacing.y;
     SandboxNewbucks(*snap, w);
     ImGui::SameLine(0, U(kGap));
-    SandboxPlayer(*snap, w);
-    ImGui::Dummy(ImVec2(0, gapY));
-    SandboxExtras(h, full);
+    SandboxPlayer(h, *snap, w);
     ImGui::Dummy(ImVec2(0, gapY));
     SandboxVacpack(*snap, full);
     ImGui::Dummy(ImVec2(0, gapY));
