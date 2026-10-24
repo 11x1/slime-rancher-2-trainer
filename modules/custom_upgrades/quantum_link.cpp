@@ -54,11 +54,14 @@
 //     GadgetDirector, and its ReferenceId added to the save's _reverseIndex with the Refinery Link's
 //     persistence id (checked every tick; the table is rebuilt when content is added). The
 //     GetPersistenceId detour maps it too (covers the moment between a rebuild and the next tick).
-//   * Fabricator: a card of its own right after the Refinery Link (GetItems detour). Fabricating it
+//   * Fabricator: a card of its own right after the Refinery Link (GadgetFabricateCategoryRuntime..ctor
+//     detour: GetItems is inlined there and has no native caller). Fabricating it
 //     (FabricateAndSpendCost detour, our definition only): the item's own CheckCanFabricate, Spend(our
 //     cost), AddItem(Refinery Link, n), kits += n. Never the vanilla path (it would AddItem our type).
-//   * HasBlueprint(ours) = kits > 0 and the Refinery Link blueprint (variant shown while a kit is left);
-//     the Fabricator helper's HasBlueprint(ours) = the Refinery Link blueprint (card unlocked with it).
+//   * HasBlueprint(ours) = kits > 0 and the card unlocked (variant shown while a kit is left); the
+//     Fabricator helper's HasBlueprint(ours) = the card unlocked: the Refinery Link blueprint, or the
+//     sidecar override "buildables.unlock.quantum_link" (buildables.h). get_ShouldShowPlaceholder is false
+//     for our cards (name and icon always shown; the description says what unlocks it).
 //     GetItemCount(ours) = min(kits, Refinery Links).
 //   * Placing (PlaceGadgetEvent detour): holding ours with a kit -> after the placement the new gadget's
 //     actor id goes into the sidecar list and a kit is used; without a kit the held gadget becomes the
@@ -128,7 +131,8 @@ constexpr const char* kTitle = "Quantum Storage Link";
 constexpr const char* kDescription =
     "A Refinery Link tuned to the Quantum Cloud. Ranch drones with the source \"Quantum Storage Link\" take "
     "items out of the Quantum Cloud here and bring them to their destination. Place it as the Refinery "
-    "Link's variant (each one uses a Quantum Storage Link you fabricated).";
+    "Link's variant (each one uses a Quantum Storage Link you fabricated). Unlocked with the Refinery Link blueprint.";
+constexpr const char* kUnlockHint = "Unlocked with the Refinery Link blueprint.";
 constexpr const char* kHolderPrefix = "sr2qlink#";
 constexpr const char* kMatTag = " [sr2q]";
 constexpr int kSlots = 8;            // storage slots per link (cloud types mirrored at once)
@@ -176,7 +180,8 @@ std::string Lower(std::string s) {
 using PersistFn = int32_t (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
 using HasBpFn = bool (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
 using CountFn = int32_t (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
-using ItemsFn = Il2CppObject* (*)(Il2CppObject*, Il2CppObject*, Il2CppObject*, const MethodInfo*);
+using RuntimeFn = void (*)(Il2CppObject*, Il2CppObject*, Il2CppObject*, Il2CppObject*, const MethodInfo*);
+using PlaceholderFn = bool (*)(Il2CppObject*, const MethodInfo*);
 using FabFn = int32_t (*)(Il2CppObject*, int32_t, const MethodInfo*);
 using PlaceFn = void (*)(Il2CppObject*, void*, const MethodInfo*);
 using PickupFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
@@ -186,7 +191,8 @@ PersistFn g_origPersist = nullptr;
 HasBpFn g_origHasBp = nullptr;
 HasBpFn g_origHelperBp = nullptr;
 CountFn g_origCount = nullptr;
-ItemsFn g_origItems = nullptr;
+RuntimeFn g_origRuntime = nullptr;
+PlaceholderFn g_origPlaceholder = nullptr;
 FabFn g_origFab = nullptr;
 PlaceFn g_origPlace = nullptr;
 PickupFn g_origPickup = nullptr;
@@ -223,6 +229,7 @@ struct Impl {
     size_t offSpawnFx = 0, offActiveFx = 0, offArriveFx = 0, offStationType = 0;
     size_t offScGame = 0, offScGadgetDir = 0, offScSpendable = 0, offScDrones = 0, offGcAutoSave = 0;
     size_t offAsdTranslation = 0, offSrtIdentTable = 0, offByIdent = 0, offGadgets = 0, offMembers = 0, offSubGroups = 0;
+    size_t offRtItems = 0, offRtCount = 0;  // FabricateCategoryRuntime`1 _itemList / _categoryCount
     // methods
     const MethodInfo* getRefinery = nullptr, *sceneInst = nullptr, *gameCtxInst = nullptr, *getRefId = nullptr;
     const MethodInfo* setHideFlags = nullptr, *objDestroy = nullptr, *objDestroyImmediate = nullptr;
@@ -236,7 +243,7 @@ struct Impl {
     const MethodInfo* spawnFx = nullptr, *rendGetMaterials = nullptr, *rendGetShared = nullptr, *rendSetShared = nullptr;
     const MethodInfo* matPropNames = nullptr, *matGetColor = nullptr, *matSetColor = nullptr, *matGetShader = nullptr;
     const MethodInfo* fabItemCtor = nullptr, *fabCheck = nullptr, *spend = nullptr, *addItem = nullptr;
-    const MethodInfo* setFavorite = nullptr, *setHeld = nullptr;
+    const MethodInfo* setFavorite = nullptr, *setHeld = nullptr, *hasBp = nullptr;
     using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
     using ArrayNewFn = Il2CppObject* (*)(Il2CppClass*, uintptr_t);
     using WBarrierFn = void (*)(Il2CppObject*, void**, void*);
@@ -281,6 +288,8 @@ struct Impl {
     // registration state
     const void* registeredDir = nullptr;
     bool loggedRegister = false, loggedAlias = false;
+    std::string cardState;  // last logged Fabricator card state (logged when it changes)
+    bool loggedNoDef = false;
 
     // links (main thread)
     struct RendRec {
@@ -423,6 +432,21 @@ struct Impl {
         }
     }
     void SetKits(int n) { host.setValue(kKitsKey, n > 0 ? std::to_string(n) : std::string()); }
+    // Sandbox override of the card's unlock (buildables.h), else the Refinery Link blueprint.
+    buildables::Unlock Override() { return buildables::ParseUnlock(host.value(buildables::UnlockKey(buildables::kQuantumLink))); }
+    bool CardUnlocked(const std::function<bool(Il2CppObject*)>& vanilla) {
+        switch (Override()) {
+            case buildables::Unlock::kUnlocked: return true;
+            case buildables::Unlock::kLocked: return false;
+            default: return base && vanilla(base);
+        }
+    }
+    // The vanilla GadgetDirector.HasBlueprint (through the detour, which passes vanilla definitions on).
+    bool BaseBlueprint() {
+        Il2CppObject* gd = SceneField(offScGadgetDir);
+        bool ok = false;
+        return unity::IsAlive(gd) && base && Value<bool>(Call(hasBp, gd, {base}, "GadgetDirector.HasBlueprint", &ok)) && ok;
+    }
     std::set<int64_t> Actors() {
         std::set<int64_t> out;
         std::stringstream ss(host.value(kActorsKey));
@@ -530,6 +554,7 @@ struct Impl {
     void Scan(double now);
     // ---- detour bodies ----
     void InsertItem(Il2CppObject* category, Il2CppObject* list, Il2CppObject* helper, Il2CppObject* factory);
+    void FixPageCount(Il2CppObject* runtime, Il2CppObject* category, int added);
     int32_t Fabricate(Il2CppObject* item, int32_t count);
     void OnTaken(Il2CppObject* storage, int slot, int32_t count);
     Il2CppObject* Sources(Il2CppObject* predicate, Il2CppObject* program);
@@ -560,9 +585,9 @@ bool HasBlueprintDetour(Il2CppObject* self, Il2CppObject* def, const MethodInfo*
     }
     if (!g || !g->armed || !def || def != g->ours) return g_origHasBp(self, def, mi);
     if (!main_thread::IsMainThread() || g->Faulted()) return false;
-    int kits = 0;
-    g_guard.Run([&] { kits = g->Kits(); });
-    return kits > 0 && g_origHasBp(self, g->base, mi);
+    bool r = false;
+    g_guard.Run([&] { r = g->Kits() > 0 && g->CardUnlocked([&](Il2CppObject* d) { return g_origHasBp(self, d, mi); }); });
+    return r;
 }
 
 bool HelperBlueprintDetour(Il2CppObject* self, Il2CppObject* def, const MethodInfo* mi) {
@@ -572,8 +597,11 @@ bool HelperBlueprintDetour(Il2CppObject* self, Il2CppObject* def, const MethodIn
         g_guard.Run([&] { r = e->HelperBlueprint(def, [&](Il2CppObject* d) { return g_origHelperBp(self, d, mi); }); });
         return r;
     }
-    if (g && g->armed && def && def == g->ours && g->base) return g_origHelperBp(self, g->base, mi);
-    return g_origHelperBp(self, def, mi);
+    if (!g || !g->armed || !def || def != g->ours || !g->base) return g_origHelperBp(self, def, mi);
+    if (!main_thread::IsMainThread() || g->Faulted()) return false;
+    bool r = false;
+    g_guard.Run([&] { r = g->CardUnlocked([&](Il2CppObject* d) { return g_origHelperBp(self, d, mi); }); });
+    return r;
 }
 
 int32_t ItemCountDetour(Il2CppObject* self, Il2CppObject* def, const MethodInfo* mi) {
@@ -590,12 +618,32 @@ int32_t ItemCountDetour(Il2CppObject* self, Il2CppObject* def, const MethodInfo*
     return std::min(n, kits);
 }
 
-Il2CppObject* GetItemsDetour(Il2CppObject* self, Il2CppObject* helper, Il2CppObject* factory, const MethodInfo* mi) {
-    Il2CppObject* list = g_origItems(self, helper, factory, mi);
-    if (!list || !g || !g->armed || !main_thread::IsMainThread() || g->Faulted()) return list;
-    if (g->ours) g_guard.Run([&] { g->InsertItem(self, list, helper, factory); });
-    if (variant_ext::Extension* e = Ext()) g_guard.Run([&] { e->InsertCards(self, list, helper, factory); });
-    return list;
+// GadgetFabricateCategoryRuntime..ctor(category, helper, recipeFactory): the Fabricator builds one per
+// category each time it opens (FabricatorCategoryList.FindCategoriesToShow; also the Sandbox's rebuild).
+// GadgetFabricateCategory.GetItems is INLINED there (no native caller at all in 1.3.0), so the cards go
+// into the runtime's own item list after the constructor.
+void RuntimeCtorDetour(Il2CppObject* self, Il2CppObject* category, Il2CppObject* helper, Il2CppObject* factory,
+                       const MethodInfo* mi) {
+    g_origRuntime(self, category, helper, factory, mi);
+    if (!self || !category || !g || !g->armed || !main_thread::IsMainThread() || g->Faulted()) return;
+    Il2CppObject* list = unity::Field<Il2CppObject*>(self, g->offRtItems);
+    if (!list) return;
+    const size_t before = unity::ListCount(list);
+    g_guard.Run([&] { g->InsertItem(category, list, helper, factory); });
+    if (variant_ext::Extension* e = Ext()) g_guard.Run([&] { e->InsertCards(category, list, helper, factory); });
+    const size_t after = unity::ListCount(list);
+    if (after > before) g_guard.Run([&] { g->FixPageCount(self, category, static_cast<int>(after - before)); });
+}
+
+// GadgetFabricatableItem.get_ShouldShowPlaceholder = "the base's pedia entry is not unlocked" (our
+// definitions share the base's pedia link). Our cards always show their name and icon, so the locked
+// card can say what unlocks it. Pointer compares only.
+bool PlaceholderDetour(Il2CppObject* self, const MethodInfo* mi) {
+    if (g && g->armed && self && g->offFabDef) {
+        Il2CppObject* def = unity::Field<Il2CppObject*>(self, g->offFabDef);
+        if (def && (def == g_ours.load(std::memory_order_acquire) || (Ext() && Ext()->Owns(def)))) return false;
+    }
+    return g_origPlaceholder(self, mi);
 }
 
 // Our card never runs the vanilla body (it would AddItem our definition into the saved inventory).
@@ -863,6 +911,13 @@ void Impl::Register() {
 // ---------------------------------------------------------------- fabricator --
 
 void Impl::InsertItem(Il2CppObject* category, Il2CppObject* list, Il2CppObject* helper, Il2CppObject* factory) {
+    if (!ours) {
+        if (!loggedNoDef) SR2_INFO("[{}] quantum link: Fabricator opened before the definition was built (it is built at the "
+                                   "first tick with a save loaded{}) - no Quantum Storage Link card this time", module,
+                                   defFailed ? "; building it FAILED, see above" : "");
+        loggedNoDef = true;
+        return;
+    }
     int32_t at = -1;
     const size_t n = unity::ListCount(list);
     for (size_t i = 0; i < n && i < 256; ++i) {
@@ -884,7 +939,38 @@ void Impl::InsertItem(Il2CppObject* category, Il2CppObject* list, Il2CppObject* 
     // Without a recipe CanBePinned is false; the card's cost display uses PurchaseCost (ours).
     SetRef(item, offFabRecipe, nullptr);
     Call(l.insert, list, {&at, item}, "Fabricator item list Insert", &ok);
-    if (ok) SR2_INFO("[{}] quantum link: Fabricator card added after the Refinery Link", module);
+    if (!ok) return;
+    // Why the card is locked / unlocked, logged when it changes.
+    const buildables::Unlock o = Override();
+    const bool bp = BaseBlueprint();
+    const bool unlocked = o == buildables::Unlock::kUnlocked || (o == buildables::Unlock::kFollowBase && bp);
+    const std::string state = std::format(
+        "{} ({}; Refinery Link blueprint {})", unlocked ? "unlocked" : "LOCKED",
+        o == buildables::Unlock::kUnlocked ? "Sandbox override: unlocked"
+        : o == buildables::Unlock::kLocked ? "Sandbox override: locked"
+                                           : "unlocked with the Refinery Link blueprint",
+        bp ? "owned" : "not owned");
+    if (state != cardState) {
+        cardState = state;
+        SR2_INFO("[{}] quantum link: Fabricator card added after the Refinery Link (Warp Tech, position {}): {}, {} kit(s)",
+                 module, at + 1, state, Kits());
+    }
+}
+
+// FabricateCategoryRuntime caches the category's member count (_categoryCount = TotalCount) at
+// construction: FabricatorItemGrid.SetCategory sizes its pages from it (pages = ceil(TotalCount / grid
+// size), 36 or 16) and the category title shows "unlocked / TotalCount". Raised by our cards only when
+// they would otherwise fall onto a page that does not exist; else the title stays the vanilla count.
+void Impl::FixPageCount(Il2CppObject* runtime, Il2CppObject* category, int added) {
+    if (!offRtCount || added <= 0) return;
+    int32_t& total = unity::Field<int32_t>(runtime, offRtCount);
+    const int32_t items = static_cast<int32_t>(unity::ListCount(unity::Field<void*>(runtime, offRtItems)));
+    auto pages = [](int32_t n, int32_t per) { return (n + per - 1) / per; };
+    if (items <= total) return;
+    if (pages(items, 36) == pages(total, 36) && pages(items, 16) == pages(total, 16)) return;
+    SR2_INFO("[{}] Fabricator category '{}': page count raised for {} mod card(s) ({} -> {} entries)", module,
+             unity::GetName(category), added, total, items);
+    total = items;
 }
 
 int32_t Impl::Fabricate(Il2CppObject* item, int32_t count) {
@@ -1564,6 +1650,7 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
     p->teleNodeClass = cls(kImage, "MonomiPark.SlimeRancher.World.Teleportation", "TeleporterNode");
     p->gadgetItemClass = cls(kImage, "MonomiPark.SlimeRancher.Player.PlayerItems", "GadgetItem");
     Il2CppClass* fabCategory = cls(kImage, kFab, "GadgetFabricateCategory");
+    Il2CppClass* fabRuntime = cls(kImage, kFab, "GadgetFabricateCategoryRuntime");
     Il2CppClass* helper = cls(kImage, kFab, "GadgetDirectorHelper");
     Il2CppClass* gadgetDir = cls(kImage, "", "GadgetDirector");
     Il2CppClass* gadgetsModel = cls(kImage, "MonomiPark.SlimeRancher.DataModel", "GadgetsModel");
@@ -1630,6 +1717,8 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
     off(p->fabItemClass, "<Definition>k__BackingField", p->offFabDef);
     off(p->fabItemClass, "<Recipe>k__BackingField", p->offFabRecipe);
     off(fabCategory, "_gadgetPurchaseEvent", p->offCatEvent);
+    off(fabRuntime, "_itemList", p->offRtItems);      // FabricateCategoryRuntime`1 fields (found through the parent)
+    off(fabRuntime, "_categoryCount", p->offRtCount);
     off(cloudModel, "_amounts", p->offAmounts);
     off(p->cloudCtrlClass, "_spawnFX", p->offSpawnFx);
     off(p->teleNodeClass, "_activeFX", p->offActiveFx);
@@ -1704,13 +1793,15 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
     const MethodInfo* hasBpMi = method(gadgetDir, "HasBlueprint", 1);
     const MethodInfo* helperBpMi = suffix(helper, ".HasBlueprint", 1);
     const MethodInfo* countMi = method(gadgetDir, "GetItemCount", 1);
-    const MethodInfo* itemsMi = R.Method(fabCategory, "GetItems", 2, nullptr);
+    const MethodInfo* runtimeMi = R.Method(fabRuntime, ".ctor", 3, nullptr);
+    const MethodInfo* placeholderMi = method(p->fabItemClass, "get_ShouldShowPlaceholder", 0);
     const MethodInfo* fabMi = suffix(p->fabItemClass, ".FabricateAndSpendCost", 1);
     const MethodInfo* placeMi = method(p->gadgetItemClass, "PlaceGadgetEvent", 1);
     const MethodInfo* pickupMi = method(p->gadgetItemClass, "PickupGadget", 1);
     const MethodInfo* variantMi = method(p->gadgetClass, "ChangeVariant", 2);
     const MethodInfo* decMi = method(p->storageMetaClass, "Decrement", 1);
-    if (!itemsMi && why.empty()) why = "GadgetFabricateCategory.GetItems(2) not found";
+    if (!runtimeMi && why.empty()) why = "GadgetFabricateCategoryRuntime..ctor(3) not found";
+    p->hasBp = hasBpMi;
     if (!why.empty()) return fail();
 
     struct H {
@@ -1726,7 +1817,10 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
         {"GadgetDirectorHelper.HasBlueprint", helperBpMi, reinterpret_cast<void*>(&HelperBlueprintDetour),
          reinterpret_cast<void**>(&g_origHelperBp)},
         {"GadgetDirector.GetItemCount", countMi, reinterpret_cast<void*>(&ItemCountDetour), reinterpret_cast<void**>(&g_origCount)},
-        {"GadgetFabricateCategory.GetItems", itemsMi, reinterpret_cast<void*>(&GetItemsDetour), reinterpret_cast<void**>(&g_origItems)},
+        {"GadgetFabricateCategoryRuntime..ctor", runtimeMi, reinterpret_cast<void*>(&RuntimeCtorDetour),
+         reinterpret_cast<void**>(&g_origRuntime)},
+        {"GadgetFabricatableItem.get_ShouldShowPlaceholder", placeholderMi, reinterpret_cast<void*>(&PlaceholderDetour),
+         reinterpret_cast<void**>(&g_origPlaceholder)},
         {"GadgetFabricatableItem.FabricateAndSpendCost", fabMi, reinterpret_cast<void*>(&FabricateDetour),
          reinterpret_cast<void**>(&g_origFab)},
         {"GadgetItem.PlaceGadgetEvent", placeMi, reinterpret_cast<void*>(&PlaceDetour), reinterpret_cast<void**>(&g_origPlace)},
@@ -1864,6 +1958,60 @@ Il2CppObject* SourceIcon() {
     if (!g || !g->base) return nullptr;
     Il2CppObject* icon = unity::Field<Il2CppObject*>(g->base, g->offIcon);
     return unity::IsAlive(icon) ? icon : nullptr;
+}
+
+bool Describe(buildables::Info& out) {
+    if (!g || !g->armed || !g->ours || !main_thread::IsMainThread() || g->Faulted()) return false;
+    Impl& p = *g;
+    out = {};
+    out.id = buildables::kQuantumLink;
+    out.name = kTitle;
+    out.base = "Refinery Link";
+    out.baseAsset = unity::GetName(p.base);
+    out.hint = kUnlockHint;
+    out.def = p.ours;
+    out.baseDef = p.base;
+    out.icon = SourceIcon();
+    g_guard.Run([&] {
+        out.unlock = p.Override();
+        out.baseUnlocked = p.BaseBlueprint();
+        out.unlocked = out.unlock == buildables::Unlock::kUnlocked ||
+                       (out.unlock == buildables::Unlock::kFollowBase && out.baseUnlocked);
+        out.owned = p.Kits();
+    });
+    return true;
+}
+
+bool Grant(int count, std::string& result) {
+    if (!g || !g->armed || !main_thread::IsMainThread() || g->Faulted()) {
+        result = "the Quantum Storage Link is not available";
+        return false;
+    }
+    Impl& p = *g;
+    if (!p.ours || !p.host.saveReady || !p.host.saveReady()) {
+        result = "load a save first (the Quantum Storage Link is set up at the first tick of a loaded save)";
+        return false;
+    }
+    count = std::clamp(count, 1, 999);
+    bool ok = false;
+    g_guard.Run([&] {
+        Il2CppObject* gd = p.SceneField(p.offScGadgetDir);
+        if (!unity::IsAlive(gd)) {
+            result = "no GadgetDirector";
+            return;
+        }
+        bool called = false;
+        const int32_t added = Impl::Value<int32_t>(p.Call(p.addItem, gd, {p.base, &count}, "GadgetDirector.AddItem", &called));
+        if (!called) {
+            result = "GadgetDirector.AddItem failed (see the log)";
+            return;
+        }
+        const int kits = p.Kits() + count;
+        p.SetKits(kits);
+        ok = true;
+        result = std::format("{} Quantum Storage Link(s): {} Refinery Link(s) added, {} kit(s) now", count, added, kits);
+    });
+    return ok;
 }
 
 }  // namespace sr2::modules::custom_upgrades::quantum

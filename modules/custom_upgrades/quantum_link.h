@@ -24,6 +24,8 @@
 #include <functional>
 #include <string>
 
+#include "modules/custom_upgrades/buildables.h"
+
 struct Il2CppObject;
 
 namespace sr2::core {
@@ -72,5 +74,11 @@ Il2CppObject* Sources(Il2CppObject* predicate, Il2CppObject* program);
 bool IsOurs(Il2CppObject* def);
 // The Quantum Storage Link gadget's icon (a Sprite) once known, else nullptr.
 Il2CppObject* SourceIcon();
+
+// ---- for buildables.cpp (main thread) ----
+// Fills `out` (id kQuantumLink) once the definition is built; false before.
+bool Describe(buildables::Info& out);
+// `count` Refinery Links into the inventory and `count` kits (as fabricating, free).
+bool Grant(int count, std::string& result);
 
 }  // namespace sr2::modules::custom_upgrades::quantum

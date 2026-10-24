@@ -137,13 +137,14 @@ constexpr VariantSpec kBoothSpec[] = {
     {"SlimeDJBooth", "Slime DJ Booth",
      "A DJ table with a mixer and two speakers that play your Slime DJ song. A slime can sit on the flower pillow "
      "behind the table. Place it as the Scientist Desk's variant (each one uses a DJ Booth you fabricated); it is "
-     "saved as a Scientist Desk.",
+     "saved as a Scientist Desk. Unlocked with the Scientist Desk blueprint.",
      0.0f},
 };
 constexpr VariantSpec kSpeakerSpec[] = {
     {"SlimeDJSpeaker", "DJ Speaker",
      "A speaker that plays your Slime DJ song. Other decorations and speakers stack on top of it. Toggle the variant "
-     "to tilt it; place it as the Boombox's variant (each one uses a DJ Speaker you fabricated). Saved as a Boombox.",
+     "to tilt it; place it as the Boombox's variant (each one uses a DJ Speaker you fabricated). Saved as a Boombox. "
+     "Unlocked with the Boombox blueprint.",
      0.0f},
     {"SlimeDJSpeakerTilted", "DJ Speaker (tilted)",
      "A DJ Speaker leaning back, for stacks and stages. Plays your Slime DJ song. Saved as a Boombox.", 30.0f},
@@ -153,13 +154,15 @@ constexpr VariantSpec kSpeakerSpec[] = {
 constexpr VariantSpec kRadioSpec = {
     "SlimeDJRadio", "Slime Radio",
     "A radio toy that plays your Slime DJ song wherever it is - slimes love to play with it. Fabricating one drops "
-    "it in front of you. It is a Night Light toy for the save.",
+    "it in front of you. It is a Night Light toy for the save. Unlocked with the Boombox blueprint.",
     0.0f};
 
 struct Family {
     const char* label;
     const char* kitsKey;
     const char* actorsKey;
+    const char* id;        // buildables.h id (sidecar override key)
+    const char* baseName;  // the vanilla base's display name (unlock hint)
     Il2CppObject* base = nullptr;          // vanilla definition
     std::vector<Il2CppObject*> defs;       // our definitions (variants; radio: the card)
     Color c1{}, c2{};
@@ -189,7 +192,7 @@ struct Impl : variant_ext::Extension {
     Il2CppClass* fabItemClass = nullptr, *gameObjectClass = nullptr, *monoClass = nullptr, *colliderClass = nullptr;
     Il2CppClass* rigidbodyClass = nullptr, *jointClass = nullptr, *animatorClass = nullptr, *musicPlayerClass = nullptr;
     // offsets
-    size_t offLocName = 0, offPrefab = 0, offRefId = 0, offHashInit = 0, offDesc = 0, offCosts = 0, offVariantOf = 0;
+    size_t offLocName = 0, offPrefab = 0, offIcon = 0, offRefId = 0, offHashInit = 0, offDesc = 0, offCosts = 0, offVariantOf = 0;
     size_t offGrad1 = 0, offGrad2 = 0, offLinked = 0, offPcCurrency = 0, offPcIdent = 0, offCostAmount = 0;
     size_t offVariantMap = 0, offGdModel = 0, offFavorites = 0, offTargeted = 0;
     size_t offHeld = 0, offLastPlaced = 0, offGadgetModel = 0, offGmTransform = 0, offAmTransform = 0, offActorId = 0;
@@ -208,7 +211,7 @@ struct Impl : variant_ext::Extension {
     const MethodInfo* goActiveSelf = nullptr, *animSetBool = nullptr;
     const MethodInfo* fabItemCtor = nullptr, *fabCheck = nullptr, *spend = nullptr, *addItem = nullptr;
     const MethodInfo* setFavorite = nullptr, *setHeld = nullptr, *instantiateActor = nullptr, *currentGroup = nullptr;
-    const MethodInfo* actorIdOf = nullptr;
+    const MethodInfo* actorIdOf = nullptr, *hasBp = nullptr;
     FieldInfo* animHashField = nullptr;
     using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
     using WBarrierFn = void (*)(Il2CppObject*, void**, void*);
@@ -219,9 +222,9 @@ struct Impl : variant_ext::Extension {
 
     // session objects (pinned, never freed)
     Family fams[kFamCount] = {
-        {"DJ Booth", "dj.booth_kits", "dj.booths"},
-        {"DJ Speaker", "dj.speaker_kits", "dj.speakers"},
-        {"Slime Radio", nullptr, kRadiosKey},
+        {"DJ Booth", "dj.booth_kits", "dj.booths", buildables::kDjBooth, "Scientist Desk"},
+        {"DJ Speaker", "dj.speaker_kits", "dj.speakers", buildables::kDjSpeaker, "Boombox"},
+        {"Slime Radio", nullptr, kRadiosKey, buildables::kSlimeRadio, "Boombox"},
     };
     Il2CppObject* boomboxPrefab = nullptr, *pillowPrefab = nullptr, *toyDef = nullptr, *toyPrefab = nullptr;
     bool defsBuilt = false, defsFailed = false, loggedWait = false;
@@ -240,7 +243,8 @@ struct Impl : variant_ext::Extension {
     ListMethods variantList, itemList;
     const void* registeredDir = nullptr;
     std::set<std::string> aliased;
-    bool loggedNoVariantEntry = false, loggedCards = false;
+    bool loggedNoVariantEntry = false, loggedNoDefs = false;
+    std::string cardState[kFamCount];  // last logged Fabricator card state per family (logged when it changes)
 
     // dressed actors
     struct Rec {
@@ -421,6 +425,23 @@ struct Impl : variant_ext::Extension {
     void SetKits(int f, int n) {
         if (fams[f].kitsKey) host.setValue(fams[f].kitsKey, n > 0 ? std::to_string(n) : std::string());
     }
+    // Sandbox override of family f's card (buildables.h), else the base's blueprint.
+    buildables::Unlock Override(int f) { return buildables::ParseUnlock(host.value(buildables::UnlockKey(fams[f].id))); }
+    bool CardUnlocked(int f, const std::function<bool(Il2CppObject*)>& vanilla) {
+        switch (Override(f)) {
+            case buildables::Unlock::kUnlocked: return true;
+            case buildables::Unlock::kLocked: return false;
+            default: return fams[f].base && vanilla(fams[f].base);
+        }
+    }
+    // The vanilla GadgetDirector.HasBlueprint (through the quantum detour, which passes vanilla definitions on).
+    bool BaseBlueprint(int f) {
+        Il2CppObject* gd = SceneField(offScGadgetDir);
+        bool ok = false;
+        return unity::IsAlive(gd) && fams[f].base &&
+               Value<bool>(Call(hasBp, gd, {fams[f].base}, "GadgetDirector.HasBlueprint", &ok)) && ok;
+    }
+    std::string Hint(int f) const { return std::format("Unlocked with the {} blueprint.", fams[f].baseName); }
     std::map<int64_t, int> Actors(int f) {  // actor id -> kind
         std::map<int64_t, int> out;
         std::stringstream ss(host.value(fams[f].actorsKey));
@@ -737,14 +758,14 @@ void Impl::Register() {
 
 bool Impl::HasBlueprint(Il2CppObject* def, const std::function<bool(Il2CppObject*)>& vanilla) {
     const int f = FamOf(def);
-    if (f < 0 || f == kRadio) return f == kRadio && vanilla(fams[kRadio].base);
-    if (!vanilla(fams[f].base)) return false;
+    if (f < 0 || !CardUnlocked(f, vanilla)) return false;
+    if (f == kRadio) return true;
     return Kits(f) > 0 || TargetListed(f);
 }
 
 bool Impl::HelperBlueprint(Il2CppObject* def, const std::function<bool(Il2CppObject*)>& vanilla) {
     const int f = FamOf(def);
-    return f >= 0 && vanilla(fams[f].base);
+    return f >= 0 && CardUnlocked(f, vanilla);
 }
 
 int32_t Impl::ItemCount(Il2CppObject* def, int32_t vanilla) {
@@ -755,14 +776,25 @@ int32_t Impl::ItemCount(Il2CppObject* def, int32_t vanilla) {
 }
 
 void Impl::InsertCards(Il2CppObject* category, Il2CppObject* list, Il2CppObject* helper, Il2CppObject* factory) {
-    if (!defsBuilt) return;
-    // (card definition, the vanilla definition it follows)
-    std::vector<std::pair<Il2CppObject*, Il2CppObject*>> cards;
-    if (!fams[kBooth].defs.empty()) cards.emplace_back(fams[kBooth].defs[0], fams[kBooth].base);
-    if (!fams[kSpeaker].defs.empty()) cards.emplace_back(fams[kSpeaker].defs[0], fams[kSpeaker].base);
-    if (!fams[kRadio].defs.empty() && !fams[kSpeaker].defs.empty()) cards.emplace_back(fams[kRadio].defs[0], fams[kSpeaker].defs[0]);
-    int added = 0;
-    for (const auto& [def, after] : cards) {
+    if (!defsBuilt) {
+        if (!loggedNoDefs) SR2_INFO("[{}] dj buildables: Fabricator opened before the definitions were built (built at the "
+                                    "first tick with a save loaded{}) - no DJ cards this time", module,
+                                    defsFailed ? "; building them FAILED, see above" : "");
+        loggedNoDefs = true;
+        return;
+    }
+    // (family, card definition, the vanilla definition it follows)
+    struct Card {
+        int fam;
+        Il2CppObject* def;
+        Il2CppObject* after;
+    };
+    std::vector<Card> cards;
+    if (!fams[kBooth].defs.empty()) cards.push_back({kBooth, fams[kBooth].defs[0], fams[kBooth].base});
+    if (!fams[kSpeaker].defs.empty()) cards.push_back({kSpeaker, fams[kSpeaker].defs[0], fams[kSpeaker].base});
+    if (!fams[kRadio].defs.empty() && !fams[kSpeaker].defs.empty())
+        cards.push_back({kRadio, fams[kRadio].defs[0], fams[kSpeaker].defs[0]});
+    for (const auto& [fam, def, after] : cards) {
         int32_t at = -1;
         bool present = false;
         for (size_t i = 0, n = unity::ListCount(list); i < n && i < 256; ++i) {
@@ -781,11 +813,23 @@ void Impl::InsertCards(Il2CppObject* category, Il2CppObject* list, Il2CppObject*
         if (!item || !ok || !l.insert) continue;
         SetRef(item, offFabRecipe, nullptr);  // no pinned recipe: RecipeFactory would build the base's (quantum_link.cpp)
         Call(l.insert, list, {&at, item}, "Fabricator item list Insert", &ok);
-        if (ok) ++added;
-    }
-    if (added && !loggedCards) {
-        loggedCards = true;
-        SR2_INFO("[{}] dj buildables: {} Fabricator card(s) added (Decorations)", module, added);
+        if (!ok) continue;
+        // Why the card is locked / unlocked, logged when it changes.
+        const buildables::Unlock o = Override(fam);
+        const bool bp = BaseBlueprint(fam);
+        const bool unlocked = o == buildables::Unlock::kUnlocked || (o == buildables::Unlock::kFollowBase && bp);
+        const std::string why = o == buildables::Unlock::kUnlocked ? std::string("Sandbox override: unlocked")
+                                : o == buildables::Unlock::kLocked ? std::string("Sandbox override: locked")
+                                                                   : std::format("unlocked with the {} blueprint", fams[fam].baseName);
+        const std::string state = std::format("{} ({}; {} blueprint {})", unlocked ? "unlocked" : "LOCKED", why,
+                                              fams[fam].baseName, bp ? "owned" : "not owned");
+        if (state != cardState[fam]) {
+            cardState[fam] = state;
+            const std::string owned = fam == kRadio ? std::format("{} radio(s) in the save", Actors(kRadio).size())
+                                                    : std::format("{} kit(s)", Kits(fam));
+            SR2_INFO("[{}] dj buildables: Fabricator card '{}' added after '{}' (position {}): {}, {}", module,
+                     fams[fam].label, unity::GetName(after), at + 1, state, owned);
+        }
     }
 }
 
@@ -1426,6 +1470,7 @@ bool DjBuildables::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& 
     if (!why.empty()) return fail();
     off(p->identTypeClass, "localizedName", p->offLocName);
     off(p->identTypeClass, "prefab", p->offPrefab);
+    off(p->identTypeClass, "icon", p->offIcon);
     off(p->identTypeClass, "referenceId", p->offRefId);
     off(p->identTypeClass, "initializedHashId", p->offHashInit);
     off(p->gadgetDefClass, "_localizedDescription", p->offDesc);
@@ -1503,6 +1548,7 @@ bool DjBuildables::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& 
     }
     p->spend = byParams(spendable, "Spend", {"MonomiPark.SlimeRancher.Economy.PurchaseCost", "System.Int32"});
     p->addItem = byParams(gadgetDir, "AddItem", {"IdentifiableType", "System.Int32"});
+    p->hasBp = method(gadgetDir, "HasBlueprint", 1);
     p->setFavorite = method(gadgetsModel, "SetFavorite", 2);
     p->setHeld = method(p->gadgetItemClass, "SetHeldGadget", 1);
     p->instantiateActor = method(helpers, "InstantiateActor", 10);
@@ -1602,5 +1648,77 @@ void DjBuildables::Reset() {
 }
 
 bool Owns(Il2CppObject* def) { return TableIndex(def) >= 0; }
+
+void Describe(std::vector<buildables::Info>& out) {
+    if (!g || !g->defsBuilt || !main_thread::IsMainThread() || g->Faulted()) return;
+    Impl& p = *g;
+    g_guard.Run([&] {
+        for (int f = 0; f < kFamCount; ++f) {
+            if (p.fams[f].defs.empty()) continue;
+            buildables::Info i;
+            i.id = p.fams[f].id;
+            i.name = p.fams[f].label;
+            i.base = p.fams[f].baseName;
+            i.baseAsset = unity::GetName(p.fams[f].base);
+            i.hint = p.Hint(f);
+            i.def = p.fams[f].defs[0];
+            i.baseDef = p.fams[f].base;
+            Il2CppObject* icon = p.offIcon ? unity::Field<Il2CppObject*>(p.fams[f].base, p.offIcon) : nullptr;
+            i.icon = unity::IsAlive(icon) ? icon : nullptr;
+            i.unlock = p.Override(f);
+            i.baseUnlocked = p.BaseBlueprint(f);
+            i.unlocked = i.unlock == buildables::Unlock::kUnlocked ||
+                         (i.unlock == buildables::Unlock::kFollowBase && i.baseUnlocked);
+            i.owned = f == kRadio ? static_cast<int>(p.Actors(kRadio).size()) : p.Kits(f);
+            out.push_back(std::move(i));
+        }
+    });
+}
+
+bool Grant(const std::string& id, int count, std::string& result) {
+    if (!g || !main_thread::IsMainThread() || g->Faulted()) {
+        result = "the Slime DJ buildables are not available";
+        return false;
+    }
+    Impl& p = *g;
+    int f = -1;
+    for (int i = 0; i < kFamCount; ++i)
+        if (id == p.fams[i].id) f = i;
+    if (f < 0 || !p.defsBuilt || p.fams[f].defs.empty() || !p.host.saveReady || !p.host.saveReady()) {
+        result = f < 0 ? "unknown buildable"
+                       : "load a save first (the DJ buildables are set up at the first tick of a loaded save)";
+        return false;
+    }
+    if (f == kRadio) {
+        const int n = std::clamp(count, 1, kMaxRadioSpawn);
+        main_thread::Post([n] {  // as the Fabricator does: spawned and listed on the next frame
+            if (g) g_guard.Run([&] { g->SpawnRadios(n); });
+        });
+        result = std::format("{} Slime Radio(s) spawning in front of you", n);
+        return true;
+    }
+    count = std::clamp(count, 1, 999);
+    bool ok = false;
+    g_guard.Run([&] {
+        Il2CppObject* gd = p.SceneField(p.offScGadgetDir);
+        if (!unity::IsAlive(gd)) {
+            result = "no GadgetDirector";
+            return;
+        }
+        bool called = false;
+        const int32_t added =
+            Impl::Value<int32_t>(p.Call(p.addItem, gd, {p.fams[f].base, &count}, "GadgetDirector.AddItem", &called));
+        if (!called) {
+            result = "GadgetDirector.AddItem failed (see the log)";
+            return;
+        }
+        const int kits = p.Kits(f) + count;
+        p.SetKits(f, kits);
+        ok = true;
+        result = std::format("{} {}(s): {} '{}' added, {} kit(s) now", count, p.fams[f].label, added,
+                             unity::GetName(p.fams[f].base), kits);
+    });
+    return ok;
+}
 
 }  // namespace sr2::modules::custom_upgrades::dj

@@ -3,7 +3,8 @@
 //
 // The Quantum Storage Link (quantum_link.cpp) owns the hooks that make a runtime GadgetDefinition
 // clone save-safe: SaveReferenceTranslation.GetPersistenceId, GadgetDirector.HasBlueprint /
-// GetItemCount, GadgetDirectorHelper.HasBlueprint, GadgetFabricateCategory.GetItems,
+// GetItemCount, GadgetDirectorHelper.HasBlueprint, GadgetFabricateCategoryRuntime..ctor (the
+// Fabricator's item list; GetItems is inlined there), GadgetFabricatableItem.get_ShouldShowPlaceholder,
 // GadgetFabricatableItem.FabricateAndSpendCost, GadgetItem.PlaceGadgetEvent / PickupGadget and
 // Gadget.ChangeVariant. MinHook allows one hook per address, so other clones (the Slime DJ buildables,
 // dj_buildables.cpp) plug into those detours through this interface instead of hooking again. Each
@@ -40,7 +41,8 @@ public:
     virtual bool HelperBlueprint(Il2CppObject* def, const std::function<bool(Il2CppObject*)>& vanilla) = 0;
     // GadgetDirector.GetItemCount(def); `vanilla` = the original's answer.
     virtual int32_t ItemCount(Il2CppObject* def, int32_t vanilla) = 0;
-    // After GadgetFabricateCategory.GetItems built `list` (any category; the quantum card is in already).
+    // After GadgetFabricateCategoryRuntime..ctor built its item `list` for `category` (any category; the
+    // quantum card is in already). Fabricator cards also get get_ShouldShowPlaceholder = false for Owns().
     virtual void InsertCards(Il2CppObject* category, Il2CppObject* list, Il2CppObject* helper, Il2CppObject* factory) = 0;
     // GadgetFabricatableItem.FabricateAndSpendCost for an owned card definition (never the original).
     virtual int32_t Fabricate(Il2CppObject* item, Il2CppObject* def, int32_t count) = 0;
