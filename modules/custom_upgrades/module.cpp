@@ -563,6 +563,8 @@ public:
     void OnLoad(Il2CppObject* asd, const void* identifier);
     void AfterLoad(Il2CppObject* asd);
     void OnNewGame();
+    bool BeforePlotReplaced(Il2CppObject* location, Il2CppObject* oldPlot, std::string& id, int32_t& oldType);
+    void OnPlotReplaced(const std::string& id, int32_t oldType, Il2CppObject* newObj);
     void ResetState(const char* why);
     void FrameCheck(float dt);
     void GateTick();
@@ -882,6 +884,29 @@ void RebuildDetour(Il2CppObject* root, const MethodInfo* mi) {
     if (run && g_self->On()) g_rebuildGuard.Run([&] { g_self->AfterMenuUpdate(root); });
 }
 
+// LandPlotLocation.Replace(oldPlot, prefab) (0x871E60): the only path that swaps the plot at a
+// location - buying a plot on an empty one (LandPlotUIRoot.BuyPlot) and demolishing (the demolish
+// closure buys the empty plot through BuyPlot). The old LandPlot is destroyed, its model unregistered
+// and a NEW LandPlotModel registered under the same LandPlotLocation._id, so every custom upgrade of
+// the old plot goes with it (the vanilla upgrades are gone with the old model). Before this hook only
+// a rebuild as another TYPE dropped them (OwnsKey); a silo demolished and rebuilt as a silo kept its
+// Silo Capacity tiers, a corral its Music Box II.
+using ReplaceFn = Il2CppObject* (*)(Il2CppObject*, Il2CppObject*, Il2CppObject*, const MethodInfo*);
+ReplaceFn g_origReplace = nullptr;
+sr2::core::DetourGuard g_replaceGuard{kModule, "LandPlotLocation.Replace"};
+
+Il2CppObject* ReplaceDetour(Il2CppObject* location, Il2CppObject* oldPlot, Il2CppObject* prefab, const MethodInfo* mi) {
+    // id and old type are read before the original: it detaches the old plot and destroys it.
+    std::string id;
+    int32_t oldType = -1;
+    bool known = false;
+    if (g_self && location && g_self->On())
+        g_replaceGuard.Run([&] { known = g_self->BeforePlotReplaced(location, oldPlot, id, oldType); });
+    Il2CppObject* r = g_origReplace(location, oldPlot, prefab, mi);
+    if (known && g_self->On()) g_replaceGuard.Run([&] { g_self->OnPlotReplaced(id, oldType, r); });
+    return r;
+}
+
 Il2CppObject* SaveImplDetour(Il2CppObject* self, bool ignoreDebug, Il2CppObject* modify, const MethodInfo* mi) {
     const bool on = g_self && g_self->On();
     if (on) g_saveGuard.Run([&] { g_self->BeforeSave(); });
@@ -1044,6 +1069,40 @@ void CustomUpgrades::AfterLoad(Il2CppObject* asd) {
     std::string game;
     unsigned long long n = 0;
     if (CurrentMetadata(asd, game, n) && game == pendingLoadGame_) pendingLoadNumber_ = n;
+}
+
+bool CustomUpgrades::BeforePlotReplaced(Il2CppObject* location, Il2CppObject* oldPlot, std::string& id,
+                                        int32_t& oldType) {
+    if (!main_thread::IsMainThread() || !unity::IsAlive(location) || !IsA(location, locationClass_)) return false;
+    id = unity::ToUtf8(unity::Field<Il2CppString*>(location, offLocationId_));
+    oldType = unity::IsAlive(oldPlot) && IsA(oldPlot, plotClass_) ? PlotType(oldPlot) : -1;
+    return !id.empty();
+}
+
+// A plot was demolished (or an empty plot built on): drop everything stored for that location id -
+// owned tiers / world upgrades, Hen Collector contents and limits, per-plot values of other modules
+// (sell_upgrades' remembered Ash Trough fill). Props, the Sell-All button and the Hen Collector clone
+// were children of the old plot and are destroyed with it; the next ~1 Hz tick sees a bare plot. In
+// memory only, like the vanilla demolish: the sidecar of the loaded .sav is written with the next game
+// save, so reloading without saving brings back the plot AND its custom upgrades together.
+void CustomUpgrades::OnPlotReplaced(const std::string& id, int32_t oldType, Il2CppObject* newObj) {
+    if (!EnsureLoaded()) return;
+    raisedCap_.erase(id);  // the new silo (if any) is a fresh object with the vanilla capacity
+    auto it = state_.plots.find(id);
+    if (it == state_.plots.end()) {
+        SR2_INFO("[{}] plot '{}' replaced (old type {}): no custom upgrade state to drop", kModule, id, oldType);
+        return;
+    }
+    std::string owned, values;
+    for (const std::string& k : it->second.owned) owned += (owned.empty() ? "" : ", ") + k;
+    for (const auto& [k, v] : it->second.values) values += (values.empty() ? "" : ", ") + k;
+    const int hens = HenCount(it->second);
+    SR2_INFO("[{}] plot '{}' demolished / replaced (old type {}, stored type {}{}): dropped owned [{}], values [{}]{}",
+             kModule, id, oldType, it->second.type, unity::IsAlive(newObj) ? "" : ", no new plot object", owned, values,
+             hens > 0 ? std::format(", {} chicken(s) in the Hen Collector lost with it", hens) : std::string());
+    state_.plots.erase(it);
+    Bump();
+    tierCache_.clear();
 }
 
 void CustomUpgrades::OnNewGame() {
@@ -3100,6 +3159,18 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         else
             SR2_WARN("[{}] ListUIRoot.RebuildUI not hooked ({}) - the plot menu updates its custom items only when "
                      "it is opened again", kModule, err.empty() ? "not found" : err);
+    }
+    // Demolish / plot swap (optional: without it a plot rebuilt as the same type keeps its tiers).
+    {
+        std::string err;
+        const MethodInfo* replaceMi = R.Method(locationClass_, "Replace", 2, &err);
+        void* p = replaceMi ? R.MethodPointer(replaceMi, &err) : nullptr;
+        if (p && ctx.HookAddress("LandPlotLocation.Replace", p, reinterpret_cast<void*>(&ReplaceDetour),
+                                 reinterpret_cast<void**>(&g_origReplace)))
+            report += std::format(" LandPlotLocation.Replace@0x{:X}", Resolver::Rva(p));
+        else
+            SR2_WARN("[{}] LandPlotLocation.Replace not hooked ({}) - a plot demolished and rebuilt as the same type "
+                     "keeps its custom upgrades", kModule, err.empty() ? "not found" : err);
     }
     if (detailsBindMi) {
         std::string err;

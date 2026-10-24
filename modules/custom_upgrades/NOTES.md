@@ -160,6 +160,20 @@ Not checked in game yet: the option in the source picker (name, icon, position),
 emptying only the Hen Collector, save + reload (log `restored from the sidecar`), the Drone List tab
 showing it, selling the Hen Collector (fallback log), turning custom upgrades off with such a program.
 
+## Demolish clears the plot (user report round 4)
+
+"Sold the silo plot, capacity stayed at full upgrade" / "bought corral, Music Box II, sold plot, bought
+Music Box -> Music Box II already bought". The sidecar keys plots by `LandPlotLocation._id`, which
+stays the same when a plot is demolished and rebuilt; only a rebuild as another type dropped the entry.
+Now a detour on `LandPlotLocation.Replace` (the one plot swap path: buying on an empty plot and the
+demolish closure, both through `LandPlotUIRoot.BuyPlot`) drops the id's whole entry after the
+original: tiers, world upgrades, Hen Collector contents and limits, other modules' per-plot values
+(sell_upgrades' Ash Trough fill). Props, the Sell-All button and the Hen Collector clone are children of
+the old plot and die with it. Vanilla upgrades need nothing: the new plot gets a new LandPlotModel.
+Not written to the sidecar at once (it belongs to the loaded .sav; the next game save writes it), so a
+reload without saving restores the plot and its upgrades together. Log: `plot '...' demolished /
+replaced (old type T, stored type T): dropped owned [...], values [...]`.
+
 ## Buy menu cards (fixes after the test of build 506a4f60)
 
 - **Purchase / Sell overlap.** The buttons size themselves: the prefab `TextButton_NoneSelectable`
