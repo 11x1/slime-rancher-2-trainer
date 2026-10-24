@@ -2773,7 +2773,7 @@ void SandboxPlayer(const Host& h, const sbx::Snapshot& s, float w) {
     const float x0 = SbxRowStart("Infinite energy");
     ImGui::SameLine(x0 + avail - U(kSwitchW));
     if (Switch("##infenergy", s.infiniteEnergy)) SbxRequest(sbx::Op::InfiniteEnergy, s.infiniteEnergy ? 0 : 1);
-    HoverTip("Keeps energy at its maximum until you restart or turn Sandbox off.");
+    HoverTip("Keeps energy at its maximum. Kept per save.");
     // Discover all upgrades (Op::DiscoverUpgrades) and, smaller beside it, Max all upgrades (Op::UnlockUpgrades):
     // under the extras' buttons.
     auto upgradesButton = [&] {
@@ -2810,9 +2810,9 @@ void SandboxPlayer(const Host& h, const sbx::Snapshot& s, float w) {
     const float x1 = SbxRowStart("Infinite health");
     ImGui::SameLine(x1 + avail - U(kSwitchW));
     if (Switch("##infhealth", st->infiniteHealth)) sbxx::Request(sbxx::Op::InfiniteHealth, st->infiniteHealth ? 0 : 1);
-    HoverTip(st->healthHook ? "Ignores all damage until you restart or turn Sandbox off."
+    HoverTip(st->healthHook ? "Ignores all damage. Kept per save."
                             : "Keeps health at its maximum. A single hit bigger than your maximum still knocks you "
-                              "out.");
+                              "out. Kept per save.");
     // Side by side when both labels fit in half the card, else one per row.
     const char* kTeleport = "Teleport to waypoint";
     const char* kUnlock = "Unlock ranch expansions";
