@@ -18,7 +18,7 @@ embedded into the DLL (`ui/mod_icons_data.inc`) and turned into Unity sprites at
 | `sell_all.png` | Sell-All Button (silo) |
 | `sell_all_now.png` | Sell All Plorts Now (silo action) |
 | `coop_air_net.png` | unused: the Coop Air Net card shows the corral's own Air Net icon (user request) |
-| `hen_collector_source.png` | Hen Collector: the coop upgrade card and the drone program source (user's drawing, `source/hencollector_custom.png`) |
+| `hen_collector_source.png` | Hen Collector: the coop upgrade card and the drone program source (user's drawing, `source/roostercollector_custom.png`) |
 | `elder_collector_source.png` | optional, not there yet: the Elder Collector drone source (see below); without it the source shows the elder hen |
 | `mods_tab.png` | the "Mods" tab of the in-game Options menu |
 | `map_node.png` | collectible tracker: map data nodes (the game has no sprite for them) |
