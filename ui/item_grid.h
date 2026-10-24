@@ -59,6 +59,7 @@ struct Options {
     const char* hint = "Search items...";
     const char* empty = "No matching items.";
     const std::vector<Tab>* tabs = nullptr;              // icon tabs before the search box (none: no tabs)
+    bool tabsBelow = false;                              // tabs on their own row under the search box, right-aligned
     const char* button = nullptr;                        // action button after the search box (nullptr: none)
     bool buttonEnabled = true;
     const std::vector<std::string>* sections = nullptr;  // section headings (Tile::section); "" = rule only
