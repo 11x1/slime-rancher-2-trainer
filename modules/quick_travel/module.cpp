@@ -537,14 +537,10 @@ bool QuickTravel::Setup(sr2::core::ModuleContext& ctx) {
     };
     if (respawnOk_)
         reg(kFastRespawn, "Fast respawn",
-            "After a knockout: no fade to black / fade in, no minimum wait and no death loading screen when you are "
-            "in the ranch zone; elsewhere the ranch zone is loaded without loading-screen padding. The time skip, "
-            "item loss and the save still happen (the house screen runs the time skip), then the house screen "
-            "closes by itself.");
+            "After a knockout, skips the fades and the loading wait. The time skip and item loss still happen.");
     if (teleportOk_)
         reg(kFastTeleport, "Fast teleport loads",
-            "Teleporters into another zone: the loading screen's 1 s fade-in wait and its fade to black are skipped. "
-            "The zone load itself is not changed. Teleports inside the same zone are already instant.");
+            "Skips the loading screen's fades when a teleporter takes you to another zone.");
 
     frameId_ = main_thread::AddFrameCallback(kModule, [this](float) { g_frameGuard.Run([this] { Frame(); }); });
     if (frameId_ == 0) return ctx.Fail("main_thread::AddFrameCallback failed");

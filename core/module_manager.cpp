@@ -140,7 +140,7 @@ void ModuleManager::SetupAll(const Config& cfg) {
         d.label = "Enabled";
         d.kind = settings::Kind::Bool;
         d.def = e.module->DefaultEnabled() ? 1 : 0;
-        d.tooltip = "Turn this module on or off (applies immediately).";
+        d.tooltip = "Turns this module on or off.";
         settings::Register(d);  // picks up modules.<name>.enabled from sr2mods.json
         settings::OnChange(name, [name](const std::string& key) {
             if (key == "enabled") ModuleManager::Get().SetEnabled(name, settings::GetBool(name, "enabled"));

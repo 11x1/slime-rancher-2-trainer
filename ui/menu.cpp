@@ -658,9 +658,7 @@ void DrawMoveRow(const settings::Def& d, hud_edit::Element e) {
     const float ctlW = std::min(U(kCtlW), std::floor(avail * 0.5f));
     const float x0 = ImGui::GetCursorPosX();
     const std::string tip = std::string("Closes this window. Drag the ") + hud_edit::Name(e) +
-                            " to move it (it snaps to the screen centre), drag a corner to resize it (Alt: from the "
-                            "centre). Shift: the same gap to both edges of its corner. Enter or a click outside keeps "
-                            "it, Esc cancels.";
+                            " to move it, or a corner to resize it. Enter keeps it, Esc cancels.";
     ImGui::AlignTextToFramePadding();
     ImGui::PushStyleColor(ImGuiCol_Text, theme::Colors().text);
     ImGui::TextUnformatted("Position and size");
@@ -672,7 +670,7 @@ void DrawMoveRow(const settings::Def& d, hud_edit::Element e) {
     ImGui::BeginDisabled(menuOpen);
     if (ImGui::Button("Move", ImVec2(ctlW, 0))) hud_edit::Begin(e);
     ImGui::EndDisabled();
-    HoverTip(menuOpen ? std::string("Close the game's menu first (pause menu, map, inventory): it covers the HUD.") : tip);
+    HoverTip(menuOpen ? std::string("Close the game's menu first; it covers the HUD.") : tip);
     ImGui::PopID();
 }
 
@@ -1090,8 +1088,8 @@ void DrawProfilesPage(const Host& h) {
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Open folder", bs) && h.openProfilesFolder) h.openProfilesFolder();
-    HoverTip("Profiles are .json files: share one by copying its file. Put shared files in this folder;\n"
-             "the list refreshes every time the overlay opens.");
+    HoverTip("Share a profile by copying its .json file. Put shared files here; the list refreshes when the "
+             "overlay opens.");
     ImGui::PopStyleVar();
 
     unsigned long long tick = 0;
@@ -2206,9 +2204,8 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     lastHover = r.hovered >= 0 ? tiles[static_cast<size_t>(r.hovered)].id : 0;
     TabTip(r, tabs);
     if (r.buttonHovered)
-        Tooltip("Fills the selected slot, then the slots that already hold the item or are empty, each item with its "
-                "amount (no amount: one slot's maximum). Slots with other items are left alone. What doesn't fit is "
-                "dropped in front of you. Ctrl+click items to select them.");
+        Tooltip("Puts the selected items in your vacpack, starting with the selected slot. What doesn't fit drops "
+                "in front of you.");
     if (r.hovered >= 0 && !ImGui::GetDragDropPayload() && !ImGui::IsPopupOpen(kSbxCtx)) {
         const sbx::Item& it = *src[static_cast<size_t>(r.hovered)];
         ItemTooltip(s, it.name, it.kind, it.id);
@@ -2363,8 +2360,7 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
     lastHover = r.hovered >= 0 ? tiles[static_cast<size_t>(r.hovered)].id : 0;
     TabTip(r, tabs);
     if (r.buttonHovered)
-        Tooltip("Spawns every selected item in front of you, each with its amount (no amount: 1). Ctrl+click items "
-                "to select them; Shift+wheel / Ctrl+wheel sets an amount.");
+        Tooltip("Spawns the selected items in front of you, each with its amount.");
     if (r.hovered >= 0 && !ImGui::IsPopupOpen(kSbxCtx)) {
         const sbx::Item& it = *src[static_cast<size_t>(r.hovered)];
         ItemTooltip(s, it.name, it.kind, it.id, it.tarr && s.tarrsOff ? "Tarrs are disabled in this save's game settings." : nullptr);
@@ -2524,8 +2520,7 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
     const item_grid::Result r = item_grid::Draw("craft", tiles, g_craftGrid, o);
     TabTip(r, tabs);
     if (r.buttonHovered)
-        Tooltip("Crafts every selected item at no cost: gadgets into your gadget inventory (a locked blueprint stays "
-                "locked), materials into the refinery.");
+        Tooltip("Crafts the selected items for free: gadgets into your inventory, materials into the refinery.");
     if (r.hovered >= 0) {
         // Name, group, the fabricator cost one ingredient per line with its icon, and the counts.
         const sbx::Recipe& rc = *src[static_cast<size_t>(r.hovered)];
@@ -2688,15 +2683,14 @@ void SandboxPlayer(const Host& h, const sbx::Snapshot& s, float w) {
         ImGui::PopID();
     };
     row("Health", std::format("{} / {}", s.health, s.maxHealth), "Refill", sbx::Op::RefillHealth,
-        "Set health to its maximum (PlayerState.SetHealth).");
+        "Set health to its maximum.");
     row("Energy", std::format("{} / {}", s.energy, s.maxEnergy), "Refill", sbx::Op::RefillEnergy,
-        "Set energy to its maximum (PlayerState.SetEnergy).");
-    row("Radiation", std::to_string(s.rads), "Clear", sbx::Op::ClearRads, "Set radiation to 0 (PlayerState.SetRad).");
+        "Set energy to its maximum.");
+    row("Radiation", std::to_string(s.rads), "Clear", sbx::Op::ClearRads, "Set radiation to 0.");
     const float x0 = SbxRowStart("Infinite energy");
     ImGui::SameLine(x0 + avail - U(kSwitchW));
     if (Switch("##infenergy", s.infiniteEnergy)) SbxRequest(sbx::Op::InfiniteEnergy, s.infiniteEnergy ? 0 : 1);
-    HoverTip("Keeps energy at its maximum. For this session only: off again after a restart or when Sandbox is "
-             "turned off.");
+    HoverTip("Keeps energy at its maximum until you restart or turn Sandbox off.");
     // Discover all upgrades (Op::DiscoverUpgrades) and, smaller beside it, Max all upgrades (Op::UnlockUpgrades):
     // under the extras' buttons.
     auto upgradesButton = [&] {
@@ -2706,20 +2700,17 @@ void SandboxPlayer(const Host& h, const sbx::Snapshot& s, float w) {
         ImGui::BeginDisabled(!canFind);
         if (ImGui::Button("Discover all upgrades", ImVec2(avail - maxW - sp, U(32)))) g_sbxDiscConfirm = true;
         ImGui::EndDisabled();
-        HoverTip(canFind ? std::format("Makes the {} upgrade(s) the Fabricator still hides (until you find them in the "
-                                       "world) available to buy, without buying any level. Asks first.",
+        HoverTip(canFind ? std::format("Makes the {} hidden Fabricator upgrade(s) available to buy. Asks first.",
                                        s.upgradesHidden)
                  : s.upgradesHidden == 0 ? std::string("Every upgrade is discovered already.")
-                                         : std::string("The game's upgrade component functions were not found (see the "
-                                                       "log)."));
+                                         : std::string("Not available: the game's upgrade functions were not found."));
         ImGui::SameLine(0, sp);
         const bool can = s.upgradeLevelsLeft > 0;
         ImGui::BeginDisabled(!can);
         if (ImGui::Button("Max all", ImVec2(maxW, U(32)))) g_sbxUpgConfirm = true;
         ImGui::EndDisabled();
-        HoverTip(can ? std::format("Max all upgrades: raises every vacpack / player upgrade of the Fabricator ({} "
-                                   "upgrade(s), {} level(s) to go) to its last level as if bought (free). Asks first; "
-                                   "the change is saved.",
+        HoverTip(can ? std::format("Raises every Fabricator upgrade to its last level for free ({} upgrade(s), {} "
+                                   "level(s) to go). Asks first.",
                                    s.upgradeCount, s.upgradeLevelsLeft)
                      : s.upgradeWhy.empty() ? std::string("Every upgrade is at its last level already.")
                                             : s.upgradeWhy);
@@ -2736,10 +2727,9 @@ void SandboxPlayer(const Host& h, const sbx::Snapshot& s, float w) {
     const float x1 = SbxRowStart("Infinite health");
     ImGui::SameLine(x1 + avail - U(kSwitchW));
     if (Switch("##infhealth", st->infiniteHealth)) sbxx::Request(sbxx::Op::InfiniteHealth, st->infiniteHealth ? 0 : 1);
-    HoverTip(st->healthHook ? "Ignores all damage and keeps health at its maximum. For this session only: off again after "
-                              "a restart or when Sandbox is turned off."
-                            : "Keeps health at its maximum (refilled 10 times a second; a single hit bigger than your "
-                              "maximum still knocks you out). For this session only.");
+    HoverTip(st->healthHook ? "Ignores all damage until you restart or turn Sandbox off."
+                            : "Keeps health at its maximum. A single hit bigger than your maximum still knocks you "
+                              "out.");
     // Side by side when both labels fit in half the card, else one per row.
     const char* kTeleport = "Teleport to waypoint";
     const char* kUnlock = "Unlock ranch expansions";
@@ -2752,16 +2742,14 @@ void SandboxPlayer(const Host& h, const sbx::Snapshot& s, float w) {
     ImGui::BeginDisabled(!st->canTeleport);
     if (ImGui::Button(kTeleport, bs)) sbxx::Request(sbxx::Op::TeleportToMarker);
     ImGui::EndDisabled();
-    HoverTip(st->canTeleport ? "Moves you to the marker you placed on the map (onto the ground below it), with the "
-                               "game's own teleport."
+    HoverTip(st->canTeleport ? "Moves you to the marker you placed on the map."
                              : st->teleportWhy);
     if (split) ImGui::SameLine();
     const bool canUnlock = st->lockedExpansions > 0;
     ImGui::BeginDisabled(!canUnlock);
     if (ImGui::Button(kUnlock, bs)) g_sbxExpConfirm = true;
     ImGui::EndDisabled();
-    HoverTip(canUnlock ? std::format("Opens the {} locked expansion(s) of your ranch as if bought (free). Asks first; "
-                                     "the change is saved.",
+    HoverTip(canUnlock ? std::format("Unlocks the {} locked ranch expansion(s) for free. Asks first.",
                                      st->lockedExpansions)
                        : st->expansionWhy);
     upgradesButton();
@@ -3236,10 +3224,8 @@ void DiscordCard(const Host& h, const ModuleView& mv, float w) {
         // Application id: kept in sync with sr2mods.json while the field is not being edited.
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("Application ID");
-        const char* idHelp = "Discord shows a presence for an application. Create one (free) in the Discord "
-                             "Developer Portal (the button below): New Application, give it the name your profile "
-                             "should show after \"Playing\", then copy the Application ID from General Information "
-                             "and paste it here. Saved in sr2mods.json (modules.discord_rpc.application_id).";
+        const char* idHelp = "In the Discord Developer Portal (button below), create an application with the name "
+                             "your profile should show, then paste its Application ID here.";
         HoverTip(idHelp);
         const float ctlW = std::min(U(260), std::floor(avail * 0.55f));
         ImGui::SameLine(x0 + avail - ctlW);
@@ -3284,7 +3270,7 @@ void DiscordCard(const Host& h, const ModuleView& mv, float w) {
     ImGui::BeginDisabled(!on);
     if (ImGui::Button("Reconnect", ImVec2(bw, 0))) dsc::RequestReconnect();
     ImGui::EndDisabled();
-    HoverTip("Connect to the Discord app again now, for example after starting Discord or changing the application.");
+    HoverTip("Connect to the Discord app again now, for example after starting Discord.");
     if (ownApp) {
         ImGui::SameLine(0, gap);
         if (ImGui::Button("Developer Portal", ImVec2(bw, 0))) OpenUrl(dsc::kDevPortalUrl);

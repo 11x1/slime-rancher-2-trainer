@@ -1689,9 +1689,7 @@ bool VacpackUpgrades::Setup(sr2::core::ModuleContext& ctx, Host host, std::strin
         d.min = 0;
         d.max = 255;
         d.step = 1;
-        d.tooltip = std::format("Selects the vacpack slot of Extra Tank {} (the {}th slot, right before the water tank) "
-                                "while you play. The game itself has number keys for slots 1-7 only. Set to none to "
-                                "disable.",
+        d.tooltip = std::format("Selects the Extra Tank {} slot. The game's own number keys cover slots 1-7 only.",
                                 k == 0 ? "III" : "IV", 7 + k);
         settings::Register(d);
     }

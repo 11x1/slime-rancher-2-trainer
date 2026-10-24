@@ -36,13 +36,12 @@ std::vector<Category> Spec() {
     ranchGeneral.columns = {{"custom_upgrades"}, {"plot_upgrades", "sell_upgrades"}};
     ranchGeneral.cardHelp = {
         {"custom_upgrades",
-         "Adds the mod's own plot upgrades (higher tiers, Coop Air Net, Hen Collector, silo Sell-All Button) to the "
-         "plots' purchase menus, and Fabricator upgrades (Tank Booster IX-XII, Extra Tank III-IV, Drone Battery Saver "
-         "I-IV). Once on with a save loaded, it stays on for that save."},
+         "Adds extra plot upgrades and Fabricator upgrades to the game's menus. Stays on while a save that uses "
+         "them is loaded."},
         {"plot_upgrades", "Applies the effects of the upgrade tiers bought through Custom Upgrades."},
         {"sell_upgrades",
-         "Sell an owned plot upgrade back for half its price: select it in the plot's purchase menu and press the "
-         "Sell button next to PURCHASED (or confirm the item). Silo storage upgrades can't be sold."},
+         "Sell an owned plot upgrade back for half its price, from the plot's purchase menu. Silo storage "
+         "upgrades can't be sold."},
     };
     ranch.tabs.push_back(ranchGeneral);
     Tab dj;
@@ -64,17 +63,16 @@ std::vector<Category> Spec() {
     Tab minimap = ModuleTab("minimap");
     hud.tabs.push_back(minimap);
     Tab collectibles = ModuleTab("collectibles", "Collectibles");
-    collectibles.help = "The collectible tracker is drawn under the minimap, so it only shows while the Minimap is on.";
+    collectibles.help = "Shown under the minimap. Needs the Minimap on.";
     hud.tabs.push_back(collectibles);
     Tab mapTools = ModuleTab("map_tools", "Full Map");
-    mapTools.help = "Extensions for the game's full-screen map. The extra icons come from the Minimap's scan, so they "
-                    "only show while the Minimap is on; reveal and right-click teleport work without it.";
+    mapTools.help = "Extras for the game's full-screen map. The extra icons need the Minimap on; reveal and "
+                    "teleport work without it.";
     hud.tabs.push_back(mapTools);
     Tab speed = ModuleTab("hl2_movement", "Speed Panel");
     speed.onlyGroups = {"HUD"};
     speed.masterKey = "momentum_hud";
-    speed.help = "The speed panel is part of Hl2 Movement and only shows while Hl2 Movement is enabled. "
-                 "This switch turns the panel on or off.";
+    speed.help = "Part of Hl2 Movement, so it needs Hl2 Movement on.";
     hud.tabs.push_back(speed);
     cats.push_back(hud);
 

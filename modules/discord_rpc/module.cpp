@@ -153,9 +153,8 @@ bool DiscordRpc::Setup(sr2::core::ModuleContext& ctx) {
         d.key = bridge::kKeyOfficial;
         d.label = "Show as Slime Rancher 2";
         d.def = 1;
-        d.tooltip = "Use Slime Rancher 2's own Discord application (its official id), so your profile shows "
-                    "\"Playing Slime Rancher 2\" with the game's icon and you need no application of your own. "
-                    "Off: your own application id below.";
+        d.tooltip = "Your profile shows \"Playing Slime Rancher 2\" with the game's icon. Off: use your own "
+                    "application below.";
         settings::Register(d);
         d.key = bridge::kKeyZone;
         d.label = "Show the area";
@@ -175,9 +174,7 @@ bool DiscordRpc::Setup(sr2::core::ModuleContext& ctx) {
         d.max = 2;
         d.step = 1;
         d.options = {"Game name", "Area", "Activity"};
-        d.tooltip = "What the server member list and the friends list show after \"Playing\": the game's (the "
-                    "application's) name, the first line (the area) or the second line (\"On the ranch\", "
-                    "\"Exploring\"). Needs a recent Discord app; older ones always show the name.";
+        d.tooltip = "What member and friends lists show after \"Playing\". Needs a recent Discord app.";
         settings::Register(d);
     }
 

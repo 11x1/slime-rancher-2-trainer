@@ -189,8 +189,7 @@ constexpr const char* kResPrefix = "res_";
 constexpr const char* kGroupMoreOres = "More ores";
 constexpr const char* kGroupPerResource = "Per resource (advanced)";
 
-constexpr const char* kLiveTip =
-    " Takes effect from the next spawn roll; unharvested resource nodes in loaded zones are rescaled too.";
+constexpr const char* kLiveTip = "";
 
 // ---- sources of the "More ores" multiplier ----
 enum Source : int { kSrcNodes = 0, kSrcLightning, kSrcCyclone, kSrcDrones, kSrcCount };
@@ -201,8 +200,8 @@ struct SourceInfo {
 };
 constexpr std::array<SourceInfo, kSrcCount> kSources{{
     {"nodes", "Resource nodes", "resources per harvested ground resource node"},
-    {"lightning", "Lightning strikes", "Lightning Mote / Storm Glass per lightning strike (and strike frequency via the spawn rate)"},
-    {"cyclone", "Cyclones", "resources per cyclone spawn burst, e.g. Drift Crystal (slimes are never multiplied; cyclone frequency via the spawn rate)"},
+    {"lightning", "Lightning strikes", "Lightning Mote and Storm Glass per lightning strike"},
+    {"cyclone", "Cyclones", "resources per cyclone burst, like Drift Crystal (never slimes)"},
     {"drones", "Explorer drones", "items an explorer drone gathers per collection"},
 }};
 std::string ApplyKey(int s) { return std::format("src_{}_apply", kSources[s].id); }
@@ -1241,41 +1240,34 @@ bool SpawnScaling::Setup(sr2::core::ModuleContext& ctx) {
         settings::Register(d);
     };
     reg(kSpawnRate, "Spawn rate multiplier", "Spawning", Kind::Float, 1.0, 0.25, 10.0, 0.25,
-        std::string("How often each zone's node director refills empty spawn points (divides the node update "
-                    "interval). Also how often lightning strikes / cyclones spawn while their source is applied "
-                    "(More ores).") + kLiveTip);
+        std::string("How often empty spawn points refill. Also speeds up lightning and cyclones while their "
+                    "source is applied.") + kLiveTip);
     reg(kMaxNodes, "Max active nodes multiplier", "Spawning", Kind::Float, 1.0, 0.5, 5.0, 0.25,
-        std::string("Scales how many resource nodes a zone keeps active at once. Limited by the zone's fixed spawn "
-                    "points and by the hard cap below.") + kLiveTip);
+        std::string("How many resource nodes a zone keeps at once. Limited by its spawn points and the hard "
+                    "cap.") + kLiveTip);
     reg(kRespawn, "Respawn interval multiplier", "Spawning", Kind::Float, 1.0, 0.1, 5.0, 0.1,
-        std::string("Multiplies the in-game hours between node refills. Below 1 = faster respawn, above 1 = slower. "
-                    "Combined with the spawn rate: interval = vanilla x this / spawn rate. Node despawn lifetimes are "
-                    "never shortened.") + kLiveTip);
+        std::string("Time between node refills. Below 1 = faster, above 1 = slower.") + kLiveTip);
     reg(kHardCap, "Hard cap: active nodes per zone", "Spawning", Kind::Int, 0, 0, 500, 1,
-        std::string("Upper limit for a zone's max active nodes after scaling. 0 = auto (5x that zone's vanilla "
-                    "value). The cap only limits increases; it never lowers a zone below vanilla."));
+        std::string("Most active nodes per zone after scaling. 0 = auto (5x the zone's normal amount)."));
     reg(kOreAmount, "Ore amount multiplier", kGroupMoreOres, Kind::Float, 1.0, 0.5, 10.0, 0.25,
-        std::string("Multiplies how many resources each source below produces per roll (rounded; 1.0 = exact "
-                    "vanilla). Used by every source that is applied and not in advanced mode.") + kLiveTip);
+        std::string("Resources per roll for every source below that is applied and not in advanced mode.") +
+            kLiveTip);
     reg(kYieldCap, "Max resources per roll", kGroupMoreOres, Kind::Int, 100, 1, 500, 1,
-        std::string("Safety cap for a single scaled roll (one node, strike, cyclone burst or drone collection) for "
-                    "performance / save size. Never lowers anything below its vanilla amount."));
+        std::string("Limit for one scaled roll, for performance and save size. Never below the normal "
+                    "amount."));
     if (paceOk_)
         reg(kKeepHarvestTime, "Resource nodes: keep vanilla harvest time", kGroupMoreOres, Kind::Bool, 1.0, 0, 1, 1,
-            std::string("On: a scaled node pops its items faster (per-item time x vanilla amount / scaled amount), "
-                        "so harvesting it takes as long as its vanilla amount did (liquids and break-type nodes "
-                        "too). Never slower than vanilla per item. Off: vanilla time per item (x10 items = 10x "
-                        "longer).") + kLiveTip);
+            std::string("A scaled node gives its items faster, so harvesting takes as long as normal. Off: "
+                        "each item takes the normal time.") + kLiveTip);
     for (int s = 0; s < kSrcCount; ++s) {
         if ((s == kSrcLightning || s == kSrcCyclone) && !weatherOk_) continue;
         if (s == kSrcDrones && !dronesOk_) continue;
         reg(ApplyKey(s), std::format("{}: apply multiplier", kSources[s].label), kGroupMoreOres, Kind::Bool, 1.0, 0, 1,
             1,
-            std::format("Scale {}. Off = this source stays vanilla.{}", kSources[s].what, kLiveTip));
+            std::format("Scales {}. Off: this source stays normal.{}", kSources[s].what, kLiveTip));
         reg(AdvancedKey(s), std::format("{}: advanced (per resource)", kSources[s].label), kGroupMoreOres, Kind::Bool,
             0.0, 0, 1, 1,
-            std::format("Use the per-resource multipliers (group '{}') for each resource this source produces "
-                        "INSTEAD of the global ore amount multiplier.{}",
+            std::format("Uses the multipliers in '{}' instead of the ore amount multiplier.{}",
                         kGroupPerResource, kLiveTip));
         // Visibility parent (settings::Def::parent): advanced mode only matters while the source is scaled.
         settings::SetParent(kModule, AdvancedKey(s), ApplyKey(s));
@@ -1842,11 +1834,10 @@ void SpawnScaling::FlushPendingResources() {
         // shown, i.e. that source applied); unregistered sources are skipped by the rule.
         for (int s = 0; s < kSrcCount; ++s) d.anyOf.push_back(AdvancedKey(s));
         d.tooltip = std::format(
-            "Amount multiplier for {}, used INSTEAD of the global ore amount multiplier by every source set to "
-            "'advanced (per resource)'.{}{}",
+            "Amount multiplier for {} on sources set to advanced.{}{}",
             it.res.label,
-            it.res.ore ? " On resource nodes it also shifts the random pick toward/away from this resource."
-                       : " So far only seen in explorer drone loot.",
+            it.res.ore ? " On resource nodes it also makes this resource more or less likely."
+                       : " Only seen in explorer drone loot so far.",
             kLiveTip);
         settings::Register(d);
         SR2_INFO("[{}] per-resource setting registered: {} ({})", kModule, it.key, d.label);
