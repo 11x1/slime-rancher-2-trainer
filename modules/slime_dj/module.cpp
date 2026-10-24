@@ -28,6 +28,10 @@
 //     (pause menu), while the player pauses, while buffering and while no box is nearby.
 //   * Queue: the tab's right column. When it runs dry the next song is a random one while
 //     `shuffle` is on (default), otherwise playback stops.
+//   * Walls dance to the music (setting dance_walls, off by default): the decoder thread analyses
+//     the song (beat.cpp: bass level + onsets per 10 ms); every frame the energy walls and the Air
+//     Net of the corrals whose box plays and that are within hearing range pulse with it
+//     (walls.cpp), restored when the song stops or pauses.
 //
 // Fault policy (like wall_markers): every game call runs inside one guarded tick or guarded
 // request; a native fault marks the module faulted and stops it for the session. GC handles are
@@ -62,6 +66,7 @@
 #include "modules/slime_dj/emitters.h"
 #include "modules/slime_dj/library.h"
 #include "modules/slime_dj/stream.h"
+#include "modules/slime_dj/walls.h"
 #include "ui/slime_dj_bridge.h"
 
 namespace sr2::modules {
@@ -97,6 +102,9 @@ constexpr float kFullFraction = 0.2f;
 constexpr float kAmpStep = 0.25f, kAmpMax = 2.0f;
 // Speakers more than this far from the clock speaker are moved back to it (two scans in a row).
 constexpr double kDriftSeconds = 0.03;
+// Walls dance: the analysis is read this far behind the play head (AudioSource.timeSamples runs
+// ahead of what is heard by about the output buffer).
+constexpr double kDanceLagSeconds = 0.04;
 
 struct Vec3 {
     float x, y, z;
@@ -115,6 +123,8 @@ struct Cfg {
     bool shuffle = true;
     bool muteVanilla = true;
     bool amplify = false;
+    bool danceWalls = false;
+    float danceIntensity = 1.0f;
 };
 
 // A vanilla audio source under a music box that we silenced.
@@ -188,9 +198,13 @@ public:
             else
                 SR2_WARN("slime_dj: cannot create the music folder {}: {}", dj::Utf8(folder_.wstring()), ec.message());
         }
-        SR2_INFO("slime_dj: resolved (AudioClip/AudioSource, MusicBoxUpgrader; SECTR source {}, cue {}, bus {}, system {})",
+        std::string danceWhy;
+        if (!dancer_.Ready() && !dancer_.Resolve(danceWhy))
+            SR2_WARN("slime_dj: 'Walls dance to the music' unavailable ({})", danceWhy);
+        SR2_INFO("slime_dj: resolved (AudioClip/AudioSource, MusicBoxUpgrader; SECTR source {}, cue {}, bus {}, system {}; "
+                 "walls dance {})",
                  sectrSourceClass_ ? "yes" : "no", cueClass_ ? "yes" : "no", busClass_ ? "yes" : "no",
-                 sectrSystemClass_ ? "yes" : "no");
+                 sectrSystemClass_ ? "yes" : "no", dancer_.Ready() ? "yes" : "no");
         return true;
     }
 
@@ -380,7 +394,26 @@ private:
             "Each other music box or speaker within hearing range of a box makes it 25 % louder and carry 25 % "
             "farther, up to double. All boxes always play the song in sync, so boxes close together also add up "
             "on their own.");
+        def("dance_walls", "Walls dance to the music", Kind::Bool, 0, 0, 1, 1,
+            "The energy walls of a corral whose music box plays (and its Air Net, if bought) pulse, grow and "
+            "change colour with the beat of the song. Only corrals within hearing range. Everything goes back to "
+            "normal when the song stops or pauses.");
+        {
+            settings::Def x;
+            x.module = kModule;
+            x.key = "dance_intensity";
+            x.label = "Dance intensity";
+            x.kind = Kind::Float;
+            x.def = 1.0;
+            x.min = 0.1;
+            x.max = 2.0;
+            x.step = 0.05;
+            x.parent = "dance_walls";
+            x.tooltip = "How strongly the walls pulse, grow and change colour.";
+            settings::Register(x);
+        }
         settings::SetDisplay(kModule, "volume", "%", {}, 100);
+        settings::SetDisplay(kModule, "dance_intensity", "%", {}, 100);
         settings::SetDisplay(kModule, "range", " m");
     }
 
@@ -392,6 +425,9 @@ private:
         c.amplify = settings::GetBool(kModule, "amplify");
         c.shuffle = settings::GetBool(kModule, "shuffle");
         c.muteVanilla = settings::GetBool(kModule, "mute_vanilla");
+        c.danceWalls = settings::GetBool(kModule, "dance_walls");
+        c.danceIntensity = std::clamp(settings::GetFloat(kModule, "dance_intensity"), 0.0f, 2.0f);
+        if (!std::isfinite(c.danceIntensity)) c.danceIntensity = 1.0f;
         return c;
     }
 
@@ -552,6 +588,7 @@ private:
     // Owned music boxes nearby (active MusicBox GameObjects), in scene order.
     std::vector<Il2CppObject*> FindBoxes() {
         std::vector<Il2CppObject*> out;
+        boxUps_.clear();
         Il2CppObject* type = unity::TypeOf(upgraderClass_);
         if (!type) return out;
         int32_t inactive = 0 /* FindObjectsInactive.Exclude */, sort = 0 /* FindObjectsSortMode.None */;
@@ -563,7 +600,10 @@ private:
             if (!unity::IsAlive(up) || !IsA(up, upgraderClass_)) continue;
             Il2CppObject* box = unity::Field<Il2CppObject*>(up, offMusicBox_);
             if (!unity::IsAlive(box) || !IsA(box, gameObjectClass_) || !unity::ActiveInHierarchy(box)) continue;
-            if (std::find(out.begin(), out.end(), box) == out.end()) out.push_back(box);
+            if (std::find(out.begin(), out.end(), box) == out.end()) {
+                out.push_back(box);
+                boxUps_.emplace_back(box, up);
+            }
         }
         return out;
     }
@@ -1123,13 +1163,79 @@ private:
         }
     }
 
+    // -------------------------------------------------------- walls dance ----
+    // Box scan: the corrals whose music box plays the song and that the camera is within hearing
+    // range of (the speaker's range, Amplify included).
+    void SyncDancer() {
+        if (!cfg_.danceWalls || !dancer_.Ready() || !cur_) return;
+        bool haveCam = false;
+        Vec3 cam{};
+        if (trGetPosition_)
+            if (Il2CppObject* c = unity::Camera_main(); c && unity::IsAlive(unity::TransformOf(c))) {
+                cam = trGetPosition_.fn(unity::TransformOf(c), trGetPosition_.mi);
+                haveCam = std::isfinite(cam.x) && std::isfinite(cam.y) && std::isfinite(cam.z);
+            }
+        std::vector<Il2CppObject*> ups;
+        for (const Speaker& sp : speakers_) {
+            if (sp.emitter || !sp.live || sp.clipGen != cur_->clipGen) continue;
+            Il2CppObject* box = Target(sp.box);
+            if (!box) continue;
+            auto it = std::find_if(boxUps_.begin(), boxUps_.end(), [&](const auto& b) { return b.first == box; });
+            if (it == boxUps_.end() || !unity::IsAlive(it->second)) continue;
+            if (haveCam) {
+                Il2CppObject* tr = unity::TransformOf(box);
+                const Vec3 p = tr ? trGetPosition_.fn(tr, trGetPosition_.mi) : cam;
+                const float dx = p.x - cam.x, dy = p.y - cam.y, dz = p.z - cam.z;
+                if (dx * dx + dy * dy + dz * dz > sp.maxD * sp.maxD) continue;
+            }
+            ups.push_back(it->second);
+        }
+        dancer_.Sync(ups);
+        if (dancer_.Plots() != dancePlots_) {
+            dancePlots_ = dancer_.Plots();
+            SR2_INFO("slime_dj: walls dance at {} corral(s)", dancePlots_);
+        }
+    }
+
+    // Every frame: the analysis at the play position (a bit behind it, see kDanceLagSeconds).
+    void TickDancer(float dt) {
+        if (!dancer_.Ready()) return;
+        if (!cfg_.danceWalls || !cur_) {
+            if (dancer_.Plots()) {
+                dancer_.Clear();
+                dancePlots_ = 0;
+                SR2_INFO("slime_dj: walls dance stopped ({}); walls restored", cur_ ? "setting off" : "no song");
+            }
+            return;
+        }
+        const Current& c = *cur_;
+        dj::BeatTrack::Sample s;
+        const dj::BeatTrack::Sample* beat = nullptr;
+        const bool playing = c.started && c.rate && c.stream && !c.userPaused && !c.buffering && !GamePaused() &&
+                             !(c.endFrame && c.playPos >= c.endFrame);
+        if (playing) {
+            const uint64_t lag = static_cast<uint64_t>(kDanceLagSeconds * c.rate);
+            const uint64_t pos = c.base + c.playPos;
+            const uint64_t q = pos > lag ? pos - lag : 0;
+            if (q < danceLast_ || danceGen_ != c.clipGen) danceLast_ = q;  // new song, seek
+            danceGen_ = c.clipGen;
+            if (c.stream->beats().Query(danceLast_, q, s)) beat = &s;
+            danceLast_ = q;
+        }
+        dancer_.Tick(dt, beat, cfg_.danceIntensity);
+    }
+
     // ---------------------------------------------------------------- tick ----
     void Tick(float dt) {
         Guarded("tick", [&] { TickImpl(dt); });
     }
 
     void TickImpl(float dt) {
-        if (cfgDirty_.exchange(false)) cfg_ = LoadCfg();
+        if (cfgDirty_.exchange(false)) {
+            const bool danced = cfg_.danceWalls;
+            cfg_ = LoadCfg();
+            if (cfg_.danceWalls && !danced) boxScan_ = 0;  // walls dance turned on: find the corrals now
+        }
         const bool viewed = bridge::WantsSnapshot();
         if (cur_) FindBuses(dt);  // nothing to look up while idle
         boxScan_ -= dt;
@@ -1148,12 +1254,14 @@ private:
                 CheckSpeakers();
                 UpdateBoost();
                 Resync(Master());
+                SyncDancer();
             }
         }
         if (!cur_ && !speakers_.empty()) DestroySpeakers();
         if (!cur_ && !viewed) boxes_ = -1;
         TickSong();
         TickMix();
+        TickDancer(dt);
         dj::emitters::SetPlaying(cur_ && cur_->started && !cur_->userPaused &&
                                      std::any_of(speakers_.begin(), speakers_.end(), [](const Speaker& sp) { return sp.live; }),
                                  cur_ ? cur_->name : std::string());
@@ -1165,6 +1273,8 @@ private:
     }
 
     void Shutdown() {
+        dancer_.Clear();
+        dancePlots_ = 0;
         StopCurrent();
         DestroySpeakers();
         Free(musicBus_);
@@ -1336,6 +1446,11 @@ private:
     unsigned clipGen_ = 0;
     int failuresInARow_ = 0;
     std::vector<Speaker> speakers_;
+    std::vector<std::pair<Il2CppObject*, Il2CppObject*>> boxUps_;  // last box scan: MusicBox GameObject, its MusicBoxUpgrader
+    dj::WallDancer dancer_;
+    size_t dancePlots_ = 0;
+    uint64_t danceLast_ = 0;
+    unsigned danceGen_ = 0;
     int boxes_ = -1, emitters_ = 0, resyncs_ = 0, restartLogs_ = 0;
     std::array<int, 5> lastCounts_{-1, -1, -1, -1, -1};
     unsigned emitterGen_ = 0;
