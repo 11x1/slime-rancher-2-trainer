@@ -378,8 +378,9 @@ names from the English string table):
 Tank Booster IX-XII use V-VIII's items with the amounts doubled (+2 for the rare ones vanilla asks 1-3 of) and
 60,000 / 75,000 / 90,000 / 120,000 Newbucks (vanilla VIII: 50,000). Extra Tank III / IV use VII / VIII's items
 unchanged and 25,000 / 50,000 Newbucks (vanilla Extra Tank II: 5,000; a slot this late is worth more than +25 per
-slot). Every level needs the vanilla component (Tank Booster / Extra Tank component), which a player who maxed the
-vanilla upgrade already has. The log lists every level's exact cost (`vacpack: TankBoosterPlus ready ...`).
+slot). No upgrade component: vanilla consumes one Tank Booster / Extra Tank component per level (counted items from
+treasure pods / the shop) and the world may hold no more than vanilla needs, so ours would be unbuyable; the cloned
+component list is cleared. The log lists every level's exact cost (`vacpack: TankBoosterPlus ready ...`).
 
 **How it works.**
 

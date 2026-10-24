@@ -99,7 +99,8 @@ struct Spec {
 // Costs: our levels copy the refinery items of vanilla Tank Booster V-VIII (IX-XII) / VII-VIII
 // (Extra Tank III-IV). Tank Booster IX-XII double the amounts (+2 for the rare items vanilla asks
 // 1-3 of) and cost 60k-120k Newbucks (vanilla VIII: 50k); Extra Tank III-IV keep the amounts and cost
-// 25k / 50k (vanilla Extra Tank II: 5k, but a slot is worth more than +25 per slot this late).
+// 25k / 50k (vanilla Extra Tank II: 5k, but a slot is worth more than +25 per slot this late). No
+// upgrade components (see CreateDefs).
 const Spec kSpecs[] = {
     {custom_upgrades::kIdBase + 0x0101, "custom_upgrades.vacpack.tank_booster", "TankBoosterPlus", kVanillaCapacityId, 4,
      false, 4,
@@ -402,13 +403,6 @@ bool CreateDefs(Il2CppObject* items) {
     Il2CppObject* slotProp = unity::Field<Il2CppObject*>(slotMod, g.offModTarget);
     const float capMax = unity::Field<float>(capMaxMod, g.offModValue);
     const float base = unity::IsAlive(limitProp) && g.offPropDefault ? unity::Field<float>(limitProp, g.offPropDefault) : 20.0f;
-    // Extra Tank II's component (the Extra Tank levels need it like vanilla II does).
-    Il2CppObject* tankComponent = nullptr;
-    {
-        Il2CppObject* last = LevelAt(slots, LevelCount(slots) - 1);
-        char* pc = reinterpret_cast<char*>(last) + g.offUlCosts;
-        tankComponent = static_cast<Il2CppObject*>(unity::ListAt(*reinterpret_cast<void**>(pc + g.offPcComponent), 0));
-    }
 
     for (int si = 0; si < kSpecCount; ++si) {
         const Spec& s = kSpecs[si];
@@ -465,14 +459,10 @@ bool CreateDefs(Il2CppObject* items) {
                 auto* type = *reinterpret_cast<Il2CppObject**>(e + 8);
                 paid += std::format("{}{} {}", paid.empty() ? "" : ", ", amount, unity::GetName(type));
             }
-            if (s.slots && tankComponent) {
-                void* comps = *reinterpret_cast<void**>(pc + g.offPcComponent);
-                auto compItemsOff = comps ? Resolver::Get().FieldOffset(unity::ClassOf(static_cast<Il2CppObject*>(comps)), "_items")
-                                          : std::nullopt;
-                void* compArr = compItemsOff ? unity::Field<void*>(comps, *compItemsOff) : nullptr;
-                if (compArr && unity::ListCount(comps) > 0)
-                    SetArrayRef(static_cast<Il2CppArray*>(compArr), 0, tankComponent);
-            }
+            // No upgrade component: vanilla consumes one Tank Booster / Extra Tank component per level and
+            // the world may hold no more than vanilla needs, so ours cost Newbucks + refinery items only.
+            if (auto* comps = *reinterpret_cast<Il2CppObject**>(pc + g.offPcComponent))
+                Invoke(MethodOf(comps, "Clear", 0), comps, {}, "List.Clear");
             // texts
             std::string title = s.level[k].title;
             std::string desc;
