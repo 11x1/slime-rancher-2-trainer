@@ -1,12 +1,13 @@
 #pragma once
-// custom_upgrades: the Slime Radio in the shop's Daily Deals (next to the daily toy), bought with Newbucks
-// and dispensed at the shop's item spawner like any toy.
+// custom_upgrades: the Slime Radio in the shop's Daily Deals - at one restock in four it is the daily toy
+// (instead of a vanilla toy), bought with Newbucks (one per restock) and dispensed like any toy.
 //
 // Save model (the vanilla save only ever sees vanilla ids), like the Fabricator path (dj_buildables.h):
 //   * The shop entry is a runtime ShopRuntimeItem of our own in the Daily Deals category's item list. Its
 //     asset reference is the vanilla Night Light toy's (GUID, reference id and unique id
 //     "ToyDefinition.NightLight"); only the display (title, icon, picture, description) is the radio's.
-//   * Buying it spends the Newbucks and queues `count` vanilla Night Lights at the shop's spawner
+//   * The vanilla toy it stands in for is only taken out of the list the shop UI reads (its data is untouched).
+//   * Buying it spends the Newbucks and queues one vanilla Night Light at the shop's spawner
 //     (ShopDirector.QueueToSpawnItem, the game's own pending-spawn queue, saved as Night Lights). The
 //     purchase is NOT tracked in the shop's purchase records (nothing of ours is written there).
 //   * The sidecar counts the radios still to come ("dj.shop_radios_pending"); each Night Light the

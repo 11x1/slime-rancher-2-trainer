@@ -38,18 +38,22 @@
 //     AssetReference object: ours gets its own (same GUID).
 //
 // What we do:
-//   * GetRuntimeItems detour (after the original): for the Daily Deals category (analytics name, or any toy
-//     in it), while the radio card is unlocked (dj_buildables' rule: the Boombox blueprint or the sidecar
-//     override), our item is inserted after the last toy (at the end without one). It is a MemberwiseClone
-//     of a toy item of that list (owning category, transactor, provider = the toy section) with our own
-//     ShopCategoryItemEntry: the Night Light's asset reference (own AssetReference of its GUID; reference /
-//     unique id "ToyDefinition.NightLight"), our price (kPrice Newbucks), no count limit; runtime helper
-//     ToyShopItemHelper.Instance, no category updater, load handle cleared (the UI loads it like any item).
+//   * GetRuntimeItems detour (after the original): for the Daily Deals category (analytics name only), while the
+//     radio card is unlocked (dj_buildables' rule: the Boombox blueprint or the sidecar override), the Slime
+//     Radio takes the daily toy's place at one restock in kOdds (restock key = ShopCategoryRuntime._lastSeedUsed
+//     mixed with the toy's asset GUID: the same answer after a reload); the vanilla toy entry is only taken out
+//     of the list the UI reads. Our item is a MemberwiseClone of that toy item (owning category, transactor,
+//     provider = the toy section) with our own ShopCategoryItemEntry: the Night Light's asset reference (own
+//     AssetReference of its GUID; reference / unique id "ToyDefinition.NightLight"), our price (kPrice
+//     Newbucks), the toy's sort index; runtime helper ToyShopItemHelper.Instance, no category updater, load
+//     handle cleared (the UI loads it like any item). One per restock: bought, it is sold out (sidecar
+//     kBoughtKey = the restock key).
 //   * get_Asset detour: our item shows a runtime ToyDefinition clone of the Night Light ("Slime Radio", the
 //     Boombox's icon and full-art picture). get_Description: our text. Both pointer compares only.
 //   * TryPurchase detour for our item: affordability, SpendableDirector.Spend, `count` Night Lights queued
 //     at the page's spawner (ShopDirector.QueueToSpawnItem), the pending count raised. Nothing tracked in
-//     the shop's purchase records. No spawner id: the radios spawn in front of the player (dj Grant).
+//     the shop's purchase records. Queued under the page's spawner id even when it is empty (as vanilla); only
+//     without one (null) the radio spawns in front of the player (dj Grant).
 //   * SpawnNextItem detour (after the original): a Night Light while radios are pending is listed as a
 //     Slime Radio (dj::ListRadio) and the count lowered. The tick lowers the count to the Night Lights
 //     still queued (a queue lost without the sidecar, Night Lights dispensed while custom upgrades were off).
@@ -93,6 +97,8 @@ constexpr const char* kImage = "Assembly-CSharp";
 constexpr const char* kShop = "MonomiPark.SlimeRancher.Shop";
 constexpr const char* kShopRuntime = "MonomiPark.SlimeRancher.Shop.Runtime";
 constexpr const char* kPendingKey = "dj.shop_radios_pending";
+constexpr const char* kBoughtKey = "dj.shop_radio_bought";  // the restock key the radio was bought in (sold out until the next)
+constexpr uint32_t kOdds = 4;  // the Slime Radio is the daily toy at one restock in kOdds
 constexpr const char* kCategory = "DailyDeals";                          // analytics name of the toy category
 constexpr const char* kNightLightGuid = "6b6134bfd2a4907479a87c894d40324c";  // DailyDeals_BaseToysTable (1.3.0)
 constexpr int32_t kPrice = 1000;      // Newbucks (vanilla toys 500..2000; the Boombox fabricates for 1000 + items)
@@ -136,12 +142,13 @@ struct Impl {
     size_t offSarInterface = 0, offSarFilter = 0, offSarRefId = 0, offSarUnique = 0, offAiRef = 0, offGuid = 0;
     size_t offSicItem = 0, offSicUnlock = 0, offSicCost = 0, offPcCur = 0, offPcIdent = 0, offPcComp = 0;
     size_t offLocName = 0, offIcon = 0, offFullArt = 0, offNeedsArt = 0, offRefId = 0, offHashInit = 0;
-    size_t offScShop = 0, offScSpendable = 0, offSdModel = 0, offDmPending = 0;
+    size_t offScShop = 0, offScSpendable = 0, offSdModel = 0, offDmPending = 0, offSeed = 0, offSubName = 0, offSubType = 0;
     // methods
     const MethodInfo* clone = nullptr, *toyHelperInstance = nullptr, *newbucks = nullptr, *entryCtor = nullptr;
     const MethodInfo* canAfford = nullptr, *getCost = nullptr, *getSortGroup = nullptr, *getSortIndex = nullptr;
     const MethodInfo* analyticsName = nullptr, *spend = nullptr, *queueSpawn = nullptr, *actorIdOf = nullptr;
     const MethodInfo* sceneInst = nullptr, *setHideFlags = nullptr, *lsCtor = nullptr, *lsGetTable = nullptr, *lsGetEntry = nullptr;
+    const MethodInfo* assetGuid = nullptr;
     using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
     using WBarrierFn = void (*)(Il2CppObject*, void**, void*);
     ObjectNewFn objectNew = nullptr;
@@ -158,7 +165,11 @@ struct Impl {
         Il2CppObject* item = nullptr;
         void* cost[3] = {};      // our PurchaseCost {_currencyCosts, IdentCosts, ComponentCosts} (held by the entry)
         Il2CppGCHandle handle = nullptr;
-        bool logged = false;
+        // The daily toy rotation: the restock key last decided, and the vanilla toy entry our item stands in for.
+        uint32_t key = 0;
+        bool decided = false, radioDay = false;
+        Il2CppObject* hiddenToy = nullptr;
+        Il2CppGCHandle hiddenHandle = nullptr;
     };
     std::vector<Item> items;
     std::unordered_map<Il2CppObject*, bool> decided;  // category -> is the Daily Deals (decided once it has items)
@@ -273,6 +284,9 @@ struct Impl {
     bool IsToyCategory(Il2CppObject* category, void* list);
     Il2CppObject* MakeItem(Il2CppObject* category, void* list, Item& rec, std::string& what);
     void Serve(Il2CppObject* category, Il2CppObject* list);
+    void Restore(Item& rec, Il2CppObject* list, const char* why, bool putBack = true);
+    uint32_t RestockKey(Il2CppObject* category, Il2CppObject* toy);
+    bool SoldOut(const Item& rec) { return !host.value(kBoughtKey).empty() && host.value(kBoughtKey) == std::to_string(rec.key); }
     void RemoveAll(const char* why);
     bool Purchase(Il2CppObject* item, int32_t count, Il2CppString* spawnHandlerId);
     void Dispensed(Il2CppObject* go);
@@ -325,12 +339,22 @@ bool Impl::EnsureDisplay() {
     Il2CppString* guid = art && offGuid ? unity::Field<Il2CppString*>(art, offGuid) : nullptr;
     const std::string g8 = unity::ToUtf8(guid);
     Il2CppObject* mine = g8.empty() ? nullptr : NewAssetRef(art, g8.c_str());
+    if (mine) {  // round 9 "no preview": a sprite reference also names its sub-object (the sprite in its texture)
+        SetRef(mine, offSubName, unity::Field<Il2CppObject*>(art, offSubName));
+        SetRef(mine, offSubType, unity::Field<Il2CppObject*>(art, offSubType));
+    }
     SetRef(d, offFullArt, mine);
-    unity::Field<bool>(d, offNeedsArt) = mine != nullptr;
+    // As the Boombox: without full art of its own the shop shows the icon as the picture.
+    unity::Field<bool>(d, offNeedsArt) = mine != nullptr && unity::Field<bool>(info.boombox, offNeedsArt);
     g_display.store(d);
     g_desc.store(desc);
     SR2_INFO("[{}] radio shop: shop entry look built (Night Light clone '{}', Boombox icon, {})", module, unity::GetName(d),
-             mine ? "Boombox picture" : "no picture (icon only)");
+             !mine ? "no picture (icon only)"
+             : unity::Field<bool>(d, offNeedsArt)
+                 ? std::format("Boombox picture '{}{}'", g8, unity::Field<Il2CppObject*>(art, offSubName)
+                                                                  ? "[" + unity::ToUtf8(unity::Field<Il2CppString*>(art, offSubName)) + "]"
+                                                                  : std::string())
+                 : std::string("the icon as the picture (the Boombox has no full art)"));
     return true;
 }
 
@@ -342,15 +366,13 @@ bool Impl::IsToyCategory(Il2CppObject* category, void* list) {
     if (n == 0) return false;  // decided once it has items
     bool ok = false;
     const std::string name = unity::ToUtf8(reinterpret_cast<Il2CppString*>(Call(analyticsName, category, {}, "ShopCategoryRuntime.get_AnalyticsName", &ok)));
-    bool toy = ok && name == kCategory;
-    for (size_t i = 0; !toy && i < n && i < 512; ++i)
-        if (auto* it = static_cast<Il2CppObject*>(unity::ListAt(list, i)); it && Toy(it))
-            toy = true;
+    // Only the Daily Deals (round 9: the Range Exchange has toys too, and got the radio as an extra entry).
+    const bool toy = ok && name == kCategory;
     decided[category] = toy;
     if (std::find(seenNames.begin(), seenNames.end(), name) == seenNames.end() && seenNames.size() < 16) {
         seenNames.push_back(name);
         SR2_INFO("[{}] radio shop: shop category '{}' ({} item(s)): {}", module, name.empty() ? "?" : name, n,
-                 toy ? "the toy category, the Slime Radio is sold here" : "not the toy category");
+                 toy ? "the daily toy category, the Slime Radio takes turns with its toys" : "not the daily toy category");
     }
     return toy;
 }
@@ -412,7 +434,7 @@ Il2CppObject* Impl::MakeItem(Il2CppObject* category, void* list, Item& rec, std:
     *reinterpret_cast<Il2CppObject**>(cost + offSicCost + offPcComp) = comp;
     alignas(8) unsigned char noLimit[16] = {};
     int32_t sortGroup = Value<int32_t>(Call(getSortGroup, src, {}, "ShopRuntimeItem.get_SortGroup", &ok));
-    int32_t sortIndex = Value<int32_t>(Call(getSortIndex, src, {}, "ShopRuntimeItem.get_SortIndex", &ok)) + 1000;
+    int32_t sortIndex = Value<int32_t>(Call(getSortIndex, src, {}, "ShopRuntimeItem.get_SortIndex", &ok));  // the toy's place
     Il2CppObject* entry = objectNew(entryClass);
     if (entry) Call(entryCtor, entry, {cost, noLimit, &sortIndex, &sortGroup}, "ShopCategoryItemEntry..ctor", &ok);
     if (!entry || !ok) return what = "item entry", nullptr;
@@ -434,7 +456,48 @@ Il2CppObject* Impl::MakeItem(Il2CppObject* category, void* list, Item& rec, std:
     return item;
 }
 
-// After GetRuntimeItems: our item in `list` (the category's own item list) while wanted, out of it otherwise.
+// The restock this list belongs to: ShopCategoryRuntime._lastSeedUsed (the seed its random restock was rolled with)
+// mixed with the daily toy's asset GUID, so the same restock gives the same answer after a reload.
+uint32_t Impl::RestockKey(Il2CppObject* category, Il2CppObject* toy) {
+    uint32_t h = 2166136261u;
+    auto mix = [&h](uint8_t b) { h = (h ^ b) * 16777619u; };
+    const int32_t seed = offSeed ? unity::Field<int32_t>(category, offSeed) : 0;
+    for (int i = 0; i < 4; ++i) mix(static_cast<uint8_t>(static_cast<uint32_t>(seed) >> (8 * i)));
+    bool ok = false;
+    const std::string guid = unity::ToUtf8(reinterpret_cast<Il2CppString*>(Call(assetGuid, toy, {}, "ShopRuntimeItem.get_AssetGuid", &ok)));
+    for (char c : guid) mix(static_cast<uint8_t>(c));
+    h ^= h >> 15;
+    h *= 0x2C1B3C6Du;
+    h ^= h >> 12;
+    return h ? h : 1;
+}
+
+// Our item out of `list`, the vanilla toy it stood in for back at its place.
+void Impl::Restore(Item& rec, Il2CppObject* list, const char* why, bool putBack) {
+    LiveOf(listM, list);
+    const int at = rec.item ? IndexIn(list, rec.item) : -1;
+    bool ok = false;
+    if (at >= 0 && listM.remove) Call(listM.remove, list, {rec.item}, "List<ShopRuntimeItem>.Remove", &ok);
+    if (putBack && rec.hiddenToy && unity::Field<Il2CppObject*>(rec.hiddenToy, offOwning) == rec.category && IndexIn(list, rec.hiddenToy) < 0 &&
+        listM.insert && at >= 0) {
+        int32_t index = std::min(at, static_cast<int>(unity::ListCount(list)));
+        Call(listM.insert, list, {&index, rec.hiddenToy}, "List<ShopRuntimeItem>.Insert", &ok);
+    }
+    if (at >= 0) SR2_INFO("[{}] radio shop: Slime Radio taken out of the daily toys ({}){}", module, why,
+                          putBack && rec.hiddenToy ? ", the vanilla daily toy is back" : "");
+    if (rec.hiddenHandle) {
+        Il2CppGCHandle h = rec.hiddenHandle;
+        main_thread::Post([h] { unity::FreeGCHandle(h); });
+    }
+    rec.hiddenToy = nullptr;
+    rec.hiddenHandle = nullptr;
+}
+
+// After GetRuntimeItems (Daily Deals only): the category offers one random toy per restock (DailyDeals_BaseToysRuleSet).
+// The Slime Radio takes that toy's place at one restock in kOdds (round 9: "coocoo corner should respect how it works
+// regarding mod items" - it used to be an extra entry next to the toy, always). The vanilla toy entry is only taken out
+// of the list the UI reads; its data, purchase records and the save are untouched. Bought once, it is sold out until
+// the next restock (sidecar kBoughtKey), like a vanilla daily toy.
 void Impl::Serve(Il2CppObject* category, Il2CppObject* list) {
     if (!list || !category || !IsA(category, categoryClass)) return;
     if (unity::Field<Il2CppObject*>(category, offCached) != list) return;  // only the category's own list
@@ -442,16 +505,26 @@ void Impl::Serve(Il2CppObject* category, Il2CppObject* list) {
     for (Item& r : items)
         if (r.category == category) rec = &r;
     if (!active) {
-        if (rec && rec->item) {
-            LiveOf(listM, list);
-            const int at = IndexIn(list, rec->item);
-            bool ok = false;
-            if (at >= 0 && listM.remove) Call(listM.remove, list, {rec->item}, "List<ShopRuntimeItem>.Remove", &ok);
-        }
+        if (rec && rec->item) Restore(*rec, list, "not offered");
         return;
     }
+    if (!IsToyCategory(category, list)) return;
+    // The vanilla daily toy in the list (none: sold out entries stay listed, so none = no toy this restock).
+    Il2CppObject* toy = nullptr;
+    int toyAt = -1;
+    for (size_t i = 0, n = unity::ListCount(list); i < n && i < 512; ++i)
+        if (auto* it = static_cast<Il2CppObject*>(unity::ListAt(list, i)); it && !IsOurs(it) && Toy(it)) {
+            toy = it;
+            toyAt = static_cast<int>(i);
+            break;
+        }
+    if (rec && rec->item && IndexIn(list, rec->item) >= 0) {  // a radio day in this list already
+        unity::Field<bool>(rec->item, offSoldOut) = SoldOut(*rec);
+        if (!toy) return;
+        Restore(*rec, list, "a new restock", false);  // a vanilla toy next to ours: the list was rebuilt
+    }
+    if (!toy) return;
     if (!rec) {
-        if (!IsToyCategory(category, list)) return;
         if (items.size() >= static_cast<size_t>(kMaxItems)) return;
         Item fresh;
         fresh.category = category;
@@ -469,35 +542,38 @@ void Impl::Serve(Il2CppObject* category, Il2CppObject* list) {
         SR2_INFO("[{}] radio shop: Slime Radio shop entry made ({}; {} Newbucks, a Night Light dressed as a radio when it "
                  "is dispensed)", module, what, kPrice);
     }
-    if (IndexIn(list, rec->item) >= 0) return;
-    // After the last toy, else at the end.
-    int at = -1;
-    const size_t n = unity::ListCount(list);
-    for (size_t i = 0; i < n && i < 512; ++i)
-        if (auto* it = static_cast<Il2CppObject*>(unity::ListAt(list, i)); it && Toy(it))
-            at = static_cast<int>(i) + 1;
-    if (at < 0) at = static_cast<int>(n);
+    const uint32_t key = RestockKey(category, toy);
+    if (!rec->decided || key != rec->key) {
+        rec->decided = true;
+        rec->key = key;
+        rec->radioDay = key % kOdds == 0;
+        SR2_INFO("[{}] radio shop: daily toy restock {:08x}: {}", module, key,
+                 rec->radioDay ? "the Slime Radio is the daily toy" : std::format("a vanilla toy (the Slime Radio comes up at 1 restock in {})", kOdds));
+    }
+    if (!rec->radioDay) return;
     LiveOf(listM, list);
     bool ok = false;
-    int32_t index = at;
-    if (listM.insert) Call(listM.insert, list, {&index, rec->item}, "List<ShopRuntimeItem>.Insert", &ok);
-    if (ok && !rec->logged) {
-        rec->logged = true;
-        SR2_INFO("[{}] radio shop: Slime Radio added to the shop's toy category (position {} of {})", module, at + 1, n + 1);
+    int32_t index = toyAt;
+    if (!listM.remove || !listM.insert) return;
+    Call(listM.remove, list, {toy}, "List<ShopRuntimeItem>.Remove", &ok);
+    if (!ok) return;
+    Call(listM.insert, list, {&index, rec->item}, "List<ShopRuntimeItem>.Insert", &ok);
+    if (!ok) {  // put the toy back
+        Call(listM.insert, list, {&index, toy}, "List<ShopRuntimeItem>.Insert", &ok);
+        return;
     }
+    rec->hiddenToy = toy;
+    rec->hiddenHandle = unity::NewGCHandle(toy);  // out of the list: kept for Restore
+    unity::Field<bool>(rec->item, offSoldOut) = SoldOut(*rec);
+    SR2_INFO("[{}] radio shop: Slime Radio stands in for the daily toy (position {} of {}{})", module, index + 1,
+             unity::ListCount(list), SoldOut(*rec) ? ", sold out: bought this restock" : "");
 }
 
 void Impl::RemoveAll(const char* why) {
-    int removed = 0;
     for (Item& r : items) {
         Il2CppObject* list = r.category ? unity::Field<Il2CppObject*>(r.category, offCached) : nullptr;
-        if (!list || IndexIn(list, r.item) < 0) continue;
-        LiveOf(listM, list);
-        bool ok = false;
-        if (listM.remove) Call(listM.remove, list, {r.item}, "List<ShopRuntimeItem>.Remove", &ok);
-        removed += ok;
+        if (list) Restore(r, list, why);
     }
-    if (removed) SR2_INFO("[{}] radio shop: {}: Slime Radio taken out of {} shop list(s)", module, why, removed);
 }
 
 // ---------------------------------------------------------------- purchase --
@@ -505,10 +581,15 @@ void Impl::RemoveAll(const char* why) {
 // Our TryPurchase: Newbucks spent, `count` vanilla Night Lights queued at the page's spawner, pending raised.
 bool Impl::Purchase(Il2CppObject* item, int32_t count, Il2CppString* spawnHandlerId) {
     if (count <= 0 || count > 999 || !info.toyDef || !unity::IsAlive(info.toyDef)) return false;
-    const Item* rec = nullptr;
-    for (const Item& r : items)
+    Item* rec = nullptr;
+    for (Item& r : items)
         if (r.item == item) rec = &r;
     if (!rec) return false;
+    if (SoldOut(*rec)) {
+        SR2_INFO("[{}] radio shop: Slime Radio not bought (sold out until the next restock)", module);
+        return false;
+    }
+    count = 1;  // a daily toy: one per restock
     bool ok = false;
     const bool afford = Value<bool>(Call(canAfford, item, {&count}, "ShopRuntimeItem.CanAfford", &ok)) && ok;
     if (!afford) {
@@ -524,9 +605,12 @@ bool Impl::Purchase(Il2CppObject* item, int32_t count, Il2CppString* spawnHandle
         SR2_INFO("[{}] radio shop: {} Slime Radio(s) not bought (SpendableDirector.Spend refused)", module, count);
         return false;
     }
+    host.setValue(kBoughtKey, std::to_string(rec->key));
+    unity::Field<bool>(item, offSoldOut) = true;
     const std::string source = unity::ToUtf8(spawnHandlerId);
     bool queued = false;
-    if (!source.empty() && unity::IsAlive(shop)) Call(queueSpawn, shop, {spawnHandlerId, info.toyDef, &count}, "ShopDirector.QueueToSpawnItem", &queued);
+    // As vanilla (ShopRuntimeItem's spawn callback): queued under the page's spawner id, even an empty one.
+    if (spawnHandlerId && unity::IsAlive(shop)) Call(queueSpawn, shop, {spawnHandlerId, info.toyDef, &count}, "ShopDirector.QueueToSpawnItem", &queued);
     if (queued) {
         const int pending = Pending() + count;
         SetPending(pending);
@@ -537,7 +621,7 @@ bool Impl::Purchase(Il2CppObject* item, int32_t count, Il2CppString* spawnHandle
         std::string result;
         for (int left = count; left > 0; left -= 5) dj::Grant(buildables::kSlimeRadio, std::min(left, 5), result);
         SR2_INFO("[{}] radio shop: {} Slime Radio(s) bought for {} Newbucks; no dispenser ({}) - spawned in front of you",
-                 module, count, kPrice * count, source.empty() ? "no spawner id" : "no ShopDirector");
+                 module, count, kPrice * count, !spawnHandlerId ? "no spawner id" : "no ShopDirector");
     }
     return true;
 }
@@ -730,6 +814,9 @@ bool RadioShop::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& why
     off(sceneCtx, "<SpendableDirector>k__BackingField", p->offScSpendable);
     off(shopDir, "_dataModel", p->offSdModel);
     off(dataModel, "_itemsPendingSpawn", p->offDmPending);
+    off(p->categoryClass, "_lastSeedUsed", p->offSeed);
+    off(assetRef, "m_SubObjectName", p->offSubName);
+    off(assetRef, "m_SubObjectType", p->offSubType);
     if (!why.empty()) return fail();
     // Value-type field offsets include the object header.
     for (size_t* o : {&p->offSicItem, &p->offSicUnlock, &p->offSicCost, &p->offPcCur, &p->offPcIdent, &p->offPcComp})
@@ -747,6 +834,7 @@ bool RadioShop::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& why
     p->getSortGroup = method(p->itemClass, "get_SortGroup", 0);
     p->getSortIndex = method(p->itemClass, "get_SortIndex", 0);
     p->analyticsName = method(p->categoryClass, "get_AnalyticsName", 0);
+    p->assetGuid = method(p->itemClass, "get_AssetGuid", 0);
     p->spend = byParams(spendable, "Spend", {"MonomiPark.SlimeRancher.Economy.PurchaseCost", "System.Int32"});
     p->queueSpawn = method(shopDir, "QueueToSpawnItem", 3);
     p->actorIdOf = byParams(identifiable, "GetActorId", {"UnityEngine.GameObject"});
@@ -837,7 +925,8 @@ void RadioShop::Reset() {
     Impl& p = *g;
     std::vector<Il2CppGCHandle> handles;
     for (Impl::Item& r : p.items)
-        if (r.handle) handles.push_back(r.handle);
+        for (Il2CppGCHandle h : {r.handle, r.hiddenHandle})
+            if (h) handles.push_back(h);
     if (!handles.empty()) main_thread::Post([handles] {
         for (Il2CppGCHandle h : handles) unity::FreeGCHandle(h);
     });
