@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "core/detour_guard.h"
+#include "core/hook_manager.h"
 #include "core/il2cpp_api.h"
 #include "core/log.h"
 #include "core/main_thread.h"
@@ -184,6 +185,48 @@ std::string PrettyAssetName(const std::string& asset) {
     return s.empty() ? asset : s;
 }
 
+// ---- the game's open Fabricator (FabricatorUI instances) ----
+// Found through two hooks instead of a scan: the old once-a-second FindObjectOfType(FabricatorUI) cost
+// 6-14 ms per call (the log's "frame:sandbox took 6 ms" every second, also on the title screen) and never
+// reported the Fabricator open in the user's test (no G press reached the module, no hint was drawn).
+// FabricatorUI.Start (1.3.0 RVA 0x826D30, runs once per instance, wires the content's events) adds the
+// instance, OnDestroy (0x8263D0) removes it; "open" is then its GameObject being active. Both hooks stay on
+// with Sandbox off (an instance started before Sandbox was turned on must be known) and only keep a list.
+// HookManager module / DetourGuard fault name "sandbox_fabricator". Main thread only.
+constexpr const char* kFabHooks = "sandbox_fabricator";
+struct FabUi {
+    Il2CppObject* ui = nullptr;
+    Il2CppGCHandle handle = nullptr;
+};
+std::vector<FabUi> g_fabUis;
+using FabUiFn = void (*)(Il2CppObject*, const MethodInfo*);
+FabUiFn g_origFabStart = nullptr, g_origFabDestroy = nullptr;
+sr2::core::DetourGuard g_fabStartGuard{kFabHooks, "FabricatorUI.Start"};
+sr2::core::DetourGuard g_fabDestroyGuard{kFabHooks, "FabricatorUI.OnDestroy"};
+
+void FabStartDetour(Il2CppObject* self, const MethodInfo* mi) {
+    g_origFabStart(self, mi);
+    g_fabStartGuard.Run([&] {
+        if (!self || !main_thread::IsMainThread()) return;
+        for (const FabUi& f : g_fabUis)
+            if (f.ui == self) return;
+        g_fabUis.push_back({self, unity::NewGCHandle(self)});
+    });
+}
+
+void FabDestroyDetour(Il2CppObject* self, const MethodInfo* mi) {
+    g_fabDestroyGuard.Run([&] {
+        if (!main_thread::IsMainThread()) return;
+        for (auto it = g_fabUis.begin(); it != g_fabUis.end(); ++it) {
+            if (it->ui != self) continue;
+            if (Il2CppGCHandle h = it->handle) main_thread::Post([h] { unity::FreeGCHandle(h); });  // not inside the hook
+            g_fabUis.erase(it);
+            break;
+        }
+    });
+    g_origFabDestroy(self, mi);
+}
+
 class Sandbox final : public sr2::core::Module {
 public:
     const char* Name() const override { return kModule; }
@@ -261,7 +304,8 @@ private:
     bool EnsureRecipes();
     bool EnsureMaterials();
     void RefreshRecipeState();
-    Il2CppObject* SlotUnlockUpgrade(const Ctx& c, Il2CppObject* slot, Il2CppObject** upgradeModel, int* level = nullptr);
+    bool SlotUnlockUpgrades(const Ctx& c, Il2CppObject* slot, Il2CppObject** upgradeModel,
+                            std::vector<Il2CppObject*>* out = nullptr);
     std::string RecipeCost(Il2CppObject* def, std::vector<bridge::CostLine>* lines = nullptr);
     Il2CppObject* GadgetDirector();
     void Refresh();
@@ -492,7 +536,6 @@ private:
     size_t offUlEffects_ = 0;                        // UpgradeLevelDefinition.Effects (List<FloatModifier>)
     size_t offSlotDefUnlockProp_ = 0;                // AmmoSlotDefinition._isUnlockedProperty
     size_t offSlotDefThreshold_ = 0;                 // AmmoSlotDefinition._isUnlockedThreshold
-    size_t offModValue_ = 0;                         // FloatModifier.Value (from the live object's class)
     Il2CppClass* upgradeDefClass_ = nullptr;
 
     // ---- unlock all upgrades (optional; uses the slot-unlock symbols above) ----
@@ -515,8 +558,22 @@ private:
     const MethodInfo* spendIdentAmount_ = nullptr;     // SpendableDirector.GetIdentCostAmount(IdentifiableType)
     const MethodInfo* spendComponentAmount_ = nullptr; // SpendableDirector.GetUpgradeComponentAmount(UpgradeComponent)
     const MethodInfo* acquireComponent_ = nullptr;     // static AcquisitionUtility.AcquireUpgradeComponent(component, int)
+    const MethodInfo* fabGridSelected_ = nullptr;      // FabricatorItemGrid.TryGetSelectedItem(out IFabricatableItem)
+    const MethodInfo* fabContentSelected_ = nullptr;   // FabricatorContent.OnItemSelected(IFabricatableItem, InteractionCause)
     unsigned long long lastFabPoll_ = 0;
     bool fabOpen_ = false, fabKeyDown_ = false;
+
+    // ---- "Discover all upgrades" (optional): the upgrade components that make a hidden upgrade buyable ----
+    size_t offUdRequireComp_ = 0;                      // UpgradeDefinition._requireComponentToBeVisibleToPlayer
+    const MethodInfo* tryGetSpendable_ = nullptr;      // SceneContextUtility.TryGetSpendableDirector(out SpendableDirector)
+    int upgHidden_ = -1;                               // upgrades still to discover (snapshot; -1 = unknown)
+
+    Il2CppObject* OpenFabricator();                    // the open FabricatorUI, or nullptr
+    Il2CppObject* FabricatorItem(Il2CppObject* ui, Il2CppObject** content, Il2CppObject** details);
+    void RefreshFabricator();
+    Il2CppObject* SpendableDirector();
+    bool UpgradeHidden(Il2CppObject* um, Il2CppObject* up, Il2CppObject* spend, std::vector<Il2CppObject*>* missing);
+    void DoDiscoverUpgrades(const Ctx& c);
 };
 
 Sandbox* g_self = nullptr;
@@ -2023,7 +2080,7 @@ void Sandbox::Refresh() {
                 } else {
                     slot.count = 0;
                 }
-                if (!slot.unlocked) slot.unlockable = SlotUnlockUpgrade(c, a, nullptr) != nullptr;
+                if (!slot.unlocked) slot.unlockable = SlotUnlockUpgrades(c, a, nullptr);
             }
             s.slots.push_back(std::move(slot));
         }
@@ -2060,6 +2117,7 @@ void Sandbox::Refresh() {
         }
         s.upgradeCount = upgCount_;
         s.upgradeLevelsLeft = upgLeft_;
+        s.upgradesHidden = upgHidden_;
         if (!incUpgrade_) s.upgradeWhy = "The game's upgrade functions were not found (see the log).";
         else if (upgLeft_ < 0) s.upgradeWhy = "The player's upgrade list was not found.";
     }
@@ -2255,8 +2313,13 @@ void Sandbox::Handle(const bridge::Action& a) {
         case bridge::Op::MoveSlot: DoMoveSlot(c, a.slot, static_cast<int>(a.value)); break;
         case bridge::Op::UnlockSlot: DoUnlockSlot(c, a.slot); break;
         case bridge::Op::UnlockUpgrades: DoUnlockUpgrades(c); break;
+        case bridge::Op::DiscoverUpgrades: DoDiscoverUpgrades(c); break;
         case bridge::Op::InfiniteEnergy: break;  // handled above
     }
+    // An open Fabricator shows the new counts at once (else only after selecting another recipe and back).
+    if (a.op == bridge::Op::AddMaterial || a.op == bridge::Op::Craft || a.op == bridge::Op::SetNewbucks ||
+        a.op == bridge::Op::AddNewbucks)
+        RefreshFabricator();
     Refresh();
 }
 
@@ -2709,75 +2772,68 @@ void Sandbox::DoAddMaterial(uintptr_t item, int64_t count) {
     else Done(false, std::format("{} not added: the game refused it", name));
 }
 
-// The upgrade the fabricator sells that unlocks `slot`: an UpgradeDefinition (from the player's
-// UpgradeModel.upgradeDefinitions) with a level whose effects target the slot definition's
-// _isUnlockedProperty (AmmoSlot.IsUnlocked: that property >= _isUnlockedThreshold). Field reads only.
-Il2CppObject* Sandbox::SlotUnlockUpgrade(const Ctx& c, Il2CppObject* slot, Il2CppObject** upgradeModel, int* level) {
-    if (!incUpgrade_ || !slot) return nullptr;
+// The upgrades the fabricator sells that drive `slot`'s unlock property: every UpgradeDefinition (from the
+// player's UpgradeModel.upgradeDefinitions, in list order: vanilla first, custom_upgrades' tiers behind their
+// parent) with a level whose effects target the slot definition's _isUnlockedProperty (AmmoSlot.IsUnlocked: that
+// property >= _isUnlockedThreshold). Field reads plus one GetUpgradeLevel per match. The effects are ADD
+// modifiers relative to the property's default, and several upgrades stack (Extra Tank I-II +1 / +2 on
+// AmmoSlotsAvailable, custom_upgrades' Extra Tank III-IV on top), so the level that unlocks a slot can't be read
+// off one modifier's value: DoUnlockSlot buys levels in this order until the slot reports unlocked. True if any
+// of them still has a level to buy.
+bool Sandbox::SlotUnlockUpgrades(const Ctx& c, Il2CppObject* slot, Il2CppObject** upgradeModel,
+                                 std::vector<Il2CppObject*>* out) {
+    if (out) out->clear();
+    if (!incUpgrade_ || !slot) return false;
     Il2CppObject* def = unity::Field<Il2CppObject*>(slot, offSlotDef_);
-    if (!IsA(def, slotDefClass_) || !unity::IsAlive(def)) return nullptr;
+    if (!IsA(def, slotDefClass_) || !unity::IsAlive(def)) return false;
     Il2CppObject* prop = unity::Field<Il2CppObject*>(def, offSlotDefUnlockProp_);
-    if (!prop) return nullptr;
-    const int threshold = unity::Field<int32_t>(def, offSlotDefThreshold_);
-    bool ok = false;
-    Il2CppObject* um = Call(getUpgradeModel_, c.model, {}, "PlayerModel.GetUpgradeModel", &ok);
-    if (!ok || !um) return nullptr;
+    if (!prop) return false;
+    Il2CppObject* um = nullptr;
+    std::vector<Il2CppObject*> ups;
+    if (!PlayerUpgrades(c, um, ups)) return false;
     if (upgradeModel) *upgradeModel = um;
-    Il2CppObject* defList = unity::Field<Il2CppObject*>(um, offUmDefs_);
-    if (!defList || !unity::IsAlive(defList)) return nullptr;
     const auto& a = api();
-    auto itemsOff = Resolver::Get().FieldOffset(a.il2cpp_object_get_class(defList), "items");
-    void* defs = itemsOff ? unity::Field<void*>(defList, *itemsOff) : nullptr;
-    for (size_t i = 0, n = unity::ListCount(defs); i < n; ++i) {
-        auto* up = static_cast<Il2CppObject*>(unity::ListAt(defs, i));
-        if (!IsA(up, upgradeDefClass_) || !unity::IsAlive(up)) continue;
-        int firstAny = -1;
+    bool open = false;
+    for (Il2CppObject* up : ups) {
+        bool targets = false;
         void* levels = unity::Field<void*>(up, offUdLevels_);
-        for (size_t l = 0, nl = unity::ListCount(levels); l < nl; ++l) {
+        const size_t nl = unity::ListCount(levels);
+        for (size_t l = 0; l < nl && !targets; ++l) {
             auto* lvl = static_cast<Il2CppObject*>(unity::ListAt(levels, l));
             if (!lvl) continue;
             if (!offUlEffects_) {
                 auto o = Resolver::Get().FieldOffset(a.il2cpp_object_get_class(lvl), "Effects");
-                if (!o) return nullptr;
+                if (!o) return false;
                 offUlEffects_ = *o;
             }
             void* effects = unity::Field<void*>(lvl, offUlEffects_);
-            for (size_t e = 0, ne = unity::ListCount(effects); e < ne; ++e) {
+            for (size_t e = 0, ne = unity::ListCount(effects); e < ne && !targets; ++e) {
                 auto* mod = static_cast<Il2CppObject*>(unity::ListAt(effects, e));
                 if (!mod) continue;
                 Il2CppClass* mk = a.il2cpp_object_get_class(mod);
                 if (mk != modClass_) {
                     auto o = Resolver::Get().FieldOffset(mk, "TargetProperty");
-                    auto v = Resolver::Get().FieldOffset(mk, "Value");
-                    if (!o || !v) continue;
+                    if (!o) continue;
                     modClass_ = mk;
                     offModTarget_ = *o;
-                    offModValue_ = *v;
                 }
-                if (unity::Field<Il2CppObject*>(mod, offModTarget_) != prop) continue;
-                // The level that unlocks it: the first whose modifier on the property reaches the
-                // threshold (a level may also list the property with a lower value).
-                if (firstAny < 0) firstAny = static_cast<int>(l);
-                if (unity::Field<float>(mod, offModValue_) >= static_cast<float>(threshold)) {
-                    if (level) *level = static_cast<int>(l);
-                    return up;
-                }
+                targets = unity::Field<Il2CppObject*>(mod, offModTarget_) == prop;
             }
         }
-        if (firstAny >= 0) {  // targets it, but no value reaches the threshold: assume the first level
-            if (level) *level = firstAny;
-            return up;
-        }
+        if (!targets) continue;
+        if (out) out->push_back(up);
+        int cur = -1;
+        if (CallValue(getUpgradeLevel_, um, {up}, "UpgradeModel.GetUpgradeLevel", cur) && cur < static_cast<int>(nl) - 1)
+            open = true;
     }
-    return nullptr;
+    return open;
 }
 
-// Unlocks a locked slot the way buying the vacpack upgrade does
-// (PlayerUpgradeFabricatableItem.FabricateAndSpendCost, 1.3.0 RVA 0x82AFA0, minus the
-// spending and analytics): UpgradeModel.IncrementUpgradeLevel, one level at a time, up to
-// the level that unlocks it (the model's level n applies UpgradeDefinition._levels[n]; the
-// fabricator buys GetUpgradeLevel + 1). Never past that level, even if the slot does not
-// report unlocked at once. Earlier slots the same levels unlock open too, as in the shop.
+// Unlocks a locked slot the way buying the vacpack upgrades does (PlayerUpgradeFabricatableItem.
+// FabricateAndSpendCost, 1.3.0 RVA 0x82AFA0, minus the spending and analytics): UpgradeModel.
+// IncrementUpgradeLevel one level at a time (SetUpgradeLevel raises OnUpgradeChanged, and ActorUpgradeHandler
+// applies _levels[n].Effects at once), on each upgrade that drives the slot's property in list order, until the
+// slot reports unlocked. Earlier slots the same levels unlock open too, as in the shop.
 void Sandbox::DoUnlockSlot(const Ctx& c, int idx) {
     Il2CppObject* slot = SlotAt(c, idx);
     if (!slot) {
@@ -2790,25 +2846,39 @@ void Sandbox::DoUnlockSlot(const Ctx& c, int idx) {
         return;
     }
     Il2CppObject* um = nullptr;
-    int target = -1;
-    Il2CppObject* up = SlotUnlockUpgrade(c, slot, &um, &target);
-    if (!up || !um || target < 0) {
+    std::vector<Il2CppObject*> ups;
+    SlotUnlockUpgrades(c, slot, &um, &ups);
+    if (ups.empty() || !um) {
         Done(false, std::format("Slot {} not unlocked: no vacpack upgrade unlocks it", idx + 1));
         return;
     }
-    const std::string upName = unity::GetName(up);
-    int levels = 0, cur = 0;
-    for (int guard = 0; guard < 16 && !unlocked; ++guard) {
-        if (!CallValue(getUpgradeLevel_, um, {up}, "UpgradeModel.GetUpgradeLevel", cur) || cur >= target) break;
-        bool inc = false;
-        if (!CallValue(incUpgrade_, um, {up}, "UpgradeModel.IncrementUpgradeLevel", inc) || !inc) break;
-        ++levels;
-        CallValue(slotUnlocked_, slot, {}, "AmmoSlot.IsUnlocked", unlocked);
+    int levels = 0;
+    std::string list, names;
+    for (Il2CppObject* up : ups) {
+        names += (names.empty() ? "" : ", ") + unity::GetName(up);
+        if (unlocked) continue;
+        const int last = static_cast<int>(unity::ListCount(unity::Field<void*>(up, offUdLevels_))) - 1;
+        int from = -1;
+        if (!CallValue(getUpgradeLevel_, um, {up}, "UpgradeModel.GetUpgradeLevel", from)) continue;
+        int cur = from;
+        for (int guard = 0; guard < 16 && !unlocked && cur < last; ++guard) {
+            bool inc = false;
+            if (!CallValue(incUpgrade_, um, {up}, "UpgradeModel.IncrementUpgradeLevel", inc) || !inc) break;
+            int now = cur;
+            if (!CallValue(getUpgradeLevel_, um, {up}, "UpgradeModel.GetUpgradeLevel", now) || now <= cur) break;
+            cur = now;
+            CallValue(slotUnlocked_, slot, {}, "AmmoSlot.IsUnlocked", unlocked);
+        }
+        if (cur > from) {
+            levels += cur - from;
+            list += std::format("{}{} {} -> {}", list.empty() ? "" : ", ", unity::GetName(up), from, cur);
+        }
     }
-    Done(unlocked, unlocked ? std::format("Slot {} unlocked ({} level(s) of the {} upgrade)", idx + 1, levels, upName)
-                   : levels ? std::format("Slot {}: applied {} level(s) of {}, but it is still locked", idx + 1, levels, upName)
-                            : std::format("Slot {} not unlocked: the {} upgrade is at level {} already (needs {})", idx + 1,
-                                          upName, cur, target));
+    if (levels) RefreshFabricator();
+    Done(unlocked, unlocked ? std::format("Slot {} unlocked ({})", idx + 1, list)
+                   : levels ? std::format("Slot {}: applied {}, but it is still locked", idx + 1, list)
+                            : std::format("Slot {} not unlocked: its upgrades ({}) are at their last level already",
+                                          idx + 1, names));
 }
 
 // ------------------------------------------------- unlock all upgrades ----
@@ -2834,9 +2904,23 @@ void Sandbox::SetupUnlocks(sr2::il2cpp::Resolver& R) {
         return nullptr;
     };
 
-    // Unlock all upgrades: the slot-unlock symbols (UpgradeModel.GetUpgradeLevel / IncrementUpgradeLevel,
+    // Max all upgrades: the slot-unlock symbols (UpgradeModel.GetUpgradeLevel / IncrementUpgradeLevel,
     // upgradeDefinitions, UpgradeDefinition._levels) are all it needs.
-    SR2_INFO("[{}] unlock all upgrades: {}", kModule, incUpgrade_ ? "available" : "NOT available (upgrade symbols missing)");
+    SR2_INFO("[{}] max all upgrades: {}", kModule, incUpgrade_ ? "available" : "NOT available (upgrade symbols missing)");
+    {
+        // Discover all upgrades: PlayerUpgradeFabricatableItem.get_ShouldShowPlaceholder (0x82B940, decompiled)
+        // hides an upgrade that is not bought (level < 0) while its _requireComponentToBeVisibleToPlayer is set and
+        // the player lacks one of level 0's ComponentCosts (SpendableDirector.HasUpgradeComponent(c, 1)).
+        std::string dw;
+        off(upgradeDefClass_, "_requireComponentToBeVisibleToPlayer", offUdRequireComp_, dw);
+        Il2CppClass* scu = cls("MonomiPark.SlimeRancher.Util", "SceneContextUtility", dw);
+        tryGetSpendable_ = method(scu, "TryGetSpendableDirector", 1, dw);
+        if (!dw.empty()) {
+            offUdRequireComp_ = 0;
+            tryGetSpendable_ = nullptr;
+        }
+        SR2_INFO("[{}] discover all upgrades: {}", kModule, dw.empty() && incUpgrade_ ? "available" : "NOT available (" + dw + ")");
+    }
 
     // Fabricator key: the open FabricatorUI's selected recipe and the refinery / currency / component counts.
     std::string fw;
@@ -2869,15 +2953,45 @@ void Sandbox::SetupUnlocks(sr2::il2cpp::Resolver& R) {
     spendIdentAmount_ = method(spend, "GetIdentCostAmount", 1, fw);
     spendComponentAmount_ = method(spend, "GetUpgradeComponentAmount", 1, fw);
     acquireComponent_ = method(acq, "AcquireUpgradeComponent", 2, fw);
+    // The selected recipe as the game reads it (_gridNavigation._selectedIndex into _currentPageOfItems; the old
+    // _hoveredIndex is the pointer's hover), and the panel refresh the game runs on a selection change
+    // (FabricatorContent.OnItemSelected: details SetItem, variants button, ItemSelected -> the key legend).
+    fabGridSelected_ = method(grid, "TryGetSelectedItem", 1, fw);
+    fabContentSelected_ = method(content, "OnItemSelected", 2, fw);
     // What it adds with: the crafter's refinery symbols and PurchaseCost layout, and the upgrade model.
     if (fw.empty() && (!gadgetAddItem_ || !refinerySpace_ || !offCraftCosts_ || !offCostIdent_ || !identCostStride_))
         fw = "the crafter's refinery / recipe-cost symbols are missing";
+    std::string hooks;
+    if (fw.empty()) {
+        // The two always-on hooks that tell when a Fabricator exists (see FabStartDetour).
+        auto& hm = sr2::core::HookManager::Get();
+        struct H {
+            const char* name;
+            void* detour;
+            void** original;
+        };
+        const H hs[] = {{"Start", reinterpret_cast<void*>(&FabStartDetour), reinterpret_cast<void**>(&g_origFabStart)},
+                        {"OnDestroy", reinterpret_cast<void*>(&FabDestroyDetour), reinterpret_cast<void**>(&g_origFabDestroy)}};
+        for (const H& h : hs) {
+            std::string err;
+            const MethodInfo* m = R.Method(fabUiClass_, h.name, 0, &err);
+            void* target = m ? R.MethodPointer(m, &err) : nullptr;
+            const std::string full = std::format("{}.FabricatorUI.{}", kFabHooks, h.name);
+            if (!target || !hm.Create(kFabHooks, full, target, h.detour, h.original, &err) || !hm.Enable(full, &err)) {
+                fw = std::format("hook FabricatorUI.{}: {}", h.name, err.empty() ? "method not found" : err);
+                break;
+            }
+            hooks += std::format("{}FabricatorUI.{} +0x{:X}", hooks.empty() ? "" : ", ", h.name, Resolver::Rva(target));
+        }
+    }
     if (!fw.empty()) {
+        if (!hooks.empty()) sr2::core::HookManager::Get().DisableModule(kFabHooks);  // Start without OnDestroy
         fabUiClass_ = nullptr;
         SR2_WARN("[{}] Fabricator key ({}): NOT available ({})", kModule, FabricatorKeyName(), fw);
     } else {
-        SR2_INFO("[{}] Fabricator key ({}): available (adds the selected recipe's missing materials to the refinery)",
-                 kModule, FabricatorKeyName());
+        SR2_INFO("[{}] Fabricator key ({}): available (adds the selected recipe's missing materials to the refinery; "
+                 "hooks {})",
+                 kModule, FabricatorKeyName(), hooks);
     }
 }
 
@@ -2901,41 +3015,48 @@ bool Sandbox::PlayerUpgrades(const Ctx& c, Il2CppObject*& um, std::vector<Il2Cpp
     return true;
 }
 
-// How many upgrades and levels "Unlock all upgrades" would add (for the button and its tooltip).
-// The model's level n applies _levels[n]; -1 = not bought; the last level is LevelCount - 1.
+// For the Player card's buttons and tooltips: how many levels "Max all upgrades" would add and how many
+// upgrades "Discover all upgrades" would make visible. The model's level n applies _levels[n]; -1 = not
+// bought; the last level is LevelCount - 1.
 void Sandbox::UpgradeState(const Ctx& c) {
     Il2CppObject* um = nullptr;
     std::vector<Il2CppObject*> ups;
     if (!PlayerUpgrades(c, um, ups)) {
         upgCount_ = 0;
-        upgLeft_ = -1;
+        upgLeft_ = upgHidden_ = -1;
         return;
     }
-    int left = 0;
+    Il2CppObject* spend = SpendableDirector();
+    int left = 0, hidden = 0;
     for (Il2CppObject* up : ups) {
         const int last = static_cast<int>(unity::ListCount(unity::Field<void*>(up, offUdLevels_))) - 1;
         int cur = -1;
         if (last < 0 || !CallValue(getUpgradeLevel_, um, {up}, "UpgradeModel.GetUpgradeLevel", cur)) continue;
         left += std::max(0, last - std::max(cur, -1));
+        if (UpgradeHidden(um, up, spend, nullptr)) ++hidden;
     }
     upgCount_ = static_cast<int>(ups.size());
     upgLeft_ = left;
+    upgHidden_ = spend && offUdRequireComp_ && acquireComponent_ && spendComponentAmount_ ? hidden : -1;
 }
 
 // Every player upgrade to its last level, the way buying them does after the cost is paid
 // (PlayerUpgradeFabricatableItem.FabricateAndSpendCost: UpgradeModel.IncrementUpgradeLevel), one level
 // at a time and never past the definition's last level. Mod tiers in the list (custom_upgrades) come
 // after their vanilla parent and go through the same call, which custom_upgrades records for its
-// sidecar (its UpgradeModel.SetUpgradeLevel detour).
+// sidecar (its UpgradeModel.SetUpgradeLevel detour). IncrementUpgradeLevel (0xAD9510, decompiled) returns
+// false at the last level (UpgradeLevelExist), else SetUpgradeLevel(level + 1), which raises OnUpgradeChanged
+// (ActorUpgradeHandler applies the level's modifiers) and the TinkerTailorSlimes progress (blocked while
+// Sandbox is on).
 void Sandbox::DoUnlockUpgrades(const Ctx& c) {
     if (!incUpgrade_) {
-        Done(false, "Upgrades not unlocked: the upgrade symbols were not found");
+        Done(false, "Upgrades not raised: the upgrade symbols were not found");
         return;
     }
     Il2CppObject* um = nullptr;
     std::vector<Il2CppObject*> ups;
     if (!PlayerUpgrades(c, um, ups)) {
-        Done(false, "Upgrades not unlocked: the player's upgrade list was not found");
+        Done(false, "Upgrades not raised: the player's upgrade list was not found");
         return;
     }
     int levels = 0, touched = 0, stuck = 0;
@@ -2961,24 +3082,174 @@ void Sandbox::DoUnlockUpgrades(const Ctx& c) {
     }
     lastUpgState_ = 0;  // the button's count at once
     if (!touched) {
-        Done(stuck == 0, stuck ? std::format("Upgrades not unlocked: the game refused {} upgrade(s)", stuck)
+        Done(stuck == 0, stuck ? std::format("Upgrades not raised: the game refused {} upgrade(s)", stuck)
                                : std::string("Every upgrade is at its last level already"));
         return;
     }
-    SR2_INFO("[{}] unlocked upgrades: {}", kModule, list);
-    Done(true, std::format("Unlocked all upgrades: {} level(s) of {} upgrade(s){}", levels, touched,
+    RefreshFabricator();
+    SR2_INFO("[{}] maxed upgrades: {}", kModule, list);
+    Done(true, std::format("Maxed all upgrades: {} level(s) of {} upgrade(s){}", levels, touched,
                            stuck ? std::format(" ({} could not be raised all the way)", stuck) : std::string()));
 }
 
+// SceneContext's SpendableDirector (SceneContextUtility.TryGetSpendableDirector), what the Fabricator counts with.
+Il2CppObject* Sandbox::SpendableDirector() {
+    if (!tryGetSpendable_) return nullptr;
+    Il2CppObject* spend = nullptr;
+    bool found = false;
+    if (!CallValue(tryGetSpendable_, nullptr, {&spend}, "SceneContextUtility.TryGetSpendableDirector", found) || !found ||
+        !spend)
+        return nullptr;
+    return spend;
+}
+
+// An upgrade the Fabricator shows as a placeholder until it is found, as PlayerUpgradeFabricatableItem.
+// get_ShouldShowPlaceholder (0x82B940, decompiled) decides: not bought (level < 0), its
+// _requireComponentToBeVisibleToPlayer set, and the player lacks one of level 0's ComponentCosts
+// (SpendableDirector.HasUpgradeComponent(c, 1); here GetUpgradeComponentAmount < 1). `missing` gets those
+// components, once each.
+bool Sandbox::UpgradeHidden(Il2CppObject* um, Il2CppObject* up, Il2CppObject* spend, std::vector<Il2CppObject*>* missing) {
+    if (missing) missing->clear();
+    if (!um || !up || !spend || !offUdRequireComp_ || !offCostComponents_ || !spendComponentAmount_) return false;
+    if (!unity::Field<bool>(up, offUdRequireComp_)) return false;
+    int cur = 0;
+    if (!CallValue(getUpgradeLevel_, um, {up}, "UpgradeModel.GetUpgradeLevel", cur) || cur >= 0) return false;
+    void* levels = unity::Field<void*>(up, offUdLevels_);
+    auto* first = unity::ListCount(levels) ? static_cast<Il2CppObject*>(unity::ListAt(levels, 0)) : nullptr;
+    if (!first) return false;
+    if (!offUlCosts_) {
+        auto o = Resolver::Get().FieldOffset(api().il2cpp_object_get_class(first), "_costs");
+        if (!o) return false;
+        offUlCosts_ = *o;
+    }
+    void* comps = *reinterpret_cast<void* const*>(reinterpret_cast<const char*>(first) + offUlCosts_ + offCostComponents_);
+    bool hidden = false;
+    for (size_t i = 0, n = unity::ListCount(comps); i < n; ++i) {
+        auto* comp = static_cast<Il2CppObject*>(unity::ListAt(comps, i));
+        if (!comp || !unity::IsAlive(comp)) continue;
+        int have = 0;
+        if (!CallValue(spendComponentAmount_, spend, {comp}, "SpendableDirector.GetUpgradeComponentAmount", have) || have >= 1)
+            continue;
+        hidden = true;
+        if (missing && std::find(missing->begin(), missing->end(), comp) == missing->end()) missing->push_back(comp);
+    }
+    return hidden;
+}
+
+// "Discover all upgrades": what finding an upgrade in the world does, without buying a level. Every upgrade
+// the Fabricator hides (UpgradeHidden) gets one of each level-0 upgrade component it lacks through
+// AcquisitionUtility.AcquireUpgradeComponent(component, 1), the treasure pod / pickup path; the upgrade then
+// shows in the Fabricator, buyable for its normal cost (level 0 spends that component, as after finding it).
+// Upgrades without that flag, or already bought, are never hidden and are left alone. Gadget blueprints are
+// a different mechanism (GadgetDirector's blueprint list, GadgetFabricatableItem.get_IsMissingBlueprint) and
+// are not touched.
+void Sandbox::DoDiscoverUpgrades(const Ctx& c) {
+    Il2CppObject* um = nullptr;
+    std::vector<Il2CppObject*> ups;
+    Il2CppObject* spend = SpendableDirector();
+    if (!acquireComponent_ || !offUdRequireComp_ || !spend || !PlayerUpgrades(c, um, ups)) {
+        Done(false, "Upgrades not discovered: the game's upgrade / component functions were not found");
+        return;
+    }
+    int found = 0, failed = 0;
+    std::string list;
+    std::vector<Il2CppObject*> missing;
+    for (Il2CppObject* up : ups) {
+        if (!UpgradeHidden(um, up, spend, &missing)) continue;
+        bool ok = true;
+        for (Il2CppObject* comp : missing) {
+            int one = 1;
+            bool got = false;
+            if (!CallValue(acquireComponent_, nullptr, {comp, &one}, "AcquisitionUtility.AcquireUpgradeComponent", got) || !got)
+                ok = false;
+        }
+        if (ok && !UpgradeHidden(um, up, spend, nullptr)) {
+            ++found;
+            list += (list.empty() ? "" : ", ") + unity::GetName(up);
+        } else {
+            ++failed;
+        }
+    }
+    lastUpgState_ = 0;
+    if (!found) {
+        Done(failed == 0, failed ? std::format("Upgrades not discovered: the game refused {} upgrade(s)", failed)
+                                 : std::string("Every upgrade is discovered already"));
+        return;
+    }
+    RefreshFabricator();
+    SR2_INFO("[{}] discovered upgrades (one upgrade component each, as when found): {}", kModule, list);
+    Done(failed == 0, std::format("Discovered {} upgrade(s){}. An open Fabricator shows them after you reopen it.", found,
+                                  failed ? std::format(" ({} could not be discovered)", failed) : std::string()));
+}
+
 // ------------------------------------------ Fabricator "add missing materials" ----
-// While Sandbox is on and the game's Fabricator is open: one FindObjectOfType(FabricatorUI) per second
-// (the overlay's hint), and the key's edge (GetAsyncKeyState, game window in front, overlay closed).
+// The open FabricatorUI: an instance the Start hook saw (still alive) whose GameObject is active.
+Il2CppObject* Sandbox::OpenFabricator() {
+    if (!fabUiClass_) return nullptr;
+    for (const FabUi& f : g_fabUis) {
+        Il2CppObject* ui = f.handle ? unity::GCHandleTarget(f.handle) : f.ui;
+        if (ui != f.ui || !IsA(ui, fabUiClass_) || !unity::IsAlive(ui)) continue;
+        if (unity::ActiveInHierarchy(unity::GameObjectOf(ui))) return ui;
+    }
+    return nullptr;
+}
+
+// The recipe the Fabricator has selected (the item its details panel shows): FabricatorItemGrid.
+// TryGetSelectedItem (0x80AAD0, decompiled: _gridNavigation._selectedIndex into _currentPageOfItems), else the
+// hovered index. Also hands back the content and details panel.
+Il2CppObject* Sandbox::FabricatorItem(Il2CppObject* ui, Il2CppObject** contentOut, Il2CppObject** detailsOut) {
+    if (contentOut) *contentOut = nullptr;
+    if (detailsOut) *detailsOut = nullptr;
+    if (!ui) return nullptr;
+    Il2CppObject* content = unity::Field<Il2CppObject*>(ui, offFabUiContent_);
+    if (!content || !unity::IsAlive(content)) return nullptr;
+    if (contentOut) *contentOut = content;
+    Il2CppObject* grid = unity::Field<Il2CppObject*>(content, offFabContentGrid_);
+    Il2CppObject* details = unity::Field<Il2CppObject*>(content, offFabContentDetails_);
+    if (detailsOut && details && unity::IsAlive(details)) *detailsOut = details;
+    if (!grid || !unity::IsAlive(grid)) return nullptr;
+    Il2CppObject* item = nullptr;
+    bool got = false;
+    if (fabGridSelected_ && CallValue(fabGridSelected_, grid, {&item}, "FabricatorItemGrid.TryGetSelectedItem", got) && got &&
+        item)
+        return item;
+    const int idx = unity::Field<int32_t>(grid, offFabGridHovered_);
+    void* items = unity::Field<void*>(grid, offFabGridItems_);
+    return idx >= 0 && static_cast<size_t>(idx) < unity::ListCount(items)
+               ? static_cast<Il2CppObject*>(unity::ListAt(items, static_cast<size_t>(idx)))
+               : nullptr;
+}
+
+// After anything that changes what the open Fabricator's selected recipe needs or has (G, refinery items,
+// crafts, Newbucks, upgrade levels, components): the refresh the game runs when the selection changes,
+// FabricatorContent.OnItemSelected(item, PROGRAMMATIC) (0x804700, decompiled: details SetItem -> recipe counts
+// and the Fabricate / Upgrade button, variants button, ItemSelected -> FabricatorUI.OnItemSelected ->
+// UpdateInputLegendBasedOnItemUpgrade, which enables the legend's Fabricate / Upgrade entry). PROGRAMMATIC
+// plays no selection sound. Without that method: FabricatorItemDetails.SetItem.
+void Sandbox::RefreshFabricator() {
+    Il2CppObject* content = nullptr;
+    Il2CppObject* details = nullptr;
+    Il2CppObject* item = FabricatorItem(OpenFabricator(), &content, &details);
+    if (!item) return;
+    bool ok = false;
+    int32_t cause = 0;  // InteractionCause.PROGRAMMATIC
+    if (fabContentSelected_ && content) Call(fabContentSelected_, content, {item, &cause}, "FabricatorContent.OnItemSelected", &ok);
+    if (!ok && details) Call(fabDetailsSetItem_, details, {item}, "FabricatorItemDetails.SetItem", &ok);
+}
+
+// While Sandbox is on: whether the game's Fabricator is open, 4 times a second (the overlay's hint; logged
+// when it changes), and the key's edge (GetAsyncKeyState, game window in front, overlay closed). The key is
+// read from the OS, so the Fabricator's own input handling does not matter.
 void Sandbox::FabricatorTick(unsigned long long now) {
     if (!fabUiClass_) return;
-    if (now - lastFabPoll_ >= 1000) {
+    if (now - lastFabPoll_ >= 250) {
         lastFabPoll_ = now;
-        Il2CppObject* ui = unity::FindObjectOfType(fabUiClass_);
-        fabOpen_ = ui && IsA(ui, fabUiClass_) && unity::IsAlive(ui);
+        const bool open = OpenFabricator() != nullptr;
+        if (open != fabOpen_)
+            SR2_INFO("[{}] Fabricator {}", kModule,
+                     open ? std::format("open: {} adds the selected recipe's missing materials", FabricatorKeyName())
+                          : std::string("closed"));
+        fabOpen_ = open;
         bridge::SetFabricatorHint(fabOpen_, kFabricatorKey);
     }
     bool down = false;
@@ -2991,13 +3262,12 @@ void Sandbox::FabricatorTick(unsigned long long now) {
     fabKeyDown_ = down;
 }
 
-// The selected recipe of the open Fabricator (FabricatorItemGrid: _currentPageOfItems[_hoveredIndex], the
-// item its details panel shows): what the player lacks of it (times the panel's craft count for gadgets)
-// is added for free: refinery items through GadgetDirector.AddItem (what the refinery intake does, clamped
-// to its space), upgrade components through AcquisitionUtility.AcquireUpgradeComponent (the treasure pod /
-// shop path), Newbucks through PlayerState.AddCurrency. "Have" is what the Fabricator itself counts
-// (SpendableDirector.GetIdentCostAmount / GetUpgradeComponentAmount). The panel is then set to the item
-// again so it shows the new counts. Nothing is crafted or bought: the player still presses Fabricate.
+// The selected recipe of the open Fabricator (FabricatorItem): what the player lacks of it (times the panel's
+// craft count for gadgets) is added for free: refinery items through GadgetDirector.AddItem (what the refinery
+// intake does, clamped to its space), upgrade components through AcquisitionUtility.AcquireUpgradeComponent
+// (the treasure pod / shop path), Newbucks through PlayerState.AddCurrency. "Have" is what the Fabricator itself
+// counts (SpendableDirector.GetIdentCostAmount / GetUpgradeComponentAmount). The panel is then refreshed
+// (RefreshFabricator). Nothing is crafted or bought: the player still presses Fabricate.
 void Sandbox::DoFabricatorMaterials() {
     Ctx c;
     std::string why;
@@ -3005,17 +3275,14 @@ void Sandbox::DoFabricatorMaterials() {
         Done(false, "Fabricator: nothing added: " + why);
         return;
     }
-    Il2CppObject* ui = unity::FindObjectOfType(fabUiClass_);
-    if (!ui || !IsA(ui, fabUiClass_) || !unity::IsAlive(ui)) return;
-    Il2CppObject* content = unity::Field<Il2CppObject*>(ui, offFabUiContent_);
-    Il2CppObject* grid = content && unity::IsAlive(content) ? unity::Field<Il2CppObject*>(content, offFabContentGrid_) : nullptr;
-    Il2CppObject* details = content && unity::IsAlive(content) ? unity::Field<Il2CppObject*>(content, offFabContentDetails_) : nullptr;
-    if (!grid || !unity::IsAlive(grid)) return;
-    const int idx = unity::Field<int32_t>(grid, offFabGridHovered_);
-    void* items = unity::Field<void*>(grid, offFabGridItems_);
-    auto* item = idx >= 0 && static_cast<size_t>(idx) < unity::ListCount(items)
-                     ? static_cast<Il2CppObject*>(unity::ListAt(items, static_cast<size_t>(idx)))
-                     : nullptr;
+    Il2CppObject* ui = OpenFabricator();
+    if (!ui) {
+        Done(false, "Fabricator: nothing added: the Fabricator is not open");
+        return;
+    }
+    Il2CppObject* content = nullptr;
+    Il2CppObject* details = nullptr;
+    Il2CppObject* item = FabricatorItem(ui, &content, &details);
     if (!item) {
         Done(false, "Fabricator: select a recipe first");
         return;
@@ -3027,7 +3294,10 @@ void Sandbox::DoFabricatorMaterials() {
     std::string name;
     if (IsA(item, fabGadgetItemClass_)) {
         Il2CppObject* def = unity::Field<Il2CppObject*>(item, offFabGadgetDef_);
-        if (!IsA(def, gadgetDefClass_) || !unity::IsAlive(def)) return;
+        if (!IsA(def, gadgetDefClass_) || !unity::IsAlive(def)) {
+            Done(false, "Fabricator: nothing added: the gadget of this recipe was not found");
+            return;
+        }
         costs = reinterpret_cast<const char*>(def) + offCraftCosts_;
         name = ItemName(def);
     } else if (IsA(item, fabUpgradeItemClass_)) {
@@ -3134,11 +3404,12 @@ void Sandbox::DoFabricatorMaterials() {
         Call(addCurrency_, c.player, {c.currency, &add, &popup, nullptr}, "PlayerState.AddCurrency", &ok);
         if (ok) added.push_back(std::format("{} Newbucks", Thousands(add)));
     }
-    // Show the new counts: the details panel (and its recipe with the chosen count) set to the item again.
-    if (!added.empty() && details && unity::IsAlive(details)) {
+    // Show the new counts: the game's selection-change refresh (it sets the recipe to 1 craft), then the
+    // recipe again with the chosen count.
+    if (!added.empty()) {
+        RefreshFabricator();
         bool ok = false;
-        Call(fabDetailsSetItem_, details, {item}, "FabricatorItemDetails.SetItem", &ok);
-        if (ok && count > 1 && recipe && unity::IsAlive(recipe))
+        if (count > 1 && recipe && unity::IsAlive(recipe))
             Call(fabRecipeSetItem_, recipe, {item, &count}, "FabricatorRecipe.SetItem", &ok);
     }
     auto join = [](const std::vector<std::string>& v) {
