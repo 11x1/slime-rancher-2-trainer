@@ -19,7 +19,8 @@
 //     ground teleport (ground_teleport.h: far spots are streamed out, so their regions are loaded in place while
 //     the player stays put, then he lands on a safe floor; TeleportablePlayer.TeleportTo, the game's in-scene
 //     teleport; never while knocked out). With Reveal off, spots under the page's fog are refused (FogMapElement.
-//     ShouldBeRevealed per fog area). In another discovered zone (any zone, the Labyrinth and the Sanctuary
+//     ShouldBeRevealed per fog area; the cloud's shape from its SDF sprite, read back from the GPU, cut at the fog
+//     shader's own threshold). In another discovered zone (any zone, the Labyrinth and the Sanctuary
 //     included, with "Reveal everything" on; that switch also lists every map tab): the game's zone-to-zone travel
 //     TeleportNetwork.TeleportToDestinationImpl into a node of the static teleport network that arrives in one
 //     of the zone's scene groups (ZoneSceneGroupMapping._mappings), then the same ground teleport. The map closes
@@ -88,6 +89,8 @@ constexpr float kTravelTimeout = 90.0f;  // zone change: give up if the player i
 constexpr float kTravelPoll = 0.5f;      // zone change: arrival checked this often
 constexpr float kWallPoll = 3.0f;        // Nullifier wall registry read this often (any time)
 constexpr const char* kWallKey = "map_tools.null_walls";  // per-save sidecar value: the walls seen
+constexpr int kFogArtSize = 128;         // fog sprites (256 px SDFs) are read back at this size for the click test
+constexpr float kFogCloudEdge = 0.5f;    // the fog shader draws a cloud where its first poster step starts (level 0.5)
 
 template <class T>
 T& F(void* obj, size_t off) {
@@ -232,6 +235,12 @@ struct Sym {
     // MapUIFogReveal._eventDirector, FogMapElement._canvasGroup (fallback: its alpha)
     ugui::Fn fogShouldReveal;
     size_t frDirector = kNoOff, fogCanvasGroup = kNoOff;
+    // the fog art's shape (its SDF sprite read back from the GPU, see FogArtOf): RenderTexture.GetTemporary(5) /
+    // ReleaseTemporary / active, Graphics.Blit(Texture, RenderTexture), Texture2D(w, h, fmt, mips, linear),
+    // ReadPixels(Rect, int, int), GetPixels32, Texture2D.width / height, Material.GetFloat / HasProperty(string)
+    Il2CppClass* tex2dClass = nullptr;
+    ugui::Fn rtGetTemp, rtReleaseTemp, rtGetActive, rtSetActive, blit, texCtor, texReadPixels, texGetPixels32, texWidth,
+        texHeight, matGetFloat, matHasProperty;
     // map tabs with Reveal on: MapListConfiguration.<>c__DisplayClass1_0.<GetAvailableMaps>b__0(MapDefinition)
     void* mapAvailable = nullptr;
 };
@@ -259,6 +268,13 @@ struct ResolveCtx {
         return f;
     }
     ugui::Fn Bind(Il2CppClass* k, const char* name, int argc) { return Bind(Method(k, name, argc), name); }
+    ugui::Fn BindP(Il2CppClass* k, const char* name, std::initializer_list<std::string_view> params) {
+        if (!k) return {};
+        std::string e;
+        const MethodInfo* m = Resolver::Get().MethodByParams(k, name, params, &e);
+        if (!m) missing.push_back(e.empty() ? std::format("method {}", name) : e);
+        return Bind(m, name);
+    }
     void* Target(Il2CppClass* k, const char* name, int argc) {
         const MethodInfo* m = Method(k, name, argc);
         if (!m) return nullptr;
@@ -423,6 +439,27 @@ public:
         s_.fogShouldReveal = c.Bind(s_.fogElement, "ShouldBeRevealed", 1);
         s_.frDirector = c.Field(s_.fogReveal, "_eventDirector");
         s_.fogCanvasGroup = c.Field(s_.fogElement, "_canvasGroup");
+        {  // the fog art's shape under a click (GPU read back of its sprite)
+            const char* core = "UnityEngine.CoreModule";
+            Il2CppClass* rt = c.Class(core, "UnityEngine", "RenderTexture");
+            s_.tex2dClass = c.Class(core, "UnityEngine", "Texture2D");
+            Il2CppClass* mat = c.Class(core, "UnityEngine", "Material");
+            s_.rtGetTemp = c.BindP(rt, "GetTemporary", {"System.Int32", "System.Int32", "System.Int32",
+                                                        "UnityEngine.RenderTextureFormat", "UnityEngine.RenderTextureReadWrite"});
+            s_.rtReleaseTemp = c.Bind(rt, "ReleaseTemporary", 1);
+            s_.rtGetActive = c.Bind(rt, "get_active", 0);
+            s_.rtSetActive = c.Bind(rt, "set_active", 1);
+            s_.blit = c.BindP(c.Class(core, "UnityEngine", "Graphics"), "Blit",
+                              {"UnityEngine.Texture", "UnityEngine.RenderTexture"});
+            s_.texCtor = c.BindP(s_.tex2dClass, ".ctor",
+                                 {"System.Int32", "System.Int32", "UnityEngine.TextureFormat", "System.Boolean", "System.Boolean"});
+            s_.texReadPixels = c.BindP(s_.tex2dClass, "ReadPixels", {"UnityEngine.Rect", "System.Int32", "System.Int32"});
+            s_.texGetPixels32 = c.Bind(s_.tex2dClass, "GetPixels32", 0);
+            s_.texWidth = c.Bind(s_.tex2dClass, "get_width", 0);
+            s_.texHeight = c.Bind(s_.tex2dClass, "get_height", 0);
+            s_.matGetFloat = c.BindP(mat, "GetFloat", {"System.String"});
+            s_.matHasProperty = c.BindP(mat, "HasProperty", {"System.String"});
+        }
         // map tabs (Reveal everything)
         if (Il2CppClass* mlc = c.Class("MonomiPark.SlimeRancher.Map", "MapListConfiguration")) {
             Il2CppClass* dc = ugui::NestedClass(mlc, "<>c__DisplayClass1_0");
@@ -518,12 +555,13 @@ public:
         RegisterSettings();
         if (!onChange_) onChange_ = settings::OnChange(kModule, [this](const std::string&) { cfgDirty_.store(true); });
         SR2_INFO("map_tools: resolved (reveal {}, zone names {}, map tabs {}, static fog {}, icons {}, teleport {}, "
-                 "cross-zone {}, fog check {}, legend hint {}, notices {}, {} optional symbols missing)",
+                 "cross-zone {}, fog check {} (cloud shapes {}), legend hint {}, notices {}, {} optional symbols missing)",
                  hookReveal_ ? "yes" : "no", hookHidden_ ? "yes" : "no", hookAvail_ ? "yes" : "no",
                  s_.behSetEnabled ? "yes" : "no", s_.setSiblingIndex ? "yes" : "no", TeleportResolved() ? "yes" : "no",
                  TravelResolved() ? "yes" : "no",
                  s_.fogShouldReveal && Has(s_.frDirector) ? "yes" : Has(s_.fogCanvasGroup) ? "alpha only" : "no",
-                 LegendResolved() ? "yes" : "no", notices_.TextReady() ? "yes" : "no", c.missing.size());
+                 FogArtResolved() ? "from the art" : "image rects only", LegendResolved() ? "yes" : "no",
+                 notices_.TextReady() ? "yes" : "no", c.missing.size());
         return true;
     }
 
@@ -613,6 +651,18 @@ private:
     // teleport
     Ref player_, net_, zoneMap_, sceneLoader_;
     bool clickLogged_ = false;
+    // the fog art's shapes read back this map open (FogArtOf), per Sprite (identity only: the page holds them)
+    struct FogArt {
+        bool ok = false;
+        std::string why;          // when !ok
+        Rect uv{0, 0, 1, 1};      // the sprite's part of its texture (normalized)
+        std::vector<uint8_t> r;   // kFogArtSize^2 red values (the SDF, as the fog shader samples it)
+    };
+    std::map<Il2CppObject*, FogArt> fogArt_;
+    struct FogShader {            // the fog material's parameters (Custom/PosterizedFogOfWarMask)
+        float noise = 1, ilmin = -6.81f, ilmax = 0.71f, steps = 5.5f, bias = 1;
+    };
+    std::map<Il2CppObject*, FogShader> fogShader_;  // per Material (identity only), this map open
     float zoneMapRetry_ = 0;
     std::map<Il2CppObject*, std::string> zoneNames_;
     std::vector<Ref> zonePins_;
@@ -642,6 +692,10 @@ private:
                Has(s_.zmdPrimary) && s_.zoneSgMapping;
     }
     bool LegendResolved() const { return Has(s_.uiLegend) && legend_hint::Resolved(); }
+    bool FogArtResolved() const {
+        return s_.tex2dClass && s_.rtGetTemp && s_.rtReleaseTemp && s_.rtGetActive && s_.rtSetActive && s_.blit &&
+               s_.texCtor && s_.texReadPixels && s_.texGetPixels32 && s_.texWidth && s_.texHeight && ugui::HasSpriteTexture();
+    }
 
     void Step(const char* s) { step_ = s; }
 
@@ -692,6 +746,8 @@ private:
         for (Ref& r : zonePins_) r.Abandon();
         zonePins_.clear();
         zoneNames_.clear();
+        fogArt_.clear();
+        fogShader_.clear();
         travel_.active = false;
         for (Icon& i : icons_)
             for (Ref* r : {&i.go, &i.t, &i.img}) r->Abandon();
@@ -799,6 +855,8 @@ private:
         mapUI_.Reset(nullptr);
         open_ = false;
         revealApplied_ = false;
+        fogArt_.clear();
+        fogShader_.clear();
     }
 
     // ------------------------------------------------------------ teardown ---
@@ -836,6 +894,8 @@ private:
             sceneLoader_.Reset(nullptr);
             travel_ = {};
             notices_.Clear();
+            fogArt_.clear();
+            fogShader_.clear();
         });
         open_ = false;
         revealShown_ = false;
@@ -1717,14 +1777,174 @@ private:
         });
     }
 
+    // The fog material's parameters (Custom/PosterizedFogOfWarMask; defaults = the map's "FogOfWar" material).
+    const FogShader& FogShaderOf(Il2CppObject* mat) {
+        auto it = fogShader_.find(mat);
+        if (it != fogShader_.end()) return it->second;
+        FogShader& f = fogShader_[mat];
+        if (!mat || !s_.matGetFloat || !s_.matHasProperty) return f;
+        auto get = [&](const char* name, float& out) {
+            Managed([&] {
+                Il2CppString* n = unity::NewString(name);
+                if (n && ugui::Call<bool>(s_.matHasProperty, mat, n)) out = ugui::Call<float>(s_.matGetFloat, mat, n);
+            });
+        };
+        get("_NoiseIntensity", f.noise);
+        get("_ilmin", f.ilmin);
+        get("_ilmax", f.ilmax);
+        get("_PosterSteps", f.steps);
+        get("_PosterBiasPower", f.bias);
+        return f;
+    }
+
+    // The fog shader's cloud level at a point of a fog image, from its SDF value `s` (the sprite's red channel)
+    // and the noise term `n` (two animated noise samples, -2..2, 0 on average). From the pixel shader (DXBC,
+    // see NOTES.md): level = pow(sat(G * (noise * n - ilmin) / (ilmax - ilmin)), bias) * steps with
+    // G = s^2 - s^2 (n + s) + s (n + s); the first poster step (a visible cloud) starts at level 0.5. At full
+    // vertex alpha (a fogged area's CanvasGroup alpha 1) the radial reveal term is 1.
+    static float CloudLevel(const FogShader& f, float s, float n) {
+        float sum = n + s;
+        float g = s * s - s * s * sum + s * sum;
+        float span = f.ilmax - f.ilmin;
+        float x = std::clamp(g * (f.noise * n - f.ilmin) / (std::fabs(span) > 1e-6f ? span : 1e-6f), 0.0f, 1.0f);
+        return std::pow(x, f.bias > 0 ? f.bias : 1.0f) * f.steps;
+    }
+
+    // The shape of a fog sprite, as the fog shader sees it: the sprite's texture is not CPU-readable, so it is
+    // drawn into a temporary linear RenderTexture (Graphics.Blit: the texture is sampled like the shader samples
+    // it) and copied back (Texture2D.ReadPixels / GetPixels32). Once per sprite per map open, only for the images
+    // under a right click; the copies are released at once.
+    const FogArt& FogArtOf(Il2CppObject* sprite) {
+        auto it = fogArt_.find(sprite);
+        if (it != fogArt_.end()) return it->second;
+        FogArt& a = fogArt_[sprite];
+        if (!FogArtResolved()) {
+            a.why = "read back not resolved";
+            return a;
+        }
+        Il2CppObject* tex = ugui::SpriteTexture(sprite);
+        if (!tex) {
+            a.why = "the sprite has no texture";
+            return a;
+        }
+        if (ugui::IsA(tex, s_.tex2dClass)) {
+            int tw = 0, th = 0;
+            Managed([&] {
+                tw = ugui::Call<int>(s_.texWidth, tex);
+                th = ugui::Call<int>(s_.texHeight, tex);
+            });
+            Rect sr = ugui::SpriteRect(sprite);
+            if (tw > 0 && th > 0 && sr.w > 0 && sr.h > 0)
+                a.uv = {sr.x / static_cast<float>(tw), sr.y / static_cast<float>(th), sr.w / static_cast<float>(tw),
+                        sr.h / static_cast<float>(th)};
+        }
+        struct Color32 {
+            uint8_t r, g, b, a;
+        };
+        Il2CppObject *rt = nullptr, *copy = nullptr, *prev = nullptr;
+        bool prevOk = false, read = false;
+        Managed([&] {
+            rt = ugui::Call<Il2CppObject*>(s_.rtGetTemp, kFogArtSize, kFogArtSize, 0, 0 /* ARGB32 */, 1 /* Linear */);
+            if (!rt) return;
+            prev = ugui::Call<Il2CppObject*>(s_.rtGetActive);
+            prevOk = true;
+            ugui::Call<void>(s_.blit, tex, rt);
+            ugui::Call<void>(s_.rtSetActive, rt);
+            copy = ugui::ObjectNew(s_.tex2dClass);
+            if (!copy) return;
+            ugui::Call<void>(s_.texCtor, copy, kFogArtSize, kFogArtSize, 4 /* RGBA32 */, false, true /* linear */);
+            ugui::Call<void>(s_.texReadPixels, copy, Rect{0, 0, static_cast<float>(kFogArtSize), static_cast<float>(kFogArtSize)},
+                             0, 0);
+            void* px = ugui::Call<void*>(s_.texGetPixels32, copy);
+            const size_t n = static_cast<size_t>(kFogArtSize) * kFogArtSize;
+            if (unity::ArrayLength(px) != n) return;
+            const Color32* c = unity::ArrayData<Color32>(px);
+            a.r.resize(n);
+            for (size_t i = 0; i < n; ++i) a.r[i] = c[i].r;
+            read = true;
+        });
+        Managed([&] {
+            if (prevOk) ugui::Call<void>(s_.rtSetActive, prev);
+            if (rt) ugui::Call<void>(s_.rtReleaseTemp, rt);
+        });
+        if (copy) Managed([&] { ugui::Destroy(copy); });
+        uint8_t peak = 0;
+        for (uint8_t v : a.r) peak = std::max(peak, v);
+        if (!read) a.why = rt ? "read back failed" : "no RenderTexture";
+        else if (peak < 8) a.why = "read back empty";  // a blit that drew nothing: do not take it as "no cloud"
+        else a.ok = true;
+        if (!a.ok) a.r.clear();
+        SR2_INFO("map_tools: fog art '{}' {} ({} px read back, peak SDF {:.2f}, sprite part of its texture ({:.2f}, {:.2f}) "
+                 "size ({:.2f}, {:.2f}))",
+                 unity::GetName(sprite), a.ok ? "read" : "not readable: " + a.why, kFogArtSize, peak / 255.0f, a.uv.x, a.uv.y,
+                 a.uv.w, a.uv.h);
+        return a;
+    }
+
+    // One fog image at the page point `pm`: 1 its cloud covers the point, 0 not, -1 its art cannot be read
+    // (`why`). `level` = the cloud level there (kFogCloudEdge = the cloud's edge; -1 = outside the image),
+    // `sdf` = the SDF value.
+    int ArtCovers(Il2CppObject* g, Vec2 pm, float& level, float& sdf, std::string& why) {
+        level = -1;
+        sdf = 0;
+        Il2CppObject* t = unity::TransformOf(g);
+        if (!ugui::IsRectTransform(t)) {
+            why = "no RectTransform";
+            return -1;
+        }
+        Rect r = ugui::GetRect(t);
+        if (std::fabs(r.w) < 1e-6f || std::fabs(r.h) < 1e-6f) return 0;
+        Il2CppObject* sprite = ugui::IsA(g, ugui::ImageClass()) ? ugui::ImageGetSprite(g) : nullptr;
+        if (sprite && ugui::ImageGetPreserveAspect(g)) {  // as Image.PreserveSpriteAspectRatio
+            Rect sr = ugui::SpriteRect(sprite);
+            if (sr.w > 0 && sr.h > 0) {
+                float ratio = sr.w / sr.h, px = -r.x / r.w, py = -r.y / r.h;
+                if (ratio > r.w / r.h) {
+                    float h = r.w / ratio;
+                    r.y += (r.h - h) * py;
+                    r.h = h;
+                } else {
+                    float w = r.h * ratio;
+                    r.x += (r.w - w) * px;
+                    r.w = w;
+                }
+            }
+        }
+        Vec3 l = ugui::InverseTransformPoint(t, ugui::TransformPoint(mapT_.get(), {pm.x, pm.y, 0}));
+        float u = (l.x - r.x) / r.w, v = (l.y - r.y) / r.h;
+        if (u < 0 || u > 1 || v < 0 || v > 1) return 0;
+        if (!sprite) {
+            why = "no sprite";
+            return -1;
+        }
+        const FogArt& a = FogArtOf(sprite);
+        if (!a.ok) {
+            why = a.why;
+            return -1;
+        }
+        // bilinear, texel centres at (i + 0.5) / size; row 0 = the bottom (GetPixels32 order, v = 0)
+        float fx = std::clamp((a.uv.x + u * a.uv.w) * kFogArtSize - 0.5f, 0.0f, kFogArtSize - 1.0f);
+        float fy = std::clamp((a.uv.y + v * a.uv.h) * kFogArtSize - 0.5f, 0.0f, kFogArtSize - 1.0f);
+        int x0 = static_cast<int>(fx), y0 = static_cast<int>(fy);
+        int x1 = std::min(x0 + 1, kFogArtSize - 1), y1 = std::min(y0 + 1, kFogArtSize - 1);
+        float tx = fx - x0, ty = fy - y0;
+        auto at = [&](int x, int y) { return a.r[static_cast<size_t>(y) * kFogArtSize + x] / 255.0f; };
+        sdf = (at(x0, y0) * (1 - tx) + at(x1, y0) * tx) * (1 - ty) + (at(x0, y1) * (1 - tx) + at(x1, y1) * tx) * ty;
+        level = CloudLevel(FogShaderOf(ugui::GraphicGetMaterial(g)), sdf, 0);
+        return level >= kFogCloudEdge ? 1 : 0;
+    }
+
     // Is the page point `pm` under the map's fog on the live page? 1 yes (`area` names it), 0 no, -1 cannot tell.
     // Fog areas: every FogMapElement of the page with its real state, FogMapElement.ShouldBeRevealed(
-    // MapUIFogReveal._eventDirector) (what RevealKnownZones shows; fallback: its CanvasGroup alpha); its shape =
-    // the rect of each of its Graphics (page-space parallelograms, as the minimap's fog test), else its own rect.
-    // Static fog (fog-shader art outside every FogMapElement, except the outside-of-the-island negative mask)
-    // counts as fog too: the game never reveals it. A point in a revealed area is clear even when a neighbouring
-    // fogged area's rect also covers it (the rects are larger than the cloud shapes).
-    int FogAt(Vec2 pm, std::string& area) {
+    // MapUIFogReveal._eventDirector) (what RevealKnownZones shows; fallback: its CanvasGroup alpha). A revealed
+    // area draws nothing (CanvasGroup alpha 0). A fogged area's cloud is NOT its image rect: the image is an SDF
+    // sprite that the fog shader cuts at a threshold, and the rects are far larger than the clouds (round 7: every
+    // click near the Conservatory was "under" map_fog_fields1's rect while the map showed it clear). So each
+    // fogged image is tested at the point with its read-back SDF and the shader's own threshold (ArtCovers);
+    // only when the art cannot be read, its rect counts. Static fog (fog-shader art outside every FogMapElement,
+    // except the outside-of-the-island negative mask) is tested the same way: the game never reveals it.
+    // One log line per click with the inputs: zone, map / world point, the deciding image and its cloud level.
+    int FogAt(Vec2 pm, float wx, float wz, const std::string& zone, std::string& area) {
         if (!s_.fogElement || !map_.Alive() || !mapT_.Alive()) return -1;
         Il2CppObject* director = nullptr;
         if (s_.fogShouldReveal && Has(s_.frDirector) && Has(s_.uiFogReveal)) {
@@ -1738,7 +1958,7 @@ private:
             elems.emplace_back(f);
             return true;
         });
-        auto inside = [&](Il2CppObject* t) {
+        auto insideRect = [&](Il2CppObject* t) {
             if (!ugui::IsRectTransform(t)) return false;
             Rect r = ugui::GetRect(t);
             const float xs[4] = {r.x, r.x + r.w, r.x + r.w, r.x}, ys[4] = {r.y, r.y, r.y + r.h, r.y + r.h};
@@ -1758,17 +1978,37 @@ private:
             }
             return sign != 0;
         };
-        auto contains = [&](Il2CppObject* root) {
-            bool any = false, hit = false;
-            ugui::ForEachInChildren(unity::GameObjectOf(root), ugui::GraphicClass(), false, [&](Il2CppObject* g) {
-                any = true;
-                hit = inside(unity::TransformOf(g));
-                return !hit;
-            });
-            return any ? hit : inside(unity::TransformOf(root));
+        bool inFog = false;
+        std::string decided;               // the deciding image and its numbers
+        std::string strongest;             // the strongest cloud under the point that did not cover it
+        float strongestLevel = -1;
+        int artTested = 0, rectOnly = 0;
+        std::string rectWhy;
+        // one fog image: true = the point is under its cloud
+        auto test = [&](Il2CppObject* g, const std::string& label) {
+            float level = 0, sdf = 0;
+            std::string why;
+            int c = ArtCovers(g, pm, level, sdf, why);
+            if (c < 0) {  // art unreadable: its rect decides
+                if (!insideRect(unity::TransformOf(g))) return false;
+                ++rectOnly;
+                if (rectWhy.empty()) rectWhy = why;
+                decided = std::format("{} (its image rect: the art is not readable, {})", label, why);
+                return true;
+            }
+            if (level >= 0) ++artTested;
+            if (c == 1) {
+                decided = std::format("{} (cloud level {:.2f} >= {:.2f}, SDF {:.2f}{})", label, level, kFogCloudEdge, sdf,
+                                      level < kFogCloudEdge * 2.5f ? ", near the cloud's edge" : "");
+                return true;
+            }
+            if (level >= 0 && level > strongestLevel) {
+                strongestLevel = level;
+                strongest = std::format("{}: cloud level {:.2f} < {:.2f}, SDF {:.2f}", label, level, kFogCloudEdge, sdf);
+            }
+            return false;
         };
         int fogged = 0, revealed = 0, unknown = 0, byAlpha = 0;
-        bool inFog = false, inClear = false;
         for (Ref& e : elems) {
             Il2CppObject* f = e.get();
             if (!unity::IsAlive(f)) continue;
@@ -1789,16 +2029,23 @@ private:
                 continue;
             }
             ++(state ? revealed : fogged);
-            if (state ? inClear : inFog) continue;
-            if (!contains(f)) continue;
-            if (state) {
-                inClear = true;
-            } else {
+            if (state || inFog) continue;  // a revealed area draws no cloud
+            std::string label = "fog area '" + unity::GetName(unity::GameObjectOf(f)) + "'";
+            bool any = false;
+            ugui::ForEachInChildren(unity::GameObjectOf(f), ugui::GraphicClass(), false, [&](Il2CppObject* g) {
+                any = true;
+                if (test(g, label)) inFog = true;
+                return !inFog;
+            });
+            if (!any && insideRect(unity::TransformOf(f))) {  // no art at all: its own rect
                 inFog = true;
-                area = "fog area '" + unity::GetName(unity::GameObjectOf(f)) + "'";
+                ++rectOnly;
+                decided = label + " (its own rect: no fog image)";
             }
+            if (inFog) area = label;
         }
-        if (!inFog && !inClear) {  // static fog
+        int statics = 0;
+        if (!inFog) {  // static fog
             std::vector<Il2CppObject*> roots;
             for (Ref& e : elems)
                 if (e.Alive()) roots.push_back(unity::TransformOf(e.get()));
@@ -1809,22 +2056,26 @@ private:
                     return true;
                 for (Il2CppObject* t = unity::TransformOf(g); t && t != mapT_.get(); t = ugui::GetParent(t))
                     if (std::find(roots.begin(), roots.end(), t) != roots.end()) return true;
-                if (!inside(unity::TransformOf(g))) return true;
+                ++statics;
+                std::string label = "static fog '" + unity::GetName(unity::GameObjectOf(g)) + "'";
+                if (!test(g, label)) return true;
                 inFog = true;
-                area = "static fog '" + unity::GetName(unity::GameObjectOf(g)) + "'";
+                area = label;
                 return false;
             });
         }
-        int result = inFog && !inClear ? 1 : 0;
-        SR2_INFO("map_tools: fog at map point ({:.0f}, {:.0f}): {}; {} fog area(s): {} fogged, {} revealed, {} unknown (state from "
-                 "{})",
-                 pm.x, pm.y,
-                 result      ? "under " + area
-                 : inClear   ? std::string("in a revealed area")
-                             : std::string("outside every fog area"),
+        int result = inFog ? 1 : 0;
+        SR2_INFO("map_tools: fog check at map point ({:.0f}, {:.0f}) = world ({:.0f}, {:.0f}), zone '{}': {}; {} fog area(s): "
+                 "{} fogged, {} revealed, {} unknown (state from {}), {} static fog image(s); {} image(s) tested by their "
+                 "art{}",
+                 pm.x, pm.y, wx, wz, zone,
+                 result      ? "UNDER " + decided
+                 : !strongest.empty() ? "clear (strongest cloud here: " + strongest + ")"
+                                 : std::string("clear (no fogged cloud image here)"),
                  elems.size(), fogged, revealed, unknown,
-                 byAlpha ? std::format("the CanvasGroup alpha for {}", byAlpha) : std::string("ShouldBeRevealed"));
-        return elems.empty() && !inFog ? -1 : result;
+                 byAlpha ? std::format("the CanvasGroup alpha for {}", byAlpha) : std::string("ShouldBeRevealed"), statics,
+                 artTested, rectOnly ? std::format(", {} by their rect ({})", rectOnly, rectWhy) : std::string());
+        return elems.empty() && statics == 0 ? -1 : result;
     }
 
     void Teleport() {
@@ -1861,7 +2112,8 @@ private:
         // Reveal off: no target under the map's fog (the player's real map, not the zone-visited flag).
         if (!cfg_.reveal) {
             std::string area;
-            if (FogAt(pm, area) == 1)
+            Il2CppObject* clickedZone = PrimaryZone(ZoneAt(pm));
+            if (FogAt(pm, wx, wz, clickedZone ? ZoneName(clickedZone) : std::string("-"), area) == 1)
                 return Refuse(std::format("({:.0f}, {:.0f}) is under the map's fog ({}); turn on Reveal everything to go there",
                                           wx, wz, area),
                               "that spot is not on your map yet");
