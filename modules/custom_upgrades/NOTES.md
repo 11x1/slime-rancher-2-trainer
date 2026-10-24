@@ -143,6 +143,18 @@ the log lines, no errors after buying another coop upgrade (re-link) or selling 
 - **Custom upgrades off / faulted:** `OnDisable` writes Coop into every program that had ours (plain
   field writes, before the hooks go off, so a later save can't see our value); `Cleanup` (main thread)
   re-programs those drones with Coop. When it is on again the sidecar's stations are mapped back.
+- **Icon (user request): the Plort Collector source icon with the Hen on its output opening**
+  (`drone_icon.cpp`). Asset data (UnityPy): `DroneSourceDefinitions` in the drone station menu scene;
+  PLORT_COLLECTOR uses `iconPatchCorralCollector` (512 x 512, full-colour art, not readable): a
+  collector whose dark round opening spans x 141..314, y 147..320 (Unity y up), a pink plort leaving
+  it. The Hen sprite (the task config's `HenType.icon` = `iconBirdHen`) is scaled so its opaque box is
+  200 px wide and centred on the opening (228, 233); no tint (both are coloured art, not glyphs). Built
+  once, at the first definition lookup after a drone source was built (that brings the Hen icon):
+  `Graphics.Blit` into a temporary RenderTexture + `Texture2D.ReadPixels` of each sprite rect, composite
+  on the CPU (bilinear, premultiplied alpha), new Texture2D + `Sprite.Create`, DontUnloadUnusedAsset +
+  GC handle (never destroyed). The definition's `_icon` is that sprite, so the picker, the applied
+  program and the Drone List all show it. Any failure: the plain Hen icon (log `icon not composed`).
+  Offline preview with the same numbers: `scratchpad/hen-source-icon.png` (`scratchpad/henicon/compose.py`).
 - **Without the mod:** the save only ever holds Coop programs; it loads and runs as Coop (the drone
   takes live chickens and the elder collector; the Hen Collector itself is gone without the mod).
 
