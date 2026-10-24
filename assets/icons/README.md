@@ -61,3 +61,7 @@ python assets/icons/src/gen_inc.py                                 # writes ui/m
 an icon changed; without Python the committed .inc is used). `src/iconkit.py` holds the drawing
 helpers (masks on a 1024 px canvas, shadow crescents, the sticker outline, tier badges);
 `src/make_icons.py` draws each icon; `src/pad_icon.py` prepares hand-drawn ones.
+
+## Browsing the extracted game icons
+
+`python assets/icons/src/build_viewer.py` writes `assets/icons/game/index.html`, an offline page that shows the game icons extracted into `assets/icons/game/` (and ours, for comparison). Open it from disk in a browser. It and the icons it shows are gitignored and stay local: don't publish or upload them.
