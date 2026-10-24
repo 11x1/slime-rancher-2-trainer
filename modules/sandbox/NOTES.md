@@ -1,6 +1,6 @@
 # sandbox
 
-Edits the character's resources from the overlay's **Misc > Sandbox** tab: Newbucks, health / energy / radiation, what each vacpack slot holds (and unlocking locked slots), spawning items in front of the player, crafting fabricator gadgets at no cost and adding crafting materials to the refinery. Off by default. While it is on, achievements are paused (see "Achievements paused").
+Edits the character's resources from the overlay's **Misc > Sandbox** tab: Newbucks, health / energy / radiation, what each vacpack slot holds (and unlocking locked slots), spawning items in front of the player, crafting fabricator gadgets at no cost, adding crafting materials to the refinery, infinite health, teleporting to the map marker and unlocking the ranch expansions. Off by default. While it is on, achievements are paused (see "Achievements paused").
 
 ## Turning it on
 
@@ -106,6 +106,39 @@ The crafter's last section: every `IdentifiableType` that `GadgetDirector.IsStor
 
 `AmmoSlot.IsUnlocked` (0xA3BE20, disassembled): true if the slot definition's `_isUnlockedProperty` is null, else the slot's unlock property value >= `_isUnlockedThreshold`. The property is driven by upgrade effects: `UpgradeDefinition._levels[n].Effects` (`List<FloatModifier>`, `TargetProperty` / `Value` in the generic base `Modifier<float>`, read on the live objects). The module looks through the player's `UpgradeModel.upgradeDefinitions` (`UpgradeDefinitionList`) for the upgrade with a modifier on the slot's property and takes the first level whose `Value` reaches the threshold (else the first level that names the property). The model's level n applies `_levels[n]` (`UpgradeDefinition.GetUpgradeLevel(int)` indexes the list directly; the fabricator buys `GetUpgradeLevel(def) + 1`), so it calls `IncrementUpgradeLevel` until `GetUpgradeLevel` reaches that index, at most 16 times, and stops early once the slot reports unlocked. Earlier slots unlocked by the same levels open too, as when buying them. Locked slots for which an upgrade is found are flagged `unlockable` in the snapshot (field reads plus one `GetUpgradeModel` call per locked slot per refresh). **Not seen in game:** that the property updates within the same call (the bound above makes a late update harmless) and the upgrade asset that owns the slot properties.
 
+## Player extras (Extras card)
+
+Code: `modules/sandbox/player_extras.cpp`, UI bridge `ui/sandbox_extras_bridge.h` (kept apart from the main snapshot), card `SandboxExtras` in `ui/menu.cpp` (full width, between Newbucks | Player and the vacpack). Each tool is optional: a missing symbol turns only that tool off (logged at setup: `[sandbox] player extras: infinite health ..., teleport to marker ..., unlock expansions ...`; the button's tooltip gives the reason). All of it runs only while the module is on, so the achievement pause applies.
+
+### Infinite health
+
+- Session toggle like infinite energy (not saved, off on restart and when the module is turned off).
+- Hook `PlayerState.Damage(Damage)` (RVA 0x87AEB0, unique body, created in Setup, switched with the module, DetourGuard). Decompiled: returns false if fast-forwarding or `timeScale <= 0`; else `PlayerModel.LoseHealth(damage.Amount)` and returns true (dead) when health floors to 0, setting `currHealth = 0`, `healthBurstAfter = inf`. While the toggle is on the detour returns false (not dead) without calling the original, so no damage source that goes through it can knock the player out.
+- Plus a 10 Hz top-up (`GetCurrHealth` < `GetMaxHealth` -> `SetHealth(max)`) for health lost any other way. If the hook can't be created, only the top-up runs (a single hit bigger than the maximum still knocks you out; the tooltip says so).
+- **Not seen in game:** whether every damage source (slime sea, falls, Tarrs, explosions) goes through `PlayerState.Damage`; a source that kills directly through `PlayerDeathHandler` would not be stopped.
+
+### Teleport to waypoint
+
+How the game stores the marker (1.3.0, decompiled): `SceneContext.MapDirector` (`MapDirector`, a ScriptableObject) -> `_navigationMarkerData` (`MapNavigationMarkerData`: `Optional<Vector3> _markerPosition`, `MapDefinition _onMap`, `SceneGroup _firstSceneGroup`). The map UI places it with `MapViewModel.PlaceNavigationMarker(Vector2 ui)` -> `MapDirector.SetPlayerNavigationMarker(new Vector3(-ui.x, 0, -ui.y), currentMap, 16)`, so the stored position is world x / z with **y = 0**. The in-world beam (`NavigationMarkerInWorldController.TurnBeamOn`) is placed at exactly that position. Not saved in the save file as far as seen (no model field).
+
+`MapDirector.TryGetPlayerNavigationMarkerLocation(out Vector3, SceneGroup forSceneGroup, ZoneDefinition forZone)` (0x9C2AC0) returns it when a marker is set, its map's `RelatedScenes` contain `forSceneGroup`, and `forZone` is not in `_centerPlayerInZones` (zones not drawn where they are). The module asks it with `RegionRegistry.CurrentSceneGroup` and `SceneContext.PlayerZoneTracker.GetCurrentZone()` every snapshot (4 Hz while the page is open); without a marker in this zone the button is disabled with the reason as tooltip. A marker on another zone's map is not offered (that would need a scene-group load).
+
+Teleport:
+1. Ground: `Physics.Raycast((x, 1500, z), down, out hit, 3000, DefaultRaycastLayers, QueryTriggerInteraction.Ignore)`; the target is 1 m above the hit. No hit: refused with a message.
+2. `TeleportNetwork.CompleteInSceneTeleport(SceneGroup, Vector3 position, Vector3 eulerRotation)` (public, 0x65BA00), the game's in-scene teleport: it takes the player's `TeleportablePlayer` and calls `TeleportTo(position, group, rotation, overlayEnabled: true)`, which sets the controller position and rotation, zeroes the velocity, `PlayerModel.SetCurrentSceneGroup`, `RegionLoader.InitializeRegionProxies` (loads the regions around the target), moves a held item along, disables screen effects and updates the audio listener. Rotation: the player's current heading (`Transform.eulerAngles` with x / z zeroed).
+
+Log: `[sandbox] Teleported to the map marker: (x, y, z) -> (x, y, z), N m`.
+
+**Not seen in game:** the ground hit (the first collider from above wins: a roof, a tree or an invisible ceiling collider would put you on top of it; over the slime sea you land on whatever collider is below), and whether distant terrain colliders are loaded before `InitializeRegionProxies` runs (if not, the raycast finds nothing and the teleport is refused rather than dropping you).
+
+### Unlock ranch expansions
+
+The expansions are `AccessDoor`s (`MonomiPark.World`, state `LOCKED 0 / OPEN 1 / CLOSED 2`, stored in `AccessDoorModel.state`, which the save keeps) with an `AccessDoorUIActivator` (`MonomiPark.SlimeRancher.UI.AccessDoor`) that opens the purchase UI. Buying (decompiled): `AccessDoorUI` confirm -> `SpendableDirector.Spend(item._purchaseCost)` -> display result true -> `AccessDoorUIActivator.OnPurchaseMenuResult`: `door.CurrState = OPEN`; each of `door.LinkedDoors` that is `LOCKED` -> `CLOSED`; `door.OnUnlockedEvent.RaiseEvent()`; PlayFab analytics; `MetaGameDirector.Grant(DomainExpansion)`; purchase cue.
+
+The module does the same for every loaded activator whose door is locked, without the spend, the analytics, the achievement grant and the cue. `AccessDoor.set_CurrState` writes the model and plays the door's open animation (`ForceUpdate`). Candidates: `FindObjectsOfTypeAll(AccessDoorUIActivator)`, live, door live with its `_model` set (prefabs have none), and a `_purchaseMenuItem` or `_legacyUIPrefab` (what `TryInitialize` needs). The scan runs on the button and every 5 s while the page is open, for the count in the tooltip. The page asks for confirmation first. Log: `[sandbox] Unlocked N ranch expansion(s): <purchase item asset names>`.
+
+**Not seen in game:** the activators exist only while the ranch scene is loaded (away from the ranch the button says to go there); whether other zones have purchasable access doors too (they would be counted and unlocked as well; the log names them); that `OnUnlockedEvent` is all the follow-up the game needs (the buy path does nothing else, so it should be).
+
 ## Achievements paused
 
 While the module is enabled no achievement progress is made: no Steam unlock or stat, and the save's achievement progress does not move. The Sandbox card says "Achievements are paused while Sandbox is on." Code: `modules/sandbox/achievements.cpp`.
@@ -136,7 +169,7 @@ Limits:
 
 ## Threading and faults
 
-- Hooks only for the achievement pause (above). One main-thread frame callback: the snapshot for the tab every 250 ms, only while the tab was drawn in the last 0.6 s (`ui/sandbox_bridge.h`), and the infinite-energy top-up.
+- Hooks only for the achievement pause and infinite health (above). One main-thread frame callback: the snapshot for the tab every 250 ms, only while the tab was drawn in the last 0.6 s (`ui/sandbox_bridge.h`, plus the Extras state in `ui/sandbox_extras_bridge.h`), and the infinite-energy / infinite-health top-ups.
 - The tab's buttons post an `Action` to the main thread (`main_thread::Post`); the module validates it, applies it, logs one line (`[sandbox] Newbucks set: 1,200 -> 5,000`, ...), sets the tab's status line and refreshes the snapshot.
 - Every game call is `Resolver::Invoke` (runtime_invoke, managed exceptions captured and logged). A native fault there marks the module faulted (`MarkModuleFaulted`); from then on it makes no game calls.
 - Each step re-reads the player: `SceneContextUtility.TryGetPlayerState`, `IsAlive` + class checks on `PlayerState`, `PlayerModel`, `AmmoSlotManager`, every `AmmoSlot` and every item.
