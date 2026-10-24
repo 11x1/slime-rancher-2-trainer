@@ -6,11 +6,15 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
+#include <ctime>
+#include <deque>
 #include <format>
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "core/json.h"
 #include "core/log.h"
@@ -30,12 +34,16 @@ constexpr DWORD kTickMs = 1000;                         // worker wake-up withou
 constexpr int kSendBurst = 5;
 constexpr unsigned long long kSendWindowMs = 20000;
 constexpr unsigned long long kSendMarginMs = 250;       // slack on top of the window (clock/queue skew)
-constexpr unsigned long long kSettleMs = 300;           // a burst of changes (Newbucks while selling) is one send...
+constexpr unsigned long long kSettleMs = 300;           // a burst of changes is one send...
 constexpr unsigned long long kSettleMaxMs = 1000;       //   ... but a steady stream still goes out every second
+constexpr unsigned long long kMinorGapMs = 20000;       // a change of only Presence::extra (Newbucks): at most this often
 constexpr unsigned long long kRetryMinMs = 5000;        // Discord not running: first retry
 constexpr unsigned long long kRetryMaxMs = 30000;       //   ... backing off to this
 constexpr unsigned long long kRejectedRetryMs = 120000; // application id refused (unless it changes)
-constexpr DWORD kHandshakeMs = 3000;
+constexpr unsigned long long kReplyTimeoutMs = 10000;   // a SET_ACTIVITY without an answer this long: reconnect
+constexpr unsigned long long kStallMs = 20000;          // watchdog: the worker loop made no progress this long
+constexpr DWORD kHandshakeMs = 6000;                    // Discord sometimes needs over 3 s (seen 2026-10-24)
+constexpr DWORD kClearReplyMs = 500;                    // wait for the clearing SET_ACTIVITY's answer before closing
 constexpr uint32_t kMaxFrame = 64 * 1024;
 constexpr size_t kMaxField = 128;                       // Discord's limit for details / state
 // The large image: Slime Rancher 2's square cover art from its official Discord application
@@ -46,6 +54,19 @@ constexpr const char* kLargeText = "Slime Rancher 2";
 
 enum Op : uint32_t { kHandshake = 0, kFrame = 1, kClose = 2, kPing = 3, kPong = 4 };
 
+// What the worker is doing, for the watchdog's log line.
+enum Phase : int { kPhaseIdle = 0, kPhaseWait, kPhaseConnect, kPhaseWrite, kPhaseRead, kPhaseState };
+const char* PhaseName(int p) {
+    switch (p) {
+        case kPhaseWait: return "waiting for news";
+        case kPhaseConnect: return "opening the pipe";
+        case kPhaseWrite: return "writing to the pipe";
+        case kPhaseRead: return "reading from the pipe";
+        case kPhaseState: return "reading the settings / presence";
+        default: return "between steps";
+    }
+}
+
 // ---- shared with the publishing threads (g_mutex) ----
 std::mutex g_mutex;
 Presence g_want;
@@ -55,18 +76,40 @@ unsigned long long g_version = 0;
 HANDLE g_wake = nullptr;  // auto-reset; set on every change
 bool g_started = false;
 
+// ---- shared with the watchdog (main thread), lock-free ----
+std::atomic<HANDLE> g_thread{nullptr};          // the worker (kept open for CancelSynchronousIo)
+std::atomic<unsigned long long> g_beat{0};      // GetTickCount64 of the worker's last loop pass
+std::atomic<int> g_phase{kPhaseIdle};
+std::atomic<bool> g_forceReconnect{false};      // the watchdog cancelled a stuck call: drop the pipe
+
+// ---- watchdog only (main thread) ----
+bool g_stallReported = false;
+unsigned long long g_nextCancel = 0;
+
 // ---- worker only ----
 HANDLE g_pipe = INVALID_HANDLE_VALUE;
 std::string g_connectedId;
 unsigned long long g_nonce = 0;
 int g_pipeIndex = -1;         // N of \\.\pipe\discord-ipc-N while connected
 std::string g_lastStatus;     // what was last logged / shown
-std::string g_lastError;      // last ERROR reply logged (one line per distinct message)
+std::string g_lastError;      // last ERROR reply logged (one line per distinct message, again after a success)
 unsigned long long g_sendTimes[kSendBurst] = {};  // ring of the last SET_ACTIVITY ticks (rate limit)
 int g_sendNext = 0;                               // oldest entry = the next one overwritten
 bool g_noDisplayType = false; // Discord refused status_display_type once: leave it out from then on
 bool g_noAssets = false;      // Discord refused the image URL once: leave the assets out from then on
 bool g_resend = false;        // send the current presence again (after dropping a refused field)
+// Unanswered SET_ACTIVITY commands in send order (Discord answers in order): send tick + what it shows.
+std::deque<std::pair<unsigned long long, std::string>> g_pending;
+std::string g_shownKey;       // what Discord last confirmed (PresenceKey), logged when it changes
+bool g_shownOk = false;       // the last answer was a success
+
+struct PhaseScope {
+    int prev;
+    explicit PhaseScope(int p) : prev(g_phase.exchange(p)) {}
+    ~PhaseScope() { g_phase.store(prev); }
+    PhaseScope(const PhaseScope&) = delete;
+    PhaseScope& operator=(const PhaseScope&) = delete;
+};
 
 // The card's Status line: a short text, the technical detail for its tooltip and when the next
 // connection attempt is (the card counts it down). Logged (text and detail) when the text changes.
@@ -111,6 +154,29 @@ std::string Clip(std::string s) {
     return s;
 }
 
+// What a presence shows, without Presence::extra (the Newbucks), for the log: one line per change.
+std::string PresenceKey(const Presence* p) {
+    if (!p) return "nothing (presence cleared)";
+    std::string s = p->details.empty() ? std::string("-") : p->details;
+    if (!p->state.empty()) s += " | " + p->state;
+    if (p->start > 0) {
+        const std::time_t t = static_cast<std::time_t>(p->start);
+        std::tm lt{};
+        localtime_s(&lt, &t);
+        s += std::format(", timer from {:02}:{:02}:{:02}", lt.tm_hour, lt.tm_min, lt.tm_sec);
+    } else {
+        s += ", no timer";
+    }
+    return s;
+}
+
+// Only Presence::extra differs (a Newbucks change): such a change waits kMinorGapMs after the last send.
+bool OnlyExtraDiffers(const Presence& a, const Presence& b) {
+    Presence x = a;
+    x.extra = b.extra;
+    return x == b && a.extra != b.extra;
+}
+
 bool Connected() { return g_pipe != INVALID_HANDLE_VALUE; }
 
 void Disconnect() {
@@ -118,9 +184,11 @@ void Disconnect() {
     g_pipe = INVALID_HANDLE_VALUE;
     g_pipeIndex = -1;
     g_connectedId.clear();
+    g_pending.clear();
 }
 
 bool WriteAll(const void* data, DWORD size) {
+    PhaseScope ph(kPhaseWrite);
     const auto* p = static_cast<const char*>(data);
     while (size > 0) {
         DWORD done = 0;
@@ -140,6 +208,7 @@ bool WriteFrame(uint32_t op, const std::string& json) {
 }
 
 bool ReadAll(void* data, DWORD size) {
+    PhaseScope ph(kPhaseRead);
     auto* p = static_cast<char*>(data);
     while (size > 0) {
         DWORD done = 0;
@@ -178,10 +247,13 @@ enum class ConnectResult { Ok, NoDiscord, Rejected, Failed };
 
 // detail: Ok = the user's name; Rejected = Discord's short reason. tech: the technical detail (tooltip).
 ConnectResult Connect(const std::string& id, std::string& detail, std::string& tech) {
-    for (int i = 0; i < 10 && !Connected(); ++i) {
-        const std::wstring name = std::format(L"\\\\.\\pipe\\discord-ipc-{}", i);
-        HANDLE h = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-        if (h != INVALID_HANDLE_VALUE) g_pipe = h, g_pipeIndex = i;
+    {
+        PhaseScope ph(kPhaseConnect);
+        for (int i = 0; i < 10 && !Connected(); ++i) {
+            const std::wstring name = std::format(L"\\\\.\\pipe\\discord-ipc-{}", i);
+            HANDLE h = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (h != INVALID_HANDLE_VALUE) g_pipe = h, g_pipeIndex = i;
+        }
     }
     if (!Connected()) {
         tech = "No Discord IPC pipe open (discord-ipc-0 to -9): the Discord desktop app is not running.";
@@ -219,6 +291,7 @@ ConnectResult Connect(const std::string& id, std::string& detail, std::string& t
     tech = std::format("Handshake OK on {} (application {}).", pipe, id);
     g_connectedId = id;
     g_lastError.clear();
+    g_shownOk = false;  // log what Discord shows again on this connection
     return ConnectResult::Ok;
 }
 
@@ -228,7 +301,7 @@ bool SendActivity(const Presence* p) {
     args.set("pid", json::Value(static_cast<double>(GetCurrentProcessId())));
     if (p) {
         json::Value act = json::Value::Object();
-        const std::string details = Clip(p->details), state = Clip(p->state);
+        const std::string details = Clip(p->details), state = Clip(p->state + p->extra);
         if (details.size() >= 2) act.set("details", json::Value(details));  // Discord wants 2..128 characters
         if (state.size() >= 2) act.set("state", json::Value(state));
         if (p->start > 0) {
@@ -253,15 +326,59 @@ bool SendActivity(const Presence* p) {
     cmd.set("cmd", json::Value(std::string("SET_ACTIVITY")));
     cmd.set("args", std::move(args));
     cmd.set("nonce", json::Value(std::to_string(++g_nonce)));
-    return WriteFrame(kFrame, Compact(cmd));
+    if (!WriteFrame(kFrame, Compact(cmd))) return false;
+    g_pending.emplace_back(GetTickCount64(), PresenceKey(p));
+    return true;
 }
 
-// Answers pings and reads replies. False when the pipe is gone (Discord quit).
-bool Poll() {
+// One reply FRAME: SET_ACTIVITY results are logged once per change (what Discord shows, or its error).
+void HandleReply(const std::string& payload) {
+    json::Value doc;
+    std::string perr;
+    if (!json::Parse(payload, doc, perr)) {
+        SR2_DEBUG("[{}] unreadable reply from Discord ({}): {}", kModule, perr, payload.substr(0, 200));
+        return;
+    }
+    const bool activity = doc["cmd"].asString() == "SET_ACTIVITY";
+    std::string key;
+    if (activity && !g_pending.empty()) {
+        key = std::move(g_pending.front().second);
+        g_pending.pop_front();
+    }
+    if (doc["evt"].asString() == "ERROR") {
+        g_shownOk = false;
+        const std::string msg = doc["data"]["message"].asString("unknown error");
+        if (!g_noDisplayType && msg.find("status_display_type") != std::string::npos) {
+            g_noDisplayType = true;  // this Discord does not know the field: send without it
+            g_resend = true;
+            SR2_INFO("[{}] Discord does not accept status_display_type; the member list shows the app name", kModule);
+        } else if (!g_noAssets && (msg.find("large_image") != std::string::npos || msg.find("assets") != std::string::npos)) {
+            g_noAssets = true;  // the image URL was refused: send without the image
+            g_resend = true;
+            SR2_INFO("[{}] Discord refused the image; the presence is sent without it", kModule);
+        }
+        if (msg != g_lastError) {
+            g_lastError = msg;
+            SR2_WARN("[{}] Discord refused the presence ({}): {}", kModule, key.empty() ? "?" : key, msg);
+        }
+    } else if (activity) {
+        if (!g_shownOk || key != g_shownKey) SR2_INFO("[{}] Discord shows: {}", kModule, key);
+        g_shownKey = std::move(key);
+        g_shownOk = true;
+        g_lastError.clear();
+    }
+}
+
+// Answers pings and reads replies, for up to waitMs (0: only what is already there; else until every
+// SET_ACTIVITY is answered). False when the pipe is gone (Discord quit).
+bool Poll(DWORD waitMs = 0) {
+    const unsigned long long until = GetTickCount64() + waitMs;
     uint32_t op = 0;
     std::string payload;
     for (int i = 0; i < 16; ++i) {
-        const int r = ReadFrame(op, payload, 0);
+        if (waitMs && g_pending.empty()) return true;
+        const unsigned long long now = GetTickCount64();
+        const int r = ReadFrame(op, payload, until > now ? static_cast<DWORD>(until - now) : 0);
         if (r == 0) return true;
         if (r < 0) return false;
         if (op == kPing) {
@@ -269,26 +386,7 @@ bool Poll() {
         } else if (op == kClose) {
             return false;
         } else if (op == kFrame) {
-            json::Value doc;
-            std::string perr;
-            if (json::Parse(payload, doc, perr) && doc["evt"].asString() == "ERROR") {
-                const std::string msg = doc["data"]["message"].asString("unknown error");
-                if (!g_noDisplayType && msg.find("status_display_type") != std::string::npos) {
-                    g_noDisplayType = true;  // this Discord does not know the field: send without it
-                    g_resend = true;
-                    SR2_INFO("[{}] Discord does not accept status_display_type; the member list shows the app name",
-                             kModule);
-                } else if (!g_noAssets && (msg.find("large_image") != std::string::npos ||
-                                           msg.find("assets") != std::string::npos)) {
-                    g_noAssets = true;  // the image URL was refused: send without the image
-                    g_resend = true;
-                    SR2_INFO("[{}] Discord refused the image; the presence is sent without it", kModule);
-                }
-                if (msg != g_lastError) {
-                    g_lastError = msg;
-                    SR2_WARN("[{}] Discord refused the presence: {}", kModule, msg);
-                }
-            }
+            HandleReply(payload);
         }
     }
     return true;
@@ -307,30 +405,44 @@ std::string ShortReason(std::string s) {
 DWORD WINAPI Worker(LPVOID) {
     unsigned long long nextTry = 0, backoff = kRetryMinMs, sentVersion = 0, sentCount = 0;
     unsigned long long seenVersion = 0, changedAt = 0, pendingSince = 0;  // settling a burst of changes
+    unsigned long long lastSendAt = 0;  // tick of the last presence sent on this connection
+    bool haveSent = false;              // lastSent is what Discord was last sent on this connection
+    Presence lastSent;
     DWORD waitMs = kTickMs;
     std::string rejectedId, user, connTech;
     for (;;) {
-        WaitForSingleObject(g_wake, waitMs);
+        {
+            PhaseScope ph(kPhaseWait);
+            WaitForSingleObject(g_wake, waitMs);
+        }
+        g_beat.store(GetTickCount64());
         waitMs = kTickMs;
         bool active = false, have = false;
         Presence want;
         unsigned long long version = 0;
+        std::string id;
+        bool official = false;
         {
-            std::lock_guard lock(g_mutex);
-            active = g_active;
-            have = g_haveWant;
-            want = g_want;
-            version = g_version;
+            PhaseScope ph(kPhaseState);
+            {
+                std::lock_guard lock(g_mutex);
+                active = g_active;
+                have = g_haveWant;
+                want = g_want;
+                version = g_version;
+            }
+            // Slime Rancher 2's own application unless turned off, else the user's id from the card.
+            official = settings::GetBool(bridge::kModule, bridge::kKeyOfficial);
+            id = official ? std::string(bridge::kOfficialAppId) : Trim(settings::GetString(bridge::kModule, bridge::kKeyAppId));
         }
-        // Slime Rancher 2's own application unless turned off, else the user's id from the card.
-        const bool official = settings::GetBool(bridge::kModule, bridge::kKeyOfficial);
-        const std::string id =
-            official ? std::string(bridge::kOfficialAppId) : Trim(settings::GetString(bridge::kModule, bridge::kKeyAppId));
         const unsigned long long now = GetTickCount64();
         const bool reconnect = bridge::TakeReconnect();
         auto drop = [&] {
             if (Connected()) {
-                if (SendActivity(nullptr)) NoteSend(GetTickCount64());
+                if (SendActivity(nullptr)) {
+                    NoteSend(GetTickCount64());
+                    Poll(kClearReplyMs);  // let Discord answer the clear before the pipe closes (else it logs EPIPE)
+                }
                 Disconnect();
                 SR2_INFO("[{}] disconnected from Discord", kModule);
             }
@@ -341,6 +453,12 @@ DWORD WINAPI Worker(LPVOID) {
             Status("Reconnecting...", bridge::Level::Dim,
                    "Discord closed the connection (the pipe broke or it sent CLOSE); connecting again.", nextTry);
         };
+        if (g_forceReconnect.exchange(false) && Connected()) {  // the watchdog cancelled a stuck pipe call
+            Disconnect();
+            nextTry = 0, backoff = kRetryMinMs;
+            Status("Reconnecting...", bridge::Level::Warn,
+                   "The connection stopped responding (watchdog); connecting again.", nextTry);
+        }
         if (!active) {
             drop();
             Status("Off", bridge::Level::Dim, {}, 0, false);
@@ -381,6 +499,7 @@ DWORD WINAPI Worker(LPVOID) {
                     backoff = kRetryMinMs;
                     sentVersion = 0;  // send the current presence again
                     pendingSince = 0;
+                    haveSent = false;
                     user = detail;
                     connTech = tech + (official ? " Slime Rancher 2's own application." : " Your own application.");
                     break;
@@ -407,11 +526,19 @@ DWORD WINAPI Worker(LPVOID) {
             lost();
             continue;
         }
+        if (!g_pending.empty() && now - g_pending.front().first > kReplyTimeoutMs) {
+            SR2_WARN("[{}] Discord has not answered a presence update for {} s; reconnecting", kModule,
+                     (now - g_pending.front().first) / 1000);
+            lost();
+            continue;
+        }
         if (g_resend) {  // a field was refused: the next send goes out without it
             g_resend = false;
             sentVersion = 0;
+            haveSent = false;
         }
         // Send as soon as a change has settled and Discord's rate limit has a free slot; the newest wins.
+        // A change of only the Newbucks waits kMinorGapMs, so it never uses up the slots an area change needs.
         if (have && version != seenVersion) {
             seenVersion = version;
             changedAt = now;
@@ -419,26 +546,36 @@ DWORD WINAPI Worker(LPVOID) {
         }
         unsigned long long slotWait = 0;
         if (have && version != sentVersion) {
-            if (!pendingSince) pendingSince = changedAt = now;  // a resend (reconnect, refused field)
-            const unsigned long long settleAt = std::min(changedAt + kSettleMs, pendingSince + kSettleMaxMs);
-            const unsigned long long sendAt = std::max(settleAt, NextSlot());
-            if (now >= sendAt) {
-                if (!SendActivity(&want)) {
-                    lost();
-                    continue;
-                }
-                NoteSend(now);
+            if (haveSent && want == lastSent) {  // changed and changed back: Discord already shows it
                 sentVersion = version;
                 pendingSince = 0;
-                ++sentCount;
-                SR2_DEBUG("[{}] presence: {} | {}", kModule, want.details, want.state);
             } else {
-                waitMs = static_cast<DWORD>(std::min<unsigned long long>(kTickMs, sendAt - now));
-                if (NextSlot() > now) slotWait = NextSlot() - now;
+                if (!pendingSince) pendingSince = changedAt = now;  // a resend (reconnect, refused field)
+                const bool minor = haveSent && OnlyExtraDiffers(want, lastSent);
+                unsigned long long sendAt = std::max(std::min(changedAt + kSettleMs, pendingSince + kSettleMaxMs), NextSlot());
+                if (minor) sendAt = std::max(sendAt, lastSendAt + kMinorGapMs);
+                if (now >= sendAt) {
+                    if (!SendActivity(&want)) {
+                        lost();
+                        continue;
+                    }
+                    NoteSend(now);
+                    sentVersion = version;
+                    pendingSince = 0;
+                    lastSent = want;
+                    haveSent = true;
+                    lastSendAt = now;
+                    ++sentCount;
+                    SR2_DEBUG("[{}] presence: {} | {}{}", kModule, want.details, want.state, want.extra);
+                } else {
+                    waitMs = static_cast<DWORD>(std::min<unsigned long long>(kTickMs, sendAt - now));
+                    if (sendAt > now + kSettleMaxMs) slotWait = sendAt - now;
+                }
             }
         }
         std::string tech = std::format("{}\nPresence updates sent: {} (Discord allows {} per {} s).", connTech, sentCount,
                                        kSendBurst, kSendWindowMs / 1000);
+        if (g_shownOk) tech += "\nDiscord shows: " + g_shownKey;
         if (slotWait) tech += std::format("\nThe latest change goes out in {} s (rate limit).", (slotWait + 999) / 1000);
         if (!g_lastError.empty()) tech += "\nLast error from Discord: " + g_lastError;
         Status(user.empty() ? std::string("Connected") : "Connected as " + user, bridge::Level::Ok, tech);
@@ -452,9 +589,11 @@ void StartLocked() {
         SR2_ERROR("[{}] could not create the worker event ({})", kModule, GetLastError());
         return;
     }
-    // Lives for the rest of the process (waits on the event while off); never joined.
+    // Lives for the rest of the process (waits on the event while off); never joined. The handle is
+    // kept so the watchdog can cancel a pipe call it is stuck in.
+    g_beat.store(GetTickCount64());
     if (HANDLE t = CreateThread(nullptr, 0, &Worker, nullptr, 0, nullptr)) {
-        CloseHandle(t);
+        g_thread.store(t);
         g_started = true;
     } else {
         SR2_ERROR("[{}] could not start the pipe thread ({})", kModule, GetLastError());
@@ -478,6 +617,38 @@ void Publish(const Presence& p) {
     g_haveWant = true;
     ++g_version;
     if (g_wake) SetEvent(g_wake);
+}
+
+void Watchdog() {
+    HANDLE thread = g_thread.load();
+    if (!thread) return;
+    const unsigned long long now = GetTickCount64(), beat = g_beat.load();
+    if (beat >= now || now - beat < kStallMs) {
+        if (g_stallReported) SR2_INFO("[{}] the pipe thread is running again", kModule);
+        g_stallReported = false;
+        g_nextCancel = 0;
+        return;
+    }
+    const int phase = g_phase.load();
+    if (!g_stallReported) {
+        g_stallReported = true;
+        SR2_WARN("[{}] the pipe thread has made no progress for {} s (it is {}); cancelling its pipe call and "
+                 "reconnecting",
+                 kModule, (now - beat) / 1000, PhaseName(phase));
+    }
+    if (now < g_nextCancel) return;
+    g_nextCancel = now + kStallMs;  // again later if it stays stuck
+    g_forceReconnect.store(true);
+    // Makes a blocked ReadFile / WriteFile / CreateFile on that thread fail (ERROR_OPERATION_ABORTED); the
+    // worker then sees a broken pipe and connects again. Not in a pipe call: nothing to cancel (logged).
+    if (!CancelSynchronousIo(thread)) {
+        const DWORD err = GetLastError();
+        if (err == ERROR_NOT_FOUND)
+            SR2_WARN("[{}] the pipe thread is not in a pipe call ({}); it reconnects once it runs again", kModule,
+                     PhaseName(phase));
+        else
+            SR2_WARN("[{}] could not cancel the pipe thread's call ({})", kModule, err);
+    }
 }
 
 }  // namespace sr2::modules::discord_rpc
