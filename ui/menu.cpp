@@ -1394,46 +1394,78 @@ bool InGroup(sbx::Kind k, int group) {
         case sbx::kGroupFood: return k == sbx::Kind::Food || k == sbx::Kind::Animal;
         case sbx::kGroupResources: return k == sbx::Kind::Resource;
         case sbx::kGroupContainers: return k == sbx::Kind::Container;
+        case sbx::kGroupOther:  // fits none of the tabs above (toys, unsorted types)
+            return k == sbx::Kind::Other || k == sbx::Kind::Toy || k == sbx::Kind::Liquid || k == sbx::Kind::Gadget;
         default: return true;
     }
+}
+
+// A crate's area: its name without "Crate" / "Gold" / "Shadow" ("Bluffs Gold Crate" -> "Bluffs").
+std::string CrateArea(const std::string& name) {
+    std::string out, word;
+    auto flush = [&] {
+        if (!word.empty() && word != "Crate" && word != "Gold" && word != "Shadow") out += (out.empty() ? "" : " ") + word;
+        word.clear();
+    };
+    for (char c : name) {
+        if (c == ' ') flush();
+        else word += c;
+    }
+    flush();
+    return out.empty() ? std::string("Other") : out;
 }
 
 // One group tab: the game's icon from the snapshot, else the first listed item's icon of that
 // group, else a coloured letter.
 item_grid::Tab GroupTab(const sbx::Snapshot& s, int group, const std::vector<sbx::Item>* items) {
-    static const char* const kTips[sbx::kGroupCount] = {"All", "Plorts", "Slimes", "Food", "Resources", "Largos", "Crates"};
-    static const char kGlyph[sbx::kGroupCount] = {0, 'P', 'S', 'F', 'R', 'L', 'C'};
+    static const char* const kTips[sbx::kGroupCount] = {"All",    "Plorts", "Slimes", "Food",
+                                                        "Resources", "Largos", "Crates", "Other"};
+    static const int kGlyph[sbx::kGroupCount] = {0, 'P', 'S', 'F', 'R', 'L', 'C', item_grid::kGlyphOther};
     static const sbx::Kind kTint[sbx::kGroupCount] = {sbx::Kind::Other, sbx::Kind::Plort,    sbx::Kind::Slime,
                                                       sbx::Kind::Food,  sbx::Kind::Resource, sbx::Kind::Largo,
-                                                      sbx::Kind::Container};
+                                                      sbx::Kind::Container, sbx::Kind::Other};
     item_grid::Tab t;
     t.icon = s.groupIcons[group];
-    if (!t.icon && group != sbx::kGroupAll && items)
+    // Other: always the drawn dots (its first item's icon would say "toys" or the like).
+    if (!t.icon && group != sbx::kGroupAll && group != sbx::kGroupOther && items)
         for (const sbx::Item& it : *items)
             if (it.icon && !it.icon2 && InGroup(it.kind, group)) {
                 t.icon = it.icon;
                 break;
             }
     t.glyph = kGlyph[group];
-    t.tint = group == sbx::kGroupAll ? 0 : KindAccent(kTint[group]);
+    t.tint = group == sbx::kGroupAll || group == sbx::kGroupOther ? 0 : KindAccent(kTint[group]);
     t.tip = kTips[group];
     return t;
 }
 
-// The vacpack tabs: All, Plorts, Slimes, Food, Resources (tab index = sbx::Group).
-const std::vector<item_grid::Tab>& GroupTabs(const sbx::Snapshot& s) {
+// The vacpack tabs: All, Plorts, Slimes, Food, Resources, and Other while the list has items that
+// fit none of them. `groups` gets the sbx::Group of each tab.
+const std::vector<item_grid::Tab>& GroupTabs(const sbx::Snapshot& s, std::vector<int>& groups) {
     static std::vector<item_grid::Tab> tabs;
     tabs.clear();
-    for (int g = sbx::kGroupAll; g <= sbx::kGroupResources; ++g) tabs.push_back(GroupTab(s, g, s.catalog.get()));
+    groups.clear();
+    for (int g = sbx::kGroupAll; g <= sbx::kGroupResources; ++g) {
+        tabs.push_back(GroupTab(s, g, s.catalog.get()));
+        groups.push_back(g);
+    }
+    bool other = false;
+    if (s.catalog)
+        for (size_t i = 0; i < s.catalog->size() && !other; ++i) other = InGroup((*s.catalog)[i].kind, sbx::kGroupOther);
+    if (other) {
+        tabs.push_back(GroupTab(s, sbx::kGroupOther, s.catalog.get()));
+        groups.push_back(sbx::kGroupOther);
+    }
     return tabs;
 }
 
-// The spawner tabs: All, then each group that has items, slimes and largos side by side.
+// The spawner tabs: All, then each group that has items, slimes and largos side by side, Other last.
 // `groups` gets the sbx::Group of each tab.
 const std::vector<item_grid::Tab>& SpawnTabs(const sbx::Snapshot& s, std::vector<int>& groups) {
     static std::vector<item_grid::Tab> tabs;
-    static const int kOrder[] = {sbx::kGroupAll,  sbx::kGroupPlorts,    sbx::kGroupSlimes,    sbx::kGroupLargos,
-                                 sbx::kGroupFood, sbx::kGroupResources, sbx::kGroupContainers};
+    static const int kOrder[] = {sbx::kGroupAll,       sbx::kGroupPlorts,    sbx::kGroupSlimes,
+                                 sbx::kGroupLargos,    sbx::kGroupFood,      sbx::kGroupResources,
+                                 sbx::kGroupContainers, sbx::kGroupOther};
     tabs.clear();
     groups.clear();
     for (int g : kOrder) {
@@ -2070,7 +2102,10 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     // ---- items the selected slot accepts ----
     ImGui::Dummy(ImVec2(0, U(2)));
     const uint32_t bit = 1u << g_sbxSlot;
-    const auto& tabs = GroupTabs(s);
+    static std::vector<int> vacGroups;  // sbx::Group per tab
+    const auto& tabs = GroupTabs(s, vacGroups);
+    g_vacGrid.tab = std::clamp(g_vacGrid.tab, 0, static_cast<int>(vacGroups.size()) - 1);
+    const int vacGroup = vacGroups[static_cast<size_t>(g_vacGrid.tab)];
     const sbx::Relation* hoverRel = nullptr;
     static uintptr_t lastHover = 0;  // hovered last frame (related tiles light up)
     if (lastHover) hoverRel = FindRelation(s, lastHover);
@@ -2079,7 +2114,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     if (s.catalog) {
         tiles.reserve(s.catalog->size());
         for (const sbx::Item& it : *s.catalog) {
-            if (!(it.slotMask & bit) || !InGroup(it.kind, g_vacGrid.tab)) continue;
+            if (!(it.slotMask & bit) || !InGroup(it.kind, vacGroup)) continue;
             item_grid::Tile t;
             t.id = it.id;
             t.name = &it.name;
@@ -2209,15 +2244,25 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
         if (InGroup(it.kind, group)) order.push_back(&it);
     // Largos tab: grouped by base slime (a section per slime, each largo under the alphabetically
     // first of its two), then by the other one.
+    // Crates tab: a section per area ("Bluffs Gold Crate" -> "Bluffs"), sorted by area, then name.
     static std::vector<std::string> families;
     families.clear();
-    const bool byFamily = group == sbx::kGroupLargos;
+    const bool byFamily = group == sbx::kGroupLargos, byArea = group == sbx::kGroupContainers;
+    std::map<const sbx::Item*, std::string> areas;
     if (byFamily) {
         std::stable_sort(order.begin(), order.end(), [](const sbx::Item* a, const sbx::Item* b) {
             return a->family != b->family ? a->family < b->family : a->family2 < b->family2;
         });
         for (const sbx::Item* it : order)
             if (families.empty() || families.back() != it->family) families.push_back(it->family);
+    } else if (byArea) {
+        for (const sbx::Item* it : order) areas[it] = CrateArea(it->name);
+        std::stable_sort(order.begin(), order.end(), [&](const sbx::Item* a, const sbx::Item* b) {
+            const std::string &x = areas[a], &y = areas[b];
+            return x != y ? x < y : a->name < b->name;
+        });
+        for (const sbx::Item* it : order)
+            if (families.empty() || families.back() != areas[it]) families.push_back(areas[it]);
     }
     std::vector<item_grid::Tile> tiles;
     tiles.reserve(order.size());
@@ -2232,14 +2277,17 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
         t.accent = KindAccent(it.kind);
         t.dimmed = it.tarr && s.tarrsOff;
         t.related = Related(hoverRel, it.id);
-        if (byFamily) t.section = static_cast<int>(std::find(families.begin(), families.end(), it.family) - families.begin());
+        if (byFamily || byArea) {
+            const std::string& key = byFamily ? it.family : areas[ip];
+            t.section = static_cast<int>(std::find(families.begin(), families.end(), key) - families.begin());
+        }
         tiles.push_back(t);
         src.push_back(&it);
     }
     item_grid::Options o = GridOptions(250);
     o.tabs = &tabs;
     o.tabsBelow = true;
-    if (byFamily) o.sections = &families;
+    if (byFamily || byArea) o.sections = &families;
     const item_grid::Result r = item_grid::Draw("spawn", tiles, g_spawnGrid, o);
     lastHover = r.hovered >= 0 ? tiles[static_cast<size_t>(r.hovered)].id : 0;
     TabTip(r, tabs);

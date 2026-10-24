@@ -37,10 +37,13 @@ struct Tile {
     int section = 0;                    // index into Options::sections; tiles must be ordered by section
 };
 
+inline constexpr int kGlyphOther = -1;  // Tab::glyph: three dots ("everything else")
+
 // An icon-only tab left of the search box.
 struct Tab {
     uint32_t icon = 0;       // item_icons id; 0 draws `glyph`
-    int glyph = 0;           // fallback drawing: 0 = "all" (four squares), else a letter (e.g. 'P')
+    int glyph = 0;           // fallback drawing: 0 = "all" (four squares), kGlyphOther = "other" (three dots),
+                             // else a letter (e.g. 'P')
     ImU32 tint = 0;          // fallback glyph colour (0: text colour)
     std::string tip;         // tooltip (the tab has no title)
 };

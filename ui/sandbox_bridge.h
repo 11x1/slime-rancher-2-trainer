@@ -29,7 +29,8 @@ inline constexpr const char* kModule = "sandbox";
 enum class Kind : uint8_t { Other, Slime, Largo, Plort, Food, Animal, Toy, Resource, Liquid, Gadget, Container };
 
 // The icon-only group tabs of the vacpack and spawner grids (index into Snapshot::groupIcons).
-// Largos and containers only appear in the spawner (the vacpack can't hold them).
+// Largos and containers only appear in the spawner (the vacpack can't hold them). Other: whatever
+// fits none of the others (toys, unsorted types); its tab is drawn (no game icon).
 enum Group : int {
     kGroupAll = 0,
     kGroupPlorts,
@@ -38,6 +39,7 @@ enum Group : int {
     kGroupResources,
     kGroupLargos,
     kGroupContainers,
+    kGroupOther,
     kGroupCount
 };
 

@@ -58,6 +58,13 @@ void DrawTabFace(ImDrawList* dl, ImVec2 a, ImVec2 b, const Tab& t, bool on, floa
         }
         return;
     }
+    if (t.glyph == kGlyphOther) {  // "other": three dots in a row
+        const float w = ib.x - ia.x, r = w * 0.11f, cy = (ia.y + ib.y) * 0.5f;
+        for (int i = 0; i < 3; ++i)
+            dl->AddCircleFilled(ImVec2(ia.x + w * (0.18f + 0.32f * static_cast<float>(i)), cy), r,
+                                WithAlpha(col, on ? 1.0f : 0.75f), 12);
+        return;
+    }
     char buf[2] = {static_cast<char>(t.glyph), 0};
     ImFont* f = theme::Display();
     const float size = (ib.y - ia.y) * 0.9f;
