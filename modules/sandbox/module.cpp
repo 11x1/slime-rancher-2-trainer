@@ -9,10 +9,12 @@
 // and values are clamped to what a vanilla game can hold. Nothing is written
 // into the save directly; the game saves the result the next time it saves.
 //
-// Achievements are paused while the module is enabled (achievements.cpp: four
-// hooks, switched on and off with the module).
+// Achievements are paused while the module is enabled (achievements.cpp), and a save
+// Sandbox was used in is marked as cheated and keeps them blocked with Sandbox off
+// (cheated_save.cpp). Both sets of hooks are always on, so Setup also runs while the
+// module is off (SetupWhileDisabled); the rest of the module does nothing then.
 //
-// Threading: no hooks besides the achievement pause. A main-thread frame callback copies a Snapshot for the
+// Threading: no hooks besides those two and infinite health. A main-thread frame callback copies a Snapshot for the
 // tab (4 Hz while it is open) and tops up energy while "infinite energy" is on;
 // the tab's requests arrive as posted main-thread jobs (ui/sandbox_bridge.h).
 // Every game call goes through Resolver::Invoke (runtime_invoke, managed
@@ -44,6 +46,7 @@
 #include "core/unity.h"
 #include "modules/custom_upgrades/sale_notify.h"
 #include "modules/sandbox/achievements.h"
+#include "modules/sandbox/cheated_save.h"
 #include "modules/sandbox/player_extras.h"
 #include "modules/sandbox/prefab_icons.h"
 #include "ui/item_icons.h"
@@ -141,6 +144,9 @@ class Sandbox final : public sr2::core::Module {
 public:
     const char* Name() const override { return kModule; }
     bool DefaultEnabled() const override { return false; }
+    // The achievement block and the cheated-save mark (achievements.h, cheated_save.h) work while
+    // Sandbox is off too: their hooks are created in Setup and never switched with the module.
+    bool SetupWhileDisabled() const override { return true; }
     bool Setup(sr2::core::ModuleContext& ctx) override;
     void OnEnable() override;
     void OnDisable() override;
@@ -425,6 +431,10 @@ void HandleThunk(const bridge::Action& a) {
 // ------------------------------------------------------------------ setup ----
 bool Sandbox::Setup(sr2::core::ModuleContext& ctx) {
     auto& R = ctx.resolver();
+    // First, and required (fail closed: without them Sandbox can't be enabled). Their hooks stay
+    // on even if a later step fails, so marked saves keep achievements blocked.
+    if (!sandbox::SetupAchievementPause(ctx)) return false;
+    if (!sandbox::SetupCheatedSave(ctx)) return false;
     std::string why;
     auto note = [&](const std::string& s) {
         if (why.empty()) why = s;
@@ -504,8 +514,6 @@ bool Sandbox::Setup(sr2::core::ModuleContext& ctx) {
     locGet_ = method(locStringClass_, "GetLocalizedString", 0);
     locIsEmpty_ = method(locStringClass_, "get_IsEmpty", 0, false);
     if (!why.empty()) return ctx.Fail(why);
-    // Required: without the pause the module does not run (fail closed).
-    if (!sandbox::SetupAchievementPause(ctx)) return false;
     SetupExtras(R);
     sandbox::SetupPlayerExtras(ctx);  // optional tools on the Extras card (player_extras.cpp)
 

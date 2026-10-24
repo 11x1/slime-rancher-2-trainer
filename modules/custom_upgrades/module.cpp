@@ -250,6 +250,8 @@ constexpr const char* kCore = "UnityEngine.CoreModule";
 constexpr const char* kPlotUiNs = "MonomiPark.SlimeRancher.UI.Plot";
 constexpr int kSidecarFormat = 2;  // 1 = one file per game (legacy), 2 = one file per .sav
 constexpr const char* kRotationSuffix = ".sav.json";  // sidecar of <save>.sav = sr2mods_saves/<save>.sav.json
+// ReadSidecarFile's error for a sidecar that holds only another module's data (sandbox "cheated" mark).
+constexpr const char* kForeignSidecar = "no custom upgrade data in it";
 // Gate: per-save value "the module was on with this save loaded" (see the Gate section above).
 constexpr const char* kOnKey = "custom_upgrades.on";
 constexpr float kGateTickSeconds = 0.5f;
@@ -1133,6 +1135,12 @@ bool CustomUpgrades::ReadSidecarFile(const std::filesystem::path& path, SaveStat
         if (err.empty()) err = "not a JSON object";
         return false;
     }
+    if (!root.find("format") && !root.find("plots") && !root.find("values")) {
+        // Only another module's per-save data (the sandbox's "cheated" mark, written while custom
+        // upgrades never saved this file): not a custom-upgrade state, so the older-sidecar fallback applies.
+        err = kForeignSidecar;
+        return false;
+    }
     meta.game = root["game"].asString();
     meta.save = root["save"].asString();
     const double num = root["save_number"].asNumber(0);
@@ -1265,7 +1273,10 @@ void CustomUpgrades::LoadSidecar(const std::string& game) {
             SidecarMeta m;
             std::string err;
             if (!ReadSidecarFile(p, tmp, m, err)) {
-                SR2_WARN("[{}] sidecar {} unreadable ({}) - looking for another one", kModule, p.string(), err);
+                if (err == kForeignSidecar)
+                    SR2_INFO("[{}] sidecar {}: {} - looking for another one", kModule, p.string(), err);
+                else
+                    SR2_WARN("[{}] sidecar {} unreadable ({}) - looking for another one", kModule, p.string(), err);
             } else if (m.save != save) {
                 SR2_WARN("[{}] sidecar {} belongs to '{}', not '{}' - ignored", kModule, p.string(), m.save, save);
             } else if (m.saveNumber && number && m.saveNumber != number) {
@@ -1448,6 +1459,20 @@ bool CustomUpgrades::WriteSidecar(const std::string& save, unsigned long long sa
             p.set("values", std::move(vals));
         }
         plots.set(id, std::move(p));
+    }
+    if (rotation && std::filesystem::exists(path, ec)) {
+        // The sandbox marks this file "cheated" from inside the same game save, just before this
+        // write (modules/sandbox/cheated_save.cpp): keep its entry if it was made for this file.
+        std::ifstream f(path, std::ios::binary);
+        std::stringstream ss;
+        ss << f.rdbuf();
+        sr2::json::Value old;
+        std::string perr;
+        if (sr2::json::Parse(ss.str(), old, perr) && old.isObject()) {
+            const sr2::json::Value& sb = old["sandbox"];
+            const double n = sb["save_number"].asNumber(0);
+            if (sb.isObject() && (n <= 0 || static_cast<unsigned long long>(n) == saveNumber)) root.set("sandbox", sb);
+        }
     }
     const std::string text = sr2::json::Serialize(root);
     auto tmp = path;
