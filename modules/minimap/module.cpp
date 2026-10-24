@@ -54,6 +54,7 @@
 #include "core/log.h"
 #include "core/main_thread.h"
 #include "core/module.h"
+#include "core/perf.h"
 #include "core/settings.h"
 #include "core/unity.h"
 #include "modules/common/discordant_walls.h"
@@ -99,6 +100,9 @@ constexpr float kArrowBaseZoom = 2.5f;        // the arrow has its base size at 
 constexpr float kIconBaseZoom = 1.0f;         // the map icons have their base size at this zoom (the default)
 constexpr float kRoundBorder = 52;            // 9-slice border (px) of the 128 px rounded-square mask / frame
 constexpr int kMarkerQueriesPerTick = 8;      // CanBeShown queries per 10 Hz tick (round robin)
+constexpr float kIconRotStep = 0.5f;          // icon counter-rotation re-applied when the map turned this much (deg)
+constexpr float kNegRefresh = 0.5f;           // outside-fog mask matrix re-set at least this often (s)
+constexpr float kPerfLogInterval = 30.0f;     // "minimap: perf" counter line (perf_log on)
 constexpr int kMarkerMaxFailures = 3;
 constexpr float kBuildRetry = 5.0f;
 constexpr float kPagePendingError = 60.0f;  // "no page prefab yet" is normal while loading; ERROR only after this long
@@ -535,6 +539,11 @@ private:
     struct Icon {        // pods / nodes / teleporter gadgets
         Ref go, t, img;
         bool active = false;
+        // last values set (ApplyIcons sets only what changed)
+        Il2CppObject* sprite = nullptr;  // identity only (the item's sprite is pinned by its owner)
+        Color tint{-1, -1, -1, -1};
+        Vec2 pos{1e9f, 1e9f};
+        float oS = -1, oR = 1e9f;        // Orient: scale / rotation applied
     };
     // The game's player marker (the full map's PlayerMarker prefab), read once: one entry per visible Image.
     // Geometry is in the space of the prefab root (upright parts) or of PlayerMapMarker._arrowRect (parts
@@ -713,6 +722,16 @@ private:
     bool spritesTried_ = false, podIconTried_ = false, frameOverrideTried_ = false;
 
     float lastS_ = -1, lastR_ = 1e9f, slowAcc_ = 0, fogAcc_ = 0, dynAcc_ = 0, scanAcc_ = 0;
+    float lastIconR_ = 1e9f;                 // icon counter-rotation applied (kIconRotStep steps)
+    float pageS_ = -1;                       // page scale / position last set (skip same-value sets)
+    Vec2 pageP_{1e9f, 1e9f};
+    bool negDirty_ = true;                   // outside-fog mask matrix must be set again
+    float negAge_ = 0;                       // seconds since it was last set (safety refresh)
+    // Work counters for the periodic "minimap: perf" line (only while perf_log is on).
+    struct PerfCounters {
+        int frames = 0, pageSets = 0, negSets = 0, orients = 0, iconSets = 0, iconSame = 0, podsFar = 0, podsNear = 0;
+    } pc_;
+    float pcAcc_ = 0;
     bool mapWasOpen_ = false, keyDown_ = false, wasLoading_ = false;
     Vec2 playerP_{};
     int lastAlt_ = 1 << 30;
@@ -789,6 +808,7 @@ private:
                        &sprDroneType_[1], &mapUIRoot_, &preloadEntry_})
             r->Abandon();
         g_pods.clear();  // handles leaked on purpose
+        podPos_.clear();
         g_podAwoken.clear();
         g_podDestroyed.clear();
         if (frameCb_) main_thread::RemoveFrameCallback(frameCb_);
@@ -797,6 +817,17 @@ private:
 
     void TickImpl(float dt) {
         time_ += dt;
+        pcAcc_ += dt;
+        if (pcAcc_ >= kPerfLogInterval) {  // how much per-frame work the caches saved (perf_log on)
+            if (sr2::core::perf::Enabled() && pc_.frames > 0)
+                SR2_INFO("minimap: perf ({:.0f} s): {} frames shown, page transform set in {} of them; outside-fog "
+                         "mask set {} times; icon orient calls {}; icon property sets {} ({} icon updates with "
+                         "nothing to set); pods {} in view / {} skipped without a game call",
+                         pcAcc_, pc_.frames, pc_.pageSets, pc_.negSets, pc_.orients, pc_.iconSets, pc_.iconSame,
+                         pc_.podsNear, pc_.podsFar);
+            pcAcc_ = 0;
+            pc_ = PerfCounters{};
+        }
         Step("settings");
         if (cfgDirty_.exchange(false)) {
             cfg_ = LoadCfg();
@@ -841,6 +872,7 @@ private:
         if (slow) {
             float sdt = slowAcc_;
             slowAcc_ = 0;
+            SR2_PERF_DETAIL("minimap.slow (10 Hz)");
             if (!SlowUpdate(sdt)) {
                 SetVisible(false);
                 return;
@@ -854,6 +886,7 @@ private:
         // 3. time-sliced page build
         if (build_.active) {
             Step("build: copy page");
+            SR2_PERF_DETAIL("minimap.build (page copy)");
             BuildStep();
             SetVisible(false);
             return;
@@ -866,10 +899,16 @@ private:
         SetVisible(true);
 
         // 4. per frame: transform only
-        Step("transform");
-        UpdateTransform();
-        Step("negative mask");
-        UpdateNegativeMask();
+        {
+            Step("transform");
+            SR2_PERF_DETAIL("minimap.transform");
+            UpdateTransform();
+        }
+        {
+            Step("negative mask");
+            SR2_PERF_DETAIL("minimap.negmask");
+            UpdateNegativeMask(dt);
+        }
 
         // 5. low rate
         fogFullAcc_ += dt;
@@ -881,16 +920,19 @@ private:
         if (fogAcc_ >= kFogInterval) {
             fogAcc_ = 0;
             Step("fog");
+            SR2_PERF_DETAIL("minimap.fog (2 s)");
             UpdateFog("periodic");
         }
         dynAcc_ += dt;
         if (dynAcc_ >= kDynInterval) {
             dynAcc_ = 0;
             Step("dynamic elements");
+            SR2_PERF_DETAIL("minimap.dynamic (10 s)");
             UpdateDynamic();
         }
         if (slow) {
             Step("markers");
+            SR2_PERF_DETAIL("minimap.markers (10 Hz)");
             UpdateMarkers();
             Step("label");
             UpdateLabel();
@@ -899,6 +941,7 @@ private:
         if (scanAcc_ >= kScanInterval) {
             scanAcc_ = 0;
             Step("icons");
+            SR2_PERF_DETAIL("minimap.icons (3 s)");
             ScanIcons();
         }
         Step("idle");
@@ -939,7 +982,10 @@ private:
         }
         bool needBuild = wantedMap_ && !build_.active &&
                          (!view_.ok || view_.mapDef.get() != wantedMap_.get() || !view_.page.Alive());
-        if (needBuild && buildCd_ <= 0) StartBuild();
+        if (needBuild && buildCd_ <= 0) {
+            SR2_PERF_DETAIL("minimap.page build start");
+            StartBuild();
+        }
 
         Step("hide rules");
         mapOpen_ = FullMapOpen();
@@ -949,6 +995,7 @@ private:
             fogFullDue_ = true;
             dynAcc_ = kDynInterval;
             for (Marker& m : view_.markers) m.nextCheck = 0;
+            negDirty_ = true;
         }
         mapWasOpen_ = mapOpen_;
         unknownArea_ = false;
@@ -1003,25 +1050,33 @@ private:
             TeardownStep("release pod", [&] { unity::FreeGCHandle(hh); });
         }
         g_pods.clear();
+        podPos_.clear();
         g_podAwoken.clear();
         g_podDestroyed.clear();
         g_mapUI.store(nullptr);
         g_hud.store(nullptr);
         g_player.store(nullptr);
-        lastS_ = -1;
-        lastR_ = 1e9f;
+        ResetTransformCache();
         mapWasOpen_ = false;
         hudWait_ = 0;
         preloadDone_ = false;
         preloadCd_ = 0;
     }
 
+    // Cached transform state: everything is set again on the next frame.
+    void ResetTransformCache() {
+        lastS_ = -1;
+        lastR_ = lastIconR_ = 1e9f;
+        pageS_ = -1;
+        pageP_ = {1e9f, 1e9f};
+        negDirty_ = true;
+    }
+
     void DestroyView() {
         if (view_.page.Alive()) ugui::Destroy(unity::GameObjectOf(view_.page.get()));
         view_ = View{};
         build_ = Build{};
-        lastS_ = -1;
-        lastR_ = 1e9f;
+        ResetTransformCache();
         lastArrowZ_ = 1e9f;
         coneS_ = -1;
         markerRR_ = 0;
@@ -1058,6 +1113,7 @@ private:
             podIconTried_ = false;
         }
         PrunePods();
+        podPos_.clear();
         podsSeeded_ = false;
         buildCd_ = 0;
         mappingScanCd_ = 0;
@@ -1101,6 +1157,7 @@ private:
     void SetVisible(bool v) {
         if (!ui_.root.Alive() || ui_.visible == v) return;
         ui_.visible = v;
+        if (v) negDirty_ = true;  // the full map may have set the outside-fog global while we were hidden
         unity::SetActive(ui_.root.get(), v);
     }
 
@@ -1112,6 +1169,7 @@ private:
             if (it != g_pods.end()) {
                 unity::FreeGCHandle(it->second);
                 g_pods.erase(it);
+                podPos_.erase(pod);
             }
         }
         g_podDestroyed.clear();
@@ -1418,6 +1476,7 @@ private:
             layer = 5;  // UI
         }
         if (!parentT) return false;
+        SR2_PERF_DETAIL("minimap.ui build (once)");
         BuildUi(parentT, layer);
         return ui_.built;
     }
@@ -1455,7 +1514,10 @@ private:
 
     void BuildUi(Il2CppObject* parentT, int layer) {
         Step("ui: sprites");
-        EnsureSprites();
+        {
+            SR2_PERF_DETAIL("minimap.ui sprites (procedural, once)");
+            EnsureSprites();
+        }
         FindFrameOverride();
         Step("ui: root");
         ui_.parentT.Reset(parentT);
@@ -1621,6 +1683,7 @@ private:
         for (Icon& i : view_.icons)
             if (i.t.Alive()) ugui::SetSizeDelta(i.t.get(), {iconPx, iconPx});
         lastS_ = -1;
+        negDirty_ = true;  // the minimap moved / resized: the outside-fog mask moved with it
         lastAlt_ = 1 << 30;
     }
 
@@ -1903,6 +1966,7 @@ private:
         size_t end = std::min(b.graphics.size(), b.next + kBuildChunk);
         for (; b.next < end; ++b.next) CopyGraphic(b.graphics[b.next].get());
         if (b.next < b.graphics.size()) return;
+        SR2_PERF_DETAIL("minimap.build finish (markers, first fog)");
         FinishBuild();
     }
 
@@ -2222,8 +2286,7 @@ private:
         view_.ok = true;
         lastBuildError_.clear();
         pagePendingSince_ = -1;
-        lastS_ = -1;
-        lastR_ = 1e9f;
+        ResetTransformCache();
         fogAcc_ = kFogInterval;
         dynAcc_ = kDynInterval;
         scanAcc_ = kScanInterval;
@@ -2927,10 +2990,21 @@ private:
         });
     }
 
-    void UpdateNegativeMask() {
+    void UpdateNegativeMask(float dt) {
         View::NegMask& n = view_.neg;
         // The full map's own NegativeMaskMap owns the global while it is open.
-        if (!n.ok || n.copies == 0 || view_.staticFog.vis != 1 || mapOpen_ || !n.t.Alive()) return;
+        if (!n.ok || n.copies == 0 || view_.staticFog.vis != 1 || mapOpen_ || !n.t.Alive()) {
+            negDirty_ = true;  // set again as soon as it is ours to drive
+            return;
+        }
+        // The matrix only changes when the page moves / turns / scales (negDirty_, from UpdateTransform) or
+        // the canvas changes (re-resolved below); it is re-set at least every kNegRefresh s anyway, in case
+        // something else changed the global.
+        negAge_ += dt;
+        if (!negDirty_ && n.canvasT.Alive() && negAge_ < kNegRefresh) return;
+        negDirty_ = false;
+        negAge_ = 0;
+        ++pc_.negSets;
         if (!n.canvasT.Alive()) {
             // The shader sees vertices in the space of the canvas the geometry is batched in: the root canvas
             // (our nested Canvas has no overrideSorting). Overlay: shader position = canvas-local, so the
@@ -3016,26 +3090,54 @@ private:
         ugui::Quat q = ugui::GetRotation(playerT_.get());
         playerP_ = ProjectPage(wp);
         float s = CurrentScale();
-        ugui::SetLocalScale(view_.page.get(), {s, s, 1});
-        ugui::SetLocalPosition(view_.page.get(), {-playerP_.x * s, -playerP_.y * s, 0});
+        ++pc_.frames;
+        // Only real changes: every Transform set dirties the minimap canvas (its batch is rebuilt by Unity
+        // later in the frame, outside our timing), even with the same value. Standing still = no page sets.
+        bool pageMoved = false;
+        if (s != pageS_) {
+            ugui::SetLocalScale(view_.page.get(), {s, s, 1});
+            pageS_ = s;
+            pageMoved = true;
+        }
+        Vec2 pp{-playerP_.x * s, -playerP_.y * s};
+        if (pp.x != pageP_.x || pp.y != pageP_.y) {
+            ugui::SetLocalPosition(view_.page.get(), {pp.x, pp.y, 0});
+            pageP_ = pp;
+            pageMoved = true;
+        }
 
         // yaw like Quaternion.eulerAngles.y (forward = q * +Z)
         float fx = 2.0f * (q.x * q.z + q.w * q.y);
         float fz = 1.0f - 2.0f * (q.x * q.x + q.y * q.y);
         float yaw = std::atan2(fx, fz) * 180.0f / kPi;
         float rot = cfg_.orientation == 1 ? yaw : 0.0f;
-        if (std::fabs(rot - lastR_) > 0.05f) ugui::SetLocalEuler(ui_.rotator.get(), {0, 0, rot});
+        if (std::fabs(rot - lastR_) > 0.05f) {
+            ugui::SetLocalEuler(ui_.rotator.get(), {0, 0, rot});
+            lastR_ = rot;
+            pageMoved = true;
+        }
+        if (pageMoved) {
+            negDirty_ = true;  // the outside-fog mask follows the page
+            ++pc_.pageSets;
+        }
         UpdateArrow(rot, yaw, s);
 
+        // Icons are counter-scaled / counter-rotated: one or two calls per visible icon. The rotation is
+        // re-applied in kIconRotStep steps (an icon tilted < 0.5 deg is invisible), not on every 0.05 deg.
         bool scaleChanged = std::fabs(s - lastS_) > lastS_ * 0.005f;
-        bool rotChanged = std::fabs(rot - lastR_) > 0.05f;
+        bool rotChanged = std::fabs(std::remainder(rot - lastIconR_, 360.0f)) > kIconRotStep || lastIconR_ > 1e8f;
         if (scaleChanged || rotChanged) {
             for (Marker& m : view_.markers)
                 if (m.active && m.t.Alive()) Orient(m.t.get(), s, rot, scaleChanged, rotChanged);
             for (Icon& i : view_.icons)
                 if (i.active && i.t.Alive()) Orient(i.t.get(), s, rot, scaleChanged, rotChanged);
-            lastS_ = s;
-            lastR_ = rot;
+            if (scaleChanged) lastS_ = s;
+            if (rotChanged) lastIconR_ = rot;
+            for (Icon& i : view_.icons) {  // what ApplyIcons compares against
+                if (!i.active) continue;
+                if (scaleChanged) i.oS = s;
+                if (rotChanged) i.oR = rot;
+            }
         }
     }
 
@@ -3085,11 +3187,14 @@ private:
     float IconZoomFactor() const { return std::clamp(cfg_.zoom / kIconBaseZoom, 0.6f, 1.75f); }
 
     // icons grow and shrink with the zoom (not with the page scale) and stay upright
-    void Orient(Il2CppObject* t, float s, float rot, bool scale, bool rotate) const {
+    void Orient(Il2CppObject* t, float s, float rot, bool scale, bool rotate) {
         const float k = IconZoomFactor() / s;
         if (scale) ugui::SetLocalScale(t, {k, k, 1});
         if (rotate) ugui::SetLocalEuler(t, {0, 0, -rot});
+        pc_.orients += (scale ? 1 : 0) + (rotate ? 1 : 0);
     }
+    // The counter-rotation the visible icons currently have.
+    float IconRot() const { return lastIconR_ < 1e8f ? lastIconR_ : 0.0f; }
 
     // ------------------------------------------------------------- markers ----
     float ViewRadiusPage() const { return ui_.size * 0.5f / std::max(1e-6f, CurrentScale()) * 1.3f; }
@@ -3211,7 +3316,7 @@ private:
         QueryMarkers();
         float vr = ViewRadiusPage();
         float s = CurrentScale();
-        float rot = lastR_ < 1e8f ? lastR_ : 0.0f;
+        float rot = IconRot();
         for (Marker& m : view_.markers) {
             if (!m.go) continue;
             bool show = cfg_.icons[m.cat] && std::hypot(m.pos.x - playerP_.x, m.pos.y - playerP_.y) <= vr;
@@ -3333,11 +3438,20 @@ private:
             SR2_DEBUG("minimap: pod registry seeded ({} pods)", g_pods.size());
         }
         Il2CppObject* icon = PodIcon();
+        // Pods never move: their world position is read once per pod (two calls), so a pod far from the
+        // player costs no game call at all; only pods in view are checked for active + LOCKED.
         for (auto& [pod, h] : g_pods) {
             if (items.size() >= scanMax_) break;
-            if (!ugui::IsA(pod, sym_.treasurePod) || !unity::ActiveInHierarchy(pod)) continue;
+            if (!ugui::IsA(pod, sym_.treasurePod)) continue;
+            auto pp = podPos_.find(pod);
+            if (pp == podPos_.end()) pp = podPos_.emplace(pod, ugui::GetPosition(unity::TransformOf(pod))).first;
             Vec2 p{};
-            if (!nearFn(ugui::GetPosition(unity::TransformOf(pod)), p)) continue;
+            if (!nearFn(pp->second, p)) {
+                ++pc_.podsFar;
+                continue;
+            }
+            ++pc_.podsNear;
+            if (!unity::ActiveInHierarchy(pod)) continue;
             int state = 1;
             if (!Managed([&] { state = ugui::Call<int>(sym_.podGetState, pod); }) || state != 0 /* LOCKED */) continue;
             ++stats_.podsShown;  // opened pods never show, whatever the fog setting
@@ -3372,6 +3486,7 @@ private:
         }
     }
     std::vector<walls::Wall> wallBuf_;
+    std::unordered_map<Il2CppObject*, Vec3> podPos_;  // registered pod -> world position (pods never move)
     bool wallLayoutWarned_ = false;
 
     template <class Near>
@@ -3647,7 +3762,7 @@ private:
     void ApplyIcons(const std::vector<IconItem>& items) {
         int layer = ugui::GetLayer(ui_.root.get());
         float s = CurrentScale();
-        float rot = lastR_ < 1e8f ? lastR_ : 0.0f;
+        float rot = IconRot();
         float px = IconPx();
         while (view_.icons.size() < items.size()) {
             Il2CppObject* go = Child(view_.page.get(), "Icon", layer);
@@ -3666,10 +3781,33 @@ private:
             if (!ic.go.Alive() || !ic.t.Alive()) continue;
             bool show = i < items.size() && items[i].sprite;
             if (show) {
-                ugui::ImageSetSprite(ic.img.get(), items[i].sprite);
-                ugui::GraphicSetColor(ic.img.get(), items[i].tint);
-                ugui::SetAnchoredPosition(ic.t.get(), items[i].pos);
-                Orient(ic.t.get(), s, rot, true, true);
+                // Only what changed: most icons are the same object at the same place every 3 s, and each
+                // set dirties the graphic (mesh + canvas batch rebuild).
+                const IconItem& it = items[i];
+                int sets = 0;
+                if (it.sprite != ic.sprite) {
+                    ugui::ImageSetSprite(ic.img.get(), it.sprite);
+                    ic.sprite = it.sprite;
+                    ++sets;
+                }
+                if (it.tint.r != ic.tint.r || it.tint.g != ic.tint.g || it.tint.b != ic.tint.b || it.tint.a != ic.tint.a) {
+                    ugui::GraphicSetColor(ic.img.get(), it.tint);
+                    ic.tint = it.tint;
+                    ++sets;
+                }
+                if (it.pos.x != ic.pos.x || it.pos.y != ic.pos.y) {
+                    ugui::SetAnchoredPosition(ic.t.get(), it.pos);
+                    ic.pos = it.pos;
+                    ++sets;
+                }
+                bool os = ic.oS != s, orr = ic.oR != rot;
+                if (os || orr) {
+                    Orient(ic.t.get(), s, rot, os, orr);
+                    ic.oS = s;
+                    ic.oR = rot;
+                }
+                pc_.iconSets += sets;
+                if (!sets && !os && !orr) ++pc_.iconSame;
             }
             if (show != ic.active) {
                 unity::SetActive(ic.go.get(), show);
