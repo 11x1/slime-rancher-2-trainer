@@ -141,6 +141,16 @@ the log lines, no errors after buying another coop upgrade (re-link) or selling 
   plain sprites, no composing. Hen Collector = the task config's `HenType.icon`; Elder Collector = the
   `ElderGroup` member whose name has "Hen" (the elder hen). Until known, Coop's icon. The composed
   Plort Collector + Hen icon (`drone_icon.cpp`) is gone.
+  Later the user drew a Hen Collector icon (the Plort Collector with a hen coming out of its opening):
+  `assets/icons/hen_collector_source.png` (embedded mod icon) is now the Hen Collector source's icon
+  (picker, applied program, Drone List: all use the one definition) and also the Hen Collector plot
+  upgrade card's icon (it replaced the old drawn `hen_collector.png`, deleted). The Elder Collector
+  source uses `elder_collector_source.png` when that file was in `assets/icons` at build time
+  (`mod_icons::Has`), else the elder hen. `SetIcon` prefers the mod icon over the chicken sprite and
+  replaces one already set; the chicken sprite (or, before it is known, Coop's icon) is the size
+  reference. The card and the source share one cached sprite, so whichever asks first sets its
+  pixels-per-unit (both views show it in a fixed frame). Log: `drone source: Hen Collector icon = the
+  mod icon 'hen_collector_source'`.
 - **Save (user decision: "save it as coop, the sidecar says the true source").**
   `DroneStationGadgetModel.Pull` gives the save a copy of the program data that says COOP (PullGadget
   turns it into the saved `DroneTaskV01` right away); the live data keeps ours. If the copy can't be
@@ -165,7 +175,8 @@ the log lines, no errors after buying another coop upgrade (re-link) or selling 
 - **Without the mod:** the save only ever holds Coop programs; it loads and runs as Coop (the drone
   takes live chickens and the elder collector; the Hen Collector itself is gone without the mod).
 
-Checked in game (round 3): Hen Collector source works. Not checked yet: the new icons, Elder Collector
+Checked in game (round 3): Hen Collector source works. Not checked yet: the new icons (the user's Hen
+Collector drawing on the source and on the coop card; the Elder Collector still the elder hen), Elder Collector
 in the picker (only for elder targets, only with a deluxe coop), a drone emptying only the elder
 collector, Hen Collector no longer offered for an elder target, save + reload of both (log `restored
 from the sidecar`), the migration of an elder-target Hen Collector program.

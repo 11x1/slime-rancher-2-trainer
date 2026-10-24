@@ -1685,7 +1685,8 @@ const char* ModIconName(int32_t id) {
         case INCIN_ASH_BOOST: return "ash_boost";
         // COOP_AIR_NET: none - the corral's own Air Net icon (iconFrom, user request "use the air net icon
         // from corrals"); assets/icons/coop_air_net.png stays embedded but unused.
-        case COOP_HEN_COLLECTOR: return "hen_collector";
+        // The user's drawing (the Plort Collector with a hen coming out), also the drone source's icon.
+        case COOP_HEN_COLLECTOR: return "hen_collector_source";
         default: return nullptr;
     }
 }

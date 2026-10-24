@@ -27,4 +27,9 @@ namespace sr2::ui::mod_icons {
 // separately from the normal icon.
 Il2CppObject* Get(std::string_view name, Il2CppObject* sizeLike = nullptr, bool greyed = false);
 
+// Is an icon of that name embedded? (No Unity calls, any thread.) For optional icons that
+// may or may not have been dropped into assets/icons at build time; Get() logs a warning
+// for an unknown name, this does not.
+bool Has(std::string_view name);
+
 }  // namespace sr2::ui::mod_icons
