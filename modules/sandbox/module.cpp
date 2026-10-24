@@ -643,6 +643,17 @@ private:
     // ---- open plot purchase menu (optional): rebuilt after a Newbucks change ----
     Il2CppClass* landPlotUiClass_ = nullptr;           // MonomiPark.SlimeRancher.UI.Plot.LandPlotUIRoot
 
+    // ---- open gadget-mode menu (optional): its lists rebuilt after a craft (RefreshGadgetMenu) ----
+    Il2CppClass* gadgetSelUiClass_ = nullptr;          // MonomiPark.SlimeRancher.UI.Gadget.NewGadgetSelectionUI
+    size_t offSelCatList_ = 0, offSelGrid_ = 0;        // its _categoryList / _itemGrid
+    size_t offCatListButtons_ = 0;                     // NewGadgetCategoryList._buttons (NewGadgetCategoryButton[])
+    size_t offCatButtonCat_ = 0;                       // NewGadgetCategoryButton._category (GadgetCategoryRuntime)
+    size_t offGridCategory_ = 0;                       // NewGadgetItemGrid._category
+    const MethodInfo* catUpdateItems_ = nullptr;       // GadgetCategoryRuntime.UpdateItemList()
+    const MethodInfo* catListSelected_ = nullptr;      // NewGadgetCategoryList.get_SelectedCategory
+    const MethodInfo* selCategorySelected_ = nullptr;  // NewGadgetSelectionUI.OnCategorySelected(category, cause)
+    void RefreshGadgetMenu();
+
     Il2CppObject* OpenFabricator();                    // the open FabricatorUI, or nullptr
     Il2CppObject* FabricatorItem(Il2CppObject* ui, Il2CppObject** content, Il2CppObject** details);
     Il2CppObject* FabricatorPopup(Il2CppObject* ui);  // the quantity popup while it is shown, else nullptr
@@ -999,6 +1010,28 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
         std::string lw2;
         landPlotUiClass_ = cls(kImage, "MonomiPark.SlimeRancher.UI.Plot", "LandPlotUIRoot", lw2);
         if (!lw2.empty()) SR2_WARN("[{}] Newbucks: an open plot menu is not refreshed ({})", kModule, lw2);
+        {
+            // Optional: the gadget-mode menu's lists after a craft (RefreshGadgetMenu).
+            std::string gw;
+            constexpr const char* kGadgetUi = "MonomiPark.SlimeRancher.UI.Gadget";
+            gadgetSelUiClass_ = cls(kImage, kGadgetUi, "NewGadgetSelectionUI", gw);
+            Il2CppClass* catList = cls(kImage, kGadgetUi, "NewGadgetCategoryList", gw);
+            Il2CppClass* catButton = cls(kImage, kGadgetUi, "NewGadgetCategoryButton", gw);
+            Il2CppClass* grid = cls(kImage, kGadgetUi, "NewGadgetItemGrid", gw);
+            Il2CppClass* catRuntime = cls(kImage, kGadgetUi, "GadgetCategoryRuntime", gw);
+            off(gadgetSelUiClass_, "_categoryList", offSelCatList_, gw);
+            off(gadgetSelUiClass_, "_itemGrid", offSelGrid_, gw);
+            off(catList, "_buttons", offCatListButtons_, gw);
+            off(catButton, "_category", offCatButtonCat_, gw);
+            off(grid, "_category", offGridCategory_, gw);
+            catUpdateItems_ = method(catRuntime, "UpdateItemList", 0, gw);
+            catListSelected_ = method(catList, "get_SelectedCategory", 0, gw);
+            selCategorySelected_ = method(gadgetSelUiClass_, "OnCategorySelected", 2, gw);
+            if (!gw.empty()) {
+                gadgetSelUiClass_ = nullptr;
+                SR2_WARN("[{}] crafter: an open gadget menu is not refreshed after a craft ({})", kModule, gw);
+            }
+        }
         // Optional: the Fabricator's order within a category, its Pinned category icon and the pinned recipe.
         std::string ow;
         fabCatIndexOf_ = method(fabGadgetCatClass_, "IndexOf", 1, ow);
@@ -3049,6 +3082,7 @@ void Sandbox::Handle(const bridge::Action& a) {
     if (a.op == bridge::Op::AddMaterial || a.op == bridge::Op::Craft || a.op == bridge::Op::SetNewbucks ||
         a.op == bridge::Op::AddNewbucks)
         RefreshFabricator();
+    if (a.op == bridge::Op::Craft) RefreshGadgetMenu();  // an open gadget-mode menu lists the new gadgets
     Refresh();
 }
 
@@ -3113,6 +3147,43 @@ void Sandbox::RefreshPurchaseMenus() {
     bool ok = false;
     if (rebuild) Call(rebuild, ui, {}, "LandPlotUIRoot.RebuildUI", &ok);
     SR2_INFO("[{}] Newbucks: open plot menu {}", kModule, ok ? "rebuilt (new amounts)" : "not rebuilt (RebuildUI not found or failed)");
+}
+
+// After a craft (vanilla or a mod buildable's grant): an open gadget-mode menu (NewGadgetSelectionUI, the
+// "place a gadget" menu) shows the new gadgets and counts (round 10: "give myself some buildable -> have to
+// reopen gadget menu"). Each category keeps the item list it read when the menu was built
+// (GadgetCategoryRuntime._itemList, from GadgetCategory.GetItems), and the grid only refills on a category
+// change. So: UpdateItemList on every category button's runtime (the game's own rebuild of that list), then
+// the selected category is shown again through NewGadgetSelectionUI.OnCategorySelected(category,
+// PROGRAMMATIC) with the grid's _category cleared first (SetCategory returns early for the same category):
+// empty / non-empty display, page count, page 1 refilled (NewGadgetItemButton.SetData reads the counts).
+// One FindObjectOfType per craft request, nothing otherwise.
+void Sandbox::RefreshGadgetMenu() {
+    if (!gadgetSelUiClass_) return;
+    Il2CppObject* ui = unity::FindObjectOfType(gadgetSelUiClass_);
+    if (!ui || !unity::IsAlive(ui) || !IsA(ui, gadgetSelUiClass_) || !unity::ActiveInHierarchy(unity::GameObjectOf(ui)))
+        return;
+    auto* list = unity::Field<Il2CppObject*>(ui, offSelCatList_);
+    auto* grid = unity::Field<Il2CppObject*>(ui, offSelGrid_);
+    if (!list || !grid || !unity::IsAlive(list) || !unity::IsAlive(grid)) return;
+    void* buttons = unity::Field<void*>(list, offCatListButtons_);
+    int updated = 0;
+    for (size_t i = 0, n = unity::ArrayLength(buttons); i < n; ++i) {
+        auto* b = static_cast<Il2CppObject*>(unity::ArrayAt(buttons, i));
+        auto* cat = b && unity::IsAlive(b) ? unity::Field<Il2CppObject*>(b, offCatButtonCat_) : nullptr;
+        bool ok = false;
+        if (cat) Call(catUpdateItems_, cat, {}, "GadgetCategoryRuntime.UpdateItemList", &ok);
+        updated += ok;
+    }
+    Il2CppObject* cur = Call(catListSelected_, list, {}, "NewGadgetCategoryList.SelectedCategory");
+    bool shown = false;
+    if (cur) {
+        unity::Field<Il2CppObject*>(grid, offGridCategory_) = nullptr;  // so SetCategory refills it
+        int32_t cause = 0;                                              // InteractionCause.PROGRAMMATIC
+        Call(selCategorySelected_, ui, {cur, &cause}, "NewGadgetSelectionUI.OnCategorySelected", &shown);
+    }
+    SR2_INFO("[{}] crafter: open gadget menu refreshed ({} categor{} re-read, selected one {})", kModule, updated,
+             updated == 1 ? "y" : "ies", shown ? "shown again" : "not shown again");
 }
 
 // Count of what a slot holds, clamped to [0, GetSlotMaxCount]: up through
