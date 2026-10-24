@@ -102,9 +102,16 @@ RVAs are only for reference (GameAssembly.dll 1.3.0). The code finds everything 
 * Known limits:
   * A save written while the mod is off has no sidecar: loading it uses the newest older one.
   * Steam Cloud does not carry the sidecars to another PC.
-  * A plot that is demolished and rebuilt as the **same** type at the same spot keeps its custom
-    upgrade. When the type changes, the entry is dropped. Fix later with a hook on the demolish
-    closure (`LandPlotUIRoot.<>c__DisplayClass8_0.<PromptForDemolish>b__0`).
+  * Demolish (fixed 2026-10-24): a detour on `LandPlotLocation.Replace(LandPlot, GameObject)`
+    (0x871E60) drops the location id's whole entry (tiers, world upgrades, Hen Collector contents,
+    per-plot values) after the original ran. Replace is the only plot swap: `LandPlotUIRoot.BuyPlot`
+    (buying on an empty plot, and the demolish closure `<PromptForDemolish>b__0` 0x703350, which buys
+    the empty plot through BuyPlot and then raises the demolish events) and `LandPlotUIRoot.Replace`.
+    It destroys the old LandPlot, unregisters its model and registers a new one under the same id.
+    Before, only a rebuild as another type dropped the entry, so a silo demolished and rebuilt as a
+    silo kept Silo Capacity IV, a corral its Music Box II. In memory only: the sidecar is written with
+    the next game save, like the vanilla demolish. Log: `plot '...' demolished / replaced (...): dropped
+    owned [...]`.
   * A deleted game leaves its sidecar behind (harmless). A later hook on
     `AutoSaveDirector.DeleteGame(string)` could delete it.
 

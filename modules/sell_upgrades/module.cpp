@@ -82,8 +82,8 @@
 //     game save into that .sav file's sidecar), so a re-purchase after a reload of a save
 //     made after the sale keeps it too; the value is cleared when it is used. No record
 //     and no sidecar value (never sold, sold but not saved, custom_upgrades off) or module
-//     off: vanilla fill. Known limit: a demolished incinerator rebuilt on the same spot
-//     keeps the sidecar value. The ash stays a vanilla-producible amount.
+//     off: vanilla fill. A demolished plot loses the value (custom_upgrades drops
+//     every per-plot value in its LandPlotLocation.Replace detour). The ash stays a vanilla-producible amount.
 //     The FillableAshSource sits on the trough's child "Ash Level" (GetComponentInChildren, as
 //     vanilla does; a plain GetComponent on AshTrough never found it, so before this fix every
 //     re-purchase kept the vanilla full trough). After every completed Ash Trough purchase the
