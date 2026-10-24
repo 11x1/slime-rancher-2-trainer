@@ -233,6 +233,7 @@
 #include "modules/custom_upgrades/drone_source.h"
 #include "modules/custom_upgrades/plot_menu_slider.h"
 #include "modules/custom_upgrades/plot_props.h"
+#include "modules/custom_upgrades/quantum_link.h"
 #include "modules/custom_upgrades/sale_notify.h"
 #include "modules/custom_upgrades/silo_receipt.h"
 #include "modules/custom_upgrades/silo_world.h"
@@ -687,7 +688,8 @@ private:
     bool globalUpgItemsTried_ = false;
     Il2CppObject* GlobalUpgradeItem(int32_t upgrade);
     custom_upgrades::world::CoopWorld world_;
-    custom_upgrades::drones::HenSource drones_;
+    custom_upgrades::drones::HenSource drones_;          // drone sources Hen / Elder Collector, Quantum Storage Link
+    custom_upgrades::quantum::QuantumLink quantum_;      // Quantum Storage Link gadget (quantum_link.h)
     custom_upgrades::world::SiloButtons silo_;  // Sell-All Button world button
     custom_upgrades::world::PlotProps props_;   // decorative props of owned tiers (plot_props.h)
     custom_upgrades::vacpack::VacpackUpgrades vacpack_;  // Fabricator vacpack upgrades (vacpack_upgrades.h)
@@ -1048,6 +1050,7 @@ void CustomUpgrades::ResetState(const char* why) {
     Bump();
     tierCache_.clear();
     world_.Reset();  // clones of the previous game are destroyed (never read) at the next tick
+    quantum_.Reset();  // links of the previous game go with its scene; the loaded save's are built at the next tick
     drones_.ResetSeen();  // the loaded save's Hen Collector programs are mapped back at the next tick
     silo_.Reset();
     props_.Reset();
@@ -2080,6 +2083,9 @@ void CustomUpgrades::Cleanup(const char* why) {
         props_.RemoveAll();
         SR2_INFO("[{}] {}: plot props removed", kModule, why);
     }
+    // Quantum Storage Links back to plain-looking Refinery Links, our variant out of the favourite slots
+    // and the variant list (also after a fault: the favourites are saved).
+    quantum_.Cleanup(why);
     RestoreCapacities(why);  // silos back to their vanilla capacity per slot (contents stay)
     vacpack_.Cleanup(why);   // vacpack upgrade levels off, our definitions out of the game's lists
     int removed = 0, restored = 0;
@@ -2121,7 +2127,9 @@ void CustomUpgrades::FrameCheck(float dt) {
         if (On()) g_batteryGuard.Run([&] { battery_.Tick(dt); });
         else battery_.Reset();
     }
-    if (!On() || (!world_.Ready() && !silo_.Ready() && !props_.Ready() && !capacityOk_ && !vacpack_.Ready())) return;
+    if (!On() || (!world_.Ready() && !silo_.Ready() && !props_.Ready() && !capacityOk_ && !vacpack_.Ready() &&
+                  !quantum_.Ready() && !drones_.Ready()))
+        return;
     if (std::isfinite(dt) && dt > 0.0f) worldAccum_ += std::min(dt, 1.0f);
     if (worldAccum_ < kWorldTickSeconds) return;
     worldAccum_ = 0.0f;
@@ -2258,7 +2266,10 @@ void CustomUpgrades::WorldTick() {
     if (world_.Ready())
         world_.Tick([&](Il2CppObject* plot, custom_upgrades::world::CoopRequest& req) { return WorldQuery(plot, req); },
                     [&]() { return LookupDirector(); });
-    if (drones_.Ready() && !sr2::core::ModuleFaulted(kModule)) drones_.Tick(world_.HenStorages());
+    if (quantum_.Ready() && !sr2::core::ModuleFaulted(kModule)) quantum_.Tick();
+    if (drones_.Ready() && !sr2::core::ModuleFaulted(kModule))
+        drones_.Tick(world_.Ready() ? world_.HenStorages() : std::vector<Il2CppObject*>{}, custom_upgrades::quantum::Available(),
+                     custom_upgrades::quantum::Placed());
     if (silo_.Ready() && !sr2::core::ModuleFaulted(kModule)) {
         // Silos that own the Sell-All Button (the button checks the plot type itself).
         const UpgradeDef* d = FindDef(SILO_SELL_ALL);
@@ -3164,12 +3175,26 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         if (!world_.Setup(R, kModule, werr))
             SR2_WARN("[{}] coop world objects unavailable ({}) - Coop Air Net and Hen Collector are not offered", kModule, werr);
     }
-    // Drone program source "Hen Collector" (optional; missing -> only the Coop source takes from it).
-    if (world_.Ready()) {
+    // Quantum Storage Link gadget (optional; missing -> not offered, nothing else changes).
+    {
+        custom_upgrades::quantum::Host qhost;
+        qhost.on = [this] { return On(); };
+        qhost.saveReady = [this] { return InGame() && EnsureLoaded(); };
+        qhost.value = [this](const std::string& k) { return SaveValueOf(k); };
+        qhost.setValue = [this](const std::string& k, const std::string& v) { return SetSaveValueOf(k, v); };
+        qhost.lookup = [this] { return LookupDirector(); };
+        std::string qerr, qreport;
+        if (quantum_.Setup(ctx, std::move(qhost), qerr, qreport)) SR2_INFO("[{}] Quantum Storage Link ready:{}", kModule, qreport);
+        else SR2_WARN("[{}] Quantum Storage Link unavailable ({}) - not offered", kModule, qerr);
+    }
+    // Drone program sources "Hen Collector" / "Elder Collector" / "Quantum Storage Link" (optional;
+    // missing -> only the vanilla sources).
+    {
         std::string derr, dreport;
-        if (drones_.Setup(ctx, kModule, derr, dreport)) SR2_INFO("[{}] drone source Hen Collector ready:{}", kModule, dreport);
-        else SR2_WARN("[{}] drone source Hen Collector unavailable ({}) - drones reach the Hen Collector through Coop",
-                      kModule, derr);
+        if (drones_.Setup(ctx, kModule, derr, dreport))
+            SR2_INFO("[{}] drone sources Hen / Elder Collector, Quantum Storage Link ready:{}", kModule, dreport);
+        else SR2_WARN("[{}] drone sources Hen / Elder Collector, Quantum Storage Link unavailable ({}) - drones reach the "
+                      "Hen Collector through Coop", kModule, derr);
     }
 
     // Silo capacity tiers (optional: missing -> Silo Capacity II-V are not offered).
