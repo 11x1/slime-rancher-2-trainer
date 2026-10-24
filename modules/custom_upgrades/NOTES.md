@@ -433,6 +433,15 @@ replaced (old type T, stored type T): dropped owned [...], values [...]`.
   original does it once more). The checkmark itself is the game's: `GenericViewHolder.BindData`
   (0x83C900) enables its `unavailableIcon` image with the item's `_unavailableIcon` sprite while
   IsAvailable is false; our clones copy that sprite from their icon source / template.
+- **Purchase popup order** (round 7: "not on confirmation buttons when buying with space"). Buying opens
+  the game's PopupPrompt (`ListUIRoot.OpenPopupPrompt` from PromptForUpgrade, the same for Space / A /
+  the Purchase button). Its prefab (gamecore_scenes, UnityPy): `Panel/BodyContent/ButtonPanel`, a game
+  `HorizontalLayout` (`_reverseChildren` 0, centred, spacing 16) with `TextButton_NoneSelectable (Accept)`
+  first, `(Cancel)` second, so the positive button is on the left. sell_upgrades now detours
+  OpenPopupPrompt (shared generic body, LandPlotUIRoot only) and moves `_positiveActionButton` to the last
+  sibling: Cancel left, Purchase right, still centred, like the card's Sell / Purchase pair. Only the order
+  changes (keys, actions, labels are the game's). The layout re-lays out on OnTransformChildrenChanged.
+  Log once: `purchase popup: buttons reordered (Cancel left, Purchase right) under 'ButtonPanel'`.
 - **Coop Air Net icon**: the corral's own Air Net upgrade icon (`iconFrom` = Air Net, found in the corral
   menu's items by `GlobalUpgradeItem`), no mod icon any more (user: "use the air net icon from corrals").
 
