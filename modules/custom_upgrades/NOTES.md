@@ -343,7 +343,7 @@ Round 7: "no DJ booth in fabricator", "cant unlock the booth / speakers", "Slime
   (0x20F5F80: `Category` @0x10, `_categoryCount` = `category.TotalCount()` @0x18, `_itemList` @0x20).
   `FabricatorCategoryList.FindCategoriesToShow` builds one runtime per category each time the Fabricator opens
   (also the Sandbox's rebuild). The same holds for `PlayerUpgradeFabricateCategory.GetItems` (0x82C000, no native
-  caller), which `vacpack_upgrades.cpp` hooks for the Drone Battery Saver card: not changed here, worth checking.
+  caller): see "Drone Battery Saver" > "Card in the Fabricator" for the vacpack card's fix.
 - **Fix.** The quantum hook is now on that constructor: after the original, `quantum::InsertItem` and the DJ
   extension's `InsertCards` insert into the runtime's `_itemList` (same anchors: Refinery Link in `GadgetWarpGroup`,
   Scientist Desk and Boombox in `GadgetDecorGroup`, 241 members; checked with UnityPy on
@@ -829,6 +829,25 @@ user feedback ("they should be refinery upgrades, not in a separate panel"). Now
   removed from the save's copy by the Pull detour and is not counted for TinkerTailorSlimes.
 - **Prerequisite: the Drone Station blueprint** (`GadgetDirector.HasBlueprint`, checked when the Fabricator
   builds its items). An owned level always shows the card; an unknown answer (lookup failed) shows it too.
+- **Card in the Fabricator (fix, round 4).** The card was inserted by a `PlayerUpgradeFabricateCategory.GetItems`
+  (0x82C000) detour, but nothing calls `GetItems` natively in 1.3.0 (IDA: only metadata references).
+  `PlayerUpgradeFabricateCategoryRuntime..ctor(category, recipeFactory)` (0x82BE90, called by
+  `FabricatorCategoryList.FindCategoriesToShow` each time the Fabricator opens, also the Sandbox's rebuild) has the
+  same LINQ code inlined (`_upgradeDefinitions.Select(new PlayerUpgradeFabricatableItem(...)).Cast().ToList()`) and
+  passes the list to `FabricateCategoryRuntime<T>..ctor` (0x20F5F80): `_categoryCount` = `TotalCount()` =
+  `Count(_upgradeDefinitions)` @0x18, `_itemList` @0x20. The detour is now on that ctor: pre, our card goes at the end
+  of the definition list of the category that holds Tank Booster (id 20; the vanilla code then makes its item); post,
+  it leaves the runtime's `_itemList` while locked (or no player / module off) and `_categoryCount` drops by as many
+  (so the title's total and the page count stay vanilla). Log, when the state changes: `vacpack: Fabricator category
+  '<name>': DroneBatterySaver: card shown (position N of M)` / `card hidden (locked: Drone Station blueprint not
+  owned)` / `card removed (no player state yet | custom upgrades off)`, plus `N upgrade(s) added to the Fabricator
+  category '<name>' list` the first time. The tiers need nothing here (they are levels of the vanilla cards).
+  Earlier logs show Battery Saver IV owned, so the card was visible before the fix somehow - probably the player's
+  `UpgradeModel.upgradeDefinitions` (where the tick inserts the card) is the same asset as the category's list; if so,
+  the locked filter never ran before and the card showed without the Drone Station blueprint. Unverified.
+  Every other hook was checked in IDA for the same problem (a target with no code reference): the rest are either
+  called directly or are virtual / interface / delegate targets (`PlayerState.InitModel`, `LandPlotUIRoot` virtuals,
+  `DroneUIDefinitionSource.FindSourceDefinition`, `GadgetFabricatableItem` interface methods, event handlers).
 - **Prices: 7,500 / 10,000 / 15,000 / 25,000 Newbucks (57,500 for IV) plus half of Tank Booster V-VIII's refinery
   items** (rounded up, at least 1).
 - **Effect** (`drone_battery.cpp`): every ~2 s each station gets back what it drained beyond the level's share since the
