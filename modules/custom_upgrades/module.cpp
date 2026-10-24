@@ -15,6 +15,7 @@
 //   Silo Capacity II     silo         Storage Capacity      3000    300 items per silo slot
 //   Silo Capacity III    silo         Silo Capacity II      4500    400 items per silo slot
 //   Silo Capacity IV     silo         Silo Capacity III     6500    500 items per silo slot
+//   Silo Capacity V      silo         Silo Capacity IV      9000    600 items per silo slot
 //
 //   Not plot upgrades: the Fabricator vacpack upgrades Tank Booster IX-XII (+25 per slot per level,
 //   up to 200), Extra Tank III-IV (a 7th / 8th slot) and Drone Battery Saver I-IV (every drone station
@@ -25,8 +26,9 @@
 //   ("SiloNonSlimes", _maxAmount 100); STORAGE2/3/4 only swap slot GameObjects, the one vanilla
 //   capacity upgrade STORAGE_CAPACITY_INCREASE (1800) runs StorageUpgrader.Apply ->
 //   AmmoSlotManager.UpdateMaxCount(StorageCapacityUpgradeAmount = 200) -> every AmmoSlot's
-//   MaxCount. So vanilla is 100 -> 200 per slot; our three tiers continue the chain on the same
-//   card to 300 / 400 / 500. The max count is runtime only (AmmoDataV02 saves id, count,
+//   MaxCount. So vanilla is 100 -> 200 per slot; our four tiers continue the chain on the same
+//   card to 300 / 400 / 500 / 600. The three vanilla "Additional Storage" cards (STORAGE2 / 3 / 4,
+//   one more storage section each) are merged into one card the same way (MergeStorageCards). The max count is runtime only (AmmoDataV02 saves id, count,
 //   emotions, appearance, radiant - no max), load restores counts without clamping them
 //   (AmmoModel.Push -> AmmoSlot.set_Count), and AmmoSlotManager.ValidateAndAdjustSlots never
 //   trims counts. So the ~1 Hz world tick re-applies the owned tier's capacity (vanilla
@@ -274,6 +276,8 @@ constexpr int32_t kUpgAirNet = 11;
 constexpr int32_t kUpgAshTrough = 14;
 constexpr int32_t kUpgDeluxeCoop = 17;
 constexpr int32_t kUpgStorageCapacity = 20;  // template preference
+// STORAGE2 / STORAGE3 / STORAGE4: the silo's "Additional Storage" cards (one more section each).
+constexpr int32_t kUpgStorageSections[] = {3, 4, 5};
 constexpr unsigned long long kTierCacheFrames = 900;
 constexpr float kWorldTickSeconds = 1.0f;  // coop world objects: create / fit / remove
 
@@ -288,9 +292,10 @@ constexpr int kSiloSlotDefault = 100;  // vanilla AmmoSlotDefinition "SiloNonSli
 // ---- custom upgrade definitions -------------------------------------------------------
 enum CustomId : int32_t {
     SILO_SELL_ALL = custom_upgrades::kIdBase + 0x0001,  // owned upgrade (silo world button)
-    SILO_CAPACITY_2 = custom_upgrades::kIdBase + 0x0060,  // silo capacity tiers (300 / 400 / 500 per slot)
+    SILO_CAPACITY_2 = custom_upgrades::kIdBase + 0x0060,  // silo capacity tiers (300 / 400 / 500 / 600 per slot)
     SILO_CAPACITY_3 = custom_upgrades::kIdBase + 0x0061,
     SILO_CAPACITY_4 = custom_upgrades::kIdBase + 0x0062,
+    SILO_CAPACITY_5 = custom_upgrades::kIdBase + 0x0063,
     CORRAL_MUSIC_2 = custom_upgrades::kIdBase + 0x0013,
     COOP_HENS_1 = custom_upgrades::kIdBase + 0x0020,
     COOP_HENS_2 = custom_upgrades::kIdBase + 0x0021,
@@ -342,8 +347,12 @@ const UpgradeDef kDefs[] = {
      "Buy Silo Capacity III for this silo?"},
     {SILO_CAPACITY_4, "silo_capacity_4", kPlotSilo, SILO_CAPACITY_3, 6500, kSiloCapFamily, 500.0f,
      kUpgStorageCapacity, 0, "Silo Capacity IV",
-     "The biggest tanks around: every slot of this silo holds 500 items. Like all silo storage, it can't be sold.",
+     "Huge tanks: every slot of this silo holds 500 items. Like all silo storage, it can't be sold.",
      "Buy Silo Capacity IV for this silo?"},
+    {SILO_CAPACITY_5, "silo_capacity_5", kPlotSilo, SILO_CAPACITY_4, 9000, kSiloCapFamily, 600.0f,
+     kUpgStorageCapacity, 0, "Silo Capacity V",
+     "The biggest tanks around: every slot of this silo holds 600 items. Like all silo storage, it can't be sold.",
+     "Buy Silo Capacity V for this silo?"},
     // ---- tiers (one menu card per chain, see Shown) ----
     {CORRAL_MUSIC_2, "corral_music_2", kPlotCorral, kUpgMusicBox, 2000, F(Family::kMusicBox), 2.0f, kUpgMusicBox, 0,
      "Music Box II", "A catchier tune that calms this corral's slimes twice as well.",
@@ -645,6 +654,7 @@ private:
     bool ListInsert(Il2CppObject* list, int32_t index, Il2CppObject* item);
     int32_t ListIndexOf(Il2CppObject* list, Il2CppObject* item);
     void RestoreVanilla(MenuInjection& inj);
+    void MergeStorageCards(Il2CppObject* plot, MenuInjection& inj, const std::vector<std::pair<Il2CppObject*, int32_t>>& cards);
     bool Shown(Il2CppObject* plot, const UpgradeDef& d);
     Il2CppObject* MarketIcon();
     void SetTexts(const Injected& in, const std::string& title, const std::string& desc, const std::string& prompt);
@@ -1886,6 +1896,16 @@ void CustomUpgrades::BeforeMenuUpdate(Il2CppObject* root) {
     // place this plot's cards. Cards that take over a vanilla card first (same list length, so the
     // recorded indices are vanilla ones), then the rest (right after their anchor, else at the end).
     RestoreVanilla(*inj);
+    // Silo "Additional Storage" cards with their VANILLA indices (the list is vanilla right now).
+    std::vector<std::pair<Il2CppObject*, int32_t>> storageCards;
+    if (type == kPlotSilo && sink)
+        for (size_t i = 0, n = unity::ListCount(inj->list); i < n && i < 64; ++i) {
+            auto* item = static_cast<Il2CppObject*>(unity::ListAt(inj->list, i));
+            if (!IsA(item, upgItemClass_) || !unity::IsAlive(item)) continue;
+            const int32_t u = unity::Field<int32_t>(item, offItemUpgrade_);
+            if (std::find(std::begin(kUpgStorageSections), std::end(kUpgStorageSections), u) != std::end(kUpgStorageSections))
+                storageCards.emplace_back(item, static_cast<int32_t>(i));
+        }
     for (int pass = 0; pass < 2; ++pass) {
         for (Injected& in : inj->items) {
             if ((pass == 0) != (in.base != nullptr)) continue;
@@ -1910,6 +1930,7 @@ void CustomUpgrades::BeforeMenuUpdate(Il2CppObject* root) {
                                       : ListCall(inj->list, "Add", in.item);
         }
     }
+    if (storageCards.size() > 1) MergeStorageCards(plot, *inj, storageCards);
     // Texts now, before the original runs: with the menu open, RebuildUI's original rebinds the
     // cards (RefreshAndAdvance) and so runs LocalizeStringEvent.UpdateString for a card that was
     // just placed (a tier taking over a vanilla card after its purchase). With the texts only
@@ -1934,6 +1955,27 @@ void CustomUpgrades::RegisterTexts(Il2CppObject* plot, const MenuInjection& inj)
         } else {
             SetTexts(in, d.title, d.description, d.prompt);
         }
+    }
+}
+
+// User request ("merge additional storage to 1 buy menu option, I don't want to scroll to upgrade
+// it"): vanilla lists STORAGE2 / 3 / 4 as three "Additional Storage" cards (STORAGE3 / 4 hidden until
+// the one before is owned, owned ones stay greyed with the checkmark). Only one stays in the list:
+// the first section not owned yet, or STORAGE4 once all are owned. The others go out as hidden
+// vanilla cards at their vanilla index, so RestoreVanilla puts them back for the next plot / when the
+// module stops. Runs after our cards are placed: their recorded indices are vanilla ones too.
+void CustomUpgrades::MergeStorageCards(Il2CppObject* plot, MenuInjection& inj,
+                                       const std::vector<std::pair<Il2CppObject*, int32_t>>& cards) {
+    Il2CppObject* keep = cards.back().first;
+    for (const auto& [item, index] : cards)
+        if (!VanillaOwned(plot, unity::Field<int32_t>(item, offItemUpgrade_))) {
+            keep = item;
+            break;
+        }
+    for (const auto& [item, index] : cards) {
+        if (item == keep) continue;
+        bool removed = false;
+        if (ListCall(inj.list, "Remove", item, &removed) && removed) inj.hidden.push_back({item, index});
     }
 }
 
@@ -2201,11 +2243,13 @@ std::vector<custom_upgrades::world::PropRequest> CustomUpgrades::WantedProps() c
         if (owns(ps, GARDEN_GROWTH_2)) kinds |= w::kPropGardenSprinkler2;
         if (owns(ps, INCIN_ASH_BOOST)) kinds |= w::kPropIncinGlow;
         if (owns(ps, CORRAL_MUSIC_2)) kinds |= w::kPropCorralMusic;
-        // Silo Capacity II / III / IV: one more ground tank per tier (a higher tier implies the lower ones).
-        const bool cap4 = owns(ps, SILO_CAPACITY_4), cap3 = cap4 || owns(ps, SILO_CAPACITY_3);
+        // Silo Capacity II-V: one more ground tank per tier (a higher tier implies the lower ones).
+        const bool cap5 = owns(ps, SILO_CAPACITY_5), cap4 = cap5 || owns(ps, SILO_CAPACITY_4),
+                   cap3 = cap4 || owns(ps, SILO_CAPACITY_3);
         if (cap3 || owns(ps, SILO_CAPACITY_2)) kinds |= w::kPropSiloTank2;
         if (cap3) kinds |= w::kPropSiloTank3;
         if (cap4) kinds |= w::kPropSiloTank4;
+        if (cap5) kinds |= w::kPropSiloTank5;
         if (kinds) out.push_back({id, kinds});
     }
     return out;
@@ -3074,7 +3118,7 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
                       kModule, derr);
     }
 
-    // Silo capacity tiers (optional: missing -> Silo Capacity II-IV are not offered).
+    // Silo capacity tiers (optional: missing -> Silo Capacity II-V are not offered).
     {
         std::string cerr;
         auto fo = [&](Il2CppClass* k, const char* field, size_t& out) {
@@ -3101,7 +3145,7 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         capacityOk_ = offUpgSilo_ && offUpgAmount_ && offSiloDefs_ && offDefMax_ && offAmmoModel_ && offPlotModelObj_ &&
                       capUpdateMi_ && capSlotMaxMi_ && getPlotModelMi_ && compInChildrenMi_ && offScGameModel_;
         if (!capacityOk_)
-            SR2_WARN("[{}] silo capacity tiers unavailable ({}) - Silo Capacity II-IV are not offered", kModule,
+            SR2_WARN("[{}] silo capacity tiers unavailable ({}) - Silo Capacity II-V are not offered", kModule,
                      cerr.empty() ? "SceneContext.GameModel not found" : cerr);
     }
 

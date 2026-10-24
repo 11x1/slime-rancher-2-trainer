@@ -39,8 +39,8 @@
 // corners hold the plot menu terminal (-x, -z), the vitamizer (-x, +z), the vanilla elder
 // collector (+x, +z) and, by coop_world's PickCorner, the Hen Collector (the free one); garden
 // corners hold the terminal, the deluxe planters (+x, -z) / (-x, +z) and the scareslime (+x, +z),
-// the deposit port stands at (-5.44, -3.14). Nothing has a collider, so nothing blocks
-// chickens, crops, the vac or the player.
+// the deposit port stands at (-5.44, -3.14). Nothing but the silo tanks has a collider, so nothing
+// else blocks chickens, crops, the vac or the player.
 //
 // Coop: hay bales + three grass tufts (Faster Hens I / II), two nests (stuffed chicken in the
 // second), the flower pillow and two more tufts (Faster Hens II) stand on scattered "slots"
@@ -192,7 +192,12 @@ const Part kGlow[] = {
 // standing on the ground on the silo's diagonals at 2.9 / 2.9 (r 4.1: clear of the silo wall at 2.1,
 // the vanilla pipes and caps at r <= 3.05, the depositors in the middle of each side and the corner
 // posts at 4.75). Yaw = the vanilla tank's yaw on that diagonal (19.6 deg + 90 per quarter turn).
-// The (-x, -z) diagonal stays free (plot menu terminal, section 0's ground pipes).
+// Tier V takes the last diagonal, (-x, -z): every diagonal has the same low pipes (each storage section's
+// Addition is the section-0 layout turned 90 deg), and the plot menu terminal stands outside the fence
+// at (-5.54, -5.54), 3.7 m from the tank centre.
+// The tanks keep their colliders (SolidKind): the vanilla tank's "collider" MeshCollider and the foot
+// plate's MeshCollider, on the prefab's own layer (Default, like the vanilla tanks and pipes), so the
+// player walks around them as around the vanilla ones and the vac / drones treat them the same.
 const Part kSiloTank2[] = {
     {Src::kPlot, kPlotSilo, nullptr, kSiloTankPath, {2.9f, 1.42f, 2.9f}, YawQ(0.98480775f, -0.17364818f), S(0.8f), false},
 };
@@ -201,6 +206,9 @@ const Part kSiloTank3[] = {
 };
 const Part kSiloTank4[] = {
     {Src::kPlot, kPlotSilo, nullptr, kSiloTankPath, {2.9f, 1.42f, -2.9f}, YawQ(0.57357644f, -0.81915204f), S(0.8f), false},
+};
+const Part kSiloTank5[] = {
+    {Src::kPlot, kPlotSilo, nullptr, kSiloTankPath, {-2.9f, 1.42f, -2.9f}, YawQ(0.17364818f, 0.98480775f), S(0.8f), false},
 };
 
 struct KindDef {
@@ -220,7 +228,13 @@ const KindDef kKinds[] = {
     {kPropSiloTank2, "SiloTankII", kPlotSilo, kSiloTank2, std::size(kSiloTank2)},
     {kPropSiloTank3, "SiloTankIII", kPlotSilo, kSiloTank3, std::size(kSiloTank3)},
     {kPropSiloTank4, "SiloTankIV", kPlotSilo, kSiloTank4, std::size(kSiloTank4)},
+    {kPropSiloTank5, "SiloTankV", kPlotSilo, kSiloTank5, std::size(kSiloTank5)},
 };
+
+// Props that keep the colliders of their source (solid, like the vanilla part they copy).
+bool SolidKind(PropKind k) {
+    return k == kPropSiloTank2 || k == kPropSiloTank3 || k == kPropSiloTank4 || k == kPropSiloTank5;
+}
 
 // ---------------------------------------------------------------- coop layout --
 
@@ -423,7 +437,7 @@ struct PlotProps::Impl {
 
     Il2CppObject* FindInGroup(Il2CppObject* group, const char* prefabName, int depth, int& budget);
     Il2CppObject* Source(const Part& part, Il2CppObject* lookup);
-    void Strip(Il2CppObject* root);
+    void Strip(Il2CppObject* root, bool keepColliders);
     void Create(Il2CppObject* plot, const KindDef& def, Il2CppObject* lookup, const std::string& id, unsigned generation);
 };
 
@@ -567,10 +581,12 @@ Il2CppObject* PlotProps::Impl::Source(const Part& part, Il2CppObject* lookup) {
 
 // Pure decoration: game scripts, joints, rigidbodies and colliders go (in that order, so nothing
 // that requires one of them is left behind). Unity's own behaviours (LODGroup, Animator, decal
-// projectors, light data) stay.
-void PlotProps::Impl::Strip(Il2CppObject* root) {
+// projectors, light data) stay. keepColliders (SolidKind): the colliders stay as static colliders
+// (no rigidbody left), on the layer the prefab gave them.
+void PlotProps::Impl::Strip(Il2CppObject* root, bool keepColliders) {
     Il2CppObject* tr = unity::TransformOf(root);
     for (Il2CppClass* k : {monoClass, jointClass, rigidbodyClass, colliderClass}) {
+        if (k == colliderClass && keepColliders) break;
         bool inactive = true, ok = false;
         Il2CppObject* arr = Call(compsInChildren, tr, {unity::TypeOf(k), &inactive}, "GetComponentsInChildren", &ok);
         for (size_t i = 0, n = ok ? unity::ArrayLength(arr) : 0; i < n && i < 512; ++i) {
@@ -638,14 +654,14 @@ void PlotProps::Impl::Create(Il2CppObject* plot, const KindDef& def, Il2CppObjec
         DestroyNow(holder);
         return;
     }
-    Strip(holder);
+    Strip(holder, SolidKind(def.kind));
     if (sr2::core::ModuleFaulted(module)) {
         DestroyNow(holder);
         return;
     }
     unity::SetActive(holder, true);
-    SR2_INFO("[{}] {} props built on plot '{}' ({} of {} piece(s){})", module, def.name, id, built, def.count,
-             scattered ? ", scattered by plot id" : "");
+    SR2_INFO("[{}] {} props built on plot '{}' ({} of {} piece(s){}{})", module, def.name, id, built, def.count,
+             scattered ? ", scattered by plot id" : "", SolidKind(def.kind) ? ", colliders kept" : "");
 }
 
 // ---------------------------------------------------------------- api --

@@ -225,10 +225,10 @@ dialog.
   under "Icon Background" bound to the popup's positive / negative InputEvent). On the clone the
   InputEventButton is disabled (it would perform that InputEvent on pointer down / up), the label's
   LocalizeStringEvent is disabled and the TMP text set to "Cancel" / "Sell"; a polled Toggle on its
-  root was meant to take the click (Button.onClick is empty in the prefab). The keyboard / pad focus is a teal
-  (Cancel) / pink (Sell) ring behind the focused button, fitted to its self-sized rect for 30 frames
-  after a build; disabled Sell = `Selectable.interactable` false (the prefab's disabled colours).
-  Fallback when any piece is missing: our own SDF buttons with "(Esc / B)" / "(Enter / A)" in the
+  root was meant to take the click (Button.onClick is empty in the prefab). (The teal / pink focus ring
+  of round 4 is gone, see "Buttons like the popup's" below.) Disabled Sell = `Selectable.interactable`
+  false (the prefab's disabled colours).
+  Fallback when any piece is missing: our own SDF buttons with "(C / B)" / "(Enter / A)" in the
   label. Log: `silo receipt: buttons cloned from the game's popup, rows fit|scroll (N px, canvas H high)`.
 - **Regression after feature/polish-4 ("Sell menu didn't show up").** The receipt never opened: log
   `silo receipt: not opened: panel failed`, then `the receipt could not be opened - selling at once`;
@@ -249,10 +249,31 @@ dialog.
   Closing deactivates the root first (`OnDisable` -> `Unpause` at once), then destroys it. Every close
   path (cancel, sell, load, module off, fault, scene change) goes through that, so the game cannot
   stay paused because of the dialog.
-- **Keys** (polled from `Keyboard.current` / `Gamepad.current`, nothing hooked): Left / Right, A / D,
-  Tab, d-pad, left stick switch Cancel / Sell; Enter / Space / pad A press the focused one (Sell is
-  focused first); Esc / pad B cancel. Mouse: the two buttons, a click on the dimmed backdrop cancels.
-  Input is ignored for 0.3 s after opening or refreshing, so the press that opened it never confirms.
+- **Buttons like the popup's** (feedback round 4: "buttons ugly, very big, no padding on the right,
+  cancel on C, the keys aren't on the left side of the buttons like the game has them"). Popup prefab
+  (UnityPy, `gamecore_scenes`, `PopupPrompt`): Panel 960 wide with `LayoutManager` + `EncapsulateChildren`,
+  ButtonPanel 64 px in from each side, Accept (positive) on the LEFT at x -169, Cancel on the right at
+  +169, each `TextButton_NoneSelectable` 321.5 x 58.6: `Label Background` (SDF pill, label 42 pt at x 30)
+  and `Icon Background` (the `InputEventDisplay` key glyph, 64 px icons) laid out by the button's
+  `HorizontalLayout` / `EncapsulateChildren` / `ResizeToPreferred`. Those are the game's own layout
+  behaviours (`MonomiPark.SlimeRancher.UI.Framework.Layout`); only a `LayoutManager` above them runs them
+  (`OnEnable` / `LateUpdate` -> `ApplyLayout`). Our clones had none, so they were never laid out: the
+  prefab size and the glyph left over the label. Now each clone gets its own `LayoutManager` (the glyph
+  on the left inside the pill, as in the game), sits in a zero-size slot scaled 0.72 (the receipt's 40 pt
+  title vs the popup's 55 pt; on the slot, not the button, whose ButtonAnimator may animate its scale),
+  and hangs off its outer edge: Sell's left edge at the left padding, Cancel's right edge at the right
+  padding (pivot 0 / 1, re-placed for 30 frames). Game order: Sell left, Cancel right. Not focusable
+  (TextButton_**NoneSelectable**): no focus ring any more. Log once: `Sell button laid out W x H (x0.72 on
+  screen)` and the key line below. Fallback (no LayoutManager class): prefab layout, unscaled.
+- **Keys** (polled, nothing hooked). Sell: the popup's positive `InputEvent` (`PopupPrompt._positiveInput`,
+  read through its `PollValue` Func, the bound action's value: the key its glyph shows), Enter, pad A.
+  Cancel: **C** (user request), Esc, pad B and the popup's negative InputEvent. Cancel's glyph shows the
+  negative event's binding; while it shows a keyboard key its key text is set to "C" (its
+  LocalizeStringEvent off, extra icons of the group hidden); a gamepad glyph stays (B). A key still held
+  when the dialog opens is not a press (edge from the open state). Own-button fallback: Left / Right, A /
+  D, Tab, d-pad, stick move the focus, Enter / Space / pad A press it. Mouse: the two buttons, a click on
+  the dimmed backdrop cancels. Input is ignored for 0.3 s after opening or refreshing, so the press that
+  opened it never confirms.
 - **What is sold.** Sell quotes the silo again. Only an identical quote (same types, counts and
   prices, market still open) is sold, with the quote as the plan: at most the shown count per type
   (`Summarize(..., plan)`). Anything else refreshes the receipt with an orange note ("Prices or
@@ -277,7 +298,7 @@ EventSystem), pad A / B and the d-pad / stick.
 
 ## Silo capacity tiers
 
-Storage per silo slot: 100 -> 200 (vanilla) -> 300 -> 400 -> 500 (ours).
+Storage per silo slot: 100 -> 200 (vanilla) -> 300 -> 400 -> 500 -> 600 (ours).
 
 - **Vanilla** (prefab `patchSilo` read with UnityPy, disassembly): one `SiloStorage` with 12 slot
   definitions, all `SiloNonSlimes` (`_maxAmount` 100). STORAGE2 / 3 / 4 (500 / 575 / 650) only swap
@@ -286,10 +307,10 @@ Storage per silo slot: 100 -> 200 (vanilla) -> 300 -> 400 -> 500 (ours).
   `scriptableobjectlookupdata_assets_all_*` bundle) runs `AmmoSlotManager.UpdateMaxCount(
   StorageCapacityUpgradeAmount = 200)` (`StorageUpgrader.Apply` 0x996E30) and shows the four
   `CapacityUpgrade1..4` parts. So vanilla has one capacity tier, 100 -> 200.
-- **Ours:** Silo Capacity II / III / IV (`0x53520060..62`, keys `silo_capacity_2..4`), 300 / 400 / 500
-  per slot, **3000 / 4500 / 6500**. A tier chain on the vanilla Storage Capacity card: once that is
-  owned the card shows Silo Capacity II, then III, then IV (greyed with the checkmark when all are
-  owned); `ChainVanillaRoot` gives every tier of a chain that starts on a vanilla upgrade that
+- **Ours:** Silo Capacity II / III / IV / V (`0x53520060..63`, keys `silo_capacity_2..5`), 300 / 400 /
+  500 / 600 per slot, **3000 / 4500 / 6500 / 9000** (V added in round 4: "add tier V, 600"). A tier
+  chain on the vanilla Storage Capacity card: once that is owned the card shows Silo Capacity II, then
+  III, IV, V (greyed with the checkmark when all are owned); `ChainVanillaRoot` gives every tier of a chain that starts on a vanilla upgrade that
   upgrade's card (before, only the first tier took it over). Icon = the vanilla Storage Capacity icon
   (no own sprite).
 - **Prices:** vanilla pays 1800 for +100 per slot (12 slots = +1200 items, 1.5 Newbucks per slot
@@ -306,6 +327,16 @@ Storage per silo slot: 100 -> 200 (vanilla) -> 300 -> 400 -> 500 (ours).
   lower max (between a load and the next tick, module off / faulted, or a mod-free load) leaves the
   contents above it in the silo; it just takes nothing more until they are below (logged as a warning
   with the count over the limit when we lower it).
+- **One "Additional Storage" card** (round 4: "merge additional storage to 1 buy menu option, I don't
+  want to scroll to upgrade it"). Vanilla lists three cards with the same title and icon, `Storage2 /
+  3 / 4 Upgrade` (STORAGE2 / 3 / 4 = upgrades 3 / 4 / 5, one more storage section and port each;
+  STORAGE3 / 4 hidden until the one before is owned, owned ones stay greyed). `MergeStorageCards`
+  keeps one of them in the silo's list, the first section not owned yet (STORAGE4 greyed once all
+  are owned), the others go out as hidden vanilla cards at their vanilla index (back for other plots /
+  module off, like a tier card's vanilla card). The capacity side was already one card (Storage
+  Capacity -> II -> ... -> V). So the silo menu has two storage cards: Additional Storage (more
+  sections) and Storage Capacity (more per slot); they are different upgrades with different
+  purchases, so they stay two cards.
 - **Not sellable**, like the vanilla silo storage upgrades: `CanSell` gives the same permanent reason
   ("silo storage"), so sell_upgrades shows no Sell button and no alt-action prompt.
 
@@ -313,9 +344,16 @@ Storage per silo slot: 100 -> 200 (vanilla) -> 300 -> 400 -> 500 (ours).
   vanilla capacity upgrade shows one `techSiloCapacity` tank per owned storage section, high on the
   silo's diagonals (`Capacity Addon 0..3`, plot-local about (-1.6, 3.3, -1.8) for section 0, each next
   section turned 90 degrees and ~0.8 m higher). Our tiers add the same tank (0.8 size) standing on the
-  ground on a diagonal at (+-2.9, +-2.9): II (+x, +z), III also (-x, +z), IV also (+x, -z), each turned
-  like the vanilla tank on that diagonal (19.6 + k * 90 degrees). The (-x, -z) diagonal stays free (plot
-  menu terminal outside it, section 0's low pipes). Clearances: silo wall r 2.1, vanilla pipe elbows /
+  ground on a diagonal at (+-2.9, +-2.9): II (+x, +z), III also (-x, +z), IV also (+x, -z), V also
+  (-x, -z), each turned like the vanilla tank on that diagonal (19.6 + k * 90 degrees). Every diagonal
+  has the same low pipes (each section's Addition is section 0's layout turned 90 degrees), the plot
+  menu terminal of the (-x, -z) corner stands outside the fence, 3.7 m from tank V.
+- **Collision** (round 4: "the silo tank props need collision"). The tank props keep the prefab's
+  colliders (`SolidKind` in plot_props: the `collider` child's MeshCollider and the foot plate's
+  MeshCollider), on their prefab layer, Default, the layer of the vanilla tanks and pipes; game
+  scripts, joints and rigidbodies are still stripped, so they are static colliders. The player walks
+  around them; the vac and drones treat them like the vanilla tank (which they already pass). Build
+  log: `SiloTankII props built on plot '...' (1 of 1 piece(s), colliders kept)`. Clearances: silo wall r 2.1, vanilla pipe elbows /
   caps r <= 3.05 (>= 1.37 m from a tank centre), depositors in the middle of each side, corner posts at
   4.75, the Sell-All button outside the (+x, -z) corner. Built by `plot_props` (holders
   `sr2props_SiloTankII..IV#<gen>`), gone when the tier is not owned / the module is off, rebuilt
@@ -357,7 +395,7 @@ coop_world's scan would destroy), stripped of colliders, joints, rigidbodies and
 | Fast Growth II | a fourth head in the middle of the -x side, turned 180 degrees | same |
 | Music Box II | a second speaker on the (-x, -z) corner post (above the plot menu terminal), leaning inwards | corral prefab `Music Box/techCorralMusicBox/MusicBox/Music` (the vanilla speaker sits on the (-x, +z) post) |
 | Ash Booster (u11) | glow + embers in the fire, embers rising out of the opening | incinerator prefab `.../meshIncinerator/FireTest/Glow` and `/Embers` (inactive in vanilla, switched on), decoration `decorFireFlower`: `FX Fireflower` |
-| Silo Capacity II / III / IV | one capacity tank per tier standing on the ground beside the silo: II (+x, +z), III adds (-x, +z), IV adds (+x, -z) | silo prefab `Silo Upgrade 0/Addition 0/Capacity Addon 0/techSiloCapacity` (the vanilla Storage Capacity Upgrade's tank, with its pipe-connector foot) at 0.8 size |
+| Silo Capacity II / III / IV / V | one capacity tank per tier standing on the ground beside the silo: II (+x, +z), III adds (-x, +z), IV adds (+x, -z), V adds (-x, -z); solid (colliders kept) | silo prefab `Silo Upgrade 0/Addition 0/Capacity Addon 0/techSiloCapacity` (the vanilla Storage Capacity Upgrade's tank, with its pipe-connector foot) at 0.8 size |
 
 Gadget / toy prefabs are found by prefab name in `LookupDirector._gadgetDefinitions` /
 `_toyDefinitions` (member types, then sub-groups). A missing model is logged once
