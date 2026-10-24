@@ -7,7 +7,9 @@
 | note | about |
 |---|---|
 | `ideas.md` | unplanned ideas |
-| `agent-context.md` | a library of what is decompiled and known, so agents find context fast |
+| `agent-context.md` | a library of what is decompiled and known, so agents find context fast (do first) |
+| `round-11.md` | round 10 test feedback, split into agent tasks |
+| `custom-icons.md` | replacing script-drawn icons with the user's drawings; vanilla icons meanwhile |
 
 ## Where the documentation lives
 
