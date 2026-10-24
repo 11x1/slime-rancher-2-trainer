@@ -17,8 +17,10 @@
 //     "despawn after 10 plorts" limit (ProducePlortsOnHit.ProducePlort resets _numPlortsSpawned), and
 //     SlimeFeral already never poofs a slime on the ranch;
 //   * kept slimes eat: the Shadow diet's EatMap gets copies of the Pink slime's food entries (fruit,
-//     veggies, meat) that produce Shadow plorts, and each kept slime's SlimeEat gets KeepEatingWhenFull
-//     (Shadow never gets hungry: its hunger recovery rate is 0) and recomputes its eats (InitFood).
+//     veggies, meat) that produce Shadow plorts, and each kept slime follows the Ringtail rule: its
+//     SlimeEat gets KeepEatingWhenFull (it eats whatever reaches it, but vanilla FinishChomp makes no
+//     plort while it is not hungry), one meal empties its hunger, and its hunger comes back at the vanilla
+//     rate (Shadow's own rate is 0). The face shows the Ringtail's mischievous look while it is full.
 //
 // Save: a shadow slime on the ranch is a plain actor of type Shadow. The save code stores every actor
 // except GameModel.ignoreOnLoad ("SceneObjectGroup" = the player) and Shadow has a persistence id, so

@@ -1170,6 +1170,26 @@ eating food". Research, RVAs and the save question: `re/shadow-slimes.md` (secti
   each kept slime's `SlimeEat` gets `_keepEatingWhenFull` and `InitFood`. Not kept any more / not owned: flag off;
   not owned / module off: our entries removed. Wild shadow slimes get the entries too (global diet) but never eat
   unless feral (no hunger, no keep-eating flag).
+- **Plorts: the Ringtail rule.** Ringtails eat without end but make a plort only while hungry. Their prefab has the
+  `KeepEatingWhenFull` component, which only sets `SlimeEat._keepEatingWhenFull` and (with `_showMischievousFace`)
+  sets the face's `_isMischievous` while `!IsHungryForNonPlorts`. The rule itself is vanilla `SlimeEat.FinishChomp`
+  (0xBB6780): `skipProduction = _keepEatingWhenFull && !IsHungryFor(food)`, passed to `EatAndProduce` (and the chomper
+  then waits `TimePerEatWhenFull`). `IsHungryFor` = drive >= `MinDriveToEat`, drive = `max(hunger, entry.MinDrive) +
+  entry.ExtraDrive`; every meal lowers the hunger by `DrivePerEat` (`InvokeOnEat`), and it rises again at the
+  emotion's hunger rate (`ComputeHungerChangePerHour`). So the reset is the hunger timer, not the day / night cycle
+  (the stone form is a separate actor, `TurnToStoneInDaylight.BecomeStatue` swaps in a `RingtailStatue`, nothing to do
+  with eating). Shadow already had the flag from us, but its hunger rate is 0, so the rhythm never came back. What we
+  do per kept slime (in memory only, put back when it stops being kept): our diet entries use `MinDrive` 0 and
+  `ExtraDrive` 0 (drive = hunger); `SlimeEat.DrivePerEat` raised to at least **1.0**, so one plort meal empties the
+  hunger and every meal after it is eaten without a plort; `SlimeEmotions._hungerRecoveryRate` = the vanilla default
+  (`SlimeEmotionConfig.HungerRate.DefaultValue`, the rate every slime without an override gets; logged once as
+  `vanilla hunger rate .../game h`), `_hungerDirection` 1, then `ComputeHungerChangePerHour`. The next plort comes once
+  the hunger is back at the Shadow prefab's `MinDriveToEat` (0.333), i.e. after `0.333 / rate` game hours plus the
+  vanilla day / night recovery factors - the same timer a normal slime's hunger uses. The tick re-applies the rate if a
+  property change reset it, sets the face's `_isMischievous` while full (the Ringtail's cue), and logs
+  `shadow slime '...' ate and is full ... hungry again in ~N game h` / `is hungry again ... next meal makes a plort`
+  (at most 12 such lines per minute). The hunger value is saved in `SlimeModel.Emotions` like every slime's (vanilla
+  safe); the rate, `DrivePerEat` and the face flag are not saved.
 - **Vacpack save.** No vanilla slot allows Shadow, so a load would drop them (`ValidateAndAdjustSlots`). The
   `AmmoModel.Pull` detour gives the save an empty `AmmoSlot` (new object, same definition) in place of each slot
   with shadow slimes and writes `custom_upgrades.vacpack.shadow_slots` = `v=count;...` (vanilla slot index); in the
@@ -1181,9 +1201,11 @@ eating food". Research, RVAs and the save question: `re/shadow-slimes.md` (secti
 - **Module off.** Owned flag off, diet back, kept slimes back to vanilla. Shadow slimes still in the vacpack are kept
   in the save made next (no Pull detour) and dropped by the load after it: logged as a WARN at cleanup.
 
-Limits: no new food item; no hunger rhythm (kept slimes eat whatever reaches them, the chomper's
-`TimePerEatWhenFull` is the only pacing, so they can empty a garden-fed corral); a vacuumed shadow slime loses its
-emotions; feral wild shadow slimes could eat (global diet). Shadow plort price was not checked (economy).
+Limits: no new food item; kept slimes still eat whatever reaches them (as Ringtails do, paced by
+`TimePerEatWhenFull` while full), so a garden-fed corral loses its food, but only the hungry meals make plorts; hunger
+does not come back while the slime is unloaded (its scene loads with Shadow's rate 0 and the tick sets ours only once
+it is tracked again); a vacuumed shadow slime loses its emotions; feral wild shadow slimes could eat (global diet).
+Shadow plort price was not checked (economy).
 
 **Test cases (not run yet):**
 1. Fabricator > vacpack upgrades: "Shadow Catcher" card at the end with the Shadow slime icon, 40,000 Newbucks + 25
@@ -1194,7 +1216,13 @@ emotions; feral wild shadow slimes could eat (global diet). Shadow plort price w
 3. Shoot it out on the ranch (in a corral): log `is on the ranch: kept`; stand next to it for a minute - it stays;
    hit it with items more than 10 times - plorts, no despawn.
 4. Feed it fruit / veggies / meat (shoot them at it, or a feeder): it eats and makes Shadow plorts (log `food
-   entries ... added to the Shadow diet`).
+   entries ... added to the Shadow diet`, `vanilla hunger rate .../game h`).
+4a. Ringtail rule: feed a hungry kept shadow slime several foods in a row: the first one makes a Shadow plort (log
+   `ate and is full ... hungry again in ~N game h`), the next ones are eaten with no plort, its face looks mischievous;
+   wait N game hours (or sleep): log `is hungry again`, the next food makes a plort again.
+4b. A kept slime in a corral with a garden / feeder: it keeps eating, but plorts come only about once per hunger cycle
+   (count them over a game day: about one per N hours, not one per food).
+4c. Carry it off the ranch or turn custom upgrades off: its face goes back to normal, it no longer eats when full.
 5. Save with shadow slimes in the vacpack (log `shadow slimes kept in the sidecar`), reload: they come back
    (log `back in the vacpack from the sidecar`); the ranch shadow slime is still in its corral after the reload.
 6. Carry one off the ranch and release it: `left the ranch`, it may scatter if hit.
