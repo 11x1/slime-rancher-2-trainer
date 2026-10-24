@@ -25,6 +25,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <format>
 #include <initializer_list>
 #include <map>
@@ -32,6 +33,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "core/detour_guard.h"
@@ -40,8 +42,10 @@
 #include "core/main_thread.h"
 #include "core/module.h"
 #include "core/unity.h"
+#include "modules/custom_upgrades/sale_notify.h"
 #include "modules/sandbox/achievements.h"
 #include "modules/sandbox/player_extras.h"
+#include "modules/sandbox/prefab_icons.h"
 #include "ui/item_icons.h"
 #include "ui/sandbox_bridge.h"
 
@@ -61,7 +65,6 @@ constexpr unsigned long long kSnapshotMs = 250;
 constexpr unsigned long long kEnergyMs = 100;
 constexpr int kMaxSlots = 32;  // slot mask width
 constexpr unsigned long long kRecipeStateMs = 2000;  // blueprint / owned counts in the crafter
-constexpr unsigned long long kCatRetryMs = 5000;     // look for the fabricator categories again (not loaded yet)
 constexpr int kMaxSpawn = 20;   // per click
 constexpr int kMaxDrop = 60;    // "Put in slots": most items dropped in front of the player per item
 constexpr int kMaxCraft = 99;   // per click
@@ -109,6 +112,31 @@ std::string CleanText(const std::string& s) {
     return out.substr(a, out.find_last_not_of(" \t") - a + 1);
 }
 
+std::string Lower(std::string s) {
+    for (char& ch : s) ch = static_cast<char>((ch >= 'A' && ch <= 'Z') ? ch - 'A' + 'a' : ch);
+    return s;
+}
+
+// A readable name from an asset name, for types without a localized one (the crates show
+// "!! Actor.l.crate_reef_01 !!"): "ContainerBluffsGold01" -> "Bluffs Gold Crate".
+std::string PrettyAssetName(const std::string& asset) {
+    std::string s;
+    for (size_t i = 0; i < asset.size(); ++i) {
+        const char c = asset[i];
+        if (c == '_') {
+            s += ' ';
+            continue;
+        }
+        const bool upper = c >= 'A' && c <= 'Z';
+        const bool prevLower = i > 0 && asset[i - 1] >= 'a' && asset[i - 1] <= 'z';
+        if (upper && prevLower) s += ' ';
+        s += c;
+    }
+    while (!s.empty() && ((s.back() >= '0' && s.back() <= '9') || s.back() == ' ')) s.pop_back();  // "...01"
+    if (s.rfind("Container ", 0) == 0) s = s.substr(10) + " Crate";
+    return s.empty() ? asset : s;
+}
+
 class Sandbox final : public sr2::core::Module {
 public:
     const char* Name() const override { return kModule; }
@@ -117,7 +145,7 @@ public:
     void OnEnable() override;
     void OnDisable() override;
 
-    void Tick();                         // main thread, every frame
+    void Tick(float dt);                 // main thread, every frame
     void Handle(const bridge::Action&);  // main thread, posted job
 
 private:
@@ -150,9 +178,17 @@ private:
     uint32_t SpriteIcon(Il2CppObject* sprite);
     Il2CppObject* VirtualIcon(Il2CppObject* obj);
     uint32_t GroupIconFor(Il2CppObject* ident);
-    void EnsureIconGroups();
+    bool EnsureTypeGroups();
+    void CollectMembers(Il2CppObject* group, std::unordered_set<uintptr_t>& out, int depth = 0);
+    Il2CppObject* NamedGroup(const char* name);
+    bool EnsureNamedSprites();
+    uint32_t NamedSprite(std::initializer_list<const char*> names);
     void EnsureGroupIcons();
     void EnsureRelations();
+    bool RenderNextIcon();
+    void QueueIconRenders(const std::vector<bridge::Item>& items);
+    static void PatchIcon(std::shared_ptr<const std::vector<bridge::Item>>& list, uintptr_t id, uint32_t icon);
+    void LogSpawnGroups();
     bridge::Kind ItemKind(Il2CppObject* ident);
     bool EnsureCatalog(const Ctx& c);
     Il2CppObject* CatalogItem(uintptr_t id, uint32_t* mask);
@@ -169,8 +205,9 @@ private:
         int index;  // into the category titles
     };
     void ReadFabCategories(std::vector<FabCat>& cats, std::vector<std::string>& titles, std::vector<uint32_t>& icons);
+    void GroupFabCategories(std::vector<std::unordered_set<uintptr_t>>& members, std::vector<std::string>& titles,
+                            std::vector<uint32_t>& icons);
     int RecipeCategory(const std::vector<FabCat>& cats, Il2CppObject* def);
-    bool RetryRecipeCategories();
     bool EnsureRecipes();
     bool EnsureMaterials();
     void RefreshRecipeState();
@@ -180,6 +217,7 @@ private:
     void Refresh();
     void TopUpEnergy();
     void Done(bool ok, const std::string& text);
+    void Notify(Il2CppObject* type, int count, const std::string& text);
 
     void DoNewbucks(const Ctx& c, int64_t target, const char* how);
     void DoSlotCount(const Ctx& c, int idx, int64_t value);
@@ -209,10 +247,24 @@ private:
     std::unordered_map<uintptr_t, bridge::Kind> kindCache_; // identity -> kind
     std::unordered_map<Il2CppClass*, const MethodInfo*> iconGetter_;  // class -> its (overriding) get_Icon, or nullptr
     std::vector<CatalogEntry> iconGroups_;  // IdentifiableTypeGroup assets with an icon (fallback icons), leaf groups first
-    bool iconGroupsBuilt_ = false;
+    std::unordered_map<std::string, CatalogEntry> groupsByName_;  // every IdentifiableTypeGroup asset, by asset name
+    std::unordered_set<uintptr_t> foodTypes_, resourceTypes_, containerTypes_;  // members of FoodGroup, CraftGroup, StandardCrateClass
+    bool typeGroupsBuilt_ = false;
+    std::unordered_map<std::string, uint32_t> namedSprites_;  // the few game sprites looked up by name (tab icons)
+    bool spritesScanned_ = false;
     uint32_t groupIcons_[bridge::kGroupCount] = {};  // icons of the group tabs
     bool groupIconsBuilt_ = false;
     std::shared_ptr<const bridge::Relations> relations_;  // slime diets, built once after the spawn list
+    // Icons rendered from prefabs for list items without any (prefab_icons.h), one per refresh.
+    sandbox::PrefabIcons prefabIcons_;
+    std::vector<uintptr_t> renderQueue_;            // type identities still to render
+    std::unordered_set<uintptr_t> renderQueued_;    // ever queued (each type is tried once)
+    std::unordered_map<uintptr_t, CatalogEntry> renderTypes_;  // queued types, kept alive
+    int rendered_ = 0, renderFailed_ = 0;
+    unsigned long long renderMs_ = 0;
+    // The game's HUD notices for spawns, crafts and refinery adds (custom_upgrades/sale_notify.h).
+    sr2::modules::custom_upgrades::ui::SaleNotices notices_;
+    bool spawnGroupsLogged_ = false;
 
     // spawner and crafter lists (main thread), built once per enable; entries kept alive by GC handles
     std::shared_ptr<const std::vector<bridge::Item>> spawnables_;
@@ -229,7 +281,6 @@ private:
     bool materialsTried_ = false;
     std::string craftWhy_;  // "" = crafter available
     unsigned long long lastRecipeState_ = 0;
-    unsigned long long lastCatTry_ = 0;  // last look for the fabricator categories (RetryRecipeCategories)
 
     // ---- resolved in Setup ----
     Il2CppClass* playerStateClass_ = nullptr;
@@ -344,6 +395,9 @@ private:
     size_t offGroupIcon_ = 0;       // IdentifiableTypeGroup._icon
     size_t offGroupSubGroups_ = 0;  // IdentifiableTypeGroup._memberGroups
     size_t offGroupIsFood_ = 0;     // IdentifiableTypeGroup._isFood
+    size_t offGroupMembers_ = 0;    // IdentifiableTypeGroup._memberTypes (List<IdentifiableType>)
+    size_t offGroupLocName_ = 0;    // IdentifiableTypeGroup._localizedName (optional, crafter category titles)
+    Il2CppClass* spriteClass_ = nullptr;  // UnityEngine.Sprite (tab icons by name)
     const MethodInfo* groupContains_ = nullptr;  // IdentifiableTypeGroup.IsMember (for the icon fallback)
     size_t offModTarget_ = 0;       // FloatModifier.TargetProperty (from the live object's class)
     Il2CppClass* modClass_ = nullptr;
@@ -456,7 +510,7 @@ bool Sandbox::Setup(sr2::core::ModuleContext& ctx) {
     sandbox::SetupPlayerExtras(ctx);  // optional tools on the Extras card (player_extras.cpp)
 
     g_self = this;
-    if (!frameCb_) frameCb_ = main_thread::AddFrameCallback(kModule, [this](float) { Tick(); });
+    if (!frameCb_) frameCb_ = main_thread::AddFrameCallback(kModule, [this](float dt) { Tick(dt); });
     if (!frameCb_) return ctx.Fail("could not add the main-thread frame callback");
     SR2_INFO("[{}] setup ok: PlayerState currency/health/energy methods, AmmoSlotManager.MaybeAddResource / "
              "Decrement, AmmoSlotDefinition.IsAllowed resolved; offsets PlayerState._model 0x{:X}, "
@@ -513,12 +567,24 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
         off(groupClass_, "_icon", offGroupIcon_, iw);
         off(groupClass_, "_memberGroups", offGroupSubGroups_, iw);
         off(groupClass_, "_isFood", offGroupIsFood_, iw);
+        off(groupClass_, "_memberTypes", offGroupMembers_, iw);
         off(identClass_, "groupType", offIdentGroupType_, iw);
         groupContains_ = method(groupClass_, "IsMember", 1, iw);
         if (!iw.empty()) {
-            offGroupIcon_ = 0;
-            SR2_WARN("[{}] no group icons ({})", kModule, iw);
+            offGroupIcon_ = offGroupMembers_ = 0;
+            SR2_WARN("[{}] no group icons and no group-based item kinds ({})", kModule, iw);
         }
+        std::string lw;
+        off(groupClass_, "_localizedName", offGroupLocName_, lw);
+        std::string sw2;
+        spriteClass_ = cls("UnityEngine.CoreModule", "UnityEngine", "Sprite", sw2);
+        if (!sw2.empty()) SR2_WARN("[{}] group tabs: no game sprites by name ({})", kModule, sw2);
+        std::string pw;
+        if (!prefabIcons_.Setup(R, kModule, pw)) SR2_WARN("[{}] no icons rendered from prefabs ({})", kModule, pw);
+        std::string nw;
+        if (!notices_.Setup(R, kModule, nw, "sandbox") || !notices_.CanCollect())
+            SR2_WARN("[{}] no HUD notices for spawns / crafts ({}): the tab's status line instead", kModule,
+                     nw.empty() ? "DroneActivitySceneNotifications.AddResourceCollected not found" : nw);
         std::string bw;
         off(slimeDefClass_, "BaseSlimes", offSlimeBases_, bw);
         if (!bw.empty()) SR2_WARN("[{}] no composed largo icons ({})", kModule, bw);
@@ -705,6 +771,7 @@ void Sandbox::OnDisable() {
     enabled_.store(false);
     sandbox::SetAchievementsPaused(false);
     if (infinite_.exchange(false)) SR2_INFO("[{}] infinite energy off (module disabled)", kModule);
+    notices_.Clear();
     bridge::SetHandler(nullptr);
     sandbox::PlayerExtrasEnabled(false);
     bridge::Snapshot s;
@@ -789,7 +856,8 @@ std::string Sandbox::ItemName(Il2CppObject* ident) {
     if (auto it = nameCache_.find(key); it != nameCache_.end()) return it->second;
     if (!IsA(ident, identClass_) || !unity::IsAlive(ident)) return "unknown item";
     std::string n = Localized(unity::Field<Il2CppObject*>(ident, offIdentLocName_));
-    if (n.empty()) n = unity::GetName(ident);
+    if (n.rfind("!!", 0) == 0) n.clear();  // missing localization entry ("!! Actor.l.crate_reef_01 !!")
+    if (n.empty()) n = PrettyAssetName(unity::GetName(ident));
     if (n.empty()) n = "unknown item";
     nameCache_[key] = n;
     return n;
@@ -850,25 +918,100 @@ uint32_t Sandbox::ItemIcon(Il2CppObject* ident, uint32_t* second) {
     return icon;
 }
 
-// Every IdentifiableTypeGroup asset with an icon, read once (leaf groups first, so the
-// most specific group wins in GroupIconFor). The group assets stay loaded; handles keep them.
-void Sandbox::EnsureIconGroups() {
-    if (iconGroupsBuilt_ || !offGroupIcon_ || !groupContains_) return;
-    iconGroupsBuilt_ = true;
+// Every IdentifiableTypeGroup asset, read once (one FindObjectsOfTypeAll): the ones with an icon
+// for GroupIconFor (leaf groups first, so the most specific group wins), all of them by asset name,
+// and the members of the game's own FoodGroup, CraftGroup and StandardCrateClass (crates) for the
+// item kinds (field reads only). The group assets stay loaded; handles keep them. True if it ran.
+bool Sandbox::EnsureTypeGroups() {
+    if (typeGroupsBuilt_) return false;
+    typeGroupsBuilt_ = true;
+    if (!groupClass_ || !offGroupIcon_) return false;
+    const unsigned long long t0 = GetTickCount64();
     std::vector<CatalogEntry> leaf, parent;
     std::string names;
     for (Il2CppObject* g : unity::FindObjectsOfTypeAll(groupClass_)) {
         if (!IsA(g, groupClass_) || !unity::IsAlive(g)) continue;
+        const std::string name = unity::GetName(g);
         Il2CppObject* spr = unity::Field<Il2CppObject*>(g, offGroupIcon_);
-        if (!spr || !unity::IsAlive(spr)) continue;
+        const bool icon = spr && unity::IsAlive(spr);
+        if (!icon && (name.empty() || groupsByName_.count(name))) continue;
         Il2CppGCHandle h = unity::NewGCHandle(g);
         if (!h) continue;
+        if (!name.empty() && !groupsByName_.count(name)) groupsByName_[name] = CatalogEntry{h, g};
+        if (!icon) continue;
         (unity::ListCount(unity::Field<void*>(g, offGroupSubGroups_)) ? parent : leaf).push_back(CatalogEntry{h, g});
-        names += (names.empty() ? "" : ", ") + unity::GetName(g);
+        names += (names.empty() ? "" : ", ") + name;
     }
     iconGroups_ = std::move(leaf);
     iconGroups_.insert(iconGroups_.end(), parent.begin(), parent.end());
     SR2_INFO("[{}] {} identifiable type group(s) with an icon: {}", kModule, iconGroups_.size(), names);
+    if (offGroupMembers_) {
+        if (Il2CppObject* g = NamedGroup("FoodGroup")) CollectMembers(g, foodTypes_);
+        if (Il2CppObject* g = NamedGroup("CraftGroup")) CollectMembers(g, resourceTypes_);
+        if (Il2CppObject* g = NamedGroup("StandardCrateClass")) CollectMembers(g, containerTypes_);
+    }
+    SR2_INFO("[{}] item kinds from the game's groups: {} food (FoodGroup), {} crafting resources (CraftGroup), {} crates "
+             "(StandardCrateClass); {} groups read ({} ms)",
+             kModule, foodTypes_.size(), resourceTypes_.size(), containerTypes_.size(), groupsByName_.size(),
+             GetTickCount64() - t0);
+    return true;
+}
+
+Il2CppObject* Sandbox::NamedGroup(const char* name) {
+    auto it = groupsByName_.find(name);
+    if (it == groupsByName_.end()) return nullptr;
+    Il2CppObject* g = unity::GCHandleTarget(it->second.handle);
+    return g == it->second.obj && IsA(g, groupClass_) && unity::IsAlive(g) ? g : nullptr;
+}
+
+// Every type in the group and its member groups (IdentifiableTypeGroup._memberTypes / _memberGroups).
+void Sandbox::CollectMembers(Il2CppObject* group, std::unordered_set<uintptr_t>& out, int depth) {
+    if (!group || depth > 8 || !IsA(group, groupClass_)) return;
+    void* types = unity::Field<void*>(group, offGroupMembers_);
+    for (size_t i = 0, n = unity::ListCount(types); i < n; ++i)
+        if (auto* t = static_cast<Il2CppObject*>(unity::ListAt(types, i)); t && IsA(t, identClass_))
+            out.insert(reinterpret_cast<uintptr_t>(t));
+    void* subs = unity::Field<void*>(group, offGroupSubGroups_);
+    for (size_t i = 0, n = unity::ListCount(subs); i < n; ++i)
+        CollectMembers(static_cast<Il2CppObject*>(unity::ListAt(subs, i)), out, depth + 1);
+}
+
+// The few game sprites the tabs use that no loaded data points to directly (the Slimepedia's
+// slime and largo icons, the fabricator's category icons): one FindObjectsOfTypeAll(Sprite),
+// names compared once. Only sprites that are loaded at that moment are found. True if it ran.
+bool Sandbox::EnsureNamedSprites() {
+    if (spritesScanned_) return false;
+    spritesScanned_ = true;
+    if (!spriteClass_) return false;
+    static const char* const kWanted[] = {"iconCategorySlimes", "pediaHomeSlimes", "iconLargoPedia_small", "iconLargoPedia",
+                                          "iconCategoryUtilities", "iconCategoryWarptech", "iconCategoryDecorations",
+                                          "iconCategoryCurios"};
+    const unsigned long long t0 = GetTickCount64();
+    size_t seen = 0;
+    std::string found;
+    for (Il2CppObject* s : unity::FindObjectsOfTypeAll(spriteClass_)) {
+        if (sr2::core::ModuleFaulted(kModule)) break;
+        if (!s || !unity::IsAlive(s)) continue;
+        ++seen;
+        const std::string n = unity::GetName(s);
+        for (const char* w : kWanted) {
+            if (n != w || namedSprites_.count(n)) continue;
+            if (const uint32_t id = SpriteIcon(s)) {
+                namedSprites_[n] = id;
+                found += (found.empty() ? "" : ", ") + n;
+            }
+        }
+    }
+    SR2_INFO("[{}] game sprites by name: {} of {} wanted found among {} loaded sprites ({} ms): {}", kModule,
+             namedSprites_.size(), std::size(kWanted), seen, GetTickCount64() - t0, found.empty() ? "none" : found);
+    return true;
+}
+
+// The first of `names` that was found (EnsureNamedSprites), 0 if none.
+uint32_t Sandbox::NamedSprite(std::initializer_list<const char*> names) {
+    for (const char* n : names)
+        if (auto it = namedSprites_.find(n); it != namedSprites_.end() && it->second) return it->second;
+    return 0;
 }
 
 // Icon of the type's own group (IdentifiableType.groupType), else of the first group with an icon
@@ -878,7 +1021,7 @@ uint32_t Sandbox::GroupIconFor(Il2CppObject* ident) {
     Il2CppObject* own = offIdentGroupType_ ? unity::Field<Il2CppObject*>(ident, offIdentGroupType_) : nullptr;
     if (IsA(own, groupClass_) && unity::IsAlive(own))
         if (const uint32_t i = SpriteIcon(unity::Field<Il2CppObject*>(own, offGroupIcon_))) return i;
-    EnsureIconGroups();
+    EnsureTypeGroups();
     for (const CatalogEntry& e : iconGroups_) {
         Il2CppObject* g = unity::GCHandleTarget(e.handle);
         if (g != e.obj || !unity::IsAlive(g)) continue;
@@ -917,11 +1060,19 @@ void Sandbox::EnsureGroupIcons() {
             break;
         }
     }
-    EnsureIconGroups();
-    auto lower = [](std::string s) {
-        for (char& ch : s) ch = static_cast<char>((ch >= 'A' && ch <= 'Z') ? ch - 'A' + 'a' : ch);
-        return s;
-    };
+    EnsureTypeGroups();
+    // Slimes and largos: the Slimepedia's own icons, if loaded (the slime one only while the Slimepedia
+    // or a shop has been opened), else the Pink Slime's icon. The tab falls back to the first item's icon.
+    groupIcons_[bridge::kGroupSlimes] = NamedSprite({"iconCategorySlimes", "pediaHomeSlimes"});
+    groupIcons_[bridge::kGroupLargos] = NamedSprite({"iconLargoPedia_small", "iconLargoPedia"});
+    if (!groupIcons_[bridge::kGroupSlimes] && spawnables_)
+        for (const bridge::Item& it : *spawnables_)
+            if (it.kind == bridge::Kind::Slime && it.icon)
+                if (Il2CppObject* o = Lookup(spawnById_, it.id, identClass_); o && unity::GetName(o) == "Pink") {
+                    groupIcons_[bridge::kGroupSlimes] = it.icon;
+                    break;
+                }
+    auto lower = [](std::string s) { return Lower(std::move(s)); };
     struct Want {
         int group;
         const char* need;
@@ -946,9 +1097,9 @@ void Sandbox::EnsureGroupIcons() {
             if ((groupIcons_[w.group] = SpriteIcon(unity::Field<Il2CppObject*>(g, offGroupIcon_)))) break;
         }
     }
-    SR2_INFO("[{}] group tab icons: plorts {}, slimes {}, food {}, resources {} (0 = drawn fallback)", kModule,
-             groupIcons_[bridge::kGroupPlorts], groupIcons_[bridge::kGroupSlimes], groupIcons_[bridge::kGroupFood],
-             groupIcons_[bridge::kGroupResources]);
+    SR2_INFO("[{}] group tab icons: plorts {}, slimes {}, largos {}, food {}, resources {} (0 = the first item's icon)",
+             kModule, groupIcons_[bridge::kGroupPlorts], groupIcons_[bridge::kGroupSlimes], groupIcons_[bridge::kGroupLargos],
+             groupIcons_[bridge::kGroupFood], groupIcons_[bridge::kGroupResources]);
 }
 
 // Favourite foods and plorts of every slime in the spawn list (SlimeDefinition.Diet, read once
@@ -999,8 +1150,18 @@ bridge::Kind Sandbox::ItemKind(Il2CppObject* ident) {
     else if (toyDefClass_ && IsA(ident, toyDefClass_)) k = bridge::Kind::Toy;
     else if (liquidDefClass_ && IsA(ident, liquidDefClass_)) k = bridge::Kind::Liquid;
     else if (offIdentIsPlort_ && unity::Field<bool>(ident, offIdentIsPlort_)) k = bridge::Kind::Plort;
+    else if (containerTypes_.count(key)) k = bridge::Kind::Container;
     else if (offIdentIsAnimal_ && unity::Field<bool>(ident, offIdentIsAnimal_)) k = bridge::Kind::Animal;
-    else if (offIdentCategories_) {
+    else if (foodTypes_.count(key)) k = bridge::Kind::Food;
+    else if (resourceTypes_.count(key)) k = bridge::Kind::Resource;
+    if (k == bridge::Kind::Other && isStorable_) {
+        // What the refinery stores (plorts were matched above) is a crafting resource too.
+        bool storable = false;
+        if (Il2CppObject* dir = GadgetDirector();
+            dir && CallValue(isStorable_, dir, {ident}, "GadgetDirector.IsStorable", storable) && storable)
+            k = bridge::Kind::Resource;
+    }
+    if (k == bridge::Kind::Other && offIdentCategories_) {
         void* cats = unity::Field<void*>(ident, offIdentCategories_);
         for (size_t i = 0, n = unity::ListCount(cats); i < n && k == bridge::Kind::Other; ++i) {
             auto* cat = static_cast<Il2CppObject*>(unity::ListAt(cats, i));
@@ -1086,6 +1247,7 @@ bool Sandbox::EnsureCatalog(const Ctx& c) {
     std::sort(items->begin(), items->end(), [](const bridge::Item& a, const bridge::Item& b) { return a.name < b.name; });
     catalog_ = std::move(items);
     catalogDefs_ = std::move(defs);
+    QueueIconRenders(*catalog_);
     SR2_INFO("[{}] vacpack item list: {} of {} identifiable types fit {} slot(s) ({} ms)", kModule, catalog_->size(),
              scanned, catalogDefs_.size(), GetTickCount64() - t0);
     LogLeftOut("vacpack item list", leftOut);
@@ -1214,7 +1376,7 @@ bool Sandbox::EnsureSpawnables() {
     spawnTried_ = true;
     const unsigned long long t0 = GetTickCount64();
     auto items = std::make_shared<std::vector<bridge::Item>>();
-    std::vector<std::string> leftOut;
+    std::vector<std::string> leftOut, notActor;
     Il2CppObject* tarrs = TarrGroup();
     size_t scanned = 0;
     for (Il2CppObject* o : unity::FindObjectsOfTypeAll(identClass_)) {
@@ -1226,7 +1388,10 @@ bool Sandbox::EnsureSpawnables() {
         Il2CppObject* prefab = unity::Field<Il2CppObject*>(o, offIdentPrefab_);
         if (!prefab || !unity::IsAlive(prefab)) continue;
         Il2CppObject* actor = unity::GetComponent(prefab, actorClass_);
-        if (!actor || !IsA(actor, actorClass_)) continue;
+        if (!actor || !IsA(actor, actorClass_)) {
+            notActor.push_back(unity::GetName(o));
+            continue;
+        }
         if (!Saveable(index, o)) {
             leftOut.push_back(unity::GetName(o));
             continue;
@@ -1241,6 +1406,18 @@ bool Sandbox::EnsureSpawnables() {
         item.icon = ItemIcon(o, &item.icon2);
         item.kind = ItemKind(o);
         item.tarr = tarr;
+        if (item.kind == bridge::Kind::Largo && offSlimeBases_) {
+            // Listed under the alphabetically first of its two base slimes (the Largos tab groups by it).
+            void* bases = unity::Field<void*>(o, offSlimeBases_);
+            std::vector<std::string> names;
+            for (size_t i = 0, n = unity::ArrayLength(bases); i < n && names.size() < 2; ++i) {
+                auto* b = static_cast<Il2CppObject*>(unity::ArrayAt(bases, i));
+                if (b && b != o && IsA(b, slimeDefClass_) && unity::IsAlive(b)) names.push_back(ItemName(b));
+            }
+            std::sort(names.begin(), names.end());
+            if (!names.empty()) item.family = names[0];
+            if (names.size() > 1) item.family2 = names[1];
+        }
         items->push_back(std::move(item));
     }
     std::map<std::string, int> seen;
@@ -1253,6 +1430,98 @@ bool Sandbox::EnsureSpawnables() {
     SR2_INFO("[{}] spawn list: {} of {} identifiable types are actors ({} ms)", kModule, spawnables_->size(), scanned,
              GetTickCount64() - t0);
     LogLeftOut("spawn list", leftOut);
+    if (!notActor.empty()) {
+        std::string names;
+        for (const std::string& n : notActor) names += (names.empty() ? "" : ", ") + n;
+        SR2_INFO("[{}] spawn list: {} type(s) with a prefab but no IdentifiableActor left out: {}", kModule, notActor.size(),
+                 names);
+    }
+    LogSpawnGroups();
+    QueueIconRenders(*spawnables_);
+    return true;
+}
+
+// How many spawn-list items each tab shows, logged once (the kinds come from the game's groups).
+void Sandbox::LogSpawnGroups() {
+    if (spawnGroupsLogged_ || !spawnables_) return;
+    spawnGroupsLogged_ = true;
+    int n[11] = {};
+    std::string noIcon;
+    int noIconCount = 0;
+    for (const bridge::Item& it : *spawnables_) {
+        ++n[static_cast<int>(it.kind) % 11];
+        if (!it.icon && !it.icon2) {
+            ++noIconCount;
+            if (noIconCount <= 40) noIcon += (noIcon.empty() ? "" : ", ") + it.name;
+        }
+    }
+    using K = bridge::Kind;
+    auto c = [&](K k) { return n[static_cast<int>(k)]; };
+    SR2_INFO("[{}] spawn list by tab: slimes {}, largos {}, plorts {}, food {} (meat {}), resources {}, crates {}; only under "
+             "All: toys {}, other {}",
+             kModule, c(K::Slime), c(K::Largo), c(K::Plort), c(K::Food) + c(K::Animal), c(K::Animal), c(K::Resource),
+             c(K::Container), c(K::Toy), c(K::Other) + c(K::Liquid) + c(K::Gadget));
+    if (noIconCount)
+        SR2_INFO("[{}] spawn list: {} item(s) without a game icon (rendered from their prefabs next): {}{}", kModule,
+                 noIconCount, noIcon, noIconCount > 40 ? ", ..." : "");
+}
+
+// Items without any icon get one rendered from their prefab later, one per refresh (RenderNextIcon).
+void Sandbox::QueueIconRenders(const std::vector<bridge::Item>& items) {
+    if (!prefabIcons_.Ready()) return;
+    for (const bridge::Item& it : items) {
+        if (it.icon || it.icon2 || renderQueued_.count(it.id)) continue;
+        Il2CppObject* o = Lookup(spawnById_, it.id, identClass_);
+        if (!o) o = CatalogItem(it.id, nullptr);
+        if (!o) continue;
+        Il2CppGCHandle h = unity::NewGCHandle(o);
+        if (!h) continue;
+        renderQueued_.insert(it.id);
+        renderTypes_[it.id] = CatalogEntry{h, o};
+        renderQueue_.push_back(it.id);
+    }
+}
+
+// A copy of `list` with `icon` set on item `id` (published lists are never changed in place).
+void Sandbox::PatchIcon(std::shared_ptr<const std::vector<bridge::Item>>& list, uintptr_t id, uint32_t icon) {
+    if (!list) return;
+    bool any = false;
+    for (const bridge::Item& it : *list) any = any || it.id == id;
+    if (!any) return;
+    auto next = std::make_shared<std::vector<bridge::Item>>(*list);
+    for (bridge::Item& it : *next)
+        if (it.id == id) it.icon = icon;
+    list = std::move(next);
+}
+
+// Renders the next queued item's prefab into an icon (prefab_icons.h) and puts it into the lists.
+// True if it did the work this refresh.
+bool Sandbox::RenderNextIcon() {
+    if (renderQueue_.empty()) return false;
+    const uintptr_t id = renderQueue_.front();
+    renderQueue_.erase(renderQueue_.begin());
+    const unsigned long long t0 = GetTickCount64();
+    auto it = renderTypes_.find(id);
+    Il2CppObject* o = it != renderTypes_.end() ? unity::GCHandleTarget(it->second.handle) : nullptr;
+    if (!o || o != it->second.obj || !IsA(o, identClass_) || !unity::IsAlive(o)) return true;
+    Il2CppObject* prefab = unity::Field<Il2CppObject*>(o, offIdentPrefab_);
+    std::string why;
+    Il2CppObject* spr = prefab ? prefabIcons_.Render(prefab, why) : nullptr;
+    const uint32_t icon = spr ? SpriteIcon(spr) : 0;
+    renderMs_ += GetTickCount64() - t0;
+    if (icon) {
+        ++rendered_;
+        iconCache_[id] = icon;
+        PatchIcon(spawnables_, id, icon);
+        PatchIcon(catalog_, id, icon);
+    } else {
+        ++renderFailed_;
+        if (renderFailed_ <= 5)
+            SR2_INFO("[{}] no icon rendered for {}: {}", kModule, unity::GetName(o), why.empty() ? "no prefab" : why);
+    }
+    if (renderQueue_.empty())
+        SR2_INFO("[{}] rendered {} icon(s) from prefabs, {} failed ({} ms in all)", kModule, rendered_, renderFailed_,
+                 renderMs_);
     return true;
 }
 
@@ -1343,28 +1612,40 @@ int Sandbox::RecipeCategory(const std::vector<FabCat>& cats, Il2CppObject* def) 
     return -1;
 }
 
-// The recipe list was built before the fabricator's categories were loaded: look for them
-// again every few seconds (only while the tab is open, like every refresh) and, once they
-// are there, group the existing list by them. True if it did the work this refresh.
-bool Sandbox::RetryRecipeCategories() {
-    if (!fabMenuClass_ || !recipes_ || recipes_->empty() || (recipeCats_ && !recipeCats_->empty())) return false;
-    const unsigned long long t0 = GetTickCount64();
-    if (t0 - lastCatTry_ < kCatRetryMs) return false;
-    lastCatTry_ = t0;
-    std::vector<FabCat> cats;
-    auto titles = std::make_shared<std::vector<std::string>>();
-    auto icons = std::make_shared<std::vector<uint32_t>>();
-    ReadFabCategories(cats, *titles, *icons);
-    if (cats.empty()) return false;
-    auto next = std::make_shared<std::vector<bridge::Recipe>>(*recipes_);
-    for (bridge::Recipe& r : *next)
-        if (Il2CppObject* d = Lookup(recipeById_, r.id, gadgetDefClass_)) r.category = RecipeCategory(cats, d);
-    recipes_ = std::move(next);
-    recipeCats_ = std::move(titles);
-    recipeCatIcons_ = std::move(icons);
-    SR2_INFO("[{}] crafter: {} fabricator categories loaded now; recipes grouped ({} ms)", kModule, recipeCats_->size(),
-             GetTickCount64() - t0);
-    return true;
+// The fabricator's categories without its menu asset (only loaded once the fabricator UI has been
+// opened): each GadgetFabricateCategory is one of the GadgetGroup's member groups (_gadgetSubGroup:
+// GadgetUtilitiesGroup, GadgetWarpGroup, GadgetDecorGroup; GadgetHiddenGroup holds the variants),
+// which are loaded from the start. Title from the group's localized name, icon from the
+// fabricator's own category sprites by name when loaded (EnsureNamedSprites).
+void Sandbox::GroupFabCategories(std::vector<std::unordered_set<uintptr_t>>& members, std::vector<std::string>& titles,
+                                 std::vector<uint32_t>& icons) {
+    Il2CppObject* root = offGroupMembers_ ? NamedGroup("GadgetGroup") : nullptr;
+    if (!root) return;
+    void* subs = unity::Field<void*>(root, offGroupSubGroups_);
+    for (size_t i = 0, n = unity::ListCount(subs); i < n; ++i) {
+        auto* g = static_cast<Il2CppObject*>(unity::ListAt(subs, i));
+        if (!g || !IsA(g, groupClass_) || !unity::IsAlive(g)) continue;
+        const std::string asset = unity::GetName(g);
+        const std::string low = Lower(asset);
+        if (low.find("hidden") != std::string::npos || low.find("variant") != std::string::npos) continue;
+        std::unordered_set<uintptr_t> set;
+        CollectMembers(g, set);
+        if (set.empty()) continue;
+        std::string title = offGroupLocName_ ? Localized(unity::Field<Il2CppObject*>(g, offGroupLocName_)) : std::string();
+        if (title.empty() || title.rfind("!!", 0) == 0) {
+            title = PrettyAssetName(asset);
+            for (const char* cut : {"Gadget ", " Group"})
+                if (const size_t p = title.find(cut); p != std::string::npos) title.erase(p, std::strlen(cut));
+        }
+        uint32_t icon = 0;
+        if (low.find("util") != std::string::npos) icon = NamedSprite({"iconCategoryUtilities"});
+        else if (low.find("warp") != std::string::npos) icon = NamedSprite({"iconCategoryWarptech"});
+        else if (low.find("decor") != std::string::npos) icon = NamedSprite({"iconCategoryDecorations"});
+        else if (low.find("curio") != std::string::npos) icon = NamedSprite({"iconCategoryCurios"});
+        members.push_back(std::move(set));
+        titles.push_back(title);
+        icons.push_back(icon);
+    }
 }
 
 // The fabricator's gadget recipes: every GadgetDefinition asset with a crafting
@@ -1381,7 +1662,12 @@ bool Sandbox::EnsureRecipes() {
     auto titles = std::make_shared<std::vector<std::string>>();
     auto catIcons = std::make_shared<std::vector<uint32_t>>();
     ReadFabCategories(cats, *titles, *catIcons);
-    lastCatTry_ = t0;
+    std::vector<std::unordered_set<uintptr_t>> groupCats;  // without the fabricator's menu asset: its groups
+    const char* catSource = "the fabricator's menu";
+    if (cats.empty()) {
+        GroupFabCategories(groupCats, *titles, *catIcons);
+        catSource = "the gadget groups";
+    }
     auto list = std::make_shared<std::vector<bridge::Recipe>>();
     for (Il2CppObject* d : unity::FindObjectsOfTypeAll(gadgetDefClass_)) {
         if (sr2::core::ModuleFaulted(kModule)) break;
@@ -1401,6 +1687,8 @@ bool Sandbox::EnsureRecipes() {
         r.cost = RecipeCost(d, &r.costs);
         r.perCraft = unity::Field<bool>(d, offBuyInPairs_) ? 2 : 1;
         r.category = RecipeCategory(cats, d);
+        for (size_t i = 0; i < groupCats.size() && r.category < 0; ++i)
+            if (groupCats[i].count(r.id)) r.category = static_cast<int>(i);
         Il2CppGCHandle h = unity::NewGCHandle(d);
         if (!h) continue;
         recipeById_[r.id] = CatalogEntry{h, d};
@@ -1411,8 +1699,15 @@ bool Sandbox::EnsureRecipes() {
     recipeCats_ = std::move(titles);
     recipeCatIcons_ = std::move(catIcons);
     lastRecipeState_ = 0;
-    SR2_INFO("[{}] crafter: {} gadget recipes in {} fabricator categories ({} ms)", kModule, recipes_->size(),
-             recipeCats_->size(), GetTickCount64() - t0);
+    std::string catNames;
+    for (size_t i = 0; i < recipeCats_->size(); ++i) {
+        int count = 0;
+        for (const bridge::Recipe& r : *recipes_) count += r.category == static_cast<int>(i) ? 1 : 0;
+        catNames += std::format("{}{} {}{}", catNames.empty() ? "" : ", ", (*recipeCats_)[i], count,
+                                (*recipeCatIcons_)[i] ? "" : " (no icon)");
+    }
+    SR2_INFO("[{}] crafter: {} gadget recipes, {} categories from {}: {} ({} ms)", kModule, recipes_->size(),
+             recipeCats_->size(), catSource, catNames.empty() ? "none" : catNames, GetTickCount64() - t0);
     LogLeftOut("crafter", leftOut);
     return true;
 }
@@ -1506,6 +1801,9 @@ void Sandbox::Refresh() {
         // s.why set
     } else {
         s.inGame = true;
+        // One-time scans, at most one per refresh so they don't stack into one long frame. The type
+        // groups come first: the item kinds (also the slots' below) are read from them and cached.
+        bool built = EnsureTypeGroups();
         if (c.currency) {
             s.haveNewbucks = CallValue(getCurrency_, c.player, {c.currency}, "PlayerState.GetCurrency", s.newbucks);
             s.maxNewbucks = unity::Field<int32_t>(c.model, offMaxCurrency_);
@@ -1536,8 +1834,8 @@ void Sandbox::Refresh() {
             }
             s.slots.push_back(std::move(slot));
         }
-        // At most one list is built per refresh, so the one-time scans don't stack into one long frame.
-        bool built = c.slots && EnsureCatalog(c);
+        if (!built) built = EnsureNamedSprites();
+        if (!built) built = c.slots && EnsureCatalog(c);
         s.catalog = catalog_;
         if (!built) built = EnsureSpawnables();
         s.spawnables = spawnables_;
@@ -1548,7 +1846,9 @@ void Sandbox::Refresh() {
         // Cheap one-time extras, each in its own refresh after the lists.
         if (!built && spawnables_ && !relations_) EnsureRelations(), built = true;
         if (!built && spawnables_ && !groupIconsBuilt_) EnsureGroupIcons(), built = true;
-        if (!built) built = RetryRecipeCategories();
+        if (!built) built = RenderNextIcon();
+        s.catalog = catalog_;  // icons rendered into the lists
+        s.spawnables = spawnables_;
         if ((recipes_ || materials_) && s.tick - lastRecipeState_ >= kRecipeStateMs) {
             lastRecipeState_ = s.tick;
             RefreshRecipeState();
@@ -1575,8 +1875,9 @@ void Sandbox::TopUpEnergy() {
     if (max > 0 && cur < max) Call(setEnergy_, c.player, {&max}, "PlayerState.SetEnergy");
 }
 
-void Sandbox::Tick() {
+void Sandbox::Tick(float dt) {
     if (!Live()) return;
+    if (notices_.Ready()) notices_.Frame(dt);  // queued HUD notices wait for the HUD (menus closed)
     const unsigned long long now = GetTickCount64();
     if (infinite_.load() && now - lastEnergy_ >= kEnergyMs) {
         lastEnergy_ = now;
@@ -1594,6 +1895,19 @@ void Sandbox::Done(bool ok, const std::string& text) {
     if (ok) SR2_INFO("[{}] {}", kModule, text);
     else SR2_WARN("[{}] {}", kModule, text);
     bridge::SetStatus(text, !ok);
+}
+
+// A spawn / craft / refinery add that worked: logged, and shown as the game's own HUD notice (the
+// quantum drones' "collected" popup: the type's icon, name and count) instead of the tab's status
+// line. Without the HUD notices the status line says it as before.
+void Sandbox::Notify(Il2CppObject* type, int count, const std::string& text) {
+    SR2_INFO("[{}] {}", kModule, text);
+    if (type && count > 0 && notices_.CanCollect() && notices_.Available()) {
+        notices_.Queue({{type, count}}, sr2::modules::custom_upgrades::ui::SaleNotices::Notice::kCollected);
+        bridge::SetStatus("", false);  // no stale line from an earlier request
+        return;
+    }
+    bridge::SetStatus(text, false);
 }
 
 // ---------------------------------------------------------------- actions ----
@@ -2022,9 +2336,9 @@ int Sandbox::DoSpawn(const Ctx& c, uintptr_t item, int64_t count, int limit) {
         if (!ok || !go) break;
         ++spawned;
     }
-    Done(spawned > 0, spawned == n   ? std::format("Spawned {} x {}", n, name)
-                      : spawned > 0  ? std::format("Spawned {} of {} x {} (the game refused the rest)", spawned, n, name)
-                                     : std::format("{} not spawned: the game refused it", name));
+    if (spawned == n) Notify(ident, n, std::format("Spawned {} x {}", n, name));
+    else Done(spawned > 0, spawned > 0 ? std::format("Spawned {} of {} x {} (the game refused the rest)", spawned, n, name)
+                                       : std::format("{} not spawned: the game refused it", name));
     return spawned;
 }
 
@@ -2071,10 +2385,12 @@ void Sandbox::DoCraft(uintptr_t item, int64_t count) {
     bool ok = false;
     Call(gadgetAddItem_, dir, {def, &amount}, "GadgetDirector.AddItem", &ok);
     CallValue(gadgetCount_, dir, {def}, "GadgetDirector.GetItemCount", after);
-    Done(ok && after > before, ok && after > before
-                                   ? std::format("Crafted {} x {} for free (inventory {} -> {}){}", after - before, name, before,
-                                                 after, unlocked ? "" : "; its blueprint is still locked")
-                                   : std::format("{} not crafted: the game refused it", name));
+    if (ok && after > before)
+        Notify(def, after - before,
+               std::format("Crafted {} x {} for free (inventory {} -> {}){}", after - before, name, before, after,
+                           unlocked ? "" : "; its blueprint is still locked"));
+    else
+        Done(false, std::format("{} not crafted: the game refused it", name));
 }
 
 // Adds `count` of a crafting material to the refinery: GadgetDirector.AddItem, which
@@ -2106,9 +2422,8 @@ void Sandbox::DoAddMaterial(uintptr_t item, int64_t count) {
     bool ok = false;
     Call(gadgetAddItem_, dir, {t, &amount}, "GadgetDirector.AddItem", &ok);
     CallValue(gadgetCount_, dir, {t}, "GadgetDirector.GetItemCount", after);
-    Done(ok && after > before, ok && after > before
-                                   ? std::format("Refinery: {} {} -> {}", name, before, after)
-                                   : std::format("{} not added: the game refused it", name));
+    if (ok && after > before) Notify(t, after - before, std::format("Refinery: {} {} -> {}", name, before, after));
+    else Done(false, std::format("{} not added: the game refused it", name));
 }
 
 // The upgrade the fabricator sells that unlocks `slot`: an UpgradeDefinition (from the player's

@@ -26,10 +26,20 @@ inline constexpr const char* kModule = "sandbox";
 
 // What kind of thing an item is (from its IdentifiableType class and flags);
 // the tab uses it for the tile accent, the group tabs and the tooltip tag.
-enum class Kind : uint8_t { Other, Slime, Largo, Plort, Food, Animal, Toy, Resource, Liquid, Gadget };
+enum class Kind : uint8_t { Other, Slime, Largo, Plort, Food, Animal, Toy, Resource, Liquid, Gadget, Container };
 
 // The icon-only group tabs of the vacpack and spawner grids (index into Snapshot::groupIcons).
-enum Group : int { kGroupAll = 0, kGroupPlorts, kGroupSlimes, kGroupFood, kGroupResources, kGroupCount };
+// Largos and containers only appear in the spawner (the vacpack can't hold them).
+enum Group : int {
+    kGroupAll = 0,
+    kGroupPlorts,
+    kGroupSlimes,
+    kGroupFood,
+    kGroupResources,
+    kGroupLargos,
+    kGroupContainers,
+    kGroupCount
+};
 
 struct Item {
     uintptr_t id = 0;       // opaque (see above)
@@ -39,6 +49,8 @@ struct Item {
     uint32_t icon2 = 0;     // second half of a composed icon (a largo without its own: its two base slimes); 0 = none
     Kind kind = Kind::Other;
     bool tarr = false;      // spawn list: in GameModel.tarrTypeGroup (grayed out while Tarrs are off)
+    std::string family;     // largo: the base slime it is listed under (the alphabetically first of its two)
+    std::string family2;    // largo: its other base slime (sort key within the family)
 };
 
 // How items relate through slime diets (SlimeDefinition.Diet), by item id. Ids

@@ -18,6 +18,10 @@
 // CanQueueAny false, 0x76D2B0) - then it drains and DISCARDS them. So we only hand items over
 // while CanQueueAny is true: a sale from the plot menu waits until the menu is closed.
 //
+// The sandbox module (modules/sandbox) uses the same class for its spawn / craft feedback with
+// Notice::kCollected: DroneActivitySceneNotifications.AddResourceCollected(IdentifiableType, int),
+// the quantum drones' cloud-upload notice (icon, name, count), resolved as optional.
+//
 // Main thread only; every game call through Resolver::Invoke (managed exceptions caught, a native
 // fault marks the module faulted). No GC handles: queued IdentifiableTypes are persistent assets
 // and are class- and IsAlive-checked again before use. While something is queued, one
@@ -40,13 +44,19 @@ namespace sr2::modules::custom_upgrades::ui {
 
 class SaleNotices {
 public:
+    // Which drone notice is raised: "plorts sold" (Sell-All) or "resource collected" (sandbox).
+    enum class Notice { kPlortSold, kCollected };
+
     SaleNotices();
     ~SaleNotices();
     SaleNotices(const SaleNotices&) = delete;
     SaleNotices& operator=(const SaleNotices&) = delete;
 
     // Worker thread: resolve by name. false = unavailable (`why`); callers keep their text feedback.
-    bool Setup(sr2::il2cpp::Resolver& R, const char* module, std::string& why);
+    // `label` starts the log lines ("sell-all notices: ...").
+    bool Setup(sr2::il2cpp::Resolver& R, const char* module, std::string& why, const char* label = "sell-all");
+    // Notice::kCollected can be queued (AddResourceCollected resolved).
+    bool CanCollect() const;
     bool Ready() const { return ready_; }
 
     // Main thread: true if the HUD list with the drone provider exists right now (the notices will
@@ -54,7 +64,7 @@ public:
     bool Available();
     // Main thread: queue one notice per (IdentifiableType, count); shown at once if the HUD
     // allows it, else when it does (dropped after 2 minutes).
-    void Queue(const std::vector<std::pair<Il2CppObject*, int>>& sold);
+    void Queue(const std::vector<std::pair<Il2CppObject*, int>>& sold, Notice kind = Notice::kPlortSold);
     // Main thread, every frame (one branch while nothing is queued).
     void Frame(float dt);
     // Drop anything queued (save loaded / new game / module off).

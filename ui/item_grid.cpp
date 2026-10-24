@@ -65,6 +65,29 @@ void DrawTabFace(ImDrawList* dl, ImVec2 a, ImVec2 b, const Tab& t, bool on, floa
     dl->AddText(f, size, ImVec2((a.x + b.x - ts.x) * 0.5f, (a.y + b.y - ts.y) * 0.5f), col, buf);
 }
 
+// Options::tabsBelow: the tabs on a row of their own under the search box, right-aligned.
+void TabRowBelow(const std::vector<Tab>& tabs, State& st, Result& res, float s) {
+    const theme::Palette& P = theme::Colors();
+    const float fh = ImGui::GetFrameHeight(), sp = 4.0f * s;
+    const int n = static_cast<int>(tabs.size());
+    st.tab = std::clamp(st.tab, 0, n - 1);
+    const float w = static_cast<float>(n) * fh + static_cast<float>(n - 1) * sp;
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, ImGui::GetContentRegionAvail().x - w));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    for (int i = 0; i < n; ++i) {
+        ImGui::PushID(i);
+        if (i > 0) ImGui::SameLine(0, sp);
+        if (ImGui::InvisibleButton("##tab", ImVec2(fh, fh)) && st.tab != i) st.tab = i, res.tabChanged = true;
+        const bool hot = ImGui::IsItemHovered(), on = st.tab == i;
+        const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+        dl->AddRectFilled(a, b, on ? P.sel : hot ? P.frameHover : P.frame, 6.0f * s);
+        if (on) dl->AddRect(a, b, Dark() ? P.grab : P.accent, 6.0f * s, 0, std::max(1.0f, 1.5f * s));
+        DrawTabFace(dl, a, b, tabs[static_cast<size_t>(i)], on || hot, s);
+        if (hot) res.hoveredTab = i;
+        ImGui::PopID();
+    }
+}
+
 }  // namespace
 
 int WheelStep(float wheel) {
@@ -181,7 +204,7 @@ Result Draw(const char* id, const std::vector<Tile>& tiles, State& st, const Opt
     // ---- header row: tabs, search, button ----
     const float fh = ImGui::GetFrameHeight();
     const float sp = 4.0f * s;
-    if (o.tabs && !o.tabs->empty()) {
+    if (o.tabs && !o.tabs->empty() && !o.tabsBelow) {
         st.tab = std::clamp(st.tab, 0, static_cast<int>(o.tabs->size()) - 1);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         for (int i = 0; i < static_cast<int>(o.tabs->size()); ++i) {
@@ -215,6 +238,7 @@ Result Draw(const char* id, const std::vector<Tile>& tiles, State& st, const Opt
         ImGui::EndDisabled();
         res.buttonHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled);
     }
+    if (o.tabs && !o.tabs->empty() && o.tabsBelow) TabRowBelow(*o.tabs, st, res, s);
 
     std::vector<int> shown;
     shown.reserve(tiles.size());
