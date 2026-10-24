@@ -97,7 +97,7 @@ The UI never draws an automatic `ui.enabled` toggle, because turning the UI off 
 |---|---|
 | Movement | Hl2 Movement (without its HUD group) |
 | World | Spawn Scaling, Wall Markers |
-| HUD | Minimap, Collectibles (the tracker is drawn under the minimap, so it needs the Minimap on), Speed Panel |
+| HUD | Minimap, Collectibles (the tracker is drawn under the minimap, so it needs the Minimap on), Full Map (`map_tools`: reveal, extra icons from the minimap scan, right-click teleport), Speed Panel |
 | Ranch | General: Custom Upgrades on the left; Plot Upgrades and Sell Upgrades on the right, one card each like Misc > General. `Tab::cardHelp` gives each card's switch its own tooltip (what the module does). Slime DJ: its own page (see below) |
 | Misc | General: Quick Start on the left; Instant Build and Quick Travel on the right, one card each with the module switch in the card header. Sandbox: its own page (see below) |
 | Profiles, Settings | one tab each |

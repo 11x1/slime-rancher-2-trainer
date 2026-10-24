@@ -65,6 +65,10 @@ std::vector<Category> Spec() {
     Tab collectibles = ModuleTab("collectibles", "Collectibles");
     collectibles.help = "The collectible tracker is drawn under the minimap, so it only shows while the Minimap is on.";
     hud.tabs.push_back(collectibles);
+    Tab mapTools = ModuleTab("map_tools", "Full Map");
+    mapTools.help = "Extensions for the game's full-screen map. The extra icons come from the Minimap's scan, so they "
+                    "only show while the Minimap is on; reveal and right-click teleport work without it.";
+    hud.tabs.push_back(mapTools);
     Tab speed = ModuleTab("hl2_movement", "Speed Panel");
     speed.onlyGroups = {"HUD"};
     speed.masterKey = "momentum_hud";
