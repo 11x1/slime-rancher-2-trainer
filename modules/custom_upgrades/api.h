@@ -36,6 +36,17 @@ bool IsModGadget(Il2CppObject* def);
 // Display name ("Sell-All Button"); "custom upgrade" if unknown.
 std::string Name(int32_t upgrade);
 
+// Corral Radio (corral, needs the Music Box): slime_dj plays that corral's own playlist instead of
+// the global queue. The id is public so slime_dj can ask Owns().
+inline constexpr int32_t kCorralRadio = kIdBase + 0x0014;
+
+// Main thread. The LandPlot owns this custom upgrade (sidecar ownership, the same answer as the
+// LandPlot.HasUpgrade detour). False when the module is off.
+bool Owns(Il2CppObject* landPlot, int32_t upgrade);
+// Main thread. The plot's stable key (its LandPlotLocation id; the key PlotValue uses), "" when
+// unknown or the module is off.
+std::string PlotKey(Il2CppObject* landPlot);
+
 // Main thread. "" = the owned custom upgrade can be sold back; else the reason.
 // `brief` (optional) gets a few-word form of the reason for a button label
 // ("holds chickens", "sell Faster Hens II first"); cleared when sellable.

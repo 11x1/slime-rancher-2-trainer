@@ -33,6 +33,28 @@ struct QueueEntry {
     double seconds = 0;
 };
 
+// Corral Radio (custom_upgrades plot upgrade): a corral with its own playlist.
+struct RadioEntry {
+    std::string file;     // relative to the music folder (what the sidecar keeps)
+    std::string name;     // Song::name, or the file name when it is gone from the folder
+    double seconds = 0;
+    bool missing = false; // not in the music folder (or not playable)
+};
+
+struct Radio {
+    std::string key;      // plot key (Action::radio)
+    std::string name;     // "Corral 2419"
+    float distance = -1;  // m from the camera at the last scan (-1 = unknown)
+    bool on = false;      // the player switched it on
+    bool shuffle = false;
+    bool hasSong = false; // a song is loaded (it holds a decoder slot)
+    int index = -1;       // playlist entry playing / played last
+    std::string now;      // song name
+    double position = 0, duration = 0;
+    std::string waiting;  // on but not audible: why
+    std::vector<RadioEntry> playlist;
+};
+
 struct Snapshot {
     unsigned long long tick = 0;                      // GetTickCount64 when it was taken
     std::shared_ptr<const std::vector<Song>> songs;   // sorted by name; nullptr before the first scan
@@ -51,6 +73,12 @@ struct Snapshot {
     int boxes = -1;                     // owned music boxes found nearby (-1 = not looked yet)
     int emitters = 0;                   // registered emitters alive at the last scan
     bool shuffle = true;                // module setting "shuffle"
+    // Corral radios loaded now (sorted by name), and whether the Corral Radio can be used at all
+    // (custom upgrades on); radioBoxes = music boxes tuned to a radio (not playing the queue).
+    std::vector<Radio> radios;
+    bool radiosAvailable = false;
+    int radioBoxes = 0;
+    int maxRadioStreams = 4;
 };
 
 enum class Op {
@@ -65,6 +93,16 @@ enum class Op {
     Stop,         // unload the current song
     Rescan,       // read the music folder again
     Seek,         // seconds: jump to that point of the current song
+    // Corral radios (Action::radio = Radio::key)
+    RadioToggle,   // switch the radio on / off
+    RadioSkip,     // next playlist entry
+    RadioShuffle,  // toggle its shuffle
+    RadioAdd,      // song: append to its playlist
+    RadioRemove,   // index: remove that entry
+    RadioUp,       // index
+    RadioDown,     // index
+    RadioClear,    // empty the playlist (and switch it off)
+    RadioPlayAt,   // index: play that entry now (switches it on)
 };
 
 struct Action {
@@ -72,6 +110,8 @@ struct Action {
     uint64_t song = 0;
     uint64_t uid = 0;
     double seconds = 0;  // Seek
+    std::string radio;   // Radio* ops: Radio::key
+    int index = -1;      // Radio* ops: playlist entry
 };
 
 struct Status {
