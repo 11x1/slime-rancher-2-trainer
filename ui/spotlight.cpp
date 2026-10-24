@@ -86,11 +86,23 @@ const ModuleView* FindView(const std::vector<ModuleView>& views, std::string_vie
 }
 
 // Extra words for the pages that draw their own content (searched, never shown).
-const char* PageKeywords(TabKind k) {
-    switch (k) {
+const char* PageKeywords(const Tab& t) {
+    switch (t.kind) {
         case TabKind::Sandbox:
-            return "cheats newbucks money health energy radiation vacpack slots spawn spawner items crafter refinery "
-                   "fabricator upgrades blueprints teleport waypoint ranch expansions";
+            switch (t.sandboxPage) {
+                case layout::SandboxPage::General:
+                    return "cheats newbucks money health energy radiation infinite player teleport waypoint marker ranch "
+                           "expansions achievements";
+                case layout::SandboxPage::Vacpack: return "cheats vacpack slots inventory items fill empty give put";
+                case layout::SandboxPage::SpawnCraft:
+                    return "cheats spawn spawner items slimes largos food crates toys crafter refinery fabricator craft "
+                           "gadgets materials";
+                case layout::SandboxPage::Upgrades:
+                    return "cheats upgrades blueprints unlock discover max fabricator extra tank mod buildables";
+                case layout::SandboxPage::Weather:
+                    return "cheats weather rain storm forecast zone lock clear skies natural time day night";
+            }
+            return "";
         case TabKind::SlimeDj: return "music songs queue playlist play pause skip music box";
         case TabKind::Profiles: return "profiles presets save load rename delete folder";
         case TabKind::Settings: return "overlay hotkey hint theme dark light discord rich presence status game build";
@@ -174,7 +186,7 @@ void BuildIndex(const std::vector<Category>& cats, const std::vector<ModuleView>
             p.title = tab.title == "General" ? c.title : tab.title;
             p.crumb = tab.title == "General" ? (oneTab ? std::string() : crumb) : (p.title == c.title ? std::string() : c.title);
             p.crumb = Join("Page", p.crumb);
-            p.help = tab.help + " " + PageKeywords(tab.kind);
+            p.help = tab.help + " " + PageKeywords(tab);
             if (mv && (tab.kind == TabKind::Module || tab.kind == TabKind::Sandbox || tab.kind == TabKind::SlimeDj)) {
                 const settings::Def* sw = !tab.masterKey.empty() ? FindDef(*mv, tab.masterKey) : mv->hasEnabled ? &mv->enabled : nullptr;
                 if (sw) {

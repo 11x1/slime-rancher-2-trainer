@@ -2,8 +2,7 @@
 // The Sandbox page's "Upgrades & Blueprints" card (modules/sandbox/upgrades.cpp, sandbox_upgrades_bridge.h):
 // tabs Upgrades (the Fabricator's vacpack / player upgrades with their game icon and tier) and one per
 // Fabricator gadget category (Utilities, Warp Tech, Decorations: blueprints locked / unlocked) and "Mod
-// buildables" (custom_upgrades' own cards: follow the base blueprint / unlocked / locked per save). Also the
-// tier menu of the vacpack slot row (right-click on an empty or locked slot: the Extra Tank tier).
+// buildables" (custom_upgrades' own cards: follow the base blueprint / unlocked / locked per save).
 // Render thread only; every change is a posted request. Kept out of menu.cpp, which only calls these and
 // hands over its card / tooltip / popup / sub-tab helpers.
 
@@ -58,9 +57,5 @@ bool KeyMenuItem(const char* label, const char* keys, const char* after, bool en
 
 // The card, `w` wide. `s`: the main snapshot (the crafter's recipes and categories for the blueprint tabs).
 void DrawCard(const Helpers& h, const ::sr2::ui::sandbox::Snapshot& s, float w);
-
-// The vacpack slot row's tier menu: call once per frame after the slot row, outside the slots' ID scope;
-// `open` = an empty or locked slot was right-clicked this frame.
-void SlotTierMenu(const Helpers& h, bool open);
 
 }  // namespace sr2::ui::sandbox_upgrades

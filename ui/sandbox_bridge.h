@@ -1,6 +1,6 @@
 #pragma once
 // Data exchange between the sandbox module (modules/sandbox) and its overlay
-// tab (menu.cpp, Misc > Sandbox).
+// tab (menu.cpp, the Sandbox category).
 //
 // Threading:
 //   * The module copies what the tab shows into a Snapshot on the Unity main

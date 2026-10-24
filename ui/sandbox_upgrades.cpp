@@ -30,7 +30,6 @@ using theme::Palette;
 constexpr const char* kUpgradeCtx = "##sbx_upg_ctx";
 constexpr const char* kBlueprintCtx = "##sbx_bp_ctx";
 constexpr const char* kModCtx = "##sbx_mod_ctx";
-constexpr const char* kSlotTierCtx = "##sbx_slot_tier";
 constexpr double kPendingSeconds = 0.8;  // a requested change shown until the state has it
 
 float g_scale = 1.0f;
@@ -173,7 +172,8 @@ void WheelLevels(const ub::Upgrade& u) {
     else RequestLevel(u, cur + (wheel > 0 ? 1 : -1));
 }
 
-// The entries shared by the upgrade's right-click menu and the slot tier menu.
+// The upgrade's right-click menu entries (the vacpack slots' Extra Tank tier menu, which shared them, is gone
+// since round 9).
 void LevelMenuItems(const ub::Upgrade& u, bool discovery) {
     const int cur = Level(u), last = u.levels - 1;
     if (KeyMenuItem("Upgrade", "Shift+Wheel", "up", cur < last, g_scale)) RequestLevel(u, cur + 1);
@@ -546,32 +546,6 @@ bool KeyMenuItem(const char* label, const char* keys, const char* after, bool en
                     (static_cast<ImU32>(static_cast<float>((dim >> IM_COL32_A_SHIFT) & 0xFF) * alpha) << IM_COL32_A_SHIFT), after);
     }
     return r;
-}
-
-void SlotTierMenu(const Helpers& h, bool open) {
-    g_scale = h.scale;
-    if (open) ImGui::OpenPopup(kSlotTierCtx);
-    Popup(h, kSlotTierCtx, [&] {
-        const auto st = ub::Get();
-        const ub::Upgrade* u = nullptr;
-        if (st)
-            for (const ub::Upgrade& x : st->upgrades)
-                if (x.slotTier) u = &x;
-        const ImVec4 dim = ImGui::ColorConvertU32ToFloat4(theme::Colors().dim);
-        if (!u) {
-            ImGui::TextColored(dim, "%s", "The vacpack slot upgrade (Extra Tank) was not found.");
-            return;
-        }
-        MenuTitle(u->name, TierText(*u, Level(*u)));
-        LevelMenuItems(*u, false);
-        ImGui::PushFont(theme::Body(), theme::kSmallSize);
-        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + U(280));
-        ImGui::TextColored(dim, "%s",
-                           "Each tier opens one more vacpack slot. Lowering it locks the last slots again; what they hold "
-                           "stays in them and is back with the tier.");
-        ImGui::PopTextWrapPos();
-        ImGui::PopFont();
-    });
 }
 
 }  // namespace sr2::ui::sandbox_upgrades

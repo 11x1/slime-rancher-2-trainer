@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cmath>
 #include <set>
+#include <utility>
 
 namespace sr2::ui::layout {
 namespace {
@@ -98,12 +99,21 @@ std::vector<Category> Spec() {
          "release build is here."},
     };
     misc.tabs.push_back(general);
-    Tab sandbox;
-    sandbox.title = "Sandbox";
-    sandbox.kind = TabKind::Sandbox;
-    sandbox.module = "sandbox";
-    misc.tabs.push_back(sandbox);
     cats.push_back(misc);
+
+    // Sandbox: its own category, one tab per page (each keeps its own scroll position).
+    Category sandbox = Cat("sandbox", "Sandbox", Icon::Sandbox);
+    for (const auto& [title, page] : {std::pair{"General", SandboxPage::General}, std::pair{"Vacpack", SandboxPage::Vacpack},
+                                      std::pair{"Spawn & Craft", SandboxPage::SpawnCraft},
+                                      std::pair{"Upgrades", SandboxPage::Upgrades}, std::pair{"Weather", SandboxPage::Weather}}) {
+        Tab t;
+        t.title = title;
+        t.kind = TabKind::Sandbox;
+        t.module = "sandbox";
+        t.sandboxPage = page;
+        sandbox.tabs.push_back(t);
+    }
+    cats.push_back(sandbox);
 
     Category profiles = Cat("profiles", "Profiles", Icon::Profiles, true);
     Tab pt;

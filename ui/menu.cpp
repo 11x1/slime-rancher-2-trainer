@@ -375,6 +375,20 @@ void DrawIcon(ImDrawList* dl, layout::Icon icon, ImVec2 o, ImU32 col) {
             for (float y : {2.5f, 10.5f})
                 for (float x : {2.5f, 10.5f}) dl->AddRect(P(x, y), P(x + 5, y + 5), col, 1.5f * k, 0, th * 0.9f);
             break;
+        case layout::Icon::Sandbox: {
+            // A four-pointed sparkle and a small one top right (cheats / magic).
+            auto star = [&](float cx, float cy, float r, float in) {
+                for (int i = 0; i < 8; ++i) {
+                    const float a = static_cast<float>(i) * kPi / 4 - kPi / 2, rr = i % 2 == 0 ? r : in;
+                    dl->PathLineTo(P(cx + std::cos(a) * rr, cy + std::sin(a) * rr));
+                }
+            };
+            star(7.5f, 10.5f, 6.5f, 2.0f);
+            dl->PathStroke(col, ImDrawFlags_Closed, th * 0.9f);
+            star(14.0f, 4.0f, 3.0f, 1.0f);
+            dl->PathFillConcave(col);
+            break;
+        }
         case layout::Icon::Profiles:
             dl->AddLine(P(3, 5), P(15, 5), col, th);
             dl->AddLine(P(3, 9), P(15, 9), col, th);
@@ -1324,13 +1338,15 @@ constexpr const char* kSbxCtx = "##sbx_item_ctx";
 constexpr const char* kCraftCtx = "##sbx_craft_ctx";  // the crafter's right-click menu (variants)
 uintptr_t g_craftCtx = 0;                             // the recipe it was opened on
 constexpr const char* kSlotDrag = "SR2_SLOT";  // drag payload: a vacpack slot index (int)
-// The grid under the mouse: the key hints in the tab bar show its controls.
+// The grid under the mouse: the key hint bar under the page shows its controls.
 enum class SbxHover { None, Slots, Picker, Spawner, Crafter, Upgrades, Blueprints };
 SbxHover g_sbxHover = SbxHover::None;
 double g_sbxHoverNone = 0;  // since when the mouse is over the page but no grid (0: over one)
 double g_sbxShownSince = 0;  // when the Sandbox page was shown again (opened / switched to)
 using sandbox_upgrades::KeyRow;
 float g_vacPickerTop = FLT_MAX;  // screen y where the vacpack's item grid starts (above it: the slots)
+float g_sbxRoom = 0;             // the page's visible height left for the card being drawn (SbxGridHeight); 0: unset
+ImVec2 g_sbxBarMin, g_sbxBarMax;  // the key hint bar under the page, last frame (empty: not shown)
 
 std::string Thousands(long long v) {
     std::string s = std::to_string(v < 0 ? -v : v);
@@ -1662,6 +1678,17 @@ item_grid::Options GridOptions(float height) {
     return o;
 }
 
+// A grid height (before scaling) that lets an item grid fill the page's visible height under it, at
+// least `minH`: called in its card right before item_grid::Draw. `headerRows`: the grid's header rows
+// (the search row; the tab row when the tabs are below it). Below the grid: the card's bottom padding
+// and border, then the page's end spacing (Draw's 18 px dummy after the item spacing).
+float SbxGridHeight(float minH, int headerRows) {
+    if (g_sbxRoom <= 0) return minH;
+    const float header = static_cast<float>(headerRows) * (ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y);
+    const float below = U(14) + U(2) + U(8) + U(18);
+    return std::max(minH, std::floor((g_sbxRoom - ImGui::GetCursorPosY() - header - below) / g_scale));
+}
+
 // Item by id from the vacpack list or the spawn list (lookup table rebuilt when a list changes).
 // The table points into the lists, so it holds them: comparing bare addresses let a rebuilt
 // list allocated where a freed one had been keep the table and its dangling pointers.
@@ -1778,7 +1805,7 @@ void TipKeys(const std::vector<KeyRow>& keys) {
 // Item tooltip: the name with its group as a small tag; for slimes, foods and plorts the
 // diet links with icons (favourite food, plort, who loves / makes it; no largos under "Made
 // by"); optional cost lines with icons (crafter), a dim info line, then the left / right click
-// as keycap rows (TipKeys; the tab bar's hints list the rest). `mod`: one of the mod's own items (its tile
+// as keycap rows (TipKeys; the hint bar under the page lists the rest). `mod`: one of the mod's own items (its tile
 // has the "M" badge): a second tag "Mod" in the accent colour.
 void ItemTooltip(const sbx::Snapshot& s, const std::string& name, sbx::Kind kind, uintptr_t id, const char* info = nullptr,
                  const std::vector<sbx::CostLine>* costs = nullptr, const std::vector<KeyRow>& keys = {}, bool mod = false) {
@@ -1917,10 +1944,15 @@ void SubTabs(const char* id, const std::vector<std::string>& labels, int& sel) {
     ImGui::PopID();
 }
 
-// The Sandbox page's key hints, in the tab bar, right-aligned against the switch (DrawTopBar): the
-// controls of the grid under the mouse (g_sbxHover), each a keycap (or several joined by '+') and a
-// short label, no title and no background. The keycaps are the HUD edit help bar's at 80 % of its
-// size, the labels 4 px over the small size's 75 %. Nothing hovered: nothing drawn.
+// The Sandbox pages' key hints: a bar pinned under the page (Draw reserves kSbxBarH under the page's
+// body on the pages with grids, SandboxHintBarShown), a little wider than the two columns, in the
+// floating surfaces' look (tooltips, menus: popup colour, outline, soft shadow). It shows the controls
+// of the grid under the mouse (g_sbxHover), each a keycap (or several joined by '+') and a short
+// label, centred; the keycaps are the HUD edit help bar's at 80 % of its size, the labels 4 px over
+// the small size's 75 %. Nothing hovered: a dim line saying what the bar is for.
+constexpr float kSbxBarH = 50;      // the strip under the page (bar + margins), before scaling
+constexpr float kSbxBarSpill = 8;   // how far the bar reaches past the columns on each side
+
 void SandboxHintBar(ImDrawList* dl, ImVec2 a, ImVec2 b) {
     const Palette& P = theme::Colors();
     static const KeyRow kSlots[] = {{"LMB", "select"}, {"Shift+Wheel", "\u00b11"}, {"Ctrl+Wheel", "\u00b110"},
@@ -1944,24 +1976,35 @@ void SandboxHintBar(ImDrawList* dl, ImVec2 a, ImVec2 b) {
         case SbxHover::Blueprints: hints = kBlueprints, count = std::size(kBlueprints); break;
         case SbxHover::None: break;
     }
-    if (!hints || b.x - a.x < U(40)) return;
+    g_sbxBarMin = a, g_sbxBarMax = b;
+    if (b.x - a.x < U(60)) return;
+    const float r = ImGui::GetStyle().PopupRounding;
+    SoftShadow(dl, a, b, r, U(1), U(4), P.shadow);
+    dl->AddRectFilled(a, b, P.popBg, r);
+    dl->AddRect(a, b, P.popBorder, r, 0, std::max(1.0f, U(1)));
     ImFont* f = theme::Body();
     const float fs = theme::kSmallSize * 0.75f + 4.0f;
-    const float capScale = g_scale * 0.8f;
     const ImVec2 ts = TextSize(f, fs, "Ag");
     const float cy = std::round((a.y + b.y) * 0.5f);
-    const float gap = U(14);
-    // What fits, from the first (the hints are ordered by importance; the rest is left out), then drawn
-    // so the last one ends at the switch.
+    const float pad = U(14);
+    if (!hints) {
+        const char* idle = "Point at a grid to see its controls.";
+        const ImVec2 is = TextSize(f, fs, idle);
+        Text(dl, f, fs, ImVec2(std::round((a.x + b.x - is.x) * 0.5f), std::round(cy - is.y * 0.5f)), P.dim, idle);
+        return;
+    }
+    const float capScale = g_scale * 0.8f;
+    const float gap = U(18);
+    // What fits, from the first (the hints are ordered by importance; the rest is left out), centred.
     std::vector<float> widths;
     float total = 0;
     for (size_t k = 0; k < count; ++k) {
         const float w = hud_edit::KeyComboWidth(hints[k].keys, capScale) + U(4) + TextSize(f, fs, hints[k].text.c_str()).x;
-        if (total + (widths.empty() ? 0.0f : gap) + w > b.x - a.x) break;
+        if (total + (widths.empty() ? 0.0f : gap) + w > b.x - a.x - 2 * pad) break;
         total += (widths.empty() ? 0.0f : gap) + w;
         widths.push_back(w);
     }
-    float x = std::round(b.x - total);
+    float x = std::round((a.x + b.x - total) * 0.5f);
     dl->PushClipRect(a, b, true);
     for (size_t k = 0; k < widths.size(); ++k) {
         const KeyRow& h = hints[k];
@@ -2101,32 +2144,33 @@ void ItemContextMenu(const sbx::Snapshot& s) {
             }
             const float e = U(22), rowW = U(250), fs = theme::kSmallSize + 0.5f;
             if (vac && g_ctxSlot >= 0 && g_ctxSlot < std::min(static_cast<int>(s.slots.size()), 32)) {
-                // The slot's Fill / Empty, as the buttons under the slots do them (round 8).
+                // The slot's Fill / Empty, as the buttons under the slots do them: two buttons side by side
+                // on one row (round 9, "fill/empty should be buttons next to eachother ... on a single line").
                 const int idx = g_ctxSlot;
                 const sbx::Slot& sl = s.slots[static_cast<size_t>(idx)];
                 const uintptr_t holds = SlotItem(sl, idx);
                 const int count = SlotCount(sl, idx), max = std::max(0, sl.max);
-                auto slotRow = [&](const char* id, const std::string& label, bool can, const char* why) {
-                    const ImVec2 p = ImGui::GetCursorScreenPos();
-                    ImGui::BeginDisabled(!can);
-                    const bool hit = ImGui::Selectable(id, false, 0, ImVec2(rowW, e));
-                    ImGui::EndDisabled();
-                    const ImVec2 ts = TextSize(theme::Body(), fs, label.c_str());
-                    Text(ImGui::GetWindowDrawList(), theme::Body(), fs, ImVec2(p.x + e + U(8), p.y + (e - ts.y) * 0.5f),
-                         can ? P.text : P.dim, label.c_str());
-                    if (!can && why && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) Tooltip(why);
-                    return hit && can;
-                };
                 if (sl.unlocked && holds) {
-                    if (slotRow("##fill", std::format("Fill slot {} ({}/{})", idx + 1, count, max), count < max,
-                                "The slot is full.")) {
+                    FontScope bf(theme::Body(), fs);
+                    const float sp = ImGui::GetStyle().ItemSpacing.x, bw = std::floor((rowW - sp) * 0.5f);
+                    const std::string fill = std::format("Fill ({}/{})", count, max);
+                    ImGui::BeginDisabled(count >= max);
+                    if (ImGui::Button(fill.c_str(), ImVec2(bw, e + U(4)))) {
                         SetSlotPending(idx, holds, max);
                         SbxRequest(sbx::Op::SetSlotCount, max, idx);
+                        ImGui::CloseCurrentPopup();
                     }
-                    if (slotRow("##empty", std::format("Empty slot {}", idx + 1), true, nullptr)) {
+                    ImGui::EndDisabled();
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                        Tooltip(count >= max ? std::string("The slot is full.")
+                                             : std::format("Fill slot {} to its maximum.", idx + 1));
+                    ImGui::SameLine(0, sp);
+                    if (ImGui::Button("Empty", ImVec2(bw, e + U(4)))) {
                         SetSlotPending(idx, 0, 0);
                         SbxRequest(sbx::Op::SetSlotCount, 0, idx);
+                        ImGui::CloseCurrentPopup();
                     }
+                    if (ImGui::IsItemHovered()) Tooltip(std::format("Remove everything from slot {}.", idx + 1));
                     ImGui::Separator();
                 }
             }
@@ -2325,7 +2369,6 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     const float e = std::max(U(24), std::floor(std::min(U(92), (avail - gap * static_cast<float>(n - 1)) / static_cast<float>(n))));
     uintptr_t slotMenu = 0;  // right-clicked slot's item: its give menu opens after the loop (popup id outside the slot's id)
     int slotMenuIdx = -1;    // that slot
-    bool tierMenu = false;   // an empty / locked slot was right-clicked (sandbox_upgrades::SlotTierMenu)
     for (int i = 0; i < n; ++i) {
         const sbx::Slot& sl = s.slots[static_cast<size_t>(i)];
         const int count = SlotCount(sl, i);
@@ -2342,8 +2385,9 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
             if (sl.unlocked) g_sbxSlot = i;
             else if (sl.unlockable) SbxRequest(sbx::Op::UnlockSlot, 0, i);
         }
+        // Right-click: only a slot with an item has a menu (round 9: the Extra Tank tier menu on empty /
+        // locked slots is gone; the tier is on the Upgrades page).
         if (right && sl.unlocked && sl.item) slotMenu = sl.item, slotMenuIdx = i;
-        else if (right) tierMenu = true;  // empty / locked: the slot-count upgrade's tier menu
         if (sl.unlocked) {
             // Shift / Ctrl + wheel over a slot: its count +-1 / +-10; an empty slot takes the last
             // picked item. A plain wheel is left alone, so the page scrolls.
@@ -2412,29 +2456,28 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
         }
         if (hot && !sl.unlocked) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort) && !ImGui::GetDragDropPayload() && !ImGui::IsPopupOpen(kSbxCtx)) {
-            // The item's name, group and favourites, the left / right click as keycaps (the tab bar's hints
-            // list the rest).
+            // The item's name, group and favourites, the left / right click as keycaps (the hint bar
+            // lists the rest).
             sandbox_upgrades::Tip tip;
             tip.name = std::format("Slot {}", i + 1);
             if (!sl.unlocked) {
                 tip.tag = "Locked";
                 tip.tagCol = P.dim;
-                if (sl.unlockable) tip.keys = {{"LMB", "unlock for free"}, {"RMB", "Extra Tank tier"}};
-                else tip.lines.push_back({"No vacpack upgrade for it was found.", P.dim}), tip.keys = {{"RMB", "Extra Tank tier"}};
+                if (sl.unlockable) tip.keys = {{"LMB", "unlock for free"}};
+                else tip.lines.push_back({"No vacpack upgrade for it was found.", P.dim});
                 RichTooltip(tip);
             } else if (sl.item) {
                 ItemTooltip(s, sl.name, sl.kind, sl.item, nullptr, nullptr, {{"LMB", "select"}, {"RMB", "context menu"}});
             } else {
                 tip.tag = "Empty";
                 tip.tagCol = P.dim;
-                tip.keys = {{"LMB", "select"}, {"RMB", "Extra Tank tier"}};
+                tip.keys = {{"LMB", "select"}};
                 RichTooltip(tip);
             }
         }
         ImGui::PopID();
     }
     if (slotMenu) OpenItemContext(slotMenu, SbxGrid::Vacpack, slotMenuIdx);
-    sandbox_upgrades::SlotTierMenu(SbxHelpers(), tierMenu);
     // A dragged slot: its icon follows the cursor.
     int draggedSlot = -1;
     if (const ImGuiPayload* p = ImGui::GetDragDropPayload(); p && p->IsDataType(kSlotDrag) && p->DataSize == sizeof(int)) {
@@ -2525,7 +2568,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     for (auto it = g_vacPick.begin(); it != g_vacPick.end();)
         if (!FindItem(s, it->first)) it = g_vacPick.erase(it);
         else ++picked, ++it;
-    item_grid::Options o = GridOptions(212);
+    item_grid::Options o = GridOptions(SbxGridHeight(212, 1));
     o.selected = sl.item;
     o.drag = true;
     o.tabs = &tabs;
@@ -2688,7 +2731,7 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
     for (auto it = g_spawnPick.begin(); it != g_spawnPick.end();)
         if (!FindItem(s, it->first)) it = g_spawnPick.erase(it);
         else ++picked, ++it;
-    item_grid::Options o = GridOptions(250);
+    item_grid::Options o = GridOptions(SbxGridHeight(250, 2));
     o.tabs = &tabs;
     o.tabsBelow = true;
     if (byFamily || byArea) o.sections = &families;
@@ -3000,7 +3043,7 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
         if (!found) it = g_craftPick.erase(it);
         else ++picked, ++it;
     }
-    item_grid::Options o = GridOptions(250);
+    item_grid::Options o = GridOptions(SbxGridHeight(250, 2));
     o.hint = "Search gadgets...";
     o.tabs = &tabs;
     o.tabsBelow = true;
@@ -3221,10 +3264,21 @@ void SandboxPlayer(const Host& h, const sbx::Snapshot& s, float w) {
     SandboxExpansionsConfirm(*st);
 }
 
-void DrawSandboxPage(const Host& h, const ModuleView& mv) {
+// The Sandbox category (module "sandbox"): one tab per page, each with its own scroll position. The
+// off card, the "Enable sandbox?" dialog and the snapshot checks are the same on every page.
+//   General: the achievements banner, Newbucks | Player.
+//   Vacpack: the slots and the item picker, across both columns.
+//   Spawn & Craft: Spawner | Refinery Crafter.
+//   Upgrades: the Upgrades & Blueprints card (sandbox_upgrades.cpp).
+//   Weather: the Weather card (sandbox_weather.cpp).
+// The key hints for the grid under the mouse are a bar pinned under the page (SandboxHintBar, drawn by
+// Draw after the page's body), on the pages with grids.
+void DrawSandboxPage(const Host& h, const ModuleView& mv, layout::SandboxPage page) {
+    using layout::SandboxPage;
     const Palette& P = theme::Colors();
     FailedBanner(mv);
     SandboxConfirm(mv);
+    g_sbxRoom = 0;
     if (!ModuleOn(mv)) {
         BeginCard("sbx_off", ImGui::GetContentRegionAvail().x);
         CardHeading("Sandbox", P.head);
@@ -3248,9 +3302,10 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
         EndCard();
         return;
     }
-    // Across both columns, above everything else on the page.
-    Banner(P.warn, sbx::SaveCheated() ? "Steam achievements are disabled for this save (Sandbox was used)."
-                                      : "Steam achievements are paused while Sandbox is on.");
+    // Across both columns, above everything else on the General page.
+    if (page == SandboxPage::General)
+        Banner(P.warn, sbx::SaveCheated() ? "Steam achievements are disabled for this save (Sandbox was used)."
+                                          : "Steam achievements are paused while Sandbox is on.");
     sbx::MarkViewed();
     const auto snap = sbx::Get();
     // The module only refreshes the snapshot while the page is viewed, so after reopening it is as old
@@ -3266,36 +3321,50 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
         SandboxStatus(h);
         return;
     }
-    // Newbucks | Player, the vacpack across both columns, then Spawner | Crafter.
     const float full = ImGui::GetContentRegionAvail().x, w = ColumnWidth();
-    const float gapY = U(kGap) - ImGui::GetStyle().ItemSpacing.y;
-    // The grid under the mouse, for the key hints in the tab bar (drawn before the page: last frame's).
-    // Kept while a menu or drag from it is open, and for a moment while the mouse crosses the gaps
-    // between the cards, so the hints don't blink when moving from one grid to another.
+    // The grid under the mouse, for the key hint bar under the page (drawn after it, this frame). Kept
+    // while a menu or drag from it is open, while the mouse is on the bar itself, and for a moment while
+    // the mouse crosses the gaps between the cards, so the hints don't blink when moving between grids.
     const bool pageHovered =
         ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
     SbxHover hover = SbxHover::None;
     auto hoverCard = [&](SbxHover what) {
         if (pageHovered && ImGui::IsMouseHoveringRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), false)) hover = what;
     };
-    SandboxNewbucks(*snap, w);
-    ImGui::SameLine(0, U(kGap));
-    SandboxPlayer(h, *snap, w);
-    ImGui::Dummy(ImVec2(0, gapY));
-    SandboxVacpack(*snap, full);
-    hoverCard(ImGui::GetMousePos().y < g_vacPickerTop ? SbxHover::Slots : SbxHover::Picker);
-    ImGui::Dummy(ImVec2(0, gapY));
-    SandboxSpawner(*snap, w);
-    hoverCard(SbxHover::Spawner);
-    ImGui::SameLine(0, U(kGap));
-    SandboxCrafter(*snap, w);
-    hoverCard(SbxHover::Crafter);
-    ImGui::Dummy(ImVec2(0, gapY));
-    sandbox_upgrades::DrawCard(SbxHelpers(), *snap, full);  // Upgrades & Blueprints (sandbox_upgrades.cpp)
-    hoverCard(sandbox_upgrades::ShowingUpgrades() ? SbxHover::Upgrades : SbxHover::Blueprints);
-    ImGui::Dummy(ImVec2(0, gapY));
-    sandbox_weather::DrawCard(SbxWeatherHelpers(), full);  // Weather (sandbox_weather.cpp)
-    if (!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) && !ImGui::GetDragDropPayload()) {
+    // What is left of the page's visible height from here: the grids grow into it (SbxGridHeight).
+    auto room = [] { g_sbxRoom = ImGui::GetWindowHeight() - ImGui::GetCursorPosY(); };
+    switch (page) {
+        case SandboxPage::General:
+            SandboxNewbucks(*snap, w);
+            ImGui::SameLine(0, U(kGap));
+            SandboxPlayer(h, *snap, w);
+            break;
+        case SandboxPage::Vacpack:
+            room();
+            SandboxVacpack(*snap, full);
+            hoverCard(ImGui::GetMousePos().y < g_vacPickerTop ? SbxHover::Slots : SbxHover::Picker);
+            break;
+        case SandboxPage::SpawnCraft:
+            room();
+            SandboxSpawner(*snap, w);
+            hoverCard(SbxHover::Spawner);
+            ImGui::SameLine(0, U(kGap));
+            SandboxCrafter(*snap, w);
+            hoverCard(SbxHover::Crafter);
+            break;
+        case SandboxPage::Upgrades:
+            sandbox_upgrades::DrawCard(SbxHelpers(), *snap, full);  // Upgrades & Blueprints (sandbox_upgrades.cpp)
+            hoverCard(sandbox_upgrades::ShowingUpgrades() ? SbxHover::Upgrades : SbxHover::Blueprints);
+            break;
+        case SandboxPage::Weather:
+            sandbox_weather::DrawCard(SbxWeatherHelpers(), full);  // Weather (sandbox_weather.cpp)
+            // Room for more world controls under the Weather card (time of day goes into the card itself,
+            // sandbox_weather.cpp); a further card here: ImGui::Dummy(ImVec2(0, U(kGap) - ItemSpacing.y)), then it.
+            break;
+    }
+    g_sbxRoom = 0;
+    if (!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) && !ImGui::GetDragDropPayload() &&
+        !ImGui::IsMouseHoveringRect(g_sbxBarMin, g_sbxBarMax, false)) {
         const double now = ImGui::GetTime();
         if (hover != SbxHover::None) {
             g_sbxHover = hover;
@@ -3304,14 +3373,19 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
             g_sbxHover = SbxHover::None;
         } else {
             if (g_sbxHoverNone == 0) g_sbxHoverNone = now;
-            if (now - g_sbxHoverNone > 0.35) g_sbxHover = SbxHover::None;  // parked off the grids (Newbucks, Player)
+            if (now - g_sbxHoverNone > 0.35) g_sbxHover = SbxHover::None;  // parked off the grids (between cards)
         }
     }
     SandboxStatus(h);
 }
 
-// True while the Sandbox page shows its grids (the menu reserves the hint bar under the page then).
-bool SandboxHintBarShown(const ModuleView& mv) {
+// True while a Sandbox page with grids (Vacpack, Spawn & Craft, Upgrades) shows them: the menu
+// reserves the key hint bar under the page then.
+bool SandboxHintBarShown(const Tab& tab, const ModuleView& mv) {
+    using layout::SandboxPage;
+    if (tab.sandboxPage != SandboxPage::Vacpack && tab.sandboxPage != SandboxPage::SpawnCraft &&
+        tab.sandboxPage != SandboxPage::Upgrades)
+        return false;
     if (!ModuleOn(mv)) return false;
     const auto snap = sbx::Get();
     return snap && snap->inGame;
@@ -4150,11 +4224,8 @@ bool DrawTopBar(const Category& cat, int& ti, const std::vector<ModuleView>& vie
                  : st.locked                ? tab.help
                  : !st.sw->tooltip.empty() ? st.sw->tooltip
                                             : st.sw->label);
-        // No "Enabled" label: the switch explains itself in its tooltip. On the Sandbox page that room
-        // holds the key hints of the grid under the mouse (from the tab strip to the switch).
-        if (tab.kind == TabKind::Sandbox)
-            if (const ModuleView* mv = FindView(views, tab.module); mv && SandboxHintBarShown(*mv))
-                SandboxHintBar(dl, ImVec2(sa.x + stripW + U(18), cy - U(16)), ImVec2(rx - U(14), cy + U(16)));
+        // No "Enabled" label: the switch explains itself in its tooltip. (The Sandbox key hints that sat
+        // here are a bar under the page since the Sandbox got its own category: SandboxHintBar.)
     }
     if (tab.kind == TabKind::Module || tab.kind == TabKind::Profiles || (tab.kind == TabKind::SlimeDj && st.on)) {
         rx -= ib + U(10);
@@ -4388,10 +4459,15 @@ bool Draw(const Host& h) {
             if (const auto it = g_pageScroll.find(page); it != g_pageScroll.end() && it->second.want > 0.5f)
                 ImGui::SetNextWindowScroll(ImVec2(-1.0f, it->second.want));
         }
+        // The Sandbox pages with grids keep a strip under the body for their key hint bar.
+        const ModuleView* sbxView = tab.kind == TabKind::Sandbox ? FindView(views, tab.module) : nullptr;
+        const bool sbxBar = sbxView && SandboxHintBarShown(tab, *sbxView);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(18), 0));
-        ImGui::BeginChild(("##body_" + page).c_str(), ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding,
-                          ImGuiWindowFlags_NoBackground);
+        ImGui::BeginChild(("##body_" + page).c_str(), ImVec2(0, sbxBar ? -U(kSbxBarH) : 0.0f),
+                          ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoBackground);
         KeepPageScroll(page);
+        // The columns' span (the content region: without the padding and the scrollbar), for the hint bar.
+        const float colX0 = ImGui::GetCursorScreenPos().x, colX1 = colX0 + ImGui::GetContentRegionAvail().x;
         if (h.versionMismatch)
             Banner(P.warn, "This game build differs from the one the mod was made for; some modules may be disabled. " +
                                h.versionStatus);
@@ -4416,7 +4492,7 @@ bool Draw(const Host& h) {
             case TabKind::Profiles: DrawProfilesPage(h); break;
             case TabKind::Settings: DrawSettingsPage(h, ui, views); break;
             case TabKind::Sandbox:
-                if (const ModuleView* mv = FindView(views, tab.module)) DrawSandboxPage(h, *mv);
+                if (sbxView) DrawSandboxPage(h, *sbxView, tab.sandboxPage);
                 break;
             case TabKind::SlimeDj:
                 if (const ModuleView* mv = FindView(views, tab.module)) DrawSlimeDjPage(h, *mv);
@@ -4426,6 +4502,14 @@ bool Draw(const Host& h) {
         ImGui::Dummy(ImVec2(0, U(18)));
         ImGui::EndChild();
         ImGui::PopStyleVar();
+        if (sbxBar) {
+            // Pinned under the page in the strip the body left free, a little wider than the columns.
+            const float top = ImGui::GetItemRectMax().y + U(4);
+            SandboxHintBar(ImGui::GetWindowDrawList(), ImVec2(std::floor(colX0 - U(kSbxBarSpill)), top),
+                           ImVec2(std::floor(colX1 + U(kSbxBarSpill)), top + U(kSbxBarH) - U(14)));
+        } else {
+            g_sbxBarMin = g_sbxBarMax = ImVec2(0, 0);
+        }
         ImGui::EndChild();
         ImGui::PopStyleVar();
     } else {
