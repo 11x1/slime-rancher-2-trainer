@@ -30,8 +30,8 @@ Not in profiles and not on the in-game Options "Mods" tab (personal, and the id 
 
 ## Threading
 
-- Main thread: a frame callback every 2 s while the module is on reads the state above (a few `runtime_invoke` calls, native fault -> module faulted) and calls `discord_rpc::Publish(Presence)`, which only copies it under a mutex and signals an event.
-- Pipe thread (`ipc.cpp`): created on the first enable, lives for the rest of the process (never joined, so turning the module off never waits on it). It wakes on the event or every second. All pipe I/O happens there.
+- Main thread: a frame callback 4 times a second (every 250 ms) while the module is on reads the state above (4-6 `runtime_invoke` calls, zone names cached per zone asset; native fault -> module faulted) and calls `discord_rpc::Publish(Presence)`, which returns at once when nothing changed, else copies it under a mutex and signals an event.
+- Pipe thread (`ipc.cpp`): created on the first enable, lives for the rest of the process (never joined, so turning the module off never waits on it). It wakes on the event, every second, or when a waiting change is due. All pipe I/O happens there.
 - `OnDisable` only flips a flag: the pipe thread sends a clearing `SET_ACTIVITY` (activity `null`) and closes the pipe within a second.
 
 ## Protocol
@@ -41,16 +41,32 @@ Not in profiles and not on the in-game Options "Mods" tab (personal, and the id 
 - Handshake: op 0 `{"v": 1, "client_id": "<id>"}`. Reply within 3 s: op 1 with `"evt": "READY"` (and `data.user`, whose `global_name` / `username` goes into the status line) = connected; op 2 CLOSE (`{"code": 4000, "message": "Invalid Client ID"}` and the like) = refused.
 - Presence: op 1 `{"cmd": "SET_ACTIVITY", "args": {"pid": <game pid>, "activity": {"details", "state", "timestamps": {"start"}, "assets": {"large_image", "large_text"}, "status_display_type"}}, "nonce": "<n>"}`. Fields shorter than 2 characters are left out (Discord rejects them), longer than 128 bytes are cut at a UTF-8 boundary.
 - Replies are read without blocking (`PeekNamedPipe`, a frame is read only once its header is there). PING is answered with PONG and the same payload; CLOSE or a broken pipe = disconnected; an `"evt": "ERROR"` reply is logged once per distinct message.
-- Sent only when the presence changed, at most once every 5 s (Discord allows 5 updates per 20 s); a change inside that window goes out when it ends. After a reconnect the current presence is sent again.
+- Sent only when the presence changed; see "Update rate" below. After a reconnect the current presence is sent again.
+
+## Update rate
+
+- **The limit:** `SET_ACTIVITY` is rate-limited to **5 updates per 20 seconds** per client. That number is from Discord's Game SDK documentation for `UpdateActivity`, which sends `SET_ACTIVITY` over the same pipe. The RPC docs give no other number, and a web search on 2026-10-24 found no official page that states it for RPC. Discord does not answer an over-limit update with an error: it queues or drops it. A third-party write-up claims one visible update per 15 s (not confirmed). So a presence can't follow the game every second the way a game's own UI does. 5 per 20 s is the ceiling for every game, SDK games included.
+- **What the mod does:** the main thread samples 4 times a second. The pipe thread sends a change once it has settled (300 ms without a newer change, but at most 1 s after the first one, so the stream of Newbucks changes while selling is one send per second, not four) and a slot is free in a sliding window of the last 5 sends (the oldest must be 20 s + 250 ms old). Otherwise it waits for that slot, and whatever the presence is then goes out: the newest wins and the states in between are skipped. The clearing `SET_ACTIVITY` (disable, id change) counts too. The window is kept across reconnects.
+- In practice the first 5 changes in a row show up within about 0.3 s each. After a burst, a change waits up to 20 s. A zone change normally shows up within a second.
+- The elapsed timer needs no updates: Discord draws it from `timestamps.start`.
 
 ## Reconnecting and the log
 
-- Discord not running: retried after 5 s, doubling to every 30 s. The status says "Waiting for Discord (the desktop app is not running)." and the log gets that line once, not per retry.
-- Discord quits: the next read fails, the pipe is closed and the retry starts again ("Discord closed the connection; waiting for it.").
+- The card's Status line shows only a short state:
+  - "Connected as <name>" (green);
+  - "Reconnecting..." (the handshake failed or the pipe broke);
+  - "Discord not running";
+  - "Refused: <Discord's reason, cut at 40 characters>" (red);
+  - "Off";
+  - with an own app, "No application id" or "Invalid application id".
+
+  The technical detail is the line's hover tooltip (`bridge::Status::detail`): the pipe (`discord-ipc-N`), the handshake result, the CLOSE code and message, the number of updates sent, the last ERROR reply, when a rate-limited change goes out, and "Next try in N s" (the card counts it down from `Status::retryAt`). The text uses ASCII "...", not U+2026, which the overlay fonts may lack.
+- Discord not running: retried after 5 s, doubling to every 30 s. The log gets "Discord not running (...)" once, not per retry.
+- Discord quits: the next read fails, the pipe is closed and the retry starts again ("Reconnecting...", then "Discord not running" if it is gone).
 - Id refused: retried every 2 minutes, or at once when the id changes.
 - The id is polled every second, so pasting a new one, or switching `official_app`, reconnects with it (the old presence is cleared first).
 - **Reconnect** (the card's button, `discord_bridge::RequestReconnect`): the pipe thread clears the presence, closes the pipe and connects again at once, skipping a retry wait or an id refusal's 2 minutes; it also forgets a refused `status_display_type` / image.
-- The log only gets a line when the status text changes (connected, waiting, refused, ...), plus one per distinct ERROR reply and one per new zone. The presence text itself is logged at debug level.
+- The log only gets a line when the status text changes (connected, reconnecting, refused, ...; the tooltip detail in brackets), plus one per distinct ERROR reply and one per new zone. The presence text itself is logged at debug level.
 
 ## Why an application id is needed, and the official one
 

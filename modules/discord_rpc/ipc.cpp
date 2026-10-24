@@ -25,7 +25,13 @@ namespace settings = sr2::core::settings;
 
 constexpr const char* kModule = "discord_rpc";
 constexpr DWORD kTickMs = 1000;                         // worker wake-up without news
-constexpr unsigned long long kMinSendMs = 5000;         // Discord allows 5 SET_ACTIVITY per 20 s
+// Discord's SET_ACTIVITY rate limit: 5 per 20 s (sliding window). A change goes out at once while a
+// slot is free, else when the oldest of the last 5 sends is 20 s old; the newest presence wins.
+constexpr int kSendBurst = 5;
+constexpr unsigned long long kSendWindowMs = 20000;
+constexpr unsigned long long kSendMarginMs = 250;       // slack on top of the window (clock/queue skew)
+constexpr unsigned long long kSettleMs = 300;           // a burst of changes (Newbucks while selling) is one send...
+constexpr unsigned long long kSettleMaxMs = 1000;       //   ... but a steady stream still goes out every second
 constexpr unsigned long long kRetryMinMs = 5000;        // Discord not running: first retry
 constexpr unsigned long long kRetryMaxMs = 30000;       //   ... backing off to this
 constexpr unsigned long long kRejectedRetryMs = 120000; // application id refused (unless it changes)
@@ -53,19 +59,37 @@ bool g_started = false;
 HANDLE g_pipe = INVALID_HANDLE_VALUE;
 std::string g_connectedId;
 unsigned long long g_nonce = 0;
+int g_pipeIndex = -1;         // N of \\.\pipe\discord-ipc-N while connected
 std::string g_lastStatus;     // what was last logged / shown
 std::string g_lastError;      // last ERROR reply logged (one line per distinct message)
+unsigned long long g_sendTimes[kSendBurst] = {};  // ring of the last SET_ACTIVITY ticks (rate limit)
+int g_sendNext = 0;                               // oldest entry = the next one overwritten
 bool g_noDisplayType = false; // Discord refused status_display_type once: leave it out from then on
 bool g_noAssets = false;      // Discord refused the image URL once: leave the assets out from then on
 bool g_resend = false;        // send the current presence again (after dropping a refused field)
 
-void Status(const std::string& text, bridge::Level level, bool log) {
-    bridge::SetStatus(text, level);
+// The card's Status line: a short text, the technical detail for its tooltip and when the next
+// connection attempt is (the card counts it down). Logged (text and detail) when the text changes.
+void Status(const std::string& text, bridge::Level level, const std::string& detail = {},
+            unsigned long long retryAt = 0, bool log = true) {
+    bridge::SetStatus({text, level, detail, retryAt});
     if (text == g_lastStatus) return;
     g_lastStatus = text;
     if (!log) return;
-    if (level == bridge::Level::Error || level == bridge::Level::Warn) SR2_WARN("[{}] {}", kModule, text);
-    else SR2_INFO("[{}] {}", kModule, text);
+    const std::string line = detail.empty() ? text : std::format("{} ({})", text, detail);
+    if (level == bridge::Level::Error || level == bridge::Level::Warn) SR2_WARN("[{}] {}", kModule, line);
+    else SR2_INFO("[{}] {}", kModule, line);
+}
+
+// Rate limit (kSendBurst per kSendWindowMs): the tick from which the next SET_ACTIVITY may go out.
+unsigned long long NextSlot() {
+    const unsigned long long oldest = g_sendTimes[g_sendNext];
+    return oldest == 0 ? 0 : oldest + kSendWindowMs + kSendMarginMs;
+}
+
+void NoteSend(unsigned long long now) {
+    g_sendTimes[g_sendNext] = now;
+    g_sendNext = (g_sendNext + 1) % kSendBurst;
 }
 
 std::string Trim(std::string s) {
@@ -92,6 +116,7 @@ bool Connected() { return g_pipe != INVALID_HANDLE_VALUE; }
 void Disconnect() {
     if (g_pipe != INVALID_HANDLE_VALUE) CloseHandle(g_pipe);
     g_pipe = INVALID_HANDLE_VALUE;
+    g_pipeIndex = -1;
     g_connectedId.clear();
 }
 
@@ -151,13 +176,18 @@ std::string Compact(const json::Value& v) {
 
 enum class ConnectResult { Ok, NoDiscord, Rejected, Failed };
 
-ConnectResult Connect(const std::string& id, std::string& detail) {
+// detail: Ok = the user's name; Rejected = Discord's short reason. tech: the technical detail (tooltip).
+ConnectResult Connect(const std::string& id, std::string& detail, std::string& tech) {
     for (int i = 0; i < 10 && !Connected(); ++i) {
         const std::wstring name = std::format(L"\\\\.\\pipe\\discord-ipc-{}", i);
         HANDLE h = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-        if (h != INVALID_HANDLE_VALUE) g_pipe = h;
+        if (h != INVALID_HANDLE_VALUE) g_pipe = h, g_pipeIndex = i;
     }
-    if (!Connected()) return ConnectResult::NoDiscord;
+    if (!Connected()) {
+        tech = "No Discord IPC pipe open (discord-ipc-0 to -9): the Discord desktop app is not running.";
+        return ConnectResult::NoDiscord;
+    }
+    const std::string pipe = std::format("discord-ipc-{}", g_pipeIndex);
     json::Value hs = json::Value::Object();
     hs.set("v", json::Value(1.0));
     hs.set("client_id", json::Value(id));
@@ -165,7 +195,7 @@ ConnectResult Connect(const std::string& id, std::string& detail) {
     std::string reply;
     if (!WriteFrame(kHandshake, Compact(hs)) || ReadFrame(op, reply, kHandshakeMs) != 1) {
         Disconnect();
-        detail = "no reply to the handshake";
+        tech = std::format("Handshake on {} failed: no reply within {} s.", pipe, kHandshakeMs / 1000);
         return ConnectResult::Failed;
     }
     json::Value doc;
@@ -174,16 +204,19 @@ ConnectResult Connect(const std::string& id, std::string& detail) {
     if (op == kClose) {
         Disconnect();
         detail = doc["message"].asString("closed");
+        tech = std::format("Discord closed the handshake on {} with code {}: {}", pipe, doc["code"].asInt(), detail);
         return ConnectResult::Rejected;
     }
     if (op != kFrame || doc["evt"].asString() != "READY") {
         Disconnect();
-        detail = std::format("unexpected reply (op {}, {})", op, doc["evt"].asString("no event"));
+        tech = std::format("Handshake on {} failed: unexpected reply (op {}, {}).", pipe, op,
+                           doc["evt"].asString("no event"));
         return ConnectResult::Failed;
     }
     const json::Value& user = doc["data"]["user"];
     detail = user["global_name"].asString();
     if (detail.empty()) detail = user["username"].asString();
+    tech = std::format("Handshake OK on {} (application {}).", pipe, id);
     g_connectedId = id;
     g_lastError.clear();
     return ConnectResult::Ok;
@@ -261,11 +294,24 @@ bool Poll() {
     return true;
 }
 
+// "Refused: <reason>" stays one short line; the full message is in the tooltip.
+std::string ShortReason(std::string s) {
+    constexpr size_t kMax = 40;
+    if (s.size() <= kMax) return s;
+    size_t n = kMax;
+    while (n > 0 && (static_cast<unsigned char>(s[n]) & 0xC0) == 0x80) --n;
+    s.resize(n);
+    return s + "...";
+}
+
 DWORD WINAPI Worker(LPVOID) {
-    unsigned long long nextTry = 0, lastSend = 0, backoff = kRetryMinMs, sentVersion = 0;
-    std::string rejectedId;
+    unsigned long long nextTry = 0, backoff = kRetryMinMs, sentVersion = 0, sentCount = 0;
+    unsigned long long seenVersion = 0, changedAt = 0, pendingSince = 0;  // settling a burst of changes
+    DWORD waitMs = kTickMs;
+    std::string rejectedId, user, connTech;
     for (;;) {
-        WaitForSingleObject(g_wake, kTickMs);
+        WaitForSingleObject(g_wake, waitMs);
+        waitMs = kTickMs;
         bool active = false, have = false;
         Presence want;
         unsigned long long version = 0;
@@ -284,23 +330,31 @@ DWORD WINAPI Worker(LPVOID) {
         const bool reconnect = bridge::TakeReconnect();
         auto drop = [&] {
             if (Connected()) {
-                SendActivity(nullptr);
+                if (SendActivity(nullptr)) NoteSend(GetTickCount64());
                 Disconnect();
                 SR2_INFO("[{}] disconnected from Discord", kModule);
             }
         };
+        auto lost = [&] {  // the pipe broke (Discord quit or restarted)
+            Disconnect();
+            nextTry = now + kRetryMinMs;
+            Status("Reconnecting...", bridge::Level::Dim,
+                   "Discord closed the connection (the pipe broke or it sent CLOSE); connecting again.", nextTry);
+        };
         if (!active) {
             drop();
-            Status("Off.", bridge::Level::Dim, false);
+            Status("Off", bridge::Level::Dim, {}, 0, false);
             nextTry = 0, backoff = kRetryMinMs;
             continue;
         }
         if (id.empty() || !ValidId(id)) {
             drop();
-            Status(id.empty() ? "No application id set. Paste your Discord application id below."
-                              : "The application id is not valid: it is the number (about 18-20 digits) from the "
-                                "Discord developer portal.",
-                   bridge::Level::Warn, true);
+            if (id.empty())
+                Status("No application id", bridge::Level::Warn,
+                       "Paste your Discord application id below, or turn on \"Show as Slime Rancher 2\".");
+            else
+                Status("Invalid application id", bridge::Level::Warn,
+                       "The application id is the number (about 18-20 digits) from the Discord Developer Portal.");
             continue;
         }
         if (Connected() && id != g_connectedId) {
@@ -320,53 +374,74 @@ DWORD WINAPI Worker(LPVOID) {
                 nextTry = 0;
             }
             if (now < nextTry) continue;
-            std::string detail;
-            switch (Connect(id, detail)) {
+            std::string detail, tech;
+            switch (Connect(id, detail, tech)) {
                 case ConnectResult::Ok:
                     rejectedId.clear();
                     backoff = kRetryMinMs;
                     sentVersion = 0;  // send the current presence again
-                    Status(detail.empty() ? "Connected to Discord." : std::format("Connected to Discord as {}.", detail),
-                           bridge::Level::Ok, true);
+                    pendingSince = 0;
+                    user = detail;
+                    connTech = tech + (official ? " Slime Rancher 2's own application." : " Your own application.");
                     break;
                 case ConnectResult::NoDiscord:
                     nextTry = now + backoff;
                     backoff = std::min(backoff * 2, kRetryMaxMs);
-                    Status("Waiting for Discord (the desktop app is not running).", bridge::Level::Dim, true);
+                    Status("Discord not running", bridge::Level::Dim, tech, nextTry);
                     continue;
                 case ConnectResult::Rejected:
                     rejectedId = id;
                     nextTry = now + kRejectedRetryMs;
-                    Status(std::format("Discord refused the application id: {}", detail), bridge::Level::Error, true);
+                    Status("Refused: " + ShortReason(detail), bridge::Level::Error,
+                           tech + "\nTried again in 2 minutes, at once when the application id changes, or with Reconnect.",
+                           nextTry);
                     continue;
                 case ConnectResult::Failed:
                     nextTry = now + backoff;
                     backoff = std::min(backoff * 2, kRetryMaxMs);
-                    Status(std::format("Could not talk to Discord ({}); retrying.", detail), bridge::Level::Warn, true);
+                    Status("Reconnecting...", bridge::Level::Warn, tech, nextTry);
                     continue;
             }
         }
         if (!Poll()) {
-            Disconnect();
-            nextTry = now + kRetryMinMs;
-            Status("Discord closed the connection; waiting for it.", bridge::Level::Dim, true);
+            lost();
             continue;
         }
         if (g_resend) {  // a field was refused: the next send goes out without it
             g_resend = false;
             sentVersion = 0;
         }
-        if (have && version != sentVersion && now - lastSend >= kMinSendMs) {
-            if (SendActivity(&want)) {
+        // Send as soon as a change has settled and Discord's rate limit has a free slot; the newest wins.
+        if (have && version != seenVersion) {
+            seenVersion = version;
+            changedAt = now;
+            if (!pendingSince) pendingSince = now;
+        }
+        unsigned long long slotWait = 0;
+        if (have && version != sentVersion) {
+            if (!pendingSince) pendingSince = changedAt = now;  // a resend (reconnect, refused field)
+            const unsigned long long settleAt = std::min(changedAt + kSettleMs, pendingSince + kSettleMaxMs);
+            const unsigned long long sendAt = std::max(settleAt, NextSlot());
+            if (now >= sendAt) {
+                if (!SendActivity(&want)) {
+                    lost();
+                    continue;
+                }
+                NoteSend(now);
                 sentVersion = version;
-                lastSend = now;
+                pendingSince = 0;
+                ++sentCount;
                 SR2_DEBUG("[{}] presence: {} | {}", kModule, want.details, want.state);
             } else {
-                Disconnect();
-                nextTry = now + kRetryMinMs;
-                Status("Discord closed the connection; waiting for it.", bridge::Level::Dim, true);
+                waitMs = static_cast<DWORD>(std::min<unsigned long long>(kTickMs, sendAt - now));
+                if (NextSlot() > now) slotWait = NextSlot() - now;
             }
         }
+        std::string tech = std::format("{}\nPresence updates sent: {} (Discord allows {} per {} s).", connTech, sentCount,
+                                       kSendBurst, kSendWindowMs / 1000);
+        if (slotWait) tech += std::format("\nThe latest change goes out in {} s (rate limit).", (slotWait + 999) / 1000);
+        if (!g_lastError.empty()) tech += "\nLast error from Discord: " + g_lastError;
+        Status(user.empty() ? std::string("Connected") : "Connected as " + user, bridge::Level::Ok, tech);
     }
 }
 

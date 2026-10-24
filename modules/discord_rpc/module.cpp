@@ -1,6 +1,6 @@
 // discord_rpc: Discord Rich Presence without the Discord SDK (see NOTES.md).
 //
-// Main thread: every 2 s a frame callback reads where the player is (the
+// Main thread: 4 times a second a frame callback reads where the player is (the
 // current zone's localized name, whether it is the ranch, optionally the
 // Newbucks) and hands a Presence to ipc.cpp. The pipe thread there talks to the
 // Discord client; nothing on the main thread waits for it.
@@ -45,7 +45,7 @@ using sr2::il2cpp::Resolver;
 
 constexpr const char* kModule = bridge::kModule;
 constexpr const char* kImage = "Assembly-CSharp";
-constexpr unsigned long long kReadMs = 2000;
+constexpr unsigned long long kReadMs = 250;  // 4 Hz: a handful of runtime_invoke calls, Publish only signals on change
 constexpr int kNewbuckPersistenceId = 1;  // CurrencyUtility.NEWBUCK_PERSISTENCE_ID
 
 bool IsA(Il2CppObject* obj, Il2CppClass* k) {

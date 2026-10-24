@@ -1,7 +1,8 @@
 #pragma once
 // Data exchange between the discord_rpc module (modules/discord_rpc) and its card
 // on the overlay's Settings page (menu.cpp). The module's pipe thread sets a
-// one-line connection status; the render thread reads it. The application id is
+// short connection status plus its technical detail (the Status line's tooltip);
+// the render thread reads it. The application id is
 // a free-text value in sr2mods.json (settings::GetString / SetString), which the
 // card edits and the pipe thread polls.
 
@@ -23,11 +24,13 @@ inline constexpr const char* kDevPortalUrl = "https://discord.com/developers/app
 enum class Level { Dim, Ok, Warn, Error };
 
 struct Status {
-    std::string text;
+    std::string text;                // short: "Connected as <name>", "Reconnecting...", "Discord not running", ...
     Level level = Level::Dim;
+    std::string detail;              // the Status line's tooltip: pipe, handshake, error codes
+    unsigned long long retryAt = 0;  // GetTickCount64 of the next connection attempt (0 = none planned)
 };
 
-void SetStatus(std::string text, Level level);  // any thread
+void SetStatus(Status s);  // any thread
 Status GetStatus();                             // any thread
 
 // The card's Reconnect button (any thread): the pipe thread drops the connection
