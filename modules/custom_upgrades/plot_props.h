@@ -3,7 +3,7 @@
 // u6, u9, u11): hay bales in the coop (Faster Hens I), extra nests, a flower pillow and a stuffed
 // chicken (Faster Hens II), a third sprinkler in the garden (Fast Growth; II adds a fourth), glow
 // and embers in the incinerator's fire (Ash Booster), a second speaker in the corral (Music Box II),
-// one more capacity tank beside the silo per Silo Capacity tier (II, III, IV).
+// one more capacity tank beside the silo per Silo Capacity tier (II, III, IV, V).
 //
 // Every prop is a clone of a vanilla model (no asset files of ours): children of decoration /
 // toy prefabs (LookupDirector._gadgetDefinitions / _toyDefinitions -> IdentifiableType.prefab,
@@ -42,7 +42,8 @@ enum PropKind : uint32_t {
     kPropCorralMusic = 1u << 5,      // corral, Music Box II: a second speaker on the (-x, -z) post
     kPropSiloTank2 = 1u << 6,        // silo, Silo Capacity II+: a capacity tank on the ground, (+x, +z)
     kPropSiloTank3 = 1u << 7,        // silo, Silo Capacity III+: a second one, (-x, +z)
-    kPropSiloTank4 = 1u << 8,        // silo, Silo Capacity IV: a third one, (+x, -z)
+    kPropSiloTank4 = 1u << 8,        // silo, Silo Capacity IV+: a third one, (+x, -z)
+    kPropSiloTank5 = 1u << 9,        // silo, Silo Capacity V: a fourth one, (-x, -z)
 };
 
 struct PropRequest {

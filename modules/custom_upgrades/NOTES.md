@@ -277,7 +277,7 @@ EventSystem), pad A / B and the d-pad / stick.
 
 ## Silo capacity tiers
 
-Storage per silo slot: 100 -> 200 (vanilla) -> 300 -> 400 -> 500 (ours).
+Storage per silo slot: 100 -> 200 (vanilla) -> 300 -> 400 -> 500 -> 600 (ours).
 
 - **Vanilla** (prefab `patchSilo` read with UnityPy, disassembly): one `SiloStorage` with 12 slot
   definitions, all `SiloNonSlimes` (`_maxAmount` 100). STORAGE2 / 3 / 4 (500 / 575 / 650) only swap
@@ -286,10 +286,10 @@ Storage per silo slot: 100 -> 200 (vanilla) -> 300 -> 400 -> 500 (ours).
   `scriptableobjectlookupdata_assets_all_*` bundle) runs `AmmoSlotManager.UpdateMaxCount(
   StorageCapacityUpgradeAmount = 200)` (`StorageUpgrader.Apply` 0x996E30) and shows the four
   `CapacityUpgrade1..4` parts. So vanilla has one capacity tier, 100 -> 200.
-- **Ours:** Silo Capacity II / III / IV (`0x53520060..62`, keys `silo_capacity_2..4`), 300 / 400 / 500
-  per slot, **3000 / 4500 / 6500**. A tier chain on the vanilla Storage Capacity card: once that is
-  owned the card shows Silo Capacity II, then III, then IV (greyed with the checkmark when all are
-  owned); `ChainVanillaRoot` gives every tier of a chain that starts on a vanilla upgrade that
+- **Ours:** Silo Capacity II / III / IV / V (`0x53520060..63`, keys `silo_capacity_2..5`), 300 / 400 /
+  500 / 600 per slot, **3000 / 4500 / 6500 / 9000** (V added in round 4: "add tier V, 600"). A tier
+  chain on the vanilla Storage Capacity card: once that is owned the card shows Silo Capacity II, then
+  III, IV, V (greyed with the checkmark when all are owned); `ChainVanillaRoot` gives every tier of a chain that starts on a vanilla upgrade that
   upgrade's card (before, only the first tier took it over). Icon = the vanilla Storage Capacity icon
   (no own sprite).
 - **Prices:** vanilla pays 1800 for +100 per slot (12 slots = +1200 items, 1.5 Newbucks per slot
@@ -306,6 +306,16 @@ Storage per silo slot: 100 -> 200 (vanilla) -> 300 -> 400 -> 500 (ours).
   lower max (between a load and the next tick, module off / faulted, or a mod-free load) leaves the
   contents above it in the silo; it just takes nothing more until they are below (logged as a warning
   with the count over the limit when we lower it).
+- **One "Additional Storage" card** (round 4: "merge additional storage to 1 buy menu option, I don't
+  want to scroll to upgrade it"). Vanilla lists three cards with the same title and icon, `Storage2 /
+  3 / 4 Upgrade` (STORAGE2 / 3 / 4 = upgrades 3 / 4 / 5, one more storage section and port each;
+  STORAGE3 / 4 hidden until the one before is owned, owned ones stay greyed). `MergeStorageCards`
+  keeps one of them in the silo's list, the first section not owned yet (STORAGE4 greyed once all
+  are owned), the others go out as hidden vanilla cards at their vanilla index (back for other plots /
+  module off, like a tier card's vanilla card). The capacity side was already one card (Storage
+  Capacity -> II -> ... -> V). So the silo menu has two storage cards: Additional Storage (more
+  sections) and Storage Capacity (more per slot); they are different upgrades with different
+  purchases, so they stay two cards.
 - **Not sellable**, like the vanilla silo storage upgrades: `CanSell` gives the same permanent reason
   ("silo storage"), so sell_upgrades shows no Sell button and no alt-action prompt.
 
@@ -313,9 +323,16 @@ Storage per silo slot: 100 -> 200 (vanilla) -> 300 -> 400 -> 500 (ours).
   vanilla capacity upgrade shows one `techSiloCapacity` tank per owned storage section, high on the
   silo's diagonals (`Capacity Addon 0..3`, plot-local about (-1.6, 3.3, -1.8) for section 0, each next
   section turned 90 degrees and ~0.8 m higher). Our tiers add the same tank (0.8 size) standing on the
-  ground on a diagonal at (+-2.9, +-2.9): II (+x, +z), III also (-x, +z), IV also (+x, -z), each turned
-  like the vanilla tank on that diagonal (19.6 + k * 90 degrees). The (-x, -z) diagonal stays free (plot
-  menu terminal outside it, section 0's low pipes). Clearances: silo wall r 2.1, vanilla pipe elbows /
+  ground on a diagonal at (+-2.9, +-2.9): II (+x, +z), III also (-x, +z), IV also (+x, -z), V also
+  (-x, -z), each turned like the vanilla tank on that diagonal (19.6 + k * 90 degrees). Every diagonal
+  has the same low pipes (each section's Addition is section 0's layout turned 90 degrees), the plot
+  menu terminal of the (-x, -z) corner stands outside the fence, 3.7 m from tank V.
+- **Collision** (round 4: "the silo tank props need collision"). The tank props keep the prefab's
+  colliders (`SolidKind` in plot_props: the `collider` child's MeshCollider and the foot plate's
+  MeshCollider), on their prefab layer, Default, the layer of the vanilla tanks and pipes; game
+  scripts, joints and rigidbodies are still stripped, so they are static colliders. The player walks
+  around them; the vac and drones treat them like the vanilla tank (which they already pass). Build
+  log: `SiloTankII props built on plot '...' (1 of 1 piece(s), colliders kept)`. Clearances: silo wall r 2.1, vanilla pipe elbows /
   caps r <= 3.05 (>= 1.37 m from a tank centre), depositors in the middle of each side, corner posts at
   4.75, the Sell-All button outside the (+x, -z) corner. Built by `plot_props` (holders
   `sr2props_SiloTankII..IV#<gen>`), gone when the tier is not owned / the module is off, rebuilt
@@ -357,7 +374,7 @@ coop_world's scan would destroy), stripped of colliders, joints, rigidbodies and
 | Fast Growth II | a fourth head in the middle of the -x side, turned 180 degrees | same |
 | Music Box II | a second speaker on the (-x, -z) corner post (above the plot menu terminal), leaning inwards | corral prefab `Music Box/techCorralMusicBox/MusicBox/Music` (the vanilla speaker sits on the (-x, +z) post) |
 | Ash Booster (u11) | glow + embers in the fire, embers rising out of the opening | incinerator prefab `.../meshIncinerator/FireTest/Glow` and `/Embers` (inactive in vanilla, switched on), decoration `decorFireFlower`: `FX Fireflower` |
-| Silo Capacity II / III / IV | one capacity tank per tier standing on the ground beside the silo: II (+x, +z), III adds (-x, +z), IV adds (+x, -z) | silo prefab `Silo Upgrade 0/Addition 0/Capacity Addon 0/techSiloCapacity` (the vanilla Storage Capacity Upgrade's tank, with its pipe-connector foot) at 0.8 size |
+| Silo Capacity II / III / IV / V | one capacity tank per tier standing on the ground beside the silo: II (+x, +z), III adds (-x, +z), IV adds (+x, -z), V adds (-x, -z); solid (colliders kept) | silo prefab `Silo Upgrade 0/Addition 0/Capacity Addon 0/techSiloCapacity` (the vanilla Storage Capacity Upgrade's tank, with its pipe-connector foot) at 0.8 size |
 
 Gadget / toy prefabs are found by prefab name in `LookupDirector._gadgetDefinitions` /
 `_toyDefinitions` (member types, then sub-groups). A missing model is logged once

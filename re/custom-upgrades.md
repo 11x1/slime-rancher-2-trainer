@@ -484,8 +484,8 @@ Original plan:
   (0xA6E530, load) copies Count with `set_Count` (0xA3C110, no clamp). `ValidateAndAdjustSlots`
   (0xA3AC00) resizes the slot array to the definitions and clears slots whose type is not allowed,
   never a count. So a max below the contents never deletes anything.
-* Built: Silo Capacity II / III / IV (`0x5352_0060..62`), 300 / 400 / 500 per slot, 3000 / 4500 /
-  6500, a chain on the vanilla Storage Capacity card (`ChainVanillaRoot`). The world tick applies
+* Built: Silo Capacity II / III / IV / V (`0x5352_0060..63`), 300 / 400 / 500 / 600 per slot, 3000 /
+  4500 / 6500 / 9000, a chain on the vanilla Storage Capacity card (`ChainVanillaRoot`). The world tick applies
   the owned tier per silo (`GameModel.GetLandPlotModel(id).gameObj` -> LandPlot -> StorageUpgrader ->
   StorageSilo -> LocalAmmo, only while its `_ammoModel` exists), module off / fault puts the vanilla
   value back. Unsellable (same reason as the vanilla silo storage upgrades). Details:
@@ -627,7 +627,7 @@ Original research:
     `alt-action sell: prefab ... label via ...`), which key the altSubmit event has on keyboard
     (the hint shows it; the event name is logged), and whether the plot categories have an
     `altDetailsButton` at all.
-* **Silo Capacity II-IV** (`0x5352_0060..62`) are a tier chain too (section 2.2b); every tier of a
+* **Silo Capacity II-V** (`0x5352_0060..63`) are a tier chain too (section 2.2b); every tier of a
   chain that starts on a vanilla upgrade now shows on that upgrade's card (`ChainVanillaRoot`).
 * **2b.2 as built:** prices/multipliers as proposed below, ids `0x5352_0013..0040` (Plort
   Collector II / III and Auto-Feeder II, `0x5352_0010..0012`, were retired), one menu card per
