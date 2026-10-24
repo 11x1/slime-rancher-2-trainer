@@ -21,7 +21,8 @@ struct Presence {
     std::string state;         // second line ("On the ranch", "Exploring")
     std::string extra;         // appended to the second line (" · 12,345 Newbucks"); a change of only this
                                // is minor and goes out at most every 20 s, so it never delays an area change
-    int64_t start = 0;         // unix seconds the save was loaded (0 = no timer)
+    int64_t start = 0;         // unix seconds the save was loaded, fixed for the save (0 = no timer); sent as
+                               // timestamps.start in ms, and Discord counts the timer up from it by itself
     int displayType = 0;       // activity.status_display_type: 0 app name, 1 state, 2 details (member list)
 
     bool operator==(const Presence&) const = default;

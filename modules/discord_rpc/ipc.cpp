@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <deque>
@@ -98,8 +99,15 @@ int g_sendNext = 0;                               // oldest entry = the next one
 bool g_noDisplayType = false; // Discord refused status_display_type once: leave it out from then on
 bool g_noAssets = false;      // Discord refused the image URL once: leave the assets out from then on
 bool g_resend = false;        // send the current presence again (after dropping a refused field)
-// Unanswered SET_ACTIVITY commands in send order (Discord answers in order): send tick + what it shows.
-std::deque<std::pair<unsigned long long, std::string>> g_pending;
+// Unanswered SET_ACTIVITY commands in send order (Discord answers in order): send tick, what it shows, and the
+// timestamps.start sent (unix milliseconds, 0 = none) to compare with Discord's echo.
+struct Pending {
+    unsigned long long first = 0;
+    std::string second;
+    int64_t startMs = 0;
+};
+std::deque<Pending> g_pending;
+int64_t g_echoStartMs = -1;   // the timestamps.start Discord last echoed (logged when it changes)
 std::string g_shownKey;       // what Discord last confirmed (PresenceKey), logged when it changes
 bool g_shownOk = false;       // the last answer was a success
 
@@ -185,6 +193,7 @@ void Disconnect() {
     g_pipeIndex = -1;
     g_connectedId.clear();
     g_pending.clear();
+    g_echoStartMs = -1;
 }
 
 bool WriteAll(const void* data, DWORD size) {
@@ -304,9 +313,12 @@ bool SendActivity(const Presence* p) {
         const std::string details = Clip(p->details), state = Clip(p->state + p->extra);
         if (details.size() >= 2) act.set("details", json::Value(details));  // Discord wants 2..128 characters
         if (state.size() >= 2) act.set("state", json::Value(state));
+        act.set("type", json::Value(0.0));  // Playing: the type whose card shows timestamps.start as a running timer
         if (p->start > 0) {
+            // A fixed point in time, not an elapsed value: Discord's client counts the timer up by itself from it,
+            // so it runs between updates. Milliseconds, the documented unit (seconds are converted by Discord too).
             json::Value ts = json::Value::Object();
-            ts.set("start", json::Value(static_cast<double>(p->start)));
+            ts.set("start", json::Value(static_cast<double>(p->start) * 1000.0));
             act.set("timestamps", std::move(ts));
         }
         if (!g_noAssets) {
@@ -327,7 +339,7 @@ bool SendActivity(const Presence* p) {
     cmd.set("args", std::move(args));
     cmd.set("nonce", json::Value(std::to_string(++g_nonce)));
     if (!WriteFrame(kFrame, Compact(cmd))) return false;
-    g_pending.emplace_back(GetTickCount64(), PresenceKey(p));
+    g_pending.push_back(Pending{GetTickCount64(), PresenceKey(p), p && p->start > 0 ? p->start * 1000 : 0});
     return true;
 }
 
@@ -341,8 +353,10 @@ void HandleReply(const std::string& payload) {
     }
     const bool activity = doc["cmd"].asString() == "SET_ACTIVITY";
     std::string key;
+    int64_t sentStartMs = 0;
     if (activity && !g_pending.empty()) {
         key = std::move(g_pending.front().second);
+        sentStartMs = g_pending.front().startMs;
         g_pending.pop_front();
     }
     if (doc["evt"].asString() == "ERROR") {
@@ -363,6 +377,18 @@ void HandleReply(const std::string& payload) {
         }
     } else if (activity) {
         if (!g_shownOk || key != g_shownKey) SR2_INFO("[{}] Discord shows: {}", kModule, key);
+        // The echoed activity: is the timer's start what was sent? Logged when it changes, warned when it differs.
+        const json::Value& echoTs = doc["data"]["timestamps"]["start"];
+        const int64_t echoMs = echoTs.isNumber() ? echoTs.asInt() : 0;
+        if (echoMs != g_echoStartMs) {
+            g_echoStartMs = echoMs;
+            if (sentStartMs > 0 && (echoMs <= 0 || std::llabs(echoMs - sentStartMs) > 1000))
+                SR2_WARN("[{}] Discord's echo has timestamps.start {} but {} was sent: the timer may not count", kModule,
+                         echoMs, sentStartMs);
+            else if (echoMs > 0)
+                SR2_INFO("[{}] Discord counts the timer from timestamps.start {} (unix ms, fixed for this save)", kModule,
+                         echoMs);
+        }
         g_shownKey = std::move(key);
         g_shownOk = true;
         g_lastError.clear();
