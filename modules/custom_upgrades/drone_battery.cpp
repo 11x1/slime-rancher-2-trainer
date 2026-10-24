@@ -26,6 +26,7 @@ constexpr const char* kImage = "Assembly-CSharp";
 constexpr float kTickSeconds = 2.0f;  // refund interval (real time)
 constexpr double kSecondsPerHour = 3600.0;
 constexpr float kMinRefund = 0.01f;   // energy units (max 1000)
+constexpr float kSummarySeconds = 60.0f;  // one summary line a minute (real time)
 
 template <class T>
 T Unbox(Il2CppObject* boxed, T def = T{}) {
@@ -193,6 +194,12 @@ void BatterySaver::Tick(float unscaledDt) {
     bool okTime = false;
     const double now = Unbox<double>(Call(worldTime_, td, nullptr, "TimeDirector.WorldTime", &okTime));
     if (!okTime || !std::isfinite(now)) return;
+    summaryTimer_ += kTickSeconds;
+    const bool summary = summaryTimer_ >= kSummarySeconds;
+    if (summary) summaryTimer_ = 0.0f;
+    double summaryTotal = 0.0;
+    int summaryStations = 0;
+    std::string summaryList;
     for (size_t i = 0, n = unity::ListCount(list); i < n && i < 256; ++i) {
         auto* model = static_cast<Il2CppObject*>(unity::ListAt(list, i));
         if (!IsA(model, stationModelClass_)) continue;
@@ -201,17 +208,24 @@ void BatterySaver::Tick(float unscaledDt) {
         auto [it, fresh] = looks_.try_emplace(station);
         Look& look = it->second;
         const double t0 = look.time;
-        look.time = now;
-        if (fresh || now < t0) continue;  // first look (or time went back): nothing to compare yet
+        if (fresh || now < t0) {  // first look (or time went back): nothing to compare yet
+            look.time = now;
+            continue;
+        }
         if (level != look.level) {
             if (level > 0)
                 SR2_INFO("[{}] battery saver: station {}: {} active (battery drain x{:.2f})", module_, station,
                          BatteryLevelName(level), 1.0f / kBatteryFactor[level]);
             look.level = level;
+            look.first = true;
+            look.time = now;
             continue;  // the new factor counts from this look on
         }
         const double dt = now - t0;
-        if (level <= 0 || dt <= 0.0) continue;
+        if (level <= 0 || dt <= 0.0) {
+            look.time = now;
+            continue;
+        }
         Il2CppObject* obs = unity::Field<Il2CppObject*>(model, offDeplete_);
         if (!obs) continue;
         if (!offObsValue_) {  // ObservableValue<double>._value: a field of the inflated class
@@ -225,15 +239,39 @@ void BatterySaver::Tick(float unscaledDt) {
         }
         const double deplete = unity::Field<double>(obs, offObsValue_);
         const double left0 = deplete - t0;  // battery seconds at the last look
-        if (!std::isfinite(deplete) || left0 <= 0.0) continue;  // was already empty
+        if (!std::isfinite(deplete) || left0 <= 0.0) {  // was already empty
+            look.time = now;
+            continue;
+        }
         const double left1 = std::max(0.0, left0 - dt / kBatteryFactor[level]);
         const double vanilla = std::max(0.0, deplete - now);
         float refund = static_cast<float>((left1 - vanilla) / kSecondsPerHour * rate);
-        if (!(refund > kMinRefund)) continue;
-        void* addArgs[] = {td, &rate, &refund};
-        Call(addEnergy_, model, addArgs, "DroneStationGadgetModel.AddEnergy", &ok);
-        if (!ok || sr2::core::ModuleFaulted(module_)) return;
+        const double before = vanilla / kSecondsPerHour * rate;
+        if (refund > kMinRefund) {  // else t0 stays: the refund grows until it is worth adding
+            void* addArgs[] = {td, &rate, &refund};
+            Call(addEnergy_, model, addArgs, "DroneStationGadgetModel.AddEnergy", &ok);
+            if (!ok || sr2::core::ModuleFaulted(module_)) return;
+            look.time = now;
+            look.refunded += refund;
+            if (look.first) {
+                look.first = false;
+                const double after = std::max(0.0, unity::Field<double>(obs, offObsValue_) - now) / kSecondsPerHour * rate;
+                SR2_INFO("[{}] battery saver: station {}: first refund +{:.2f} energy for {:.0f} world s (battery {:.1f} -> "
+                         "{:.1f} of 1000)", module_, station, refund, dt, before, after);
+            }
+        }
+        if (summary) {
+            summaryTotal += look.refunded;
+            ++summaryStations;
+            const double cur = std::max(0.0, unity::Field<double>(obs, offObsValue_) - now) / kSecondsPerHour * rate;
+            summaryList += std::format("{}{} +{:.1f} (battery {:.0f})", summaryList.empty() ? "" : ", ", station,
+                                       look.refunded, cur);
+            look.refunded = 0.0;
+        }
     }
+    if (summary && level > 0 && summaryStations > 0)
+        SR2_INFO("[{}] battery saver: {} gave back {:.1f} energy to {} station(s) in the last {:.0f} s: {}", module_,
+                 BatteryLevelName(level), summaryTotal, summaryStations, kSummarySeconds, summaryList);
 }
 
 }  // namespace sr2::modules::custom_upgrades::drones
