@@ -5,6 +5,8 @@
 //   upgrade            levels  effect (stacks on the maxed vanilla upgrade)        shown once
 //   Tank Booster IX-XII  4     +25 / +50 / +75 / +100 items per slot (125..200)    Tank Booster VIII owned
 //   Extra Tank III-IV    2     a 7th / 8th vacpack slot                            Extra Tank II owned
+//   Drone Battery Saver  4     every drone station's drone uses 1/1.25 .. 1/2 of   Drone Station blueprint
+//     I-IV                     the battery (effect: drone_battery.cpp)             owned
 //
 // Each is a clone of the vanilla "AmmoCapacity" UpgradeDefinition (Object.Instantiate: its levels,
 // effects, costs and texts are deep copies) with its own _uniqueId in the custom range, appended to
@@ -24,6 +26,8 @@
 
 #include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 
 struct Il2CppObject;
 
@@ -33,6 +37,12 @@ class ModuleContext;
 
 namespace sr2::modules::custom_upgrades::vacpack {
 
+// Per-save value of the Drone Battery Saver: the owned level, 0-based ("" = none).
+inline constexpr const char* kDroneBatteryKey = "custom_upgrades.vacpack.drone_battery";
+// Old builds sold the Battery Saver per drone station: "<prefix><actor id>" = tier 1..4. Migrated
+// once into the global level (the highest tier wins) and then erased.
+inline constexpr const char* kOldBatteryPrefix = "drone_battery.station.";
+
 // What the vacpack upgrades need from module.cpp.
 struct Host {
     std::function<bool()> on;         // module enabled, not faulted
@@ -40,6 +50,12 @@ struct Host {
     std::function<std::string(const std::string&)> value;                 // per-save value (sidecar)
     std::function<bool(const std::string&, const std::string&)> setValue;
     std::function<Il2CppObject*()> lookup;                                // LookupDirector
+    // Per-save values whose key starts with the prefix (key, value).
+    std::function<std::vector<std::pair<std::string, std::string>>(const std::string&)> valuesWithPrefix;
+    // Drone Battery Saver: the Drone Station GadgetDefinition (icon, pedia entry; nullptr = unknown)
+    // and whether its blueprint is owned (1 / 0, -1 = unknown: the card is shown). Optional.
+    std::function<Il2CppObject*()> droneStation;
+    std::function<int()> droneBlueprint;
 };
 
 class VacpackUpgrades {
@@ -58,6 +74,9 @@ public:
     void Cleanup(const char* why);
     // Save game loaded / new game started (before the game builds the new player model).
     void Reset();
+
+    // Main thread: the owned Drone Battery Saver level, 0 (none / no save / off) .. 4.
+    int DroneBatteryLevel() const;
 
 private:
     bool ready_ = false;

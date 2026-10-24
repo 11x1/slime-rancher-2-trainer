@@ -85,13 +85,18 @@ struct LevelSpec {
     int newbucks;  // first currency cost
     const char* title;
 };
+enum class Kind {
+    kCapacity,      // ADD on AmmoLimit (as cloned)
+    kSlots,         // ADD on AmmoSlotsAvailable
+    kDroneBattery,  // no vacpack effect (ADD 0); drone_battery.cpp reads the level
+};
 struct Spec {
     int32_t id;         // our _uniqueId (custom range, never a vanilla id)
     const char* key;    // per-save value: the owned level (0-based), "" = none
     const char* name;   // asset name suffix / log
-    int32_t parentId;   // vanilla upgrade this one continues (shown once that is maxed)
+    int32_t parentId;   // vanilla upgrade this one continues (shown once that is maxed); 0 = none
     int firstTemplate;  // AmmoCapacity level whose costs (refinery items) our first level copies
-    bool slots;         // targets AmmoSlotsAvailable (else AmmoLimit, as cloned)
+    Kind kind;
     int levels;
     LevelSpec level[4];
 };
@@ -101,21 +106,34 @@ struct Spec {
 // 1-3 of) and cost 60k-120k Newbucks (vanilla VIII: 50k); Extra Tank III-IV keep the amounts and cost
 // 25k / 50k (vanilla Extra Tank II: 5k, but a slot is worth more than +25 per slot this late). No
 // upgrade components (see CreateDefs).
+// Drone Battery Saver I-IV (global, every station): half of Tank Booster V-VIII, both the Newbucks
+// (7.5k / 10k / 15k / 25k) and the refinery items (rounded up). Old builds sold it per station for
+// 1.5k-7.5k Newbucks (17k for one station's IV); one global purchase now covers every station, so it
+// costs about as much as three stations did, and the items put it in the late game next to the drone
+// stations themselves. Less fuel is its only gain, so it stays well below the vac upgrades.
 const Spec kSpecs[] = {
     {custom_upgrades::kIdBase + 0x0101, "custom_upgrades.vacpack.tank_booster", "TankBoosterPlus", kVanillaCapacityId, 4,
-     false, 4,
+     Kind::kCapacity, 4,
      {{25.0f, 60000, "Tank Booster IX"},
       {50.0f, 75000, "Tank Booster X"},
       {75.0f, 90000, "Tank Booster XI"},
       {100.0f, 120000, "Tank Booster XII"}}},
-    {custom_upgrades::kIdBase + 0x0102, "custom_upgrades.vacpack.extra_tank", "ExtraTankPlus", kVanillaSlotsId, 6, true, 2,
-     {{1.0f, 25000, "Extra Tank III"}, {2.0f, 50000, "Extra Tank IV"}, {}, {}}},
+    {custom_upgrades::kIdBase + 0x0102, "custom_upgrades.vacpack.extra_tank", "ExtraTankPlus", kVanillaSlotsId, 6,
+     Kind::kSlots, 2, {{1.0f, 25000, "Extra Tank III"}, {2.0f, 50000, "Extra Tank IV"}, {}, {}}},
+    {custom_upgrades::kIdBase + 0x0103, kDroneBatteryKey, "DroneBatterySaver", 0, 4, Kind::kDroneBattery, 4,
+     {{1.25f, 7500, "Drone Battery Saver I"},
+      {1.5f, 10000, "Drone Battery Saver II"},
+      {1.75f, 15000, "Drone Battery Saver III"},
+      {2.0f, 25000, "Drone Battery Saver IV"}}},
 };
 constexpr int kSpecCount = static_cast<int>(sizeof(kSpecs) / sizeof(kSpecs[0]));
 
 int ScaleAmount(const Spec& s, int amount) {
-    if (s.slots) return amount;
-    return amount <= 5 ? amount + 2 : amount * 2;
+    switch (s.kind) {
+        case Kind::kSlots: return amount;
+        case Kind::kDroneBattery: return std::max(1, (amount + 1) / 2);
+        default: return amount <= 5 ? amount + 2 : amount * 2;
+    }
 }
 
 using WBarrierFn = void (*)(Il2CppObject*, void**, void*);
@@ -159,6 +177,7 @@ struct State {
 
     size_t offUmDefs = 0, offUmLevels = 0;
     size_t offUdIcon = 0, offUdId = 0, offUdPedia = 0, offUdLevels = 0;
+    size_t offUdNeedsComponent = 0;  // _requireComponentToBeVisibleToPlayer (optional)
     size_t offPsDefs = 0, offPsModel = 0, offPsAmmo = 0;
     size_t offAmModel = 0, offAmodelSlots = 0;
     size_t offSlotId = 0, offSlotCount = 0;
@@ -200,7 +219,9 @@ struct State {
     int vanillaSlotCount = 0;
     Il2CppObject* restoredAmmo = nullptr;  // AmmoModel whose extra slots were refilled (identity only)
     bool applying = false;                 // our own SetUpgradeLevel calls: not a purchase
-    bool loggedNoSlots = false;
+    bool loggedNoSlots = false, loggedNoBlueprint = false;
+    bool batteryArt = false;  // the battery saver card has the Drone Station's icon / pedia entry
+    bool migrated = false;    // old per-station battery tiers checked for this save
 };
 
 State g;
@@ -428,7 +449,9 @@ bool CreateDefs(Il2CppObject* items) {
             LevelCount(def) != s.levels)
             return false;
         unity::Field<int32_t>(def, g.offUdId) = s.id;
-        if (s.slots) {
+        // Ours cost no upgrade component (below), so a component must not be needed to see the card.
+        if (g.offUdNeedsComponent) unity::Field<bool>(def, g.offUdNeedsComponent) = false;
+        if (s.kind == Kind::kSlots) {
             SetRef(def, g.offUdIcon, unity::Field<Il2CppObject*>(slots, g.offUdIcon));
             SetRef(def, g.offUdPedia, unity::Field<Il2CppObject*>(slots, g.offUdPedia));
         }
@@ -439,8 +462,10 @@ bool CreateDefs(Il2CppObject* items) {
             if (!mod) return false;
             Il2CppObject* effects = unity::Field<Il2CppObject*>(lvl, g.offUlEffects);
             ListRemoveRange(effects, 1, static_cast<int32_t>(unity::ListCount(effects)) - 1);  // vanilla has one
-            if (s.slots) SetRef(mod, g.offModTarget, slotProp);
-            unity::Field<float>(mod, g.offModValue) = s.level[k].value;
+            if (s.kind == Kind::kSlots) SetRef(mod, g.offModTarget, slotProp);
+            // The battery saver changes nothing on the vacpack: ADD 0 on AmmoLimit (the level's effect
+            // list stays as the game expects it, one modifier).
+            unity::Field<float>(mod, g.offModValue) = s.kind == Kind::kDroneBattery ? 0.0f : s.level[k].value;
             // costs: Newbucks, refinery items, upgrade component
             char* pc = reinterpret_cast<char*>(lvl) + g.offUlCosts;
             void* currency = *reinterpret_cast<void**>(pc + g.offPcCurrency);
@@ -466,7 +491,12 @@ bool CreateDefs(Il2CppObject* items) {
             // texts
             std::string title = s.level[k].title;
             std::string desc;
-            if (s.slots) {
+            if (s.kind == Kind::kDroneBattery) {
+                const float f = s.level[k].value;
+                desc = std::format("Quantum power cells for your ranch drones: every drone station's drone uses {}% of its "
+                                   "normal battery, so a full charge lasts {:g}x as long.",
+                                   static_cast<int>(std::lround(100.0f / f)), f);
+            } else if (s.kind == Kind::kSlots) {
                 const int slot = 6 + static_cast<int>(s.level[k].value);
                 desc = std::format("Squeezes a {}th tank onto your vacpack. It has no number key: scroll to it or use the "
                                    "next / previous slot buttons.",
@@ -483,7 +513,8 @@ bool CreateDefs(Il2CppObject* items) {
             if (d) text_override::Set(d, desc);
             costLog += std::format(" | {}: {} Newbucks + {}", title, s.level[k].newbucks, paid.empty() ? "nothing" : paid);
         }
-        g.ours[si] = {&s, def, s.parentId == kVanillaCapacityId ? cap : slots, LevelCount(s.parentId == kVanillaCapacityId ? cap : slots)};
+        Il2CppObject* parent = s.parentId == kVanillaCapacityId ? cap : s.parentId == kVanillaSlotsId ? slots : nullptr;
+        g.ours[si] = {&s, def, parent, LevelCount(parent)};
         SR2_INFO("[{}] vacpack: {} ready (id 0x{:X}, {} level(s)){}", kModule, s.name, s.id, s.levels, costLog);
     }
     SR2_INFO("[{}] vacpack: Tank Booster VIII = {} per slot (AmmoLimit default {} + {}); ours add 25 per level", kModule,
@@ -503,7 +534,7 @@ int InsertOurs(Il2CppObject* items) {
     int added = 0;
     for (const Ours& o : g.ours) {
         if (!o.def || ListIndexOf(items, o.def) >= 0) continue;
-        const int32_t at = ListIndexOf(items, o.parent);
+        const int32_t at = o.parent ? ListIndexOf(items, o.parent) : -1;  // no parent: at the end
         const int32_t n = static_cast<int32_t>(unity::ListCount(items));
         if (ListInsert(items, at >= 0 ? at + 1 : n, o.def)) ++added;
     }
@@ -520,10 +551,19 @@ int RemoveOurs(Il2CppObject* items) {
 }
 
 // The Fabricator shows our card once the vanilla upgrade it continues is maxed (or ours is owned).
+// The Drone Battery Saver once the Drone Station blueprint is owned (unknown = shown).
 bool Unlocked(const Ours& o, Il2CppObject* upgrades) {
     Il2CppObject* dict = upgrades ? unity::Field<Il2CppObject*>(upgrades, g.offUmLevels) : nullptr;
     if (!dict) return false;
     if (DictGet(dict, o.spec->id) >= 0) return true;
+    if (o.spec->kind == Kind::kDroneBattery) {
+        const int bp = g.host.droneBlueprint ? g.host.droneBlueprint() : -1;
+        if (bp < 0 && !g.loggedNoBlueprint) {
+            g.loggedNoBlueprint = true;
+            SR2_INFO("[{}] vacpack: Drone Station blueprint unknown - the Drone Battery Saver card is shown", kModule);
+        }
+        return bp != 0;
+    }
     return o.parentLevels > 0 && DictGet(dict, o.spec->parentId) >= o.parentLevels - 1;
 }
 
@@ -532,6 +572,63 @@ int DesiredLevel(const Ours& o) {
     int lvl = -1;
     if (!v.empty()) std::from_chars(v.data(), v.data() + v.size(), lvl);
     return std::clamp(lvl, -1, o.spec->levels - 1);
+}
+
+// ---- Drone Battery Saver ----
+
+// A field of the object's class or one of its parents (0 = not found).
+size_t FieldOff(Il2CppObject* obj, const char* name) {
+    const auto& a = api();
+    for (Il2CppClass* c = unity::ClassOf(obj); c; c = a.il2cpp_class_get_parent ? a.il2cpp_class_get_parent(c) : nullptr)
+        if (auto o = Resolver::Get().FieldOffset(c, name)) return *o;
+    return 0;
+}
+
+// The card takes the Drone Station gadget's icon and pedia entry (once the scene has its definition).
+void DroneArt() {
+    if (g.batteryArt || !g.host.droneStation) return;
+    const Ours* o = nullptr;
+    for (const Ours& x : g.ours)
+        if (x.spec && x.spec->kind == Kind::kDroneBattery && x.def) o = &x;
+    Il2CppObject* gadget = o ? g.host.droneStation() : nullptr;
+    if (!o || !unity::IsAlive(gadget)) return;
+    g.batteryArt = true;
+    const size_t offIcon = FieldOff(gadget, "icon"), offPedia = FieldOff(gadget, "_pediaLink");
+    Il2CppObject* icon = offIcon ? unity::Field<Il2CppObject*>(gadget, offIcon) : nullptr;
+    Il2CppObject* pedia = offPedia ? unity::Field<Il2CppObject*>(gadget, offPedia) : nullptr;
+    if (unity::IsAlive(icon)) SetRef(o->def, g.offUdIcon, icon);
+    if (unity::IsAlive(pedia)) SetRef(o->def, g.offUdPedia, pedia);
+    SR2_INFO("[{}] vacpack: Drone Battery Saver card uses the '{}' icon ({}) and pedia entry ({})", kModule,
+             unity::GetName(gadget), unity::IsAlive(icon) ? unity::GetName(icon) : std::string("not found, Tank Booster's"),
+             unity::IsAlive(pedia) ? unity::GetName(pedia) : std::string("not found, Tank Booster's"));
+}
+
+// Old builds sold Battery Saver I-IV per drone station ("drone_battery.station.<id>" = 1..4). The
+// highest tier any station owned becomes the global level; the per-station values are erased.
+void MigrateBattery() {
+    if (g.migrated || !g.host.valuesWithPrefix || !g.host.setValue) return;
+    g.migrated = true;
+    const auto old = g.host.valuesWithPrefix(kOldBatteryPrefix);
+    if (old.empty()) return;
+    const Spec* spec = nullptr;
+    for (const Spec& sp : kSpecs)
+        if (sp.kind == Kind::kDroneBattery) spec = &sp;
+    if (!spec) return;
+    int best = 0;
+    for (const auto& [key, value] : old) {
+        int t = 0;
+        std::from_chars(value.data(), value.data() + value.size(), t);
+        best = std::max(best, std::clamp(t, 0, spec->levels));
+        g.host.setValue(key, std::string());
+    }
+    int have = -1;
+    const std::string cur = g.host.value ? g.host.value(spec->key) : std::string();
+    if (!cur.empty()) std::from_chars(cur.data(), cur.data() + cur.size(), have);
+    const int want = std::max(have, best - 1);  // 0-based
+    if (want != have) g.host.setValue(spec->key, std::to_string(want));
+    SR2_INFO("[{}] vacpack: migrated the per-station Battery Saver of an older build: {} station(s), highest tier {} -> "
+             "global {} (saved with the next game save; the other stations' tiers are not refunded)",
+             kModule, old.size(), best, want >= 0 ? spec->level[want].title : "none");
 }
 
 // ---- extra slots ----
@@ -795,6 +892,8 @@ void VacpackUpgrades::Tick() {
             g.createFailed = !g.created;
         }
         if (!g.created) return;
+        DroneArt();
+        MigrateBattery();  // before the saved levels go onto the model
         // The model knows our ids before the list does (ActorUpgradeHandler.SetModifiersFromModel
         // asks GetUpgradeLevel for every listed definition; a missing key would throw).
         for (const Ours& o : g.ours)
@@ -865,7 +964,18 @@ void VacpackUpgrades::Cleanup(const char* why) {
     });
 }
 
-void VacpackUpgrades::Reset() { g.restoredAmmo = nullptr; }
+void VacpackUpgrades::Reset() {
+    g.restoredAmmo = nullptr;
+    g.migrated = false;
+}
+
+int VacpackUpgrades::DroneBatteryLevel() const {
+    if (!ready_ || !On() || !g.host.saveReady || !g.host.saveReady() || !g.host.value) return 0;
+    const std::string v = g.host.value(kDroneBatteryKey);
+    int lvl = -1;
+    if (!v.empty()) std::from_chars(v.data(), v.data() + v.size(), lvl);
+    return std::clamp(lvl + 1, 0, 4);
+}
 
 bool VacpackUpgrades::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& why, std::string& report) {
     Resolver& R = ctx.resolver();
@@ -944,6 +1054,7 @@ bool VacpackUpgrades::Setup(sr2::core::ModuleContext& ctx, Host host, std::strin
         *o = *o >= 2 * sizeof(void*) ? *o - 2 * sizeof(void*) : *o;
     if (propDef)
         if (auto o = R.FieldOffset(propDef, "DefaultValue")) g.offPropDefault = *o;  // texts only (fallback 20)
+    if (auto o = R.FieldOffset(g.upgradeDefClass, "_requireComponentToBeVisibleToPlayer")) g.offUdNeedsComponent = *o;
 
     g.tryGetPlayer = method(scu, "TryGetPlayerState", 1);
     g.getUpgradeModel = method(g.playerModelClass, "GetUpgradeModel", 0);
