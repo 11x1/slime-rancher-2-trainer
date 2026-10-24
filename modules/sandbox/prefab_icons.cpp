@@ -34,6 +34,7 @@ constexpr int kLayer = 31;          // layer the copies are drawn on (camera and
 constexpr size_t kMaxParts = 64;    // renderers copied per prefab
 constexpr float kOriginY = 10000;   // where the copies are built (far above any scene)
 constexpr int kHideDontUnload = 32; // HideFlags.DontUnloadUnusedAsset
+constexpr float kKeyLux = 3.0f;      // the key light's first strength (raised between renders while too dark)
 
 struct V3 {
     float x, y, z;
@@ -138,11 +139,12 @@ struct PrefabIcons::Impl {
                      *camOrthoSize = nullptr, *camNear = nullptr, *camFar = nullptr, *camHdr = nullptr, *camMsaa = nullptr,
                      *camTarget = nullptr, *camRender = nullptr;
     const MethodInfo *lightType = nullptr, *lightIntensity = nullptr, *lightMask = nullptr, *lightColor = nullptr;
-    const MethodInfo *rtCtor = nullptr, *rtCreate = nullptr, *rtRelease = nullptr, *rtGetActive = nullptr,
+    const MethodInfo *rtCtor = nullptr, *rtCtorSrgb = nullptr, *rtCreate = nullptr, *rtRelease = nullptr, *rtGetActive = nullptr,
                      *rtSetActive = nullptr;
     const MethodInfo *texCtor = nullptr, *texRead = nullptr, *texGetPixels = nullptr, *texSetPixels = nullptr,
                      *texApply = nullptr, *spriteCreate = nullptr;
     int failures = 0;
+    std::string lastLook;  // how the last render was lit / levelled (for the caller's log line)
 
     Il2CppObject* Call(const MethodInfo* m, void* obj, std::initializer_list<void*> args, const char* what, bool* ok) {
         if (ok) *ok = false;
@@ -237,6 +239,7 @@ struct PrefabIcons::Impl {
 };
 
 PrefabIcons::PrefabIcons() = default;
+std::string PrefabIcons::LastLook() const { return impl_ ? impl_->lastLook : std::string(); }
 PrefabIcons::~PrefabIcons() { delete impl_; }
 
 bool PrefabIcons::Setup(Resolver& R, const char* module, std::string& why) {
@@ -316,6 +319,8 @@ bool PrefabIcons::Setup(Resolver& R, const char* module, std::string& why) {
     p->lightColor = m(p->lightClass, "set_color", 1);
     p->rtCtor = mp(p->rtClass, ".ctor", {"System.Int32", "System.Int32", "System.Int32"});
     p->rtCreate = m(p->rtClass, "Create", 0);
+    p->rtCtorSrgb = R.MethodByParams(p->rtClass, ".ctor", {"System.Int32", "System.Int32", "System.Int32", "UnityEngine.RenderTextureFormat",
+                                                            "UnityEngine.RenderTextureReadWrite"}, nullptr);  // optional
     p->rtRelease = m(p->rtClass, "Release", 0);
     p->rtGetActive = m(p->rtClass, "get_active", 0);
     p->rtSetActive = m(p->rtClass, "set_active", 1);
@@ -490,18 +495,46 @@ Il2CppObject* PrefabIcons::RenderPieces(const std::vector<Piece>& pieces, const 
     Il2CppObject* camGo = I.NewGameObject("sr2mods_icon_camera");
     Il2CppObject* cam = camGo ? I.AddComponent(camGo, I.cameraClass, "AddComponent(Camera)") : nullptr;
     if (camGo) made.push_back(camGo);
-    Il2CppObject* lightGo = I.NewGameObject("sr2mods_icon_light");
-    Il2CppObject* light = lightGo ? I.AddComponent(lightGo, I.lightClass, "AddComponent(Light)") : nullptr;
-    if (lightGo) made.push_back(lightGo);
+    // Three directional lights (round 9: "rendered icons are very dim"; one 1.15 lux light was all the old render had,
+    // and HDRP lights in lux against the scene's exposure): a key from the front right above, a fill from the front
+    // left below, a rim from behind. Their strength is raised between renders until the image is bright enough.
+    struct LightSpec {
+        V3 to;           // the direction the light shines
+        float strength;  // relative to the key
+        Color color;
+    };
+    static constexpr LightSpec kLights[] = {
+        {{-0.35f, -0.75f, -0.55f}, 1.0f, {1.0f, 0.97f, 0.92f, 1}},   // key
+        {{0.65f, -0.25f, -0.70f}, 0.55f, {0.85f, 0.9f, 1.0f, 1}},    // fill
+        {{0.20f, -0.45f, 0.85f}, 0.7f, {1.0f, 1.0f, 1.0f, 1}},       // rim
+    };
+    int mask = 1 << kLayer;
+    std::vector<Il2CppObject*> lights;
+    for (const LightSpec& ls : kLights) {
+        Il2CppObject* lightGo = I.NewGameObject("sr2mods_icon_light");
+        Il2CppObject* light = lightGo ? I.AddComponent(lightGo, I.lightClass, "AddComponent(Light)") : nullptr;
+        if (lightGo) made.push_back(lightGo);
+        if (!light) continue;
+        int directional = 0;
+        Color c = ls.color;
+        I.Do(I.lightType, light, {&directional}, "Light.set_type");
+        I.Do(I.lightMask, light, {&mask}, "Light.set_cullingMask");
+        I.Do(I.lightColor, light, {&c}, "Light.set_color");
+        I.SetPose(lightGo, center, LookRotation(ls.to), nullptr);
+        lights.push_back(light);
+    }
     Il2CppObject* rt = I.New(I.rtClass);
-    if (!cam || !light || !rt) {
+    if (!cam || lights.empty() || !rt) {
         cleanup();
         why = "could not create the camera / light / render texture";
         ++I.failures;
         return nullptr;
     }
-    int sz = kSize, depth = 24;
-    if (!I.Do(I.rtCtor, rt, {&sz, &sz, &depth}, "RenderTexture..ctor")) {
+    // sRGB colour target where the 5-argument constructor exists (RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB):
+    // the bytes read back are then display values, not linear ones (linear bytes look far too dark).
+    int sz = kSize, depth = 24, argb32 = 0, srgb = 2;
+    const bool srgbTarget = I.rtCtorSrgb && I.Do(I.rtCtorSrgb, rt, {&sz, &sz, &depth, &argb32, &srgb}, "RenderTexture..ctor(sRGB)");
+    if (!srgbTarget && !I.Do(I.rtCtor, rt, {&sz, &sz, &depth}, "RenderTexture..ctor")) {
         cleanup();
         why = "RenderTexture..ctor failed";
         ++I.failures;
@@ -514,7 +547,6 @@ Il2CppObject* PrefabIcons::RenderPieces(const std::vector<Piece>& pieces, const 
     bool no = false, yes = true;
     int clear = 2;  // CameraClearFlags.SolidColor
     Color key{1, 0, 1, 0};
-    int mask = 1 << kLayer;
     float size = radius * 1.04f, nearP = 0.05f, farP = radius * 8.0f + 1.0f;
     I.Do(I.camEnabled, cam, {&no}, "Camera.set_enabled");
     I.Do(I.camClear, cam, {&clear}, "Camera.set_clearFlags");
@@ -527,79 +559,142 @@ Il2CppObject* PrefabIcons::RenderPieces(const std::vector<Piece>& pieces, const 
     I.Do(I.camHdr, cam, {&no}, "Camera.set_allowHDR");
     I.Do(I.camMsaa, cam, {&no}, "Camera.set_allowMSAA");
     I.SetPose(camGo, Add(center, Mul(dir, radius * 4.0f)), LookRotation(Mul(dir, -1.0f)), nullptr);
-    int directional = 0;
-    float intensity = 1.15f;
-    Color white{1, 0.97f, 0.92f, 1};
-    I.Do(I.lightType, light, {&directional}, "Light.set_type");
-    I.Do(I.lightIntensity, light, {&intensity}, "Light.set_intensity");
-    I.Do(I.lightMask, light, {&mask}, "Light.set_cullingMask");
-    I.Do(I.lightColor, light, {&white}, "Light.set_color");
-    I.SetPose(lightGo, center, LookRotation(V3{-0.35f, -0.75f, -0.55f}), nullptr);
+    if (!I.Do(I.camTarget, cam, {rt}, "Camera.set_targetTexture")) {
+        cleanup();
+        why = "Camera.set_targetTexture failed";
+        ++I.failures;
+        return nullptr;
+    }
 
-    bool rendered = I.Do(I.camTarget, cam, {rt}, "Camera.set_targetTexture") && I.Do(I.camRender, cam, {}, "Camera.Render");
-
-    // ---- read back, make the background transparent ----
-    Il2CppObject* tex = rendered ? I.New(I.tex2dClass) : nullptr;
+    Il2CppObject* tex = I.New(I.tex2dClass);
     int fmt = 4;  // TextureFormat.RGBA32
-    bool ok = tex && I.Do(I.texCtor, tex, {&sz, &sz, &fmt, &no}, "Texture2D..ctor");
-    if (ok) {
+    if (!tex || !I.Do(I.texCtor, tex, {&sz, &sz, &fmt, &no}, "Texture2D..ctor")) {
+        Il2CppObject* nullRt = nullptr;
+        I.Do(I.camTarget, cam, {nullRt}, "Camera.set_targetTexture");
+        cleanup();
+        why = "Texture2D..ctor failed";
+        ++I.failures;
+        return nullptr;
+    }
+    // One render + read back at `gain` x the light strengths; the background is marked transparent. nullptr on failure.
+    const size_t n = static_cast<size_t>(kSize * kSize);
+    bool alphaKept = false;
+    auto renderOnce = [&](float gain) -> void* {
+        for (size_t li = 0; li < lights.size(); ++li) {
+            float intensity = kKeyLux * kLights[li].strength * gain;
+            I.Do(I.lightIntensity, lights[li], {&intensity}, "Light.set_intensity");
+        }
+        if (!I.Do(I.camRender, cam, {}, "Camera.Render")) return nullptr;
         bool got = false;
         Il2CppObject* prev = I.Call(I.rtGetActive, nullptr, {}, "RenderTexture.active", &got);
         Rect r{0, 0, static_cast<float>(kSize), static_cast<float>(kSize)};
         int zero = 0;
-        ok = I.Do(I.rtSetActive, nullptr, {rt}, "RenderTexture.set_active") &&
-             I.Do(I.texRead, tex, {&r, &zero, &zero}, "Texture2D.ReadPixels");
+        const bool read = I.Do(I.rtSetActive, nullptr, {rt}, "RenderTexture.set_active") &&
+                          I.Do(I.texRead, tex, {&r, &zero, &zero}, "Texture2D.ReadPixels");
         I.Do(I.rtSetActive, nullptr, {got ? prev : nullptr}, "RenderTexture.set_active");
+        if (!read) return nullptr;
+        void* px = I.Call(I.texGetPixels, tex, {}, "Texture2D.GetPixels32", &got);
+        if (!got || unity::ArrayLength(px) != n) return nullptr;
+        Color32* c = unity::ArrayData<Color32>(px);
+        size_t clearAlpha = 0, opaque = 0;
+        for (size_t i = 0; i < n; ++i) {
+            clearAlpha += c[i].a < 8 ? 1 : 0;
+            opaque += c[i].a > 247 ? 1 : 0;
+        }
+        // The pipeline kept the clear alpha if part of the image is transparent; else key out the magenta.
+        alphaKept = clearAlpha > n / 20 && opaque > 0;
+        for (size_t i = 0; i < n; ++i) {
+            Color32& p = c[i];
+            const bool bg = alphaKept ? p.a < 8 : (p.r > 235 && p.g < 24 && p.b > 235);
+            if (bg) p = Color32{0, 0, 0, 0};
+            else if (!alphaKept) p.a = 255;
+        }
+        return px;
+    };
+    // Brightness of the drawn pixels: the 90th percentile luminance (0..1) and the share of clipped pixels.
+    auto measure = [&](void* px, float& p90, float& clipped, size_t& shown) {
+        Color32* c = unity::ArrayData<Color32>(px);
+        std::vector<uint8_t> lum;
+        lum.reserve(n);
+        size_t hot = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (c[i].a == 0) continue;
+            const uint8_t l = static_cast<uint8_t>((30 * c[i].r + 59 * c[i].g + 11 * c[i].b) / 100);
+            lum.push_back(l);
+            hot += std::max({c[i].r, c[i].g, c[i].b}) > 250 ? 1 : 0;
+        }
+        shown = lum.size();
+        if (lum.empty()) {
+            p90 = clipped = 0.0f;
+            return;
+        }
+        auto k = lum.begin() + static_cast<std::ptrdiff_t>(lum.size() * 9 / 10);
+        std::nth_element(lum.begin(), k, lum.end());
+        p90 = *k / 255.0f;
+        clipped = static_cast<float>(hot) / static_cast<float>(lum.size());
+    };
+    void* px = nullptr;
+    float gain = 1.0f, p90 = 0.0f, clipped = 0.0f;
+    size_t shown = 0;
+    int renders = 0;
+    for (int pass = 0; pass < 3; ++pass) {
+        void* next = renderOnce(gain);
+        if (!next) break;
+        px = next;
+        ++renders;
+        measure(px, p90, clipped, shown);
+        if (shown < 16 || p90 >= 0.6f || clipped > 0.03f) break;
+        // Brighter lights: scaled for p90 ~0.75 (tone mapping makes the response sub-linear, so up to 8x a step).
+        gain *= std::clamp(0.75f / std::max(p90, 0.05f), 1.5f, 8.0f);
     }
     Il2CppObject* nullRt = nullptr;
     I.Do(I.camTarget, cam, {nullRt}, "Camera.set_targetTexture");
     I.Do(I.rtRelease, rt, {}, "RenderTexture.Release");
     cleanup();
-    if (!ok) {
-        why = rendered ? "read back failed" : "Camera.Render failed";
+    if (!px) {
+        why = "Camera.Render / read back failed";
         ++I.failures;
         return nullptr;
-    }
-    bool got = false;
-    void* px = I.Call(I.texGetPixels, tex, {}, "Texture2D.GetPixels32", &got);
-    const size_t n = got ? unity::ArrayLength(px) : 0;
-    if (n != static_cast<size_t>(kSize * kSize)) {
-        why = "no pixels";
-        ++I.failures;
-        return nullptr;
-    }
-    Color32* c = unity::ArrayData<Color32>(px);
-    size_t clearAlpha = 0, opaque = 0;
-    for (size_t i = 0; i < n; ++i) {
-        clearAlpha += c[i].a < 8 ? 1 : 0;
-        opaque += c[i].a > 247 ? 1 : 0;
-    }
-    // The pipeline kept the clear alpha if part of the image is transparent; else key out the magenta.
-    const bool alphaKept = clearAlpha > n / 20 && opaque > 0;
-    size_t shown = 0;
-    for (size_t i = 0; i < n; ++i) {
-        Color32& p = c[i];
-        const bool bg = alphaKept ? p.a < 8 : (p.r > 235 && p.g < 24 && p.b > 235);
-        if (bg) p = Color32{0, 0, 0, 0};
-        else {
-            if (!alphaKept) p.a = 255;
-            if (tint) {
-                // Towards the tint colour, keeping the shading (brightness).
-                const float l = (0.30f * p.r + 0.59f * p.g + 0.11f * p.b) / 255.0f;
-                const float v = std::min(1.0f, l * 1.5f + 0.15f) * 255.0f;
-                auto mix = [v](uint8_t c, float t) {
-                    return static_cast<uint8_t>(std::clamp(c + (t * v - c) * 0.65f, 0.0f, 255.0f));
-                };
-                p.r = mix(p.r, tint[0]), p.g = mix(p.g, tint[1]), p.b = mix(p.b, tint[2]);
-            }
-            ++shown;
-        }
     }
     if (shown < 16 || shown == n) {
         why = shown ? "nothing but background was drawn over" : "nothing was drawn";
         ++I.failures;
         return nullptr;
     }
+    // What the lights could not do: levels on the CPU. A gain puts the 90th percentile near 0.82 (at most 3x), then a
+    // gamma lift brightens the shadows of a still dark image (median under 0.35).
+    Color32* c = unity::ArrayData<Color32>(px);
+    const float levelGain = p90 > 0.0f ? std::clamp(0.82f / p90, 1.0f, 3.0f) : 1.0f;
+    float median = 0.0f;
+    {
+        std::vector<uint8_t> lum;
+        lum.reserve(shown);
+        for (size_t i = 0; i < n; ++i)
+            if (c[i].a) lum.push_back(static_cast<uint8_t>((30 * c[i].r + 59 * c[i].g + 11 * c[i].b) / 100));
+        auto k = lum.begin() + static_cast<std::ptrdiff_t>(lum.size() / 2);
+        std::nth_element(lum.begin(), k, lum.end());
+        median = std::min(1.0f, *k / 255.0f * levelGain);
+    }
+    const float gamma = median > 0.01f && median < 0.35f ? std::clamp(std::log(0.42f) / std::log(median), 0.55f, 1.0f) : 1.0f;
+    uint8_t lut[256];
+    for (int v = 0; v < 256; ++v)
+        lut[v] = static_cast<uint8_t>(std::clamp(std::pow(std::min(1.0f, v / 255.0f * levelGain), gamma) * 255.0f + 0.5f, 0.0f, 255.0f));
+    for (size_t i = 0; i < n; ++i) {
+        Color32& p = c[i];
+        if (!p.a) continue;
+        p.r = lut[p.r], p.g = lut[p.g], p.b = lut[p.b];
+        if (tint) {
+            // Towards the tint colour, keeping the shading (brightness).
+            const float l = (0.30f * p.r + 0.59f * p.g + 0.11f * p.b) / 255.0f;
+            const float v = std::min(1.0f, l * 1.5f + 0.15f) * 255.0f;
+            auto mix = [v](uint8_t ch, float t) {
+                return static_cast<uint8_t>(std::clamp(ch + (t * v - ch) * 0.65f, 0.0f, 255.0f));
+            };
+            p.r = mix(p.r, tint[0]), p.g = mix(p.g, tint[1]), p.b = mix(p.b, tint[2]);
+        }
+    }
+    I.lastLook = std::format("{} render(s), lights x{:.1f}, p90 {:.2f}, levels x{:.2f}, gamma {:.2f}, {} target", renders,
+                             gain, p90, levelGain, gamma, srgbTarget ? "sRGB" : "default");
     bool updateMips = false, noLongerReadable = true;
     if (!I.Do(I.texSetPixels, tex, {px}, "Texture2D.SetPixels32") ||
         !I.Do(I.texApply, tex, {&updateMips, &noLongerReadable}, "Texture2D.Apply")) {
@@ -610,6 +705,7 @@ Il2CppObject* PrefabIcons::RenderPieces(const std::vector<Piece>& pieces, const 
     Rect rect{0, 0, static_cast<float>(kSize), static_cast<float>(kSize)};
     V2 pivot{0.5f, 0.5f};
     float ppu = 100.0f;
+    bool got = false;
     Il2CppObject* spr = I.Call(I.spriteCreate, nullptr, {tex, &rect, &pivot, &ppu}, "Sprite.Create", &got);
     if (!got || !spr) {
         why = "Sprite.Create failed";
