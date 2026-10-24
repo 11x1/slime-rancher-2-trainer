@@ -98,6 +98,7 @@ bool g_prevHotkeyDown = true;  // require a release first (key may be held at st
 bool g_wasOpen = false;
 bool g_softCursor = false;
 bool g_textInputActive = false;  // ImGui text field had focus last frame (render thread)
+std::atomic<bool> g_typing{false};  // the same, for game_input on the main thread
 // io.WantCaptureMouse of the last overlay frame (render thread writes, window
 // thread reads). While open and false (pointer outside the overlay's windows,
 // no ImGui drag, no modal), mouse input goes on to the game, so the game's own
@@ -675,7 +676,8 @@ void RenderFrame() {
         if (momentum) momentum_hud::Draw();
         if (editing) hud_edit::Draw(g_appliedScale);  // outline, handles, guide line (mouse and keys are ours)
         if (open) {
-            if (!editing) hud_edit::Hover(g_appliedScale, g_captureState.load() == 0);  // drag a HUD element: edit mode
+            // Drag a HUD element: edit mode. Not while a game menu (map, pause, inventory) covers the HUD.
+            if (!editing) hud_edit::Hover(g_appliedScale, g_captureState.load() == 0 && !game_input::GameMenuOpen());
             if (!menu::Draw(MakeHost())) overlay::SetOpen(false);
             if (hud_edit::Active()) overlay::SetOpen(false);  // "Move" clicked or element dragged: edit mode
         } else if (hint && !editing) {
@@ -687,6 +689,7 @@ void RenderFrame() {
         }
         ImGui::Render();
         g_textInputActive = io.WantTextInput;
+        g_typing.store(g_textInputActive, std::memory_order_relaxed);
     }
 
     // D3D11 submission on the game's immediate context: a driver / GPU stall shows up here.
@@ -877,7 +880,13 @@ bool CreateAndEnable(const char* name, void* target, void* detour, void** orig, 
     return true;
 }
 
-void OnMainThreadTick(float /*dt*/) { game_input::Tick(Captured() && !g_failed.load()); }
+// The pointer over the overlay (or a text field in use) also keeps the game's menu input
+// (full map, pause menu) and its UI pointer away from the game (game_input.h).
+void OnMainThreadTick(float /*dt*/) {
+    const bool captured = Captured() && !g_failed.load();
+    game_input::Tick(captured, captured && g_imguiWantsMouse.load(std::memory_order_relaxed),
+                     captured && g_typing.load(std::memory_order_relaxed));
+}
 
 }  // namespace
 

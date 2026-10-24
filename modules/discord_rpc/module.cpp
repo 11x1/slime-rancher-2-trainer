@@ -5,7 +5,8 @@
 // Newbucks) and hands a Presence to ipc.cpp. The pipe thread there talks to the
 // Discord client; nothing on the main thread waits for it.
 //
-// Default OFF. Needs a Discord application id (sr2mods.json
+// Default OFF. Uses Slime Rancher 2's own Discord application id by default
+// ("official_app"), else the user's own (sr2mods.json
 // "modules.discord_rpc.application_id", edited on the overlay's Settings page).
 
 #include <windows.h>
@@ -149,6 +150,13 @@ bool DiscordRpc::Setup(sr2::core::ModuleContext& ctx) {
         settings::Def d;
         d.module = kModule;
         d.kind = settings::Kind::Bool;
+        d.key = bridge::kKeyOfficial;
+        d.label = "Show as Slime Rancher 2";
+        d.def = 1;
+        d.tooltip = "Use Slime Rancher 2's own Discord application (its official id), so your profile shows "
+                    "\"Playing Slime Rancher 2\" with the game's icon and you need no application of your own. "
+                    "Off: your own application id below.";
+        settings::Register(d);
         d.key = bridge::kKeyZone;
         d.label = "Show the area";
         d.def = 1;
@@ -158,6 +166,18 @@ bool DiscordRpc::Setup(sr2::core::ModuleContext& ctx) {
         d.label = "Show Newbucks";
         d.def = 0;
         d.tooltip = "Add your current Newbucks to the second line.";
+        settings::Register(d);
+        d.key = bridge::kKeyMemberList;
+        d.label = "Member list shows";
+        d.kind = settings::Kind::Enum;
+        d.def = 1;
+        d.min = 0;
+        d.max = 2;
+        d.step = 1;
+        d.options = {"Game name", "Area", "Activity"};
+        d.tooltip = "What the server member list and the friends list show after \"Playing\": the game's (the "
+                    "application's) name, the first line (the area) or the second line (\"On the ranch\", "
+                    "\"Exploring\"). Needs a recent Discord app; older ones always show the name.";
         settings::Register(d);
     }
 
@@ -217,8 +237,10 @@ bool DiscordRpc::Setup(sr2::core::ModuleContext& ctx) {
 
     if (!frameCb_) frameCb_ = main_thread::AddFrameCallback(kModule, [this](float) { Tick(); });
     if (!frameCb_) return ctx.Fail("could not add the main-thread frame callback");
-    SR2_INFO("[{}] setup ok ({}application id {})", kModule, gameWhy_.empty() ? "" : "game state off, ",
-             settings::GetString(kModule, bridge::kKeyAppId).empty() ? "not set" : "set");
+    SR2_INFO("[{}] setup ok ({}application id: {})", kModule, gameWhy_.empty() ? "" : "game state off, ",
+             settings::GetBool(kModule, bridge::kKeyOfficial)                ? "Slime Rancher 2's own"
+             : settings::GetString(kModule, bridge::kKeyAppId).empty() ? "own, not set"
+                                                                         : "own");
     return true;
 }
 
@@ -269,6 +291,10 @@ bool DiscordRpc::Newbucks(Il2CppObject* player, int& out) {
 
 rpc::Presence DiscordRpc::Read() {
     rpc::Presence p;
+    // Member list: Game name / Area / Activity -> status_display_type 0 name, 2 details, 1 state.
+    static constexpr int kDisplayType[] = {0, 2, 1};
+    const int ml = settings::GetInt(kModule, bridge::kKeyMemberList);
+    p.displayType = kDisplayType[ml < 0 || ml > 2 ? 0 : ml];
     Il2CppObject* player = nullptr;
     bool found = false;
     const bool inGame = gameWhy_.empty() &&

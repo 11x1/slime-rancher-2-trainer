@@ -19,6 +19,7 @@ struct Presence {
     std::string details;       // first line ("In the main menu", the area name)
     std::string state;         // second line ("On the ranch", "Exploring", Newbucks)
     int64_t start = 0;         // unix seconds the save was loaded (0 = no timer)
+    int displayType = 0;       // activity.status_display_type: 0 app name, 1 state, 2 details (member list)
 
     bool operator==(const Presence&) const = default;
 };

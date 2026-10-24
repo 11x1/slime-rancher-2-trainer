@@ -32,6 +32,11 @@ constexpr unsigned long long kRejectedRetryMs = 120000; // application id refuse
 constexpr DWORD kHandshakeMs = 3000;
 constexpr uint32_t kMaxFrame = 64 * 1024;
 constexpr size_t kMaxField = 128;                       // Discord's limit for details / state
+// The large image: Slime Rancher 2's square cover art from its official Discord application
+// (233 x 233; the app icon is only 32 x 32). Discord accepts https URLs as activity assets.
+constexpr const char* kLargeImage =
+    "https://cdn.discordapp.com/app-icons/1124351953024077845/3bcb29b4113fd3799b70218aafe5385d.png?size=512";
+constexpr const char* kLargeText = "Slime Rancher 2";
 
 enum Op : uint32_t { kHandshake = 0, kFrame = 1, kClose = 2, kPing = 3, kPong = 4 };
 
@@ -50,6 +55,9 @@ std::string g_connectedId;
 unsigned long long g_nonce = 0;
 std::string g_lastStatus;     // what was last logged / shown
 std::string g_lastError;      // last ERROR reply logged (one line per distinct message)
+bool g_noDisplayType = false; // Discord refused status_display_type once: leave it out from then on
+bool g_noAssets = false;      // Discord refused the image URL once: leave the assets out from then on
+bool g_resend = false;        // send the current presence again (after dropping a refused field)
 
 void Status(const std::string& text, bridge::Level level, bool log) {
     bridge::SetStatus(text, level);
@@ -195,6 +203,15 @@ bool SendActivity(const Presence* p) {
             ts.set("start", json::Value(static_cast<double>(p->start)));
             act.set("timestamps", std::move(ts));
         }
+        if (!g_noAssets) {
+            json::Value assets = json::Value::Object();
+            assets.set("large_image", json::Value(std::string(kLargeImage)));
+            assets.set("large_text", json::Value(std::string(kLargeText)));
+            act.set("assets", std::move(assets));
+        }
+        // What the member list shows after "Playing" (newer Discord clients; older ones ignore or refuse it).
+        if (!g_noDisplayType && p->displayType > 0)
+            act.set("status_display_type", json::Value(static_cast<double>(p->displayType)));
         args.set("activity", std::move(act));
     } else {
         args.set("activity", json::Value());  // null clears the presence
@@ -223,6 +240,17 @@ bool Poll() {
             std::string perr;
             if (json::Parse(payload, doc, perr) && doc["evt"].asString() == "ERROR") {
                 const std::string msg = doc["data"]["message"].asString("unknown error");
+                if (!g_noDisplayType && msg.find("status_display_type") != std::string::npos) {
+                    g_noDisplayType = true;  // this Discord does not know the field: send without it
+                    g_resend = true;
+                    SR2_INFO("[{}] Discord does not accept status_display_type; the member list shows the app name",
+                             kModule);
+                } else if (!g_noAssets && (msg.find("large_image") != std::string::npos ||
+                                           msg.find("assets") != std::string::npos)) {
+                    g_noAssets = true;  // the image URL was refused: send without the image
+                    g_resend = true;
+                    SR2_INFO("[{}] Discord refused the image; the presence is sent without it", kModule);
+                }
                 if (msg != g_lastError) {
                     g_lastError = msg;
                     SR2_WARN("[{}] Discord refused the presence: {}", kModule, msg);
@@ -248,8 +276,12 @@ DWORD WINAPI Worker(LPVOID) {
             want = g_want;
             version = g_version;
         }
-        const std::string id = Trim(settings::GetString(bridge::kModule, bridge::kKeyAppId));
+        // Slime Rancher 2's own application unless turned off, else the user's id from the card.
+        const bool official = settings::GetBool(bridge::kModule, bridge::kKeyOfficial);
+        const std::string id =
+            official ? std::string(bridge::kOfficialAppId) : Trim(settings::GetString(bridge::kModule, bridge::kKeyAppId));
         const unsigned long long now = GetTickCount64();
+        const bool reconnect = bridge::TakeReconnect();
         auto drop = [&] {
             if (Connected()) {
                 SendActivity(nullptr);
@@ -274,6 +306,13 @@ DWORD WINAPI Worker(LPVOID) {
         if (Connected() && id != g_connectedId) {
             drop();
             nextTry = 0, backoff = kRetryMinMs;
+        }
+        if (reconnect) {  // the card's Reconnect button: drop and try again now, whatever the wait
+            SR2_INFO("[{}] reconnect requested", kModule);
+            drop();
+            rejectedId.clear();
+            nextTry = 0, backoff = kRetryMinMs;
+            g_noDisplayType = g_noAssets = false;
         }
         if (!Connected()) {
             if (!rejectedId.empty() && id != rejectedId) {  // a new id after a refusal: try it at once
@@ -312,6 +351,10 @@ DWORD WINAPI Worker(LPVOID) {
             nextTry = now + kRetryMinMs;
             Status("Discord closed the connection; waiting for it.", bridge::Level::Dim, true);
             continue;
+        }
+        if (g_resend) {  // a field was refused: the next send goes out without it
+            g_resend = false;
+            sentVersion = 0;
         }
         if (have && version != sentVersion && now - lastSend >= kMinSendMs) {
             if (SendActivity(&want)) {
