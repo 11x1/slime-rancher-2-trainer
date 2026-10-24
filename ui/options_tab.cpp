@@ -23,6 +23,7 @@
 #include "core/version_guard.h"
 #include "il2cpp_util.h"
 #include "mod_icons.h"
+#include "discord_bridge.h"
 #include "sandbox_bridge.h"
 #include "settings_view.h"
 
@@ -430,6 +431,8 @@ void RebuildRows() {
     for (const auto& mv : BuildModuleViews()) {
         // Sandbox is turned on only through the overlay's confirmation dialog.
         if (mv.module == sandbox::kModule) continue;
+        // Discord Rich Presence needs its application id, which only the overlay's Settings page edits.
+        if (mv.module == discord::kModule) continue;
         auto add = [&](const settings::Def& d, std::string label, bool indented) {
             if (d.kind == settings::Kind::Key) return;  // overlay-only
             const bool toggle = d.kind == settings::Kind::Bool;

@@ -27,7 +27,11 @@ constexpr const char* kSkipModule = "ui";  // never part of a profile
 // Also never part of a profile: a profile load must not turn on the sandbox,
 // which the overlay only enables after a confirmation dialog.
 constexpr const char* kSandboxModule = "sandbox";
-bool Skipped(std::string_view module) { return module == kSkipModule || module == kSandboxModule; }
+// Discord Rich Presence is personal (it needs your own application id and tells your friends where you are).
+constexpr const char* kDiscordModule = "discord_rpc";
+bool Skipped(std::string_view module) {
+    return module == kSkipModule || module == kSandboxModule || module == kDiscordModule;
+}
 
 // A settings::Snapshot without the modules profiles skip.
 json::Value WithoutSkipped(const json::Value& mods) {

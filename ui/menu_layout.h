@@ -15,13 +15,16 @@
 
 namespace sr2::ui::layout {
 
+// Drawn as its own card on the Settings page (not a tab of its own).
+inline constexpr const char* kDiscordModule = "discord_rpc";
+
 enum class Icon { Movement, World, Hud, Ranch, Misc, Profiles, Settings };
 
 enum class TabKind {
     Module,    // one module's groups as cards (plus nested modules below)
     Cards,     // several small modules, one card each with its own switch
     Profiles,  // the profiles page
-    Settings,  // the overlay's own settings (module "ui") and status
+    Settings,  // the overlay's own settings (module "ui"), status and Discord Rich Presence (module "discord_rpc")
     Sandbox,   // module "sandbox": its own page (resource editor), switch only after a confirmation dialog
     SlimeDj,   // module "slime_dj": its own page (song list, queue, now playing); refresh icon = rescan
 };
