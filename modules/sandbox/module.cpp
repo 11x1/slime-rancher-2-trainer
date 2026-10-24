@@ -2291,6 +2291,11 @@ bool Sandbox::MergeModRecipes(std::vector<bridge::Recipe>& list, const ModList& 
         r.icon = ModIconFor(i);
         if (base) r.category = base->category, r.order = base->order;
         else if (!want.empty()) r.category = want.back().category, r.order = want.back().order;  // after the one before
+        // No base recipe and nothing before it: a tile with category -1 is in no tab (invisible). The first
+        // category with recipes instead, at the end (logged with the tile list below).
+        if (r.category < 0)
+            for (const bridge::Recipe& o : list)
+                if (!o.mod && o.category >= 0 && (r.category < 0 || o.category < r.category)) r.category = o.category;
         r.modRank = rank;
         auto cost = modCosts_.find(r.id);
         if (cost == modCosts_.end()) {
@@ -2318,9 +2323,22 @@ bool Sandbox::MergeModRecipes(std::vector<bridge::Recipe>& list, const ModList& 
     if (same) return false;
     if (have.size() != want.size()) {
         std::string names;
-        for (const bridge::Recipe& r : want)
-            names += std::format("{}{} (category {}, after position {})", names.empty() ? "" : ", ", r.name, r.category, r.order);
-        SR2_INFO("[{}] crafter: {} mod buildable tile(s){}{}", kModule, want.size(), want.empty() ? "" : ": ", names);
+        size_t k = 0;
+        for (const auto& i : mods) {
+            if (!i.def || !unity::IsAlive(i.def) || k >= want.size()) continue;
+            const bridge::Recipe& r = want[k++];
+            const bool baseFound = std::any_of(list.begin(), list.end(), [&](const bridge::Recipe& o) {
+                return !o.mod && o.id == reinterpret_cast<uintptr_t>(i.baseDef);
+            });
+            const std::string cat = recipeCats_ && r.category >= 0 && static_cast<size_t>(r.category) < recipeCats_->size()
+                                        ? (*recipeCats_)[static_cast<size_t>(r.category)]
+                                        : std::format("#{}", r.category);
+            names += std::format("{}{} ({}, {} {}{})", names.empty() ? "" : ", ", r.name, cat,
+                                 baseFound ? "after the" : "base recipe NOT found:", i.base,
+                                 baseFound ? std::format(" at position {}", r.order) : std::string());
+        }
+        SR2_INFO("[{}] crafter: {} mod buildable tile(s) of {} listed by custom upgrades{}{}", kModule, want.size(),
+                 mods.size(), want.empty() ? "" : ": ", names);
     }
     list.erase(std::remove_if(list.begin(), list.end(), [](const bridge::Recipe& r) { return r.mod; }), list.end());
     list.insert(list.end(), want.begin(), want.end());
