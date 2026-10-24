@@ -2475,14 +2475,20 @@ void SandboxStatus(const Host& h) {
 // the map marker and unlocking the ranch expansions (after a confirmation, it is a permanent save change).
 namespace sbxx = ::sr2::ui::sandbox::extras;
 constexpr const char* kSbxExpPopup = "##sandbox_expansions";
+constexpr const char* kSbxUpgPopup = "##sandbox_upgrades";
 bool g_sbxExpConfirm = false;
+bool g_sbxUpgConfirm = false;
 
-void SandboxExpansionsConfirm(const sbxx::State& st) {
+// A Sandbox confirmation modal (Cancel / `ok`, Esc cancels; Cancel first, so focus never starts on
+// `ok`). `open` opens it once. True on the frame `ok` is clicked.
+bool SandboxConfirmModal(const char* id, bool& open, const char* title, const std::string& text, const char* dim,
+                         const char* ok) {
     const Palette& P = theme::Colors();
-    if (g_sbxExpConfirm) {
-        ImGui::OpenPopup(kSbxExpPopup);
-        g_sbxExpConfirm = false;
+    if (open) {
+        ImGui::OpenPopup(id);
+        open = false;
     }
+    bool confirmed = false;
     const float w = U(430);
     ImGui::SetNextWindowPos(ImVec2((g_winMin.x + g_winMax.x) * 0.5f, (g_winMin.y + g_winMax.y) * 0.5f), ImGuiCond_Appearing,
                             ImVec2(0.5f, 0.5f));
@@ -2492,35 +2498,54 @@ void SandboxExpansionsConfirm(const sbxx::State& st) {
     ImGui::PushStyleColor(ImGuiCol_Border, P.cardBorder);
     const ImGuiWindowFlags f = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                                ImGuiWindowFlags_AlwaysAutoResize;
-    if (ImGui::BeginPopupModal(kSbxExpPopup, nullptr, f)) {
+    if (ImGui::BeginPopupModal(id, nullptr, f)) {
         {
             FontScope fs(theme::Display(), theme::kDisplaySize + 4);
             ImGui::PushStyleColor(ImGuiCol_Text, theme::Current() == theme::Mode::Dark ? P.grab : P.accent);
-            ImGui::TextUnformatted("Unlock ranch expansions?");
+            ImGui::TextUnformatted(title);
             ImGui::PopStyleColor();
         }
         ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextUnformatted(std::format("Opens the {} locked expansion(s) of your ranch as if you had bought them, "
-                                           "for free.",
-                                           std::max(0, st.lockedExpansions))
-                                   .c_str());
+        ImGui::TextUnformatted(text.c_str());
         ImGui::PopTextWrapPos();
-        DimText("This changes your save for good: the game keeps the expansions open when it next saves, and there is "
-                "no way to lock them again.");
+        DimText(dim);
         ImGui::Dummy(ImVec2(0, U(4)));
         const ImVec2 bs(U(112), U(34));
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - 2 * bs.x -
                              ImGui::GetStyle().ItemSpacing.x);
         if (ImGui::Button("Cancel", bs) || PopupCancelled()) ImGui::CloseCurrentPopup();
         ImGui::SameLine();
-        if (AccentButton("Unlock", bs)) {
-            sbxx::Request(sbxx::Op::UnlockExpansions);
+        if (AccentButton(ok, bs)) {
+            confirmed = true;
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(2);
+    return confirmed;
+}
+
+void SandboxExpansionsConfirm(const sbxx::State& st) {
+    if (SandboxConfirmModal(kSbxExpPopup, g_sbxExpConfirm, "Unlock ranch expansions?",
+                            std::format("Opens the {} locked expansion(s) of your ranch as if you had bought them, "
+                                        "for free.",
+                                        std::max(0, st.lockedExpansions)),
+                            "This changes your save for good: the game keeps the expansions open when it next saves, "
+                            "and there is no way to lock them again.",
+                            "Unlock"))
+        sbxx::Request(sbxx::Op::UnlockExpansions);
+}
+
+void SandboxUpgradesConfirm(const sbx::Snapshot& s) {
+    if (SandboxConfirmModal(kSbxUpgPopup, g_sbxUpgConfirm, "Unlock all upgrades?",
+                            std::format("Raises every vacpack and player upgrade the Fabricator sells to its last "
+                                        "level ({} level(s) to go), as if you had bought them, for free.",
+                                        std::max(0, s.upgradeLevelsLeft)),
+                            "This changes your save for good: the game saves the upgrade levels, and there is no way "
+                            "to take them back.",
+                            "Unlock"))
+        SbxRequest(sbx::Op::UnlockUpgrades);
 }
 
 void SandboxPlayer(const Host& h, const sbx::Snapshot& s, float w) {
@@ -2549,10 +2574,24 @@ void SandboxPlayer(const Host& h, const sbx::Snapshot& s, float w) {
     if (Switch("##infenergy", s.infiniteEnergy)) SbxRequest(sbx::Op::InfiniteEnergy, s.infiniteEnergy ? 0 : 1);
     HoverTip("Keeps energy at its maximum. For this session only: off again after a restart or when Sandbox is "
              "turned off.");
+    // Unlock all upgrades (the main module, Op::UnlockUpgrades): full width, under the extras' buttons.
+    auto upgradesButton = [&] {
+        const bool can = s.upgradeLevelsLeft > 0;
+        ImGui::BeginDisabled(!can);
+        if (ImGui::Button("Unlock all upgrades", ImVec2(avail, U(32)))) g_sbxUpgConfirm = true;
+        ImGui::EndDisabled();
+        HoverTip(can ? std::format("Raises every vacpack / player upgrade of the Fabricator ({} upgrade(s), {} level(s) "
+                                   "to go) to its last level as if bought (free). Asks first; the change is saved.",
+                                   s.upgradeCount, s.upgradeLevelsLeft)
+                     : s.upgradeWhy.empty() ? std::string("Every upgrade is at its last level already.")
+                                            : s.upgradeWhy);
+        SandboxUpgradesConfirm(s);
+    };
     // Infinite health and the two buttons come from the extras bridge (player_extras.cpp).
     const auto st = sbxx::Get();
     if (!st || h.nowMs - st->tick > 3000) {
         DimText("Reading...");
+        upgradesButton();
         EndCard();
         return;
     }
@@ -2587,6 +2626,7 @@ void SandboxPlayer(const Host& h, const sbx::Snapshot& s, float w) {
                                      "the change is saved.",
                                      st->lockedExpansions)
                        : st->expansionWhy);
+    upgradesButton();
     EndCard();
     SandboxExpansionsConfirm(*st);
 }
@@ -3689,6 +3729,21 @@ void DrawHint(const Host& h) {
             ImGui::TextUnformatted(" for mod settings");
             if (h.versionMismatch)
                 ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.warn), "Version warning: %s", h.versionStatus.c_str());
+            next();
+        }
+        ImGui::End();
+    }
+    if (h.sandboxFabKey != 0) {
+        // Sandbox: the game's Fabricator is open (its own key legend has no room for ours).
+        ImGui::SetNextWindowPos(ImVec2(U(16), y), ImGuiCond_Always);
+        if (ImGui::Begin("##sr2mods_fab_hint", nullptr, f)) {
+            const char k[2] = {static_cast<char>(h.sandboxFabKey), 0};
+            ImGui::TextUnformatted("Press ");
+            ImGui::SameLine(0, 0);
+            ImGui::TextColored(key, "%s", k);
+            ImGui::SameLine(0, 0);
+            ImGui::TextUnformatted(" to add the missing materials");
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.soft), "Sandbox: into the refinery, free");
             next();
         }
         ImGui::End();

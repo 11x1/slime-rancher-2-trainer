@@ -50,6 +50,7 @@
 #include "modules/sandbox/player_extras.h"
 #include "modules/sandbox/prefab_icons.h"
 #include "ui/item_icons.h"
+#include "ui/overlay.h"
 #include "ui/sandbox_bridge.h"
 
 namespace sr2::modules {
@@ -72,6 +73,8 @@ constexpr int kMaxSpawn = 20;   // per click
 constexpr int kMaxDrop = 60;    // "Put in slots": most items dropped in front of the player per item
 constexpr int kMaxCraft = 99;   // per click
 constexpr float kSpawnDist = 2.5f;  // metres in front of the camera
+constexpr int kFabricatorKey = 'G';  // in the open Fabricator: add the selected recipe's missing materials
+constexpr const char* FabricatorKeyName() { return "G"; }
 
 struct Vec3 {
     float x, y, z;
@@ -237,6 +240,13 @@ private:
     bool SpawnPose(const Ctx& c, Vec3& pos, Vec3& fwd);
     bool GetVec3(const MethodInfo* m, Il2CppObject* obj, Vec3& out);
     void SetupExtras(sr2::il2cpp::Resolver& R);
+    // "Unlock all upgrades" (Player card) and the Fabricator's "add missing materials" key.
+    void SetupUnlocks(sr2::il2cpp::Resolver& R);
+    bool PlayerUpgrades(const Ctx& c, Il2CppObject*& um, std::vector<Il2CppObject*>& out);
+    void UpgradeState(const Ctx& c);
+    void DoUnlockUpgrades(const Ctx& c);
+    void FabricatorTick(unsigned long long now);
+    void DoFabricatorMaterials();
 
     std::atomic<bool> enabled_{false};
     std::atomic<bool> infinite_{false};
@@ -420,6 +430,29 @@ private:
     size_t offSlotDefThreshold_ = 0;                 // AmmoSlotDefinition._isUnlockedThreshold
     size_t offModValue_ = 0;                         // FloatModifier.Value (from the live object's class)
     Il2CppClass* upgradeDefClass_ = nullptr;
+
+    // ---- unlock all upgrades (optional; uses the slot-unlock symbols above) ----
+    int upgCount_ = 0, upgLeft_ = -1;  // for the snapshot (refreshed every kRecipeStateMs)
+    unsigned long long lastUpgState_ = 0;
+    size_t offUlCosts_ = 0;            // UpgradeLevelDefinition._costs (PurchaseCost, inline; from the live class)
+
+    // ---- Fabricator "add missing materials" key (optional) ----
+    Il2CppClass* fabUiClass_ = nullptr;          // MonomiPark.SlimeRancher.UI.Fabricator.FabricatorUI
+    Il2CppClass* fabGadgetItemClass_ = nullptr;  // GadgetFabricatableItem
+    Il2CppClass* fabUpgradeItemClass_ = nullptr; // PlayerUpgradeFabricatableItem
+    size_t offFabUiContent_ = 0, offFabUiSpend_ = 0;          // FabricatorUI._content / _spendableDirector
+    size_t offFabContentGrid_ = 0, offFabContentDetails_ = 0; // FabricatorContent._itemGrid / _itemDetails
+    size_t offFabGridHovered_ = 0, offFabGridItems_ = 0;      // FabricatorItemGrid._hoveredIndex / _currentPageOfItems
+    size_t offFabDetailsRecipe_ = 0, offFabRecipeCount_ = 0;  // FabricatorItemDetails._recipe, FabricatorRecipe._itemCount
+    size_t offFabGadgetDef_ = 0, offFabUpgradeDef_ = 0;       // the items' Definition / UpgradeDefinition backing fields
+    size_t offCostComponents_ = 0;                            // PurchaseCost.ComponentCosts (in the struct)
+    const MethodInfo* fabDetailsSetItem_ = nullptr;    // FabricatorItemDetails.SetItem(IFabricatableItem)
+    const MethodInfo* fabRecipeSetItem_ = nullptr;     // FabricatorRecipe.SetItem(IFabricatableItem, int)
+    const MethodInfo* spendIdentAmount_ = nullptr;     // SpendableDirector.GetIdentCostAmount(IdentifiableType)
+    const MethodInfo* spendComponentAmount_ = nullptr; // SpendableDirector.GetUpgradeComponentAmount(UpgradeComponent)
+    const MethodInfo* acquireComponent_ = nullptr;     // static AcquisitionUtility.AcquireUpgradeComponent(component, int)
+    unsigned long long lastFabPoll_ = 0;
+    bool fabOpen_ = false, fabKeyDown_ = false;
 };
 
 Sandbox* g_self = nullptr;
@@ -515,6 +548,7 @@ bool Sandbox::Setup(sr2::core::ModuleContext& ctx) {
     locIsEmpty_ = method(locStringClass_, "get_IsEmpty", 0, false);
     if (!why.empty()) return ctx.Fail(why);
     SetupExtras(R);
+    SetupUnlocks(R);
     sandbox::SetupPlayerExtras(ctx);  // optional tools on the Extras card (player_extras.cpp)
 
     g_self = this;
@@ -782,6 +816,7 @@ void Sandbox::OnDisable() {
     if (infinite_.exchange(false)) SR2_INFO("[{}] infinite energy off (module disabled)", kModule);
     notices_.Clear();
     bridge::SetHandler(nullptr);
+    bridge::SetFabricatorHint(false, 0);
     sandbox::PlayerExtrasEnabled(false);
     bridge::Snapshot s;
     s.tick = GetTickCount64();
@@ -1876,6 +1911,14 @@ void Sandbox::Refresh() {
         s.craftWhy = craftWhy_;
         s.relations = relations_;
         std::copy(std::begin(groupIcons_), std::end(groupIcons_), std::begin(s.groupIcons));
+        if (incUpgrade_ && s.tick - lastUpgState_ >= kRecipeStateMs) {
+            lastUpgState_ = s.tick;
+            UpgradeState(c);
+        }
+        s.upgradeCount = upgCount_;
+        s.upgradeLevelsLeft = upgLeft_;
+        if (!incUpgrade_) s.upgradeWhy = "The game's upgrade functions were not found (see the log).";
+        else if (upgLeft_ < 0) s.upgradeWhy = "The player's upgrade list was not found.";
     }
     bridge::Publish(std::move(s));
 }
@@ -1899,6 +1942,7 @@ void Sandbox::Tick(float dt) {
         lastEnergy_ = now;
         TopUpEnergy();
     }
+    FabricatorTick(now);
     const bool snap = bridge::WantsSnapshot() && now - lastSnap_ >= kSnapshotMs;
     if (snap) {
         lastSnap_ = now;
@@ -2001,6 +2045,7 @@ void Sandbox::Handle(const bridge::Action& a) {
             break;
         case bridge::Op::MoveSlot: DoMoveSlot(c, a.slot, static_cast<int>(a.value)); break;
         case bridge::Op::UnlockSlot: DoUnlockSlot(c, a.slot); break;
+        case bridge::Op::UnlockUpgrades: DoUnlockUpgrades(c); break;
         case bridge::Op::InfiniteEnergy: break;  // handled above
     }
     Refresh();
@@ -2549,6 +2594,348 @@ void Sandbox::DoUnlockSlot(const Ctx& c, int idx) {
                    : levels ? std::format("Slot {}: applied {} level(s) of {}, but it is still locked", idx + 1, levels, upName)
                             : std::format("Slot {} not unlocked: the {} upgrade is at level {} already (needs {})", idx + 1,
                                           upName, cur, target));
+}
+
+// ------------------------------------------------- unlock all upgrades ----
+// Optional: everything here only turns its own tool off when a symbol is missing.
+void Sandbox::SetupUnlocks(sr2::il2cpp::Resolver& R) {
+    auto cls = [&](const char* ns, const char* name, std::string& why) -> Il2CppClass* {
+        std::string err;
+        Il2CppClass* k = R.Class(kImage, ns, name, &err);
+        if (!k && why.empty()) why = err.empty() ? std::format("class {}.{} not found", ns, name) : err;
+        return k;
+    };
+    auto off = [&](Il2CppClass* k, const char* field, size_t& out, std::string& why) {
+        if (!k) return;
+        std::string err;
+        if (auto o = R.FieldOffset(k, field, &err)) out = *o;
+        else if (why.empty()) why = err.empty() ? std::format("field {} not found", field) : err;
+    };
+    auto method = [&](Il2CppClass* k, const char* name, int argc, std::string& why) -> const MethodInfo* {
+        if (!k) return nullptr;
+        std::string err;
+        if (const MethodInfo* m = R.Method(k, name, argc, &err)) return m;
+        if (why.empty()) why = std::format("method {}({}) not found", name, argc);
+        return nullptr;
+    };
+
+    // Unlock all upgrades: the slot-unlock symbols (UpgradeModel.GetUpgradeLevel / IncrementUpgradeLevel,
+    // upgradeDefinitions, UpgradeDefinition._levels) are all it needs.
+    SR2_INFO("[{}] unlock all upgrades: {}", kModule, incUpgrade_ ? "available" : "NOT available (upgrade symbols missing)");
+
+    // Fabricator key: the open FabricatorUI's selected recipe and the refinery / currency / component counts.
+    std::string fw;
+    constexpr const char* kFabNs = "MonomiPark.SlimeRancher.UI.Fabricator";
+    fabUiClass_ = cls(kFabNs, "FabricatorUI", fw);
+    Il2CppClass* content = cls(kFabNs, "FabricatorContent", fw);
+    Il2CppClass* grid = cls(kFabNs, "FabricatorItemGrid", fw);
+    Il2CppClass* details = cls(kFabNs, "FabricatorItemDetails", fw);
+    Il2CppClass* recipe = cls(kFabNs, "FabricatorRecipe", fw);
+    fabGadgetItemClass_ = cls(kFabNs, "GadgetFabricatableItem", fw);
+    fabUpgradeItemClass_ = cls(kFabNs, "PlayerUpgradeFabricatableItem", fw);
+    Il2CppClass* spend = cls("MonomiPark.SlimeRancher.Player", "SpendableDirector", fw);
+    Il2CppClass* acq = cls("MonomiPark.SlimeRancher.Economy", "AcquisitionUtility", fw);
+    Il2CppClass* cost = cls("MonomiPark.SlimeRancher.Economy", "PurchaseCost", fw);
+    off(fabUiClass_, "_content", offFabUiContent_, fw);
+    off(fabUiClass_, "_spendableDirector", offFabUiSpend_, fw);
+    off(content, "_itemGrid", offFabContentGrid_, fw);
+    off(content, "_itemDetails", offFabContentDetails_, fw);
+    off(grid, "_hoveredIndex", offFabGridHovered_, fw);
+    off(grid, "_currentPageOfItems", offFabGridItems_, fw);
+    off(details, "_recipe", offFabDetailsRecipe_, fw);
+    off(recipe, "_itemCount", offFabRecipeCount_, fw);
+    off(fabGadgetItemClass_, "<Definition>k__BackingField", offFabGadgetDef_, fw);
+    off(fabUpgradeItemClass_, "<UpgradeDefinition>k__BackingField", offFabUpgradeDef_, fw);
+    size_t compOff = 0;
+    off(cost, "ComponentCosts", compOff, fw);
+    if (compOff >= 2 * sizeof(void*)) offCostComponents_ = compOff - 2 * sizeof(void*);
+    fabDetailsSetItem_ = method(details, "SetItem", 1, fw);
+    fabRecipeSetItem_ = method(recipe, "SetItem", 2, fw);
+    spendIdentAmount_ = method(spend, "GetIdentCostAmount", 1, fw);
+    spendComponentAmount_ = method(spend, "GetUpgradeComponentAmount", 1, fw);
+    acquireComponent_ = method(acq, "AcquireUpgradeComponent", 2, fw);
+    // What it adds with: the crafter's refinery symbols and PurchaseCost layout, and the upgrade model.
+    if (fw.empty() && (!gadgetAddItem_ || !refinerySpace_ || !offCraftCosts_ || !offCostIdent_ || !identCostStride_))
+        fw = "the crafter's refinery / recipe-cost symbols are missing";
+    if (!fw.empty()) {
+        fabUiClass_ = nullptr;
+        SR2_WARN("[{}] Fabricator key ({}): NOT available ({})", kModule, FabricatorKeyName(), fw);
+    } else {
+        SR2_INFO("[{}] Fabricator key ({}): available (adds the selected recipe's missing materials to the refinery)",
+                 kModule, FabricatorKeyName());
+    }
+}
+
+// The player's upgrades (UpgradeModel.upgradeDefinitions, the list the Fabricator's upgrade page and the
+// save use; custom_upgrades adds its own tiers to it while they are registered).
+bool Sandbox::PlayerUpgrades(const Ctx& c, Il2CppObject*& um, std::vector<Il2CppObject*>& out) {
+    out.clear();
+    um = nullptr;
+    if (!incUpgrade_ || !getUpgradeModel_) return false;
+    bool ok = false;
+    um = Call(getUpgradeModel_, c.model, {}, "PlayerModel.GetUpgradeModel", &ok);
+    if (!ok || !um || !unity::IsAlive(um)) return false;
+    Il2CppObject* defList = unity::Field<Il2CppObject*>(um, offUmDefs_);
+    if (!defList || !unity::IsAlive(defList)) return false;
+    auto itemsOff = Resolver::Get().FieldOffset(api().il2cpp_object_get_class(defList), "items");
+    void* defs = itemsOff ? unity::Field<void*>(defList, *itemsOff) : nullptr;
+    for (size_t i = 0, n = unity::ListCount(defs); i < n; ++i) {
+        auto* up = static_cast<Il2CppObject*>(unity::ListAt(defs, i));
+        if (IsA(up, upgradeDefClass_) && unity::IsAlive(up)) out.push_back(up);
+    }
+    return true;
+}
+
+// How many upgrades and levels "Unlock all upgrades" would add (for the button and its tooltip).
+// The model's level n applies _levels[n]; -1 = not bought; the last level is LevelCount - 1.
+void Sandbox::UpgradeState(const Ctx& c) {
+    Il2CppObject* um = nullptr;
+    std::vector<Il2CppObject*> ups;
+    if (!PlayerUpgrades(c, um, ups)) {
+        upgCount_ = 0;
+        upgLeft_ = -1;
+        return;
+    }
+    int left = 0;
+    for (Il2CppObject* up : ups) {
+        const int last = static_cast<int>(unity::ListCount(unity::Field<void*>(up, offUdLevels_))) - 1;
+        int cur = -1;
+        if (last < 0 || !CallValue(getUpgradeLevel_, um, {up}, "UpgradeModel.GetUpgradeLevel", cur)) continue;
+        left += std::max(0, last - std::max(cur, -1));
+    }
+    upgCount_ = static_cast<int>(ups.size());
+    upgLeft_ = left;
+}
+
+// Every player upgrade to its last level, the way buying them does after the cost is paid
+// (PlayerUpgradeFabricatableItem.FabricateAndSpendCost: UpgradeModel.IncrementUpgradeLevel), one level
+// at a time and never past the definition's last level. Mod tiers in the list (custom_upgrades) come
+// after their vanilla parent and go through the same call, which custom_upgrades records for its
+// sidecar (its UpgradeModel.SetUpgradeLevel detour).
+void Sandbox::DoUnlockUpgrades(const Ctx& c) {
+    if (!incUpgrade_) {
+        Done(false, "Upgrades not unlocked: the upgrade symbols were not found");
+        return;
+    }
+    Il2CppObject* um = nullptr;
+    std::vector<Il2CppObject*> ups;
+    if (!PlayerUpgrades(c, um, ups)) {
+        Done(false, "Upgrades not unlocked: the player's upgrade list was not found");
+        return;
+    }
+    int levels = 0, touched = 0, stuck = 0;
+    std::string list;
+    for (Il2CppObject* up : ups) {
+        const int last = static_cast<int>(unity::ListCount(unity::Field<void*>(up, offUdLevels_))) - 1;
+        int from = -1, cur = -1;
+        if (last < 0 || !CallValue(getUpgradeLevel_, um, {up}, "UpgradeModel.GetUpgradeLevel", from)) continue;
+        cur = from;
+        for (int guard = 0; guard < 32 && cur < last; ++guard) {
+            bool inc = false;
+            if (!CallValue(incUpgrade_, um, {up}, "UpgradeModel.IncrementUpgradeLevel", inc) || !inc) break;
+            int now = cur;
+            if (!CallValue(getUpgradeLevel_, um, {up}, "UpgradeModel.GetUpgradeLevel", now) || now <= cur) break;
+            cur = now;
+        }
+        if (cur > from) {
+            levels += cur - from;
+            ++touched;
+            list += std::format("{}{} {} -> {}", list.empty() ? "" : ", ", unity::GetName(up), from, cur);
+        }
+        if (cur < last) ++stuck;
+    }
+    lastUpgState_ = 0;  // the button's count at once
+    if (!touched) {
+        Done(stuck == 0, stuck ? std::format("Upgrades not unlocked: the game refused {} upgrade(s)", stuck)
+                               : std::string("Every upgrade is at its last level already"));
+        return;
+    }
+    SR2_INFO("[{}] unlocked upgrades: {}", kModule, list);
+    Done(true, std::format("Unlocked all upgrades: {} level(s) of {} upgrade(s){}", levels, touched,
+                           stuck ? std::format(" ({} could not be raised all the way)", stuck) : std::string()));
+}
+
+// ------------------------------------------ Fabricator "add missing materials" ----
+// While Sandbox is on and the game's Fabricator is open: one FindObjectOfType(FabricatorUI) per second
+// (the overlay's hint), and the key's edge (GetAsyncKeyState, game window in front, overlay closed).
+void Sandbox::FabricatorTick(unsigned long long now) {
+    if (!fabUiClass_) return;
+    if (now - lastFabPoll_ >= 1000) {
+        lastFabPoll_ = now;
+        Il2CppObject* ui = unity::FindObjectOfType(fabUiClass_);
+        fabOpen_ = ui && IsA(ui, fabUiClass_) && unity::IsAlive(ui);
+        bridge::SetFabricatorHint(fabOpen_, kFabricatorKey);
+    }
+    bool down = false;
+    if (fabOpen_ && !sr2::ui::overlay::IsOpen()) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+        down = pid == GetCurrentProcessId() && (GetAsyncKeyState(kFabricatorKey) & 0x8000) != 0;
+    }
+    if (down && !fabKeyDown_) DoFabricatorMaterials();
+    fabKeyDown_ = down;
+}
+
+// The selected recipe of the open Fabricator (FabricatorItemGrid: _currentPageOfItems[_hoveredIndex], the
+// item its details panel shows): what the player lacks of it (times the panel's craft count for gadgets)
+// is added for free: refinery items through GadgetDirector.AddItem (what the refinery intake does, clamped
+// to its space), upgrade components through AcquisitionUtility.AcquireUpgradeComponent (the treasure pod /
+// shop path), Newbucks through PlayerState.AddCurrency. "Have" is what the Fabricator itself counts
+// (SpendableDirector.GetIdentCostAmount / GetUpgradeComponentAmount). The panel is then set to the item
+// again so it shows the new counts. Nothing is crafted or bought: the player still presses Fabricate.
+void Sandbox::DoFabricatorMaterials() {
+    Ctx c;
+    std::string why;
+    if (!Context(c, why)) {
+        Done(false, "Fabricator: nothing added: " + why);
+        return;
+    }
+    Il2CppObject* ui = unity::FindObjectOfType(fabUiClass_);
+    if (!ui || !IsA(ui, fabUiClass_) || !unity::IsAlive(ui)) return;
+    Il2CppObject* content = unity::Field<Il2CppObject*>(ui, offFabUiContent_);
+    Il2CppObject* grid = content && unity::IsAlive(content) ? unity::Field<Il2CppObject*>(content, offFabContentGrid_) : nullptr;
+    Il2CppObject* details = content && unity::IsAlive(content) ? unity::Field<Il2CppObject*>(content, offFabContentDetails_) : nullptr;
+    if (!grid || !unity::IsAlive(grid)) return;
+    const int idx = unity::Field<int32_t>(grid, offFabGridHovered_);
+    void* items = unity::Field<void*>(grid, offFabGridItems_);
+    auto* item = idx >= 0 && static_cast<size_t>(idx) < unity::ListCount(items)
+                     ? static_cast<Il2CppObject*>(unity::ListAt(items, static_cast<size_t>(idx)))
+                     : nullptr;
+    if (!item) {
+        Done(false, "Fabricator: select a recipe first");
+        return;
+    }
+    Il2CppObject* recipe = details && unity::IsAlive(details) ? unity::Field<Il2CppObject*>(details, offFabDetailsRecipe_) : nullptr;
+    int count = recipe && unity::IsAlive(recipe) ? std::clamp(unity::Field<int32_t>(recipe, offFabRecipeCount_), 1, 999) : 1;
+    // The cost: a gadget's CraftingCosts, or the next level's _costs of an upgrade.
+    const char* costs = nullptr;
+    std::string name;
+    if (IsA(item, fabGadgetItemClass_)) {
+        Il2CppObject* def = unity::Field<Il2CppObject*>(item, offFabGadgetDef_);
+        if (!IsA(def, gadgetDefClass_) || !unity::IsAlive(def)) return;
+        costs = reinterpret_cast<const char*>(def) + offCraftCosts_;
+        name = ItemName(def);
+    } else if (IsA(item, fabUpgradeItemClass_)) {
+        count = 1;
+        Il2CppObject* up = unity::Field<Il2CppObject*>(item, offFabUpgradeDef_);
+        Il2CppObject* um = nullptr;
+        std::vector<Il2CppObject*> ups;
+        if (!IsA(up, upgradeDefClass_) || !unity::IsAlive(up) || !PlayerUpgrades(c, um, ups)) {
+            Done(false, "Fabricator: nothing added: the upgrade was not found");
+            return;
+        }
+        name = unity::GetName(up);
+        int cur = -1;
+        CallValue(getUpgradeLevel_, um, {up}, "UpgradeModel.GetUpgradeLevel", cur);
+        void* levels = unity::Field<void*>(up, offUdLevels_);
+        const size_t next = static_cast<size_t>(std::max(cur, -1) + 1);
+        auto* lvl = next < unity::ListCount(levels) ? static_cast<Il2CppObject*>(unity::ListAt(levels, next)) : nullptr;
+        if (!lvl) {
+            Done(true, std::format("Fabricator: {} is fully upgraded", name));
+            return;
+        }
+        if (!offUlCosts_) {
+            auto o = Resolver::Get().FieldOffset(api().il2cpp_object_get_class(lvl), "_costs");
+            if (!o) {
+                Done(false, "Fabricator: nothing added: UpgradeLevelDefinition._costs not found");
+                return;
+            }
+            offUlCosts_ = *o;
+        }
+        costs = reinterpret_cast<const char*>(lvl) + offUlCosts_;
+    } else {
+        Done(false, "Fabricator: the selected item is not a gadget or upgrade recipe");
+        return;
+    }
+    Il2CppObject* spend = unity::Field<Il2CppObject*>(ui, offFabUiSpend_);
+    if (spend && !unity::IsAlive(spend)) spend = nullptr;
+    Il2CppObject* dir = GadgetDirector();
+    std::vector<std::string> added, missed;
+
+    // Refinery items.
+    void* ident = *reinterpret_cast<void* const*>(costs + offCostIdent_);
+    if (const size_t n = unity::ListCount(ident)) {
+        size_t offItems = 0;
+        if (auto o = Resolver::Get().FieldOffset(api().il2cpp_object_get_class(static_cast<Il2CppObject*>(ident)), "_items"))
+            offItems = *o;
+        void* arr = offItems ? unity::Field<void*>(ident, offItems) : nullptr;
+        char* data = arr ? unity::ArrayData<char>(arr) : nullptr;
+        for (size_t i = 0; data && i < n && i < unity::ArrayLength(arr); ++i) {
+            char* e = data + i * identCostStride_;
+            const int amount = *reinterpret_cast<int32_t*>(e + offIdentCostAmount_);
+            auto* type = *reinterpret_cast<Il2CppObject**>(e + offIdentCostType_);
+            if (!type || amount <= 0 || !IsA(type, identClass_) || !unity::IsAlive(type)) continue;
+            int have = 0;
+            if (!(spend && CallValue(spendIdentAmount_, spend, {type}, "SpendableDirector.GetIdentCostAmount", have)) && dir)
+                CallValue(gadgetCount_, dir, {type}, "GadgetDirector.GetItemCount", have);
+            const int need = amount * count - have;
+            if (need <= 0) continue;
+            int space = 0;
+            if (!dir || !CallValue(refinerySpace_, dir, {type}, "GadgetDirector.GetRefinerySpaceAvailable", space) || space <= 0) {
+                missed.push_back(std::format("{} {} (refinery full or not stored there)", need, ItemName(type)));
+                continue;
+            }
+            int add = std::min(need, space), before = 0, after = 0;
+            CallValue(gadgetCount_, dir, {type}, "GadgetDirector.GetItemCount", before);
+            bool ok = false;
+            Call(gadgetAddItem_, dir, {type, &add}, "GadgetDirector.AddItem", &ok);
+            CallValue(gadgetCount_, dir, {type}, "GadgetDirector.GetItemCount", after);
+            if (ok && after > before) added.push_back(std::format("{} {}", after - before, ItemName(type)));
+            if (!ok || after - before < need) missed.push_back(std::format("{} {}", need - std::max(0, after - before), ItemName(type)));
+        }
+    }
+    // Upgrade components (one per list entry).
+    if (offCostComponents_) {
+        void* comps = *reinterpret_cast<void* const*>(costs + offCostComponents_);
+        std::map<Il2CppObject*, int> needs;
+        for (size_t i = 0, n = unity::ListCount(comps); i < n; ++i)
+            if (auto* comp = static_cast<Il2CppObject*>(unity::ListAt(comps, i)); comp && unity::IsAlive(comp)) needs[comp] += count;
+        for (auto& [comp, amount] : needs) {
+            int have = 0;
+            if (spend) CallValue(spendComponentAmount_, spend, {comp}, "SpendableDirector.GetUpgradeComponentAmount", have);
+            int need = amount - have;
+            if (need <= 0) continue;
+            bool got = false;
+            if (CallValue(acquireComponent_, nullptr, {comp, &need}, "AcquisitionUtility.AcquireUpgradeComponent", got) && got)
+                added.push_back(std::format("{} {}", need, unity::GetName(comp)));
+            else
+                missed.push_back(std::format("{} {}", need, unity::GetName(comp)));
+        }
+    }
+    // Newbucks (other currencies are left alone).
+    void* cur = *reinterpret_cast<void* const*>(costs + offCostCurrency_);
+    for (size_t i = 0, n = unity::ListCount(cur); i < n; ++i) {
+        auto* e = static_cast<Il2CppObject*>(unity::ListAt(cur, i));
+        if (!e) continue;
+        Il2CppObject* currency = unity::Field<Il2CppObject*>(e, offCurCostCurrency_);
+        const int64_t amount = static_cast<int64_t>(unity::Field<int32_t>(e, offCurCostAmount_)) * count;
+        if (amount <= 0 || !c.currency || currency != c.currency) continue;
+        int have = 0;
+        if (!CallValue(getCurrency_, c.player, {c.currency}, "PlayerState.GetCurrency", have)) continue;
+        const int maxBucks = unity::Field<int32_t>(c.model, offMaxCurrency_);
+        int add = static_cast<int>(std::clamp<int64_t>(amount - have, 0, std::max(0, maxBucks - have)));
+        if (add <= 0) continue;
+        bool popup = true, ok = false;
+        Call(addCurrency_, c.player, {c.currency, &add, &popup, nullptr}, "PlayerState.AddCurrency", &ok);
+        if (ok) added.push_back(std::format("{} Newbucks", Thousands(add)));
+    }
+    // Show the new counts: the details panel (and its recipe with the chosen count) set to the item again.
+    if (!added.empty() && details && unity::IsAlive(details)) {
+        bool ok = false;
+        Call(fabDetailsSetItem_, details, {item}, "FabricatorItemDetails.SetItem", &ok);
+        if (ok && count > 1 && recipe && unity::IsAlive(recipe))
+            Call(fabRecipeSetItem_, recipe, {item, &count}, "FabricatorRecipe.SetItem", &ok);
+    }
+    auto join = [](const std::vector<std::string>& v) {
+        std::string s;
+        for (const std::string& x : v) s += (s.empty() ? "" : ", ") + x;
+        return s;
+    };
+    const std::string what = count > 1 ? std::format("{} x {}", count, name) : name;
+    if (added.empty() && missed.empty()) Done(true, std::format("Fabricator: you already have everything for {}", what));
+    else if (missed.empty()) Done(true, std::format("Fabricator: added {} for {}", join(added), what));
+    else Done(!added.empty(), std::format("Fabricator: {}{} for {}; not added: {}", added.empty() ? "nothing added" : "added ",
+                                          join(added), what, join(missed)));
 }
 
 // Moves a slot's contents onto another slot: onto the same item it merges (up to the

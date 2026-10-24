@@ -1,6 +1,6 @@
 # sandbox
 
-Edits the character's resources from the overlay's **Misc > Sandbox** tab: Newbucks, health / energy / radiation, what each vacpack slot holds (and unlocking locked slots), spawning items in front of the player, crafting fabricator gadgets at no cost, adding crafting materials to the refinery, infinite health, teleporting to the map marker and unlocking the ranch expansions. Off by default. While it is on, achievements are paused (see "Achievements paused"), and a save it was used in is marked as cheated: achievements stay blocked in that save for good (see "Cheated saves").
+Edits the character's resources from the overlay's **Misc > Sandbox** tab: Newbucks, health / energy / radiation, what each vacpack slot holds (and unlocking locked slots), spawning items in front of the player, crafting fabricator gadgets at no cost, adding crafting materials to the refinery, infinite health, teleporting to the map marker, unlocking the ranch expansions and all player upgrades, and a Fabricator key that adds a recipe's missing materials. Off by default. While it is on, achievements are paused (see "Achievements paused"), and a save it was used in is marked as cheated: achievements stay blocked in that save for good (see "Cheated saves").
 
 ## Turning it on
 
@@ -155,6 +155,28 @@ The module does the same for every loaded activator whose door is locked, withou
 
 **Not seen in game:** the activators exist only while the ranch scene is loaded (away from the ranch the button says to go there); whether other zones have purchasable access doors too (they would be counted and unlocked as well; the log names them); that `OnUnlockedEvent` is all the follow-up the game needs (the buy path does nothing else, so it should be).
 
+### Unlock all upgrades (round 5)
+
+Code: `module.cpp` (`DoUnlockUpgrades`, `Op::UnlockUpgrades`; not player_extras). A full-width button at the bottom of the Player card, "Unlock all upgrades", opens an "Unlock all upgrades?" modal (Cancel / Unlock, Esc cancels; the shared `SandboxConfirmModal` in `menu.cpp`, also used by the expansions modal now). Disabled with a tooltip when every upgrade is at its last level or the symbols are missing.
+
+- The list: the player's `UpgradeModel.upgradeDefinitions` (the slot unlock's lookup, `PlayerUpgrades`). The model keeps one level per `_uniqueId`, -1 = not bought; level n applies `_levels[n]`, so the last level is `_levels.Count - 1`.
+- Per upgrade: `IncrementUpgradeLevel` until `GetUpgradeLevel` reaches the last level (what `PlayerUpgradeFabricatableItem.FabricateAndSpendCost` does after `SpendableDirector.Spend`), stopping if the call returns false or the level does not move, at most 32 times. Never past the last level. No analytics, no `MetaGameDirector` grant (the achievement hooks block progress while Sandbox is on anyway).
+- Mod tiers: custom_upgrades puts its Tank Booster IX-XII / Extra Tank III-IV definitions into the same list behind their vanilla parent while they are registered, so they are raised too, after the vanilla ones; `IncrementUpgradeLevel` goes through `SetUpgradeLevel`, whose custom_upgrades detour stores the level in that save's sidecar value as for a purchase. With custom_upgrades off they are not in the list.
+- Snapshot: `upgradeCount` / `upgradeLevelsLeft` (one `GetUpgradeLevel` per upgrade every 2 s while the page is open), shown in the button's tooltip and the modal.
+- Log: `[sandbox] unlocked upgrades: AmmoCapacity -1 -> 7, ...` (asset names, model levels) and the status line `Unlocked all upgrades: N level(s) of M upgrade(s)`.
+- **Not seen in game:** that `IncrementUpgradeLevel` returns true and moves one level per call (as the slot unlock assumes), that every listed definition is one the Fabricator sells (hidden or unused entries would be raised too; the log names them), and the custom tiers' extra slots (they need the slots custom_upgrades adds at load, as when bought).
+
+## Fabricator: add the missing materials (round 5)
+
+While Sandbox is on and the game's Fabricator is open, **G** adds what the selected recipe still lacks. Code: `module.cpp` (`FabricatorTick`, `DoFabricatorMaterials`).
+
+- Open: one `FindObjectOfType(FabricatorUI)` per second while Sandbox is on (active instances only). The key is polled every frame only while it is open (`GetAsyncKeyState('G')`, edge, the game window in front, the overlay closed). The game's own key legend (`FabricatorUI._inputLegend`, `InputLegendConfiguration` assets per page) is not extended; instead the overlay draws a small pill top left, "Press G to add the missing materials / Sandbox: into the refinery, free" (`sandbox_bridge::SetFabricatorHint`, stale after 3 s; `menu::DrawHint`).
+- The recipe: `FabricatorUI._content` -> `FabricatorContent._itemGrid` -> `FabricatorItemGrid._currentPageOfItems[_hoveredIndex]`, the item the details panel shows. A `GadgetFabricatableItem` costs its `GadgetDefinition.CraftingCosts` times the panel's craft count (`_itemDetails._recipe._itemCount`); a `PlayerUpgradeFabricatableItem` costs the next level's `UpgradeLevelDefinition._costs` (`_levels[GetUpgradeLevel + 1]`, as `FabricateAndSpendCost` spends it).
+- What it adds, only the part that is missing (have = what the Fabricator counts, `FabricatorUI._spendableDirector`): refinery items `SpendableDirector.GetIdentCostAmount` -> `GadgetDirector.AddItem` (clamped to the refinery's space; a type the refinery doesn't store is reported); upgrade components `GetUpgradeComponentAmount` -> `AcquisitionUtility.AcquireUpgradeComponent(component, n)` (the pickup path); Newbucks `PlayerState.AddCurrency` (up to the Newbucks limit; other currencies are left alone). Nothing is crafted or bought: the player presses Fabricate / Upgrade as usual.
+- Then `FabricatorItemDetails.SetItem(item)` (and `FabricatorRecipe.SetItem(item, count)` for a count above 1) so the panel shows the new counts.
+- Result in the log and the Sandbox status line: `Fabricator: added 20 Pink Plort, 150 Newbucks for Home Teleporter` / `you already have everything for ...` / `select a recipe first`.
+- **Not seen in game:** that G is free in the Fabricator (its keyboard bindings were not checked; the key is a constant, `kFabricatorKey`), that `_hoveredIndex` is the selected recipe with the mouse as well as with the keyboard / pad, that `SetItem` refreshes the panel (else the counts update when another recipe is selected), whether `SetItem` resets the craft count, and what `GetIdentCostAmount` counts (refinery only, presumably).
+
 ## Achievements paused
 
 While the module is enabled, and while a save marked as cheated is loaded (see "Cheated saves"), no achievement progress is made: no Steam unlock or stat, and the save's achievement progress does not move. The Sandbox page shows a warning banner across both columns at its top, "Steam achievements are paused while Sandbox is on." or, in a marked save, "Steam achievements are disabled for this save (Sandbox was used)." (since 2026-10-24; before, a dim line at the bottom). Code: `modules/sandbox/achievements.cpp`.
@@ -271,7 +293,6 @@ The `frame:ui.overlay` cost (avg 0.98 ms, 570 frames > 2 ms in the 10 s before) 
 
 ## Not done (possible later)
 
-- **Unlock all vacpack upgrades**: only the slot upgrade is applied (above, one level at a time like the shop). Other upgrades (tank size, jetpack, ...) would go through the same `IncrementUpgradeLevel`; not offered yet.
 - Other `CurrencyDefinition`s (same `AddCurrency` / `SpendCurrency` path, with a currency picker), keys (`PlayerState.AddKey` exists, trivially doable), plort market prices, unlocking zones / map, time of day (`TimeDirector`).
 
 ## Unverified in game
