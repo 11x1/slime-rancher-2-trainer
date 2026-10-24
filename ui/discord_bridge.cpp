@@ -7,15 +7,14 @@ namespace sr2::ui::discord {
 namespace {
 
 std::mutex g_mutex;
-Status g_status{"Off.", Level::Dim};  // guarded by g_mutex
+Status g_status{"Off", Level::Dim, {}, 0};  // guarded by g_mutex
 std::atomic<bool> g_reconnect{false};
 
 }  // namespace
 
-void SetStatus(std::string text, Level level) {
+void SetStatus(Status s) {
     std::lock_guard lock(g_mutex);
-    g_status.text = std::move(text);
-    g_status.level = level;
+    g_status = std::move(s);
 }
 
 Status GetStatus() {

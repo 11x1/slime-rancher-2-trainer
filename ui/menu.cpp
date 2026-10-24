@@ -3109,7 +3109,16 @@ void DiscordCard(const Host& h, const ModuleView& mv, float w) {
                       : st.level == dsc::Level::Warn  ? P.warn
                       : st.level == dsc::Level::Error ? P.err
                                                       : P.dim;
-    KeyValue("Status", on ? st.text : std::string("Off."), col);
+    // Short state on the line; the technical detail (pipe, handshake, error codes, retry) in its tooltip.
+    std::string tip = on ? st.detail : std::string();
+    if (on && st.retryAt) {
+        const unsigned long long now = GetTickCount64();
+        if (st.retryAt > now) {
+            if (!tip.empty()) tip += "\n";
+            tip += std::format("Next try in {} s.", (st.retryAt - now + 999) / 1000);
+        }
+    }
+    KeyValue("Status", on ? st.text : std::string("Off"), col, tip);
 
     // Reconnect (skips any retry wait) and, with an own application, the Developer Portal in the browser.
     ImGui::Dummy(ImVec2(0, U(2)));
