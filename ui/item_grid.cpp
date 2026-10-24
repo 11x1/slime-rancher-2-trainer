@@ -297,6 +297,54 @@ void DrawTile(ImDrawList* dl, ImVec2 a, ImVec2 b, const Tile& t, bool hot, bool 
     else if (t.related) dl->AddRect(a, b, WithAlpha(Dark() ? P.grab : P.accent, 0.45f), r, 0, std::max(1.0f, scale));
 }
 
+bool SearchBox(const char* id, const char* hint, char* buf, size_t size, float width, float scale, bool* active) {
+    const theme::Palette& P = theme::Colors();
+    ImGui::PushID(id);
+    ImGuiStorage* st = ImGui::GetStateStorage();
+    const ImGuiID refocus = ImGui::GetID("##refocus");
+    const float w = width > 0 ? width : ImGui::GetContentRegionAvail().x, h = ImGui::GetFrameHeight();
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    // The x goes in before the box: the first of two overlapping items keeps the hover,
+    // so a click on it is the x's, not the box's. It is drawn after the box (on its frame).
+    const bool hasText = buf[0] != 0;
+    const float bw = std::min(h, 24.0f * scale);
+    const ImVec2 xa(pos.x + w - bw - 2.0f * scale, pos.y), xb(pos.x + w - 2.0f * scale, pos.y + h);
+    bool clicked = false, hov = false;
+    if (hasText) {
+        ImGui::SetCursorScreenPos(xa);
+        ImGui::PushItemFlag(ImGuiItemFlags_NoTabStop | ImGuiItemFlags_NoNav, true);  // SetKeyboardFocusHere skips it
+        clicked = ImGui::InvisibleButton("##clear", ImVec2(xb.x - xa.x, h));
+        ImGui::PopItemFlag();
+        hov = ImGui::IsItemHovered();
+        if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        ImGui::SetCursorScreenPos(pos);
+    }
+    bool changed = false;
+    if (clicked) {
+        buf[0] = 0;
+        changed = true;
+        st->SetBool(refocus, true);
+    } else if (st->GetBool(refocus)) {  // cleared last frame: the box takes the keyboard back
+        st->SetBool(refocus, false);
+        ImGui::SetKeyboardFocusHere();
+    }
+    ImGui::SetNextItemWidth(w);
+    changed |= ImGui::InputTextWithHint("##box", hint, buf, size);
+    const bool isActive = ImGui::IsItemActive();
+    if (hasText) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 c((xa.x + xb.x) * 0.5f, (xa.y + xb.y) * 0.5f);
+        if (hov) dl->AddCircleFilled(c, bw * 0.36f, ImGui::GetColorU32(WithAlpha(P.text, 0.12f)));
+        const float r = 3.5f * scale, th = std::max(1.0f, 1.6f * scale);
+        const ImU32 col = ImGui::GetColorU32(hov ? P.text : P.dim);
+        dl->AddLine(ImVec2(c.x - r, c.y - r), ImVec2(c.x + r, c.y + r), col, th);
+        dl->AddLine(ImVec2(c.x - r, c.y + r), ImVec2(c.x + r, c.y - r), col, th);
+    }
+    ImGui::PopID();
+    if (active) *active = isActive;
+    return changed;
+}
+
 Result Draw(const char* id, const std::vector<Tile>& tiles, State& st, const Options& o) {
     const theme::Palette& P = theme::Colors();
     const float s = o.scale;
@@ -312,8 +360,8 @@ Result Draw(const char* id, const std::vector<Tile>& tiles, State& st, const Opt
     }
     float bw = 0;
     if (o.button) bw = ImGui::CalcTextSize(o.button).x + ImGui::GetStyle().FramePadding.x * 2 + 8.0f * s;
-    ImGui::SetNextItemWidth(o.button ? std::max(40.0f * s, ImGui::GetContentRegionAvail().x - bw - sp) : -FLT_MIN);
-    ImGui::InputTextWithHint("##search", o.hint, st.search, sizeof(st.search));
+    SearchBox("##search", o.hint, st.search, sizeof(st.search),
+              o.button ? std::max(40.0f * s, ImGui::GetContentRegionAvail().x - bw - sp) : 0.0f, s);
     if (o.button) {
         ImGui::SameLine(0, sp);
         ImGui::BeginDisabled(!o.buttonEnabled);

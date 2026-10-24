@@ -266,10 +266,16 @@ bool HasConsoleName(const std::string& text) {
     return false;
 }
 
+// Minimum tooltip widths (design px): plain text tips, and the Sandbox item / rich tips, which
+// are as wide as their key rows when they have some and were narrow without (a name and a tag).
+constexpr float kTipMinW = 160, kRichTipMinW = 230;
+
 void Tooltip(const std::string& text) {
     if (text.empty()) return;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(12), U(9)));
     PushFloatingStyle();
+    // A minimum width: a tooltip of a few words (a tile's name) looked squeezed.
+    ImGui::SetNextWindowSizeConstraints(ImVec2(U(kTipMinW), 0), ImVec2(FLT_MAX, FLT_MAX));
     if (ImGui::BeginTooltip()) {
         FloatingSurface(false);
         {
@@ -897,13 +903,6 @@ void EndCard() {
     ImGui::PopStyleColor(2);
 }
 
-void SmallHeading(const char* text) {
-    FontScope f(theme::Display(), theme::kSmallSize + 1);
-    ImGui::PushStyleColor(ImGuiCol_Text, theme::Colors().soft);
-    ImGui::TextUnformatted(text);
-    ImGui::PopStyleColor();
-}
-
 void CardHeading(const char* text, ImU32 col) {
     FontScope f(theme::Display(), theme::kDisplaySize - 1);
     ImGui::PushStyleColor(ImGuiCol_Text, col);
@@ -1055,19 +1054,9 @@ void DrawCardsPage(const Host& h, const Tab& tab, const std::vector<ModuleView>&
             for (const auto& g : mv->groups) groups.push_back(&g);
             const Nesting n = BuildNesting(groups, {});
             ImGui::BeginDisabled(!on);  // grayed out and read-only while the module is off
-            bool first = true;
-            for (const auto* g : groups) {
-                const bool any = std::any_of(g->defs.begin(), g->defs.end(),
-                                             [&](const settings::Def& d) { return RowShown(*mv, d, n, {}); });
-                if (!any) continue;
-                // The card is named by its module: its groups get small sub-headers.
-                if (!g->name.empty() && groups.size() > 1) {
-                    if (!first) ImGui::Dummy(ImVec2(0, U(2)));
-                    SmallHeading(g->name.c_str());
-                }
-                first = false;
-                DrawGroupRows(h, *mv, *g, n, {}, {});
-            }
+            // The card is named by its module: its groups get no headings (round 10), just one
+            // list of rows in group order.
+            for (const auto* g : groups) DrawGroupRows(h, *mv, *g, n, {}, {});
             ImGui::EndDisabled();
             EndCard();
             ImGui::Dummy(ImVec2(0, U(kGap) - ImGui::GetStyle().ItemSpacing.y));
@@ -1797,8 +1786,8 @@ void ItemTooltip(const sbx::Snapshot& s, const std::string& name, sbx::Kind kind
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(14), U(10)));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(6), U(4)));
     PushFloatingStyle();
-    // A sensible minimum width: a name with only its tag (no favourites) looked squashed.
-    ImGui::SetNextWindowSizeConstraints(ImVec2(U(190), 0), ImVec2(FLT_MAX, FLT_MAX));
+    // A sensible minimum width: a name with only its tag (no favourites, no key rows) looked squashed.
+    ImGui::SetNextWindowSizeConstraints(ImVec2(U(kRichTipMinW), 0), ImVec2(FLT_MAX, FLT_MAX));
     if (ImGui::BeginTooltip()) {
         FloatingSurface(false);
         {
@@ -1861,7 +1850,7 @@ void RichTooltip(const sandbox_upgrades::Tip& t) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(14), U(10)));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(6), U(4)));
     PushFloatingStyle();
-    ImGui::SetNextWindowSizeConstraints(ImVec2(U(190), 0), ImVec2(FLT_MAX, FLT_MAX));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(U(kRichTipMinW), 0), ImVec2(FLT_MAX, FLT_MAX));
     if (ImGui::BeginTooltip()) {
         FloatingSurface(false);
         {
@@ -1935,15 +1924,15 @@ void SubTabs(const char* id, const std::vector<std::string>& labels, int& sel) {
 void SandboxHintBar(ImDrawList* dl, ImVec2 a, ImVec2 b) {
     const Palette& P = theme::Colors();
     static const KeyRow kSlots[] = {{"LMB", "select"}, {"Shift+Wheel", "\u00b11"}, {"Ctrl+Wheel", "\u00b110"},
-                                    {"Drag", "move / swap"}, {"RMB", "menu"}};
+                                    {"Drag", "move / swap"}, {"RMB", "context menu"}};
     static const KeyRow kPicker[] = {{"LMB", "put in a slot"},    {"Ctrl+LMB", "select"}, {"Shift+Wheel", "\u00b11"},
-                                     {"Ctrl+Wheel", "\u00b110"}, {"Drag", "to a slot"},  {"RMB", "menu / clear"}};
+                                     {"Ctrl+Wheel", "\u00b110"}, {"Drag", "to a slot"},  {"RMB", "context menu / clear"}};
     static const KeyRow kSpawner[] = {{"LMB", "spawn"},            {"Ctrl+LMB", "select"}, {"Shift+Wheel", "\u00b11"},
-                                      {"Ctrl+Wheel", "\u00b110"}, {"RMB", "menu / clear"}};
+                                      {"Ctrl+Wheel", "\u00b110"}, {"RMB", "context menu / clear"}};
     static const KeyRow kCrafter[] = {{"LMB", "select"}, {"Shift+Wheel", "\u00b11"}, {"Ctrl+Wheel", "\u00b110"},
                                       {"RMB", "clear"}};
-    static const KeyRow kUpgrades[] = {{"Shift+Wheel", "\u00b11 level"}, {"Ctrl+Wheel", "max / none"}, {"RMB", "menu"}};
-    static const KeyRow kBlueprints[] = {{"LMB", "unlock / lock"}, {"RMB", "menu"}};
+    static const KeyRow kUpgrades[] = {{"Shift+Wheel", "\u00b11 level"}, {"Ctrl+Wheel", "max / none"}, {"RMB", "context menu"}};
+    static const KeyRow kBlueprints[] = {{"LMB", "unlock / lock"}, {"RMB", "context menu"}};
     const KeyRow* hints = nullptr;
     size_t count = 0;
     switch (g_sbxHover) {
@@ -2434,7 +2423,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
                 else tip.lines.push_back({"No vacpack upgrade for it was found.", P.dim}), tip.keys = {{"RMB", "Extra Tank tier"}};
                 RichTooltip(tip);
             } else if (sl.item) {
-                ItemTooltip(s, sl.name, sl.kind, sl.item, nullptr, nullptr, {{"LMB", "select"}, {"RMB", "menu"}});
+                ItemTooltip(s, sl.name, sl.kind, sl.item, nullptr, nullptr, {{"LMB", "select"}, {"RMB", "context menu"}});
             } else {
                 tip.tag = "Empty";
                 tip.tagCol = P.dim;
@@ -2556,7 +2545,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
                 "in front of you.");
     if (r.hovered >= 0 && !ImGui::GetDragDropPayload() && !ImGui::IsPopupOpen(kSbxCtx)) {
         const sbx::Item& it = *src[static_cast<size_t>(r.hovered)];
-        ItemTooltip(s, it.name, it.kind, it.id, nullptr, nullptr, {{"LMB", "put in a slot"}, {"RMB", "menu"}}, it.mod);
+        ItemTooltip(s, it.name, it.kind, it.id, nullptr, nullptr, {{"LMB", "put in a slot"}, {"RMB", "context menu"}}, it.mod);
     }
     if (r.dropped && r.dropped->DataSize == sizeof(int)) {
         const int from = *static_cast<const int*>(r.dropped->Data);
@@ -2716,7 +2705,7 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
         const char* info = it.tarr && s.tarrsOff ? "Tarrs are disabled in this save's game settings."
                            : it.mod ? "Spawned through the mod (kept in the mod's file): at most 5 at a time."
                                     : nullptr;
-        ItemTooltip(s, it.name, it.kind, it.id, info, nullptr, {{"LMB", "spawn"}, {"RMB", "menu"}}, it.mod);
+        ItemTooltip(s, it.name, it.kind, it.id, info, nullptr, {{"LMB", "spawn"}, {"RMB", "context menu"}}, it.mod);
     }
     if (r.wheelStep != 0 && r.hovered >= 0) {
         const sbx::Item& it = *src[static_cast<size_t>(r.hovered)];
@@ -3047,7 +3036,7 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
         if (!mat && !rc.variants.empty()) info += std::format(" {} variant{}: right-click.", rc.variants.size(),
                                                               rc.variants.size() == 1 ? "" : "s");
         std::vector<KeyRow> keys{{"LMB", g_craftPick.count(rc.id) ? "deselect" : "select"}, {"Shift+Wheel", "amount"}};
-        if (!mat) keys.push_back({"RMB", rc.variants.empty() ? "craft menu" : "variants"});
+        if (!mat) keys.push_back({"RMB", rc.variants.empty() ? "context menu" : "variants"});
         if (!ImGui::IsPopupOpen(kCraftCtx))
             ItemTooltip(s, rc.name, mat || rc.mod ? rc.kind : sbx::Kind::Gadget, mat ? rc.id : 0, info.c_str(), mat ? nullptr : &rc.costs,
                         keys, rc.mod);
@@ -3436,8 +3425,7 @@ void DjSongs(const djb::Snapshot& s, float w, float listH) {
     ImGui::SameLine(0, gap);
     if (ImGui::Button("Open folder", ImVec2(folderW, 0))) djb::OpenFolder(s.folder);
     HoverTip("Opens " + s.folder + "\nPut .ogg, .mp3 or .wav files there (subfolders work too), then Rescan.");
-    ImGui::SetNextItemWidth(-FLT_MIN);
-    ImGui::InputTextWithHint("##djsearch", "Search songs...", g_djSearch, sizeof(g_djSearch));
+    item_grid::SearchBox("##djsearch", "Search songs...", g_djSearch, sizeof(g_djSearch), 0.0f, g_scale);
     const std::string needle = g_djSearch;
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));

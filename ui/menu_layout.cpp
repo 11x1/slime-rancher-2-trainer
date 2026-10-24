@@ -225,6 +225,14 @@ std::vector<OptionText> EnumTexts(const settings::Def& d) {
           {"Accelerated", "Forward hops gain speed like back hops"}}},
         {"minimap", "orientation", {{"North up", "The map stays fixed"}, {"Rotate", "The map turns with the player"}}},
         {"minimap", "arrow_style", {{"Game marker", "The game's own player icon"}, {"Classic", "A plain arrow"}}},
+        // Instant needs its own hook: without it the setting has only the first two options.
+        {"misc_tweaks", "fab_purchases",
+         {{"Normal", "The game's confirm window and animation"},
+          {"Skip animation", "Keeps the confirm window, no success animation"},
+          {"Instant", "Buys at once, no confirm window, one per press"}}},
+        {"misc_tweaks", "fab_purchases",
+         {{"Normal", "The game's confirm window and animation"},
+          {"Skip animation", "Keeps the confirm window, no success animation"}}},
     };
     for (const auto& e : kTable)
         if (d.module == e.module && d.key == e.key && e.options.size() == d.options.size()) return e.options;

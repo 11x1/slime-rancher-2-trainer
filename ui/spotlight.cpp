@@ -14,6 +14,7 @@
 #include "core/log.h"
 #include "hud_edit.h"
 #include "imgui_internal.h"  // GetTopMostPopupModal
+#include "item_grid.h"  // SearchBox
 #include "theme.h"
 
 namespace sr2::ui::spotlight {
@@ -463,11 +464,10 @@ bool Draw(const Helpers& h, const std::vector<Category>& cats, const std::vector
         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(U(4), U(6)));
         ImGui::SetCursorScreenPos(ImVec2(a.x + U(48), std::round(sy - ImGui::GetFrameHeight() * 0.5f)));
-        ImGui::SetNextItemWidth(W - U(48) - U(18));
         // Focus on open, and again after a click elsewhere in the box (a row's switch) once it is released.
         if (g.opened || (!g.inputActive && !ImGui::IsAnyItemActive())) ImGui::SetKeyboardFocusHere();
-        ImGui::InputTextWithHint("##query", "Search settings and pages", g.query, sizeof(g.query));
-        g.inputActive = ImGui::IsItemActive();
+        item_grid::SearchBox("##query", "Search settings and pages", g.query, sizeof(g.query), W - U(48) - U(18), g_scale,
+                             &g.inputActive);
         ImGui::PopStyleVar(2);
         ImGui::PopStyleColor(3);
         ImGui::PopFont();

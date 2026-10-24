@@ -102,6 +102,13 @@ int WheelStep(float wheel);
 // Case-insensitive substring match, as the search box uses it.
 bool Matches(const std::string& name, const char* needle);
 
+// A search box (InputTextWithHint, `width` <= 0: the rest of the row) with a small
+// clear button (an x) inside its right end while it holds text: a click empties it
+// and gives the box the keyboard focus again. True if the text changed this frame.
+// `active`: whether the box has the keyboard (typing) this frame.
+bool SearchBox(const char* id, const char* hint, char* buf, size_t size, float width, float scale,
+               bool* active = nullptr);
+
 // The header row (tabs, search box, button) and the grid below it. The caller
 // filters tiles by State::tab itself, before calling: call PredictTab first, so a
 // tab clicked this frame already filters this frame's tiles (else the old tab's
