@@ -59,7 +59,7 @@ bool ChainSellTarget(Il2CppObject* landPlot, Il2CppObject* item, int32_t& upgrad
 enum class Family : int {
     kMusicBox = 0,   // corral Music Box II: calming bonus x multiplier
     kCoop,           // coop Faster Hens I / II: laying period divided by the multiplier
-    kGarden,         // garden Fast Growth I / II: crop growth rate x multiplier
+    kGarden,         // garden Sprinkler II / III (ids garden_growth_1 / 2): crop growth rate x multiplier
     kAsh,            // incinerator Ash Booster: ash per incinerated food x multiplier
     kCount
 };

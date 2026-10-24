@@ -29,6 +29,13 @@
 //   * decorFireFlower (decoration gadget): child "FX Fireflower" (two ember particle systems,
 //     "Embers_01" / "Embers_02" at y 2.59 / 1.17 above the flower), set so they rise out of
 //     the incinerator's opening.
+//   * Ash Booster embers out of the ash (user, round 7: "embers should come from ash aswell"): the
+//     same inactive "FireTest/Embers" emitter (turned -90 deg about x: it emits upwards) cloned three
+//     more times, smaller, around the incinerator at r ~3.3 on the Ash Trough's ash. The ash surface is
+//     the live plot's "AshTrough/Ash Level" (FillableAshSource; its transform moves between MinYPos and
+//     MaxYPos with the amount of ash, prefab y 0.75 = full): these clones (named "sr2ash") follow its
+//     local height on every ~1 Hz tick (FollowAsh), 5 cm above it. Without the trough object they stay
+//     at the full-trough height.
 //   * silo prefab "patchSilo": "Silo Upgrade N/Addition N/Capacity Addon N/techSiloCapacity" = the
 //     vanilla Storage Capacity Upgrade's tanks, one per storage section, high on the silo's diagonals
 //     (plot-local about (-1.6, 3.3, -1.8) for section 0, the others turned 90 deg each and higher).
@@ -51,8 +58,8 @@
 // collector, Hen Collector), off the vanilla nest in the middle and clear of the other slots;
 // after 64 failed draws it takes a fixed fallback spot.
 //
-// Garden: a third sprinkler head in the middle of the +x side (Fast Growth I or II) and a fourth
-// in the middle of the -x side (Fast Growth II; the deposit port at (-5.44, -3.14) is outside the
+// Garden: a third sprinkler head in the middle of the +x side (Sprinkler II or III) and a fourth
+// in the middle of the -x side (Sprinkler III; the deposit port at (-5.44, -3.14) is outside the
 // soil), spraying inwards like the vanilla ones.
 //
 // Corral: the second speaker goes on the (-x, -z) corner post, above the plot menu terminal
@@ -104,6 +111,9 @@ constexpr int32_t kPlotIncinerator = 7;
 // Transform.Find finds inactive children, the clone goes under our holder and is shown with it).
 constexpr const char* kSiloTankPath = "Silo Upgrade 0/Addition 0/Capacity Addon 0/techSiloCapacity";
 constexpr std::string_view kPrefix = "sr2props_";
+constexpr std::string_view kAshName = "sr2ash";            // ember clones that follow the ash surface
+constexpr const char* kAshLevelPath = "AshTrough/Ash Level";  // incinerator prefab: FillableAshSource
+constexpr float kAshFullY = 0.75f;                          // its prefab height (a full trough)
 
 struct Vec3 {
     float x, y, z;
@@ -126,6 +136,7 @@ struct Part {
     Vec3 scale;
     bool activate;       // the source is inactive in its prefab: switch the clone on
     int slot = -1;       // >= 0: coop layout slot; pos / rot are then offsets from the slot
+    bool onAsh = false;  // pos.y is the height above the incinerator's ash surface (FollowAsh)
 };
 
 constexpr Quat kId{0.0f, 0.0f, 0.0f, 1.0f};
@@ -163,8 +174,14 @@ const Part kHay[] = {
 const Part kNests[] = {
     {Src::kPlot, kPlotCoop, nullptr, "Deco/nestPlain01", {}, kId, S(1.0f), false, 5},
     {Src::kPlot, kPlotCoop, nullptr, "Deco/nestPlain01", {}, kId, S(1.0f), false, 6},
-    {Src::kToy, 0, "toyStuffedChicken", "model_stuffedChicken", {0.0f, 0.1f, 0.0f}, YawQ(-0.70710678f, 0.70710678f),
-     S(1.33f), false, 6},
+    // The plush hen sits deep in the nest (round 7: "hen one nest eggs are unnaturally lined up"): the
+    // stuffed chicken mesh (identifiabletypes bundle, "stuffedChicken", origin at the body centre, radius
+    // 0.44) has a row of round bulbs low on its front and sides (toes, wing tips; y -0.48 .. +0.05), which
+    // at the old height (+0.1) stood just above the nest floor (nestChicken01: floor ~0.09, rim ~0.40)
+    // like a neat row of eggs. At -0.06 every bulb is below the floor and inside the straw wall; the body
+    // and head still rise ~0.2 m over the rim. A slight 6 deg lean (about its own x) so it settles in.
+    {Src::kToy, 0, "toyStuffedChicken", "model_stuffedChicken", {0.0f, -0.06f, 0.0f},
+     {0.03700710f, -0.70614096f, 0.03700710f, 0.70614096f}, S(1.33f), false, 6},
     {Src::kGadget, 0, "decorFlowerPillowSmall", "mesh", {}, kId, S(0.7f), false, 7},
     {Src::kPlot, kPlotCoop, nullptr, "Deco/decoFieldsGrass02_Green", {}, kId, S(0.6f), false, 8},
     {Src::kPlot, kPlotCoop, nullptr, "Deco/decoFieldsGrass01 _Green", {}, kId, S(0.65f), false, 9},
@@ -186,6 +203,13 @@ const Part kGlow[] = {
     {Src::kPlot, kPlotIncinerator, nullptr, "objIncinerator/Meshes/meshIncinerator/FireTest/Embers",
      {0.0f, 2.11f, 0.0f}, {-0.70710678f, 0.0f, 0.0f, 0.70710678f}, {1.05f, 0.9f, 1.8f}, true},
     {Src::kGadget, 0, "decorFireFlower", "FX Fireflower", {0.0f, 2.4f, 0.0f}, kId, S(1.0f), false},
+    // embers out of the ash around the incinerator (onAsh: y is above the ash surface)
+    {Src::kPlot, kPlotIncinerator, nullptr, "objIncinerator/Meshes/meshIncinerator/FireTest/Embers", {3.1f, 0.05f, 1.2f},
+     {-0.70710678f, 0.0f, 0.0f, 0.70710678f}, {0.7f, 0.7f, 0.9f}, true, -1, true},
+    {Src::kPlot, kPlotIncinerator, nullptr, "objIncinerator/Meshes/meshIncinerator/FireTest/Embers",
+     {-1.9f, 0.05f, 2.7f}, {-0.70710678f, 0.0f, 0.0f, 0.70710678f}, {0.6f, 0.6f, 0.8f}, true, -1, true},
+    {Src::kPlot, kPlotIncinerator, nullptr, "objIncinerator/Meshes/meshIncinerator/FireTest/Embers",
+     {-1.0f, 0.05f, -3.2f}, {-0.70710678f, 0.0f, 0.0f, 0.70710678f}, {0.65f, 0.65f, 0.85f}, true, -1, true},
 };
 
 // Silo tanks: the vanilla capacity tank ("Capacity Addon 0/techSiloCapacity": mesh 2.4 x 2.7 x 2.4
@@ -326,6 +350,7 @@ struct PlotProps::Impl {
     const MethodInfo* trFind = nullptr;          // Transform.Find(string)
     const MethodInfo* trSetParent = nullptr;     // Transform.SetParent(Transform, bool)
     const MethodInfo* trSetLocalPosition = nullptr;
+    const MethodInfo* trGetLocalPosition = nullptr;
     const MethodInfo* trSetLocalRotation = nullptr;
     const MethodInfo* trSetLocalScale = nullptr;
     const MethodInfo* goCtor = nullptr;          // GameObject..ctor(string)
@@ -440,6 +465,7 @@ struct PlotProps::Impl {
     Il2CppObject* Source(const Part& part, Il2CppObject* lookup);
     void Strip(Il2CppObject* root, bool keepColliders);
     void Create(Il2CppObject* plot, const KindDef& def, Il2CppObject* lookup, const std::string& id, unsigned generation);
+    void FollowAsh(Il2CppObject* plot, unsigned generation);
 };
 
 // ---------------------------------------------------------------- setup --
@@ -517,6 +543,7 @@ bool PlotProps::Setup(Resolver& R, const char* module, std::string& why) {
     p->trFind = byParams(transform, "Find", {"System.String"});
     p->trSetParent = byParams(transform, "SetParent", {"UnityEngine.Transform", "System.Boolean"});
     p->trSetLocalPosition = method(transform, "set_localPosition", 1);
+    p->trGetLocalPosition = method(transform, "get_localPosition", 0);
     p->trSetLocalRotation = method(transform, "set_localRotation", 1);
     p->trSetLocalScale = method(transform, "set_localScale", 1);
     p->goCtor = byParams(p->gameObjectClass, ".ctor", {"System.String"});
@@ -649,6 +676,11 @@ void PlotProps::Impl::Create(Il2CppObject* plot, const KindDef& def, Il2CppObjec
         Call(trSetLocalPosition, tr, {&pos}, "Transform.set_localPosition");
         Call(trSetLocalRotation, tr, {&rot}, "Transform.set_localRotation");
         Call(trSetLocalScale, tr, {&scale}, "Transform.set_localScale");
+        if (part->onAsh) {
+            unity::SetName(clone, kAshName);
+            pos.y += kAshFullY;  // FollowAsh moves it to the live ash height once the holder is active
+            Call(trSetLocalPosition, tr, {&pos}, "Transform.set_localPosition");
+        }
         if (part->activate) unity::SetActive(clone, true);  // still inactive in the hierarchy (holder)
         clones.push_back(clone);
         ++built;
@@ -663,6 +695,7 @@ void PlotProps::Impl::Create(Il2CppObject* plot, const KindDef& def, Il2CppObjec
         return;
     }
     unity::SetActive(holder, true);
+    if (def.kind == kPropIncinGlow) FollowAsh(plot, generation);
     // Music Box II: the second speaker plays the Slime DJ song too (its vanilla audio was stripped with
     // the game scripts). Dropped by slime_dj when Unity destroys the holder.
     if (def.kind == kPropCorralMusic)
@@ -670,6 +703,39 @@ void PlotProps::Impl::Create(Il2CppObject* plot, const KindDef& def, Il2CppObjec
             if (unity::IsAlive(clone)) sr2::modules::slime_dj::RegisterEmitter(clone, sr2::modules::slime_dj::EmitterKind::kSpeaker);
     SR2_INFO("[{}] {} props built on plot '{}' ({} of {} piece(s){}{})", module, def.name, id, built, def.count,
              scattered ? ", scattered by plot id" : "", SolidKind(def.kind) ? ", colliders kept" : "");
+}
+
+// Ash Booster: the "sr2ash" ember clones sit 5 cm over the live ash surface (see the header). Called
+// right after the build and on every tick while the props stand; nothing is written while the height
+// is unchanged.
+void PlotProps::Impl::FollowAsh(Il2CppObject* plot, unsigned generation) {
+    if (!trGetLocalPosition) return;
+    Il2CppObject* plotTr = unity::TransformOf(plot);
+    if (!unity::IsAlive(plotTr)) return;
+    bool ok = false;
+    Il2CppObject* ash = Call(trFind, plotTr, {unity::NewString(kAshLevelPath)}, "Transform.Find", &ok);
+    if (!ok || !unity::IsAlive(ash)) return;  // no trough object: the clones keep the full-trough height
+    Il2CppObject* b = Call(trGetLocalPosition, ash, {}, "Transform.get_localPosition", &ok);
+    if (!ok || !b) return;
+    const float ashY = Value<Vec3>(b).y;  // AshTrough sits at the plot origin: plot-local height
+    if (!std::isfinite(ashY)) return;
+    const std::string holderName = std::format("{}IncineratorGlow#{}", kPrefix, generation);
+    for (Il2CppObject* child : ChildTransforms(plotTr)) {
+        Il2CppObject* go = unity::GameObjectOf(child);
+        if (!go || unity::GetName(go) != holderName) continue;
+        for (Il2CppObject* tr : ChildTransforms(child)) {
+            Il2CppObject* cgo = unity::GameObjectOf(tr);
+            if (!cgo || unity::GetName(cgo) != kAshName) continue;
+            Il2CppObject* pb = Call(trGetLocalPosition, tr, {}, "Transform.get_localPosition", &ok);
+            if (!ok || !pb) continue;
+            Vec3 pos = Value<Vec3>(pb);
+            const float want = ashY + 0.05f;
+            if (std::fabs(pos.y - want) < 0.01f) continue;
+            pos.y = want;
+            Call(trSetLocalPosition, tr, {&pos}, "Transform.set_localPosition");
+        }
+        break;
+    }
 }
 
 // ---------------------------------------------------------------- api --
@@ -696,6 +762,7 @@ void PlotProps::Tick(const std::vector<PropRequest>& wanted, const std::function
         for (const KindDef& k : kKinds)
             if ((kinds & k.kind) && k.plotType == type) want |= k.kind;
         const uint32_t have = p.Scan(plot, generation_, want);
+        if (have & kPropIncinGlow) p.FollowAsh(plot, generation_);
         for (const KindDef& k : kKinds) {
             if (!(want & k.kind) || (have & k.kind)) continue;
             if (!lookupTried) {

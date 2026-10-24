@@ -163,6 +163,18 @@
 //     an alt prompt (prefab / label missing) that key still sells the card (btnAltCard_). Disabled
 //     buttons ("Holds food") hide the icon.
 //
+// ---------------------------------------------------------------- purchase popup --
+//   The purchase confirm (ListUIRoot`4.OpenPopupPrompt, opened by PromptForUpgrade for Space / A /
+//   the Purchase button alike) is the game's PopupPrompt: Panel/BodyContent/ButtonPanel, a game
+//   HorizontalLayout (_reverseChildren 0, centred, spacing 16) with "TextButton_NoneSelectable
+//   (Accept)" first and "(Cancel)" second (gamecore_scenes bundle, UnityPy), so vanilla shows the
+//   positive button on the left. Detour on OpenPopupPrompt (shared generic body; LandPlotUIRoot only,
+//   by class): after the original, the returned PopupPrompt's _positiveActionButton goes last among
+//   its siblings (Transform.SetAsLastSibling; LayoutBehaviour re-lays out on OnTransformChildrenChanged,
+//   and the popup was just instantiated anyway): Cancel left, Purchase right, still centred, the same
+//   order as the card's Sell / Purchase pair (user report round 7: "not on confirmation buttons when
+//   buying with space"). Keys and actions are unchanged. Other menus' popups are not touched.
+//
 // Fault policy: every detour runs its logic inside a DetourGuard (native fault -> module
 // faulted, detours pass-through). Objects are class- and IsAlive-checked; runtime_invoke
 // native faults mark the module faulted (never used as control flow). GC handles (open
@@ -300,6 +312,7 @@ public:
         return (altGo_ && item == altItem_) || (btnAltCard_ && item == btnAltCard_);
     }
     bool HandleAltAction(Il2CppObject* root, Il2CppObject* item);
+    void SwapPopupButtons(Il2CppObject* popup);
 
     // Ash Trough re-purchase: a vanilla purchase closure about to buy ASH_TROUGH on a plot
     // whose ash was remembered at its sale (else plot == nullptr).
@@ -365,6 +378,7 @@ private:
     bool loggedButton_ = false;
     bool loggedLayout_ = false;
     bool loggedAlt_ = false;
+    bool loggedPopup_ = false;
 
     // open plot menu (main thread only)
     Il2CppObject* root_ = nullptr;
@@ -455,6 +469,10 @@ public:
     Il2CppClass* textLabelClass_ = nullptr;    // TextLabel (optional label route)
     size_t offTextLabelLse_ = 0, offTextLabelTmp_ = 0;  // TextLabel._stringEvent / _textElement
     bool altOk_ = false;
+    // purchase popup order (optional: missing -> the game's order, Purchase left)
+    Il2CppClass* popupClass_ = nullptr;                   // PopupPrompt
+    size_t offPopupPositive_ = 0, offPopupNegative_ = 0;  // _positiveActionButton / _negativeActionButton
+    Bound<void(Il2CppObject*)> setAsLastSibling_;         // Transform.SetAsLastSibling
     Il2CppClass* layoutGroupClass_ = nullptr;  // UnityEngine.UI.LayoutGroup (optional)
     Il2CppClass* inputEventButtonClass_ = nullptr;   // InputEventButton (optional)
     Il2CppClass* inputEventDisplayClass_ = nullptr;  // InputEventDisplay (optional)
@@ -522,6 +540,7 @@ sr2::core::DetourGuard g_bindGuard{kModule, "DetailsMoreButtonView.BindData"};
 sr2::core::DetourGuard g_pressGuard{kModule, "Button.Press"};
 sr2::core::DetourGuard g_showAltGuard{kModule, "ListUIRoot.ShowAltActionButton"};
 sr2::core::DetourGuard g_altGuard{kModule, "ListUIRoot.OnAltAction"};
+sr2::core::DetourGuard g_popupGuard{kModule, "ListUIRoot.OpenPopupPrompt"};
 
 using OnActionFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
 using ConfirmFn = void (*)(Il2CppObject*, const MethodInfo*);
@@ -530,6 +549,9 @@ using MoreBindFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
 using PressFn = void (*)(Il2CppObject*, const MethodInfo*);
 using ShowAltFn = bool (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
 using OnAltActionFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+// BaseUI OpenPopupPrompt(title, message, warning, positiveText, negativeText, positiveAction, negativeAction)
+using OpenPopupFn = Il2CppObject* (*)(Il2CppObject*, Il2CppObject*, Il2CppObject*, Il2CppObject*, Il2CppObject*,
+                                      Il2CppObject*, Il2CppObject*, Il2CppObject*, const MethodInfo*);
 OnActionFn g_origOnAction = nullptr;
 ConfirmFn g_origConfirm = nullptr;
 SetActivatorFn g_origSetActivator = nullptr;
@@ -537,6 +559,7 @@ MoreBindFn g_origMoreBind = nullptr;
 PressFn g_origPress = nullptr;
 ShowAltFn g_origShowAlt = nullptr;
 OnAltActionFn g_origOnAlt = nullptr;
+OpenPopupFn g_origOpenPopup = nullptr;
 
 void SetActivatorDetour(Il2CppObject* self, Il2CppObject* plot, const MethodInfo* mi) {
     // Before the original: it ends in RebuildUI, which binds the details of the first item.
@@ -575,6 +598,16 @@ void OnAltActionDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo*
     if (g_self && self && item && g_self->On() && IsA(self, g_self->rootClass_))
         g_altGuard.Run([&] { handled = g_self->HandleAltAction(self, item); });
     if (!handled) g_origOnAlt(self, item, mi);
+}
+
+// Shared generic body too: LandPlotUIRoot only, by class.
+Il2CppObject* OpenPopupDetour(Il2CppObject* self, Il2CppObject* title, Il2CppObject* message, Il2CppObject* warning,
+                              Il2CppObject* posText, Il2CppObject* negText, Il2CppObject* posAction,
+                              Il2CppObject* negAction, const MethodInfo* mi) {
+    Il2CppObject* popup = g_origOpenPopup(self, title, message, warning, posText, negText, posAction, negAction, mi);
+    if (g_self && self && popup && g_self->On() && IsA(self, g_self->rootClass_))
+        g_popupGuard.Run([&] { g_self->SwapPopupButtons(popup); });
+    return popup;
 }
 
 void OnActionDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo* mi) {
@@ -808,6 +841,32 @@ bool SellUpgrades::HandleAction(Il2CppObject* root, Il2CppObject* item) {
     // Owned item confirmed (A / submit / clicking the selected card): nothing happens, as in
     // vanilla. Selling is only the Sell button (no popup, so no accidental sale on a double click).
     return true;
+}
+
+// ---------------------------------------------------------------- purchase popup --
+
+// Cancel left, Purchase right (see the header): the positive button becomes the last child of the
+// ButtonPanel, whose HorizontalLayout lays its children out in sibling order.
+void SellUpgrades::SwapPopupButtons(Il2CppObject* popup) {
+    if (!setAsLastSibling_ || !main_thread::IsMainThread()) return;
+    if (!IsA(popup, popupClass_) || !unity::IsAlive(popup)) return;
+    auto* pos = unity::Field<Il2CppObject*>(popup, offPopupPositive_);
+    auto* neg = unity::Field<Il2CppObject*>(popup, offPopupNegative_);
+    if (!unity::IsAlive(pos) || !unity::IsAlive(neg)) return;
+    Il2CppObject* posTr = unity::TransformOf(pos);
+    Il2CppObject* negTr = unity::TransformOf(neg);
+    if (!unity::IsAlive(posTr) || !unity::IsAlive(negTr)) return;
+    Il2CppObject* parent = getParent_(posTr);
+    if (!unity::IsAlive(parent) || parent != getParent_(negTr)) {  // not the prefab layout we know
+        if (!loggedPopup_) SR2_WARN("[{}] purchase popup: Accept / Cancel not siblings - order left as is", kModule);
+        loggedPopup_ = true;
+        return;
+    }
+    setAsLastSibling_(posTr);
+    if (!loggedPopup_)
+        SR2_INFO("[{}] purchase popup: buttons reordered (Cancel left, Purchase right) under '{}'", kModule,
+                 unity::GetName(unity::GameObjectOf(parent)));
+    loggedPopup_ = true;
 }
 
 // ---------------------------------------------------------------- sell button --
@@ -1914,6 +1973,27 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         }
     }
 
+    // ---- purchase popup order (optional: missing -> the game's order) ----
+    const MethodInfo* openPopupMi = nullptr;
+    {
+        std::string perr;
+        popupClass_ = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Popup", "PopupPrompt", &perr);
+        auto oPos = popupClass_ ? R.FieldOffset(popupClass_, "_positiveActionButton", &perr) : std::nullopt;
+        auto oNeg = popupClass_ ? R.FieldOffset(popupClass_, "_negativeActionButton", &perr) : std::nullopt;
+        std::string saved = why;
+        openPopupMi = method(rootClass_, "OpenPopupPrompt", 7, false);
+        const bool sib = bind(setAsLastSibling_, method(transform, "SetAsLastSibling", 0, false), false);
+        why = saved;
+        if (oPos && oNeg && openPopupMi && sib) {
+            offPopupPositive_ = *oPos;
+            offPopupNegative_ = *oNeg;
+        } else {
+            openPopupMi = nullptr;
+            SR2_WARN("[{}] purchase popup order unavailable ({}) - the game's order (Purchase left)", kModule,
+                     perr.empty() ? "PopupPrompt / OpenPopupPrompt / SetAsLastSibling missing" : perr);
+        }
+    }
+
     // ---- hooks ----
     std::string err;
     void* onActionPtr = R.MethodPointer(onActionMi, &err);
@@ -1961,6 +2041,12 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
             altWhy = "hook ListUIRoot.OnAltAction failed";  // ShowAlt stays pass-through (altOk_ false)
         else
             altOk_ = true;
+    }
+    if (openPopupMi) {
+        void* pp = R.MethodPointer(openPopupMi, &err);
+        if (!pp || !ctx.HookAddress("ListUIRoot.OpenPopupPrompt", pp, reinterpret_cast<void*>(&OpenPopupDetour),
+                                    reinterpret_cast<void**>(&g_origOpenPopup)))
+            SR2_WARN("[{}] hook ListUIRoot.OpenPopupPrompt failed - purchase popup keeps the game's order", kModule);
     }
     if (!altOk_)
         SR2_WARN("[{}] alt-action sell unavailable ({}) - selling is mouse-only this session", kModule, altWhy);

@@ -9,8 +9,9 @@
 //   Music Box II        corral       Music Box             2000    2x calming bonus
 //   Faster Hens I        coop         -                     2000    hens lay 1.5x as often
 //   Faster Hens II       coop         Faster Hens I         4000    hens lay 2x as often
-//   Fast Growth I        garden       -                     2000    crops grow 1.5x as fast
-//   Fast Growth II       garden       Fast Growth I         4000    crops grow 2x as fast
+//   Sprinkler II         garden       -                     2000    crops grow 1.5x as fast
+//   Sprinkler III        garden       Sprinkler II          4000    crops grow 2x as fast
+//   (save ids garden_growth_1 / _2: the tiers were called Fast Growth I / II until round 8)
 //   Ash Booster          incinerator  Ash Trough            1500    2x ash per incinerated food
 //   Silo Capacity II     silo         Storage Capacity      3000    300 items per silo slot
 //   Silo Capacity III    silo         Silo Capacity II      4500    400 items per silo slot
@@ -39,10 +40,10 @@
 //   sold (sell_upgrades shows no Sell button for them).
 //
 //   Each chain has ONE menu card (Shown): the first tier not owned yet, or the last one once
-//   all are owned (greyed, checkmark). Faster Hens I -> II and Fast Growth I -> II share a
+//   all are owned (greyed, checkmark). Faster Hens I -> II and Sprinkler II -> III share a
 //   card; a tier on a vanilla upgrade (Music Box II, Ash Booster) takes over that upgrade's
 //   card once it is owned (the vanilla item leaves the list while the tier card stands at its
-//   index, and comes back for every other plot / when the module stops). Fast Growth is listed
+//   index, and comes back for every other plot / when the module stops). Sprinkler II / III is listed
 //   right after the Sprinkler (`after`). A card that shows a tier not owned yet gets Buy (the
 //   vanilla Purchase button) and, next to it, sell_upgrades' Sell button for the tier below
 //   (api.h ChainSellTarget). Prerequisites: custom `needs` or a vanilla upgrade via the
@@ -84,8 +85,8 @@
 //
 //   Tier props (plot_props.cpp): owned tiers show on their plot as pure decoration cloned from
 //   vanilla models - Faster Hens I / II: two small hay bales (decorHayBales), II adds two nests
-//   (the coop's own), a flower pillow and a stuffed chicken toy; Fast Growth I / II: a third
-//   sprinkler head (garden prefab); Ash Booster: glow + embers in the incinerator's fire. Built /
+//   (the coop's own), a flower pillow and a stuffed chicken toy; Sprinkler II / III: a third
+//   (III: and a fourth) sprinkler head (garden prefab); Ash Booster: glow + embers in the incinerator's fire. Built /
 //   removed by the same ~1 Hz world tick from the sidecar ownership.
 //
 //   World objects are clones of vanilla plot-prefab parts (LookupDirector.GetPlotPrefab),
@@ -366,12 +367,13 @@ const UpgradeDef kDefs[] = {
      "Faster Hens II", "The coziest nests around: hens lay eggs twice as fast. Replaces Faster Hens I.",
      "Buy Faster Hens II for this coop?"},
     {GARDEN_GROWTH_1, "garden_growth_1", kPlotGarden, 0, 2000, F(Family::kGarden), 1.5f, kUpgSprinkler, kUpgSprinkler,
-     "Fast Growth I", "Extra-rich soil makes crops grow 1.5x as fast. Stacks with the sprinkler!",
-     "Buy Fast Growth I for this garden?"},
+     "Sprinkler II",
+     "Far, Far Range ranchers swear by a third sprinkler head. Well-watered crops grow 1.5x as fast!",
+     "Buy Sprinkler II for this garden?"},
     {GARDEN_GROWTH_2, "garden_growth_2", kPlotGarden, GARDEN_GROWTH_1, 4000, F(Family::kGarden), 2.0f, kUpgSprinkler,
-     kUpgSprinkler, "Fast Growth II",
-     "Crops grow twice as fast. Stacks with the sprinkler and replaces Fast Growth I.",
-     "Buy Fast Growth II for this garden?"},
+     kUpgSprinkler, "Sprinkler III",
+     "A fourth head soaks every last row. Ogden would approve: crops grow twice as fast! Replaces Sprinkler II.",
+     "Buy Sprinkler III for this garden?"},
     {INCIN_ASH_BOOST, "incinerator_ash_boost", kPlotIncinerator, kUpgAshTrough, 1500, F(Family::kAsh), 2.0f,
      kUpgAshTrough, 0, "Ash Booster",
      "Squeezes twice the ash out of everything you burn. Fire slimes approve!",
@@ -2290,8 +2292,8 @@ void CustomUpgrades::WorldTick() {
     if (vacpack_.Ready() && !sr2::core::ModuleFaulted(kModule)) vacpack_.Tick();
 }
 
-// Plots whose owned tiers have props: Faster Hens I / II (hay; II adds nests), Fast Growth I / II
-// (sprinkler), Ash Booster (fire glow). The plot type is checked again on the live plot.
+// Plots whose owned tiers have props: Faster Hens I / II (hay; II adds nests), Sprinkler II / III
+// (sprinkler heads), Ash Booster (fire glow). The plot type is checked again on the live plot.
 std::vector<custom_upgrades::world::PropRequest> CustomUpgrades::WantedProps() const {
     namespace w = custom_upgrades::world;
     auto owns = [](const PlotState& ps, int32_t id) {

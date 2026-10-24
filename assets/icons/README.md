@@ -13,7 +13,7 @@ embedded into the DLL (`ui/mod_icons_data.inc`) and turned into Unity sprites at
 | `feeder_2.png` | Auto-Feeder II (corral) |
 | `music_2.png` | Music Box II (corral) |
 | `hens_1.png`, `hens_2.png` | Faster Hens I / II (coop) |
-| `growth_1.png`, `growth_2.png` | Fast Growth I / II (garden) |
+| `growth_1.png`, `growth_2.png` | Sprinkler II / III (garden; ids garden_growth_1 / 2) |
 | `ash_boost.png` | Ash Booster (incinerator) |
 | `sell_all.png` | Sell-All Button (silo) |
 | `sell_all_now.png` | Sell All Plorts Now (silo action) |

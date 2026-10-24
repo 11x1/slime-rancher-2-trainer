@@ -433,6 +433,15 @@ replaced (old type T, stored type T): dropped owned [...], values [...]`.
   original does it once more). The checkmark itself is the game's: `GenericViewHolder.BindData`
   (0x83C900) enables its `unavailableIcon` image with the item's `_unavailableIcon` sprite while
   IsAvailable is false; our clones copy that sprite from their icon source / template.
+- **Purchase popup order** (round 7: "not on confirmation buttons when buying with space"). Buying opens
+  the game's PopupPrompt (`ListUIRoot.OpenPopupPrompt` from PromptForUpgrade, the same for Space / A /
+  the Purchase button). Its prefab (gamecore_scenes, UnityPy): `Panel/BodyContent/ButtonPanel`, a game
+  `HorizontalLayout` (`_reverseChildren` 0, centred, spacing 16) with `TextButton_NoneSelectable (Accept)`
+  first, `(Cancel)` second, so the positive button is on the left. sell_upgrades now detours
+  OpenPopupPrompt (shared generic body, LandPlotUIRoot only) and moves `_positiveActionButton` to the last
+  sibling: Cancel left, Purchase right, still centred, like the card's Sell / Purchase pair. Only the order
+  changes (keys, actions, labels are the game's). The layout re-lays out on OnTransformChildrenChanged.
+  Log once: `purchase popup: buttons reordered (Cancel left, Purchase right) under 'ButtonPanel'`.
 - **Coop Air Net icon**: the corral's own Air Net upgrade icon (`iconFrom` = Air Net, found in the corral
   menu's items by `GlobalUpgradeItem`), no mod icon any more (user: "use the air net icon from corrals").
 
@@ -535,6 +544,20 @@ dialog.
   are unknown. Log once: `silo sell button on plot '...' tinted gold (cap): N colour(s) on <renderer> (k),
   ...` - if it says `no cap found` or 0 colours, the renderer names / shader need a look. A later palette
   change leaves our instanced materials alone (they are in no palette map).
+- **Gold button, round 8** (test: "button is NOT gold", log had `tinted gold (cap): 24 colour(s) on
+  button_button (24)`). The cap's material is the palette shader `RanchTech01` (24 slots `_Color00` ..
+  `_Color72` picked per vertex by a UV2 mask; corral prefab via UnityPy), so the 24 writes were the right
+  ones; ApplyPalette / ColorPaletteApplicator (IDA: SetupForTarget only maps shared materials, keeps unknown
+  ones; Apply only recolours mapped materials) cannot undo them. No StaticColorizer on the button. The
+  cause was not found for sure; two weak spots are fixed: the tint ran once per button, keyed by the raw
+  GameObject pointer (no GC handle, so a rebuilt button could look "already tinted"), and nothing would
+  notice a later material swap or a MaterialPropertyBlock (wins over material values; StaticColorizer /
+  ColorPalette.SetColors(Renderer) write them). Now the instanced materials are named `sr2mods_gold`, every
+  tick checks the cap's shared material name and tints again when it is not ours (log `materials were
+  replaced (was '...') - tinted again`), the same colours also go into a MaterialPropertyBlock on each
+  tinted renderer, and the tint is stronger: cap 85 %, base (`button_base`) 35 % (no cap: everything
+  40 %). First log line now: `tinted gold (cap + base): N colour(s) on button_button (24 at 85 %),
+  button_base (.. at 35 %); property block on K renderer(s)`.
 - Log: `silo receipt ready`, `sell all (plot '...'): receipt shown, N plort(s) in T type(s) for V`,
   `receipt cancelled, nothing sold`, `receipt changed before the sale (...) - refreshed`, then the
   usual `sell all (receipt, plot '...'): sold ...`. Without the dialog parts (setup failed) the button
@@ -644,11 +667,11 @@ coop_world's scan would destroy), stripped of colliders, joints, rigidbodies and
 | tier | prop | source |
 |---|---|---|
 | Faster Hens I or II (u5) | two small hay bales (scale 0.5) and three grass tufts, scattered | decoration `decorHayBales`: `hayBale_2`, `hayBale_0 (1)`; coop prefab `Deco/decoFieldsGrass01 _Green`, `Deco/decoFieldsGrass02_Green` |
-| Faster Hens II (u6) | two nests (a stuffed chicken in the second), a flower pillow and two more grass tufts, scattered | coop prefab `Deco/nestPlain01` (the vanilla nest), toy `toyStuffedChicken`: `model_stuffedChicken`, decoration `decorFlowerPillowSmall`: `mesh`, coop grass as above |
-| Fast Growth I or II (u9) | a third sprinkler head in the middle of the +x side, spraying inwards | garden prefab `Sprinkler/SprinklerBase` (vanilla heads are on the -z / +z sides) |
-| Fast Growth II | a fourth head in the middle of the -x side, turned 180 degrees | same |
+| Faster Hens II (u6) | two nests (a stuffed chicken sitting deep in the second), a flower pillow and two more grass tufts, scattered | coop prefab `Deco/nestPlain01` (the vanilla nest), toy `toyStuffedChicken`: `model_stuffedChicken`, decoration `decorFlowerPillowSmall`: `mesh`, coop grass as above |
+| Sprinkler II or III (u9; were Fast Growth I / II) | a third sprinkler head in the middle of the +x side, spraying inwards | garden prefab `Sprinkler/SprinklerBase` (vanilla heads are on the -z / +z sides) |
+| Sprinkler III | a fourth head in the middle of the -x side, turned 180 degrees | same |
 | Music Box II | a second speaker on the (-x, -z) corner post (above the plot menu terminal), leaning inwards | corral prefab `Music Box/techCorralMusicBox/MusicBox/Music` (the vanilla speaker sits on the (-x, +z) post) |
-| Ash Booster (u11) | glow + embers in the fire, embers rising out of the opening | incinerator prefab `.../meshIncinerator/FireTest/Glow` and `/Embers` (inactive in vanilla, switched on), decoration `decorFireFlower`: `FX Fireflower` |
+| Ash Booster (u11) | glow + embers in the fire, embers rising out of the opening, and three ember emitters on the ash around the incinerator (following the ash height) | incinerator prefab `.../meshIncinerator/FireTest/Glow` and `/Embers` (inactive in vanilla, switched on), decoration `decorFireFlower`: `FX Fireflower` |
 | Silo Capacity II / III / IV / V | one capacity tank per tier standing on the ground beside the silo: II (+x, +z), III adds (-x, +z), IV adds (+x, -z), V adds (-x, -z); solid (colliders kept) | silo prefab `Silo Upgrade 0/Addition 0/Capacity Addon 0/techSiloCapacity` (the vanilla Storage Capacity Upgrade's tank, with its pipe-connector foot) at 0.8 size |
 
 Gadget / toy prefabs are found by prefab name in `LookupDirector._gadgetDefinitions` /
@@ -660,6 +683,23 @@ Coop scatter: one layout of 10 slots per coop (`CoopLayout`), seeded by FNV-1a o
 Slots stay within +-3.7 m, out of the corner squares (|x| and |z| both > 2.5), about 1.2 m off the
 vanilla nest and clear of each other (radius per slot); 64 draws, then a fixed fallback spot (a
 simulation over 2000 ids never needed it).
+
+Round 7 feedback, coop: "hen one nest eggs are unnaturally lined up". No prop has eggs: the nest mesh
+(`nestChicken01`, 482 vertices: bowl, floor disc, straw planks) and the pillow (5 petals) have none, and
+SR2 has no egg model besides the giant eggs. The "eggs" are the stuffed chicken's own bulbs: its mesh
+(`stuffedChicken`, origin at the body centre, radius 0.44) has a row of round bulbs low on its front and
+sides (toes, wing tips, y -0.48 .. +0.05). At the old height (+0.1 in the nest) their tops stood just above
+the nest floor (~0.09; rim ~0.40) in a neat row. The hen now sits at -0.06 (every bulb below the floor,
+inside the straw wall; body and head still ~0.2 m over the rim) with a 6 degree lean. If the user still
+sees eggs, ask for a screenshot.
+
+Round 7 feedback, incinerator: "embers should come from ash aswell". Three more clones of the vanilla
+inactive `FireTest/Embers` emitter (turned -90 degrees about x, so it emits upwards), smaller, at r ~3.3
+around the incinerator: (3.1, 1.2), (-1.9, 2.7), (-1.0, -3.2). They are named `sr2ash` and follow the
+live `AshTrough/Ash Level` transform (FillableAshSource moves it between MinYPos and MaxYPos with the ash;
+prefab y 0.75 = full) 5 cm above it, checked on every ~1 Hz tick (`FollowAsh`, writes only on a change).
+Not checked: that the ash plane really covers those spots (Ash Level mesh bounds not read) and whether the
+emitter looks right at that size.
 
 Corral corners: plot menu terminal (-x, -z) outside the post at ground height, vanilla speaker
 (-x, +z), plort collector (+x, +z), auto-feeder distributor (+x, -z) at 2.5 m. The second speaker

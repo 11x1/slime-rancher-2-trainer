@@ -1,7 +1,7 @@
 #pragma once
 // custom_upgrades: decorative props that show an owned tier upgrade on its plot (checklist u5,
 // u6, u9, u11): hay bales in the coop (Faster Hens I), extra nests, a flower pillow and a stuffed
-// chicken (Faster Hens II), a third sprinkler in the garden (Fast Growth; II adds a fourth), glow
+// chicken (Faster Hens II), a third sprinkler in the garden (Sprinkler II; III adds a fourth), glow
 // and embers in the incinerator's fire (Ash Booster), a second speaker in the corral (Music Box II),
 // one more capacity tank beside the silo per Silo Capacity tier (II, III, IV, V).
 //
@@ -36,9 +36,9 @@ namespace sr2::modules::custom_upgrades::world {
 enum PropKind : uint32_t {
     kPropCoopHay = 1u << 0,         // coop, Faster Hens I or II: two small hay bales
     kPropCoopNests = 1u << 1,       // coop, Faster Hens II: two nests, a flower pillow, a stuffed chicken
-    kPropGardenSprinkler = 1u << 2, // garden, Fast Growth I or II: a sprinkler on the free +x side
+    kPropGardenSprinkler = 1u << 2, // garden, Sprinkler II or III: a sprinkler on the free +x side
     kPropIncinGlow = 1u << 3,       // incinerator, Ash Booster: glow + embers in the fire
-    kPropGardenSprinkler2 = 1u << 4, // garden, Fast Growth II: a fourth sprinkler on the -x side
+    kPropGardenSprinkler2 = 1u << 4, // garden, Sprinkler III: a fourth sprinkler on the -x side
     kPropCorralMusic = 1u << 5,      // corral, Music Box II: a second speaker on the (-x, -z) post
     kPropSiloTank2 = 1u << 6,        // silo, Silo Capacity II+: a capacity tank on the ground, (+x, +z)
     kPropSiloTank3 = 1u << 7,        // silo, Silo Capacity III+: a second one, (-x, +z)

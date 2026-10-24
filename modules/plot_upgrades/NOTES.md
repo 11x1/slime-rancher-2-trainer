@@ -12,8 +12,12 @@ then stays locked on for that save, see `re/custom-upgrades.md` 1.2b).
 | Music Box II | corral | Music Box | 2000 | 2x calming bonus (0.5 -> 1.0) |
 | Faster Hens I | coop | - | 2000 | hens lay 1.5x as often |
 | Faster Hens II | coop | Faster Hens I | 4000 | hens lay 2x as often |
-| Fast Growth I | garden | - | 2000 | crops grow 1.5x as fast (stacks with the Sprinkler) |
-| Fast Growth II | garden | Fast Growth I | 4000 | crops grow 2x as fast |
+| Sprinkler II | garden | - | 2000 | crops grow 1.5x as fast (stacks with the Sprinkler) |
+| Sprinkler III | garden | Sprinkler II | 4000 | crops grow 2x as fast |
+
+Sprinkler II / III were called Fast Growth I / II until round 8 (user: rename them, with descriptions in
+the voice of Slime Rancher 1's garden upgrades). Only the display texts changed: the save ids stay
+`garden_growth_1` / `garden_growth_2`, so owned tiers carry over.
 | Ash Booster | incinerator | Ash Trough | 1500 | 2x ash per incinerated food (capacity unchanged) |
 
 Only the highest owned tier of a family counts. Prices are fixed in `kDefs`
@@ -23,7 +27,7 @@ Each chain has one menu card: the first tier not owned yet, or the last one once
 (greyed, checkmark). After Faster Hens I is bought the same card reads Faster Hens II, with Buy
 (next tier) and Sell (the owned tier) side by side. Music Box II and Ash Booster take over the
 vanilla Music Box / Ash Trough card once that is owned; Sell on that card sells the vanilla
-upgrade. Fast Growth is listed right after the Sprinkler. Selling is refused while a higher
+upgrade. Sprinkler II / III is listed right after the Sprinkler. Selling is refused while a higher
 tier (or, for a vanilla prerequisite, any tier built on it) is still owned. Details:
 `re/custom-upgrades.md` (1.3, 2b) and the custom_upgrades / sell_upgrades headers.
 
