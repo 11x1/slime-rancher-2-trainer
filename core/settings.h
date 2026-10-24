@@ -62,6 +62,13 @@ void Flush();
 // Why the last write of sr2mods.json failed; "" once a write succeeds (or none failed yet).
 std::string LastSaveError();
 
+// ---- free-text module values ----
+// A string under "modules.<module>.<key>" in sr2mods.json that is not a Def: no
+// generic UI row, not in profiles, no change callbacks (poll it). "" if absent.
+// SetString marks the document dirty (debounced save like a setting). Any thread.
+std::string GetString(std::string_view module, std::string_view key);
+void SetString(std::string_view module, std::string_view key, std::string value);
+
 // ---- visibility (Def::parent) ----
 // Sets a registered def's visibility parent (convenience for modules whose
 // registration helpers do not take one; a later Register without a parent

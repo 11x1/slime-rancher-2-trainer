@@ -50,6 +50,10 @@ bool g_saverStarted = false;
 bool g_parseErrorLogged = false;
 std::string g_saveError;            // why the last save failed ("" = it succeeded)
 std::map<std::string, std::string> g_rootStrings;  // top-level strings to write ("active_profile")
+struct ModuleString {
+    std::string module, key, value;
+};
+std::map<std::string, ModuleString> g_moduleStrings;  // PKey -> free-text module value to write (GetString / SetString)
 struct Stashed {
     std::string module, key;
     json::Value value;
@@ -148,6 +152,7 @@ void SaveNow() {
             if (g_persist.contains(PKey(e.def.module, e.def.key)))
                 values.push_back({e.def.module, {e.def.key, ToJson(e.def, e.value)}});
         for (const auto& [pk, st] : g_stashed) values.push_back({st.module, {st.key, st.value}});
+        for (const auto& [pk, ms] : g_moduleStrings) values.push_back({ms.module, {ms.key, json::Value(ms.value)}});
         rootStrings = g_rootStrings;
     }
 
@@ -307,6 +312,25 @@ int GetInt(std::string_view module, std::string_view key) { return static_cast<i
 bool Has(std::string_view module, std::string_view key) {
     std::lock_guard lock(g_mutex);
     return FindLocked(module, key) != nullptr;
+}
+
+std::string GetString(std::string_view module, std::string_view key) {
+    std::lock_guard lock(g_mutex);
+    if (auto it = g_moduleStrings.find(PKey(module, key)); it != g_moduleStrings.end()) return it->second.value;
+    return g_doc["modules"][module][key].asString();
+}
+
+void SetString(std::string_view module, std::string_view key, std::string value) {
+    if (module.empty() || key.empty()) return;
+    std::lock_guard lock(g_mutex);
+    const std::string pk = PKey(module, key);
+    auto it = g_moduleStrings.find(pk);
+    const std::string cur = it != g_moduleStrings.end() ? it->second.value : g_doc["modules"][module][key].asString();
+    if (cur == value && (it != g_moduleStrings.end() || g_doc["modules"][module].find(key))) return;
+    g_moduleStrings[pk] = {std::string(module), std::string(key), std::move(value)};
+    g_dirty = true;
+    g_lastChange = Clock::now();
+    if (g_wake) SetEvent(g_wake);
 }
 
 bool Saved(std::string_view module, std::string_view key) {
