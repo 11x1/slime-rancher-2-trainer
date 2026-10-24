@@ -3894,21 +3894,6 @@ void DrawHint(const Host& h) {
         }
         ImGui::End();
     }
-    if (h.sandboxFabKey != 0) {
-        // Sandbox: the game's Fabricator is open (its own key legend has no room for ours).
-        ImGui::SetNextWindowPos(ImVec2(U(16), y), ImGuiCond_Always);
-        if (ImGui::Begin("##sr2mods_fab_hint", nullptr, f)) {
-            const char k[2] = {static_cast<char>(h.sandboxFabKey), 0};
-            ImGui::TextUnformatted("Press ");
-            ImGui::SameLine(0, 0);
-            ImGui::TextColored(key, "%s", k);
-            ImGui::SameLine(0, 0);
-            ImGui::TextUnformatted(" to add the missing materials");
-            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.soft), "Sandbox: into the refinery, free");
-            next();
-        }
-        ImGui::End();
-    }
     if (h.quickHint != 0) {
         ImGui::SetNextWindowPos(ImVec2(U(16), y), ImGuiCond_Always);
         if (ImGui::Begin("##sr2mods_quick_hint", nullptr, f)) {

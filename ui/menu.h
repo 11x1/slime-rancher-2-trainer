@@ -25,7 +25,6 @@ struct Host {
     bool menuHint = false;
     int quickHint = 0;
     float quickSeconds = -1;           // countdown of the pending auto-continue, < 0 = unknown
-    int sandboxFabKey = 0;             // Sandbox: the Fabricator is open; its "add missing materials" key (VK, 0 = none)
     // Key capture (overlay polls the keyboard): start, and whether `d` is being captured.
     void (*startCapture)(const settings::Def& d) = nullptr;
     bool (*isCapturing)(const settings::Def& d) = nullptr;

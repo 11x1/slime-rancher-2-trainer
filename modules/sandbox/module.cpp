@@ -39,13 +39,16 @@
 #include <vector>
 
 #include "core/detour_guard.h"
+#include "core/guard.h"
 #include "core/hook_manager.h"
 #include "core/il2cpp_api.h"
 #include "core/log.h"
 #include "core/main_thread.h"
 #include "core/module.h"
 #include "core/unity.h"
+#include "modules/common/legend_hint.h"
 #include "modules/custom_upgrades/sale_notify.h"
+#include "modules/minimap/ugui.h"
 #include "modules/sandbox/achievements.h"
 #include "modules/sandbox/cheated_save.h"
 #include "modules/sandbox/player_extras.h"
@@ -60,6 +63,8 @@ namespace {
 namespace unity = sr2::core::unity;
 namespace main_thread = sr2::core::main_thread;
 namespace bridge = sr2::ui::sandbox;
+namespace legend_hint = sr2::modules::legend_hint;
+namespace ugui = sr2::modules::minimap::ugui;
 using sr2::il2cpp::api;
 using sr2::il2cpp::Resolver;
 
@@ -344,6 +349,8 @@ private:
     void UpgradeState(const Ctx& c);
     void DoUnlockUpgrades(const Ctx& c);
     void FabricatorTick(unsigned long long now);
+    void FabricatorHintTick(unsigned long long now);
+    void DropFabricatorHint();
     void DoFabricatorMaterials();
 
     std::atomic<bool> enabled_{false};
@@ -562,6 +569,11 @@ private:
     const MethodInfo* fabContentSelected_ = nullptr;   // FabricatorContent.OnItemSelected(IFabricatableItem, InteractionCause)
     unsigned long long lastFabPoll_ = 0;
     bool fabOpen_ = false, fabKeyDown_ = false;
+    // "[G] Add materials" in the Fabricator's own key bar (modules/common/legend_hint.h), before "[Z] Pin"
+    size_t offFabUiLegend_ = 0, offFabUiPinEvent_ = 0;  // FabricatorUI._inputLegend / _pinRecipeEvent
+    bool fabHintOk_ = false, fabHintLogged_ = false, fabHintFailLogged_ = false;
+    unsigned long long fabHintNext_ = 0, fabHintSince_ = 0;
+    legend_hint::Clone fabHint_;
 
     // ---- "Discover all upgrades" (optional): the upgrade components that make a hidden upgrade buyable ----
     size_t offUdRequireComp_ = 0;                      // UpgradeDefinition._requireComponentToBeVisibleToPlayer
@@ -947,7 +959,6 @@ void Sandbox::OnDisable() {
     notices_.Clear();
     batchNotices_.clear();
     bridge::SetHandler(nullptr);
-    bridge::SetFabricatorHint(false, 0);
     sandbox::PlayerExtrasEnabled(false);
     bridge::Snapshot s;
     s.tick = GetTickCount64();
@@ -2136,7 +2147,10 @@ void Sandbox::TopUpEnergy() {
 }
 
 void Sandbox::Tick(float dt) {
-    if (!Live()) return;
+    if (!Live()) {
+        if (fabHint_.Exists()) DropFabricatorHint();  // Sandbox off: the key bar entry goes
+        return;
+    }
     if (notices_.Ready()) notices_.Frame(dt);  // queued HUD notices wait for the HUD (menus closed)
     const unsigned long long now = GetTickCount64();
     if (infinite_.load() && now - lastEnergy_ >= kEnergyMs) {
@@ -2992,6 +3006,18 @@ void Sandbox::SetupUnlocks(sr2::il2cpp::Resolver& R) {
         SR2_INFO("[{}] Fabricator key ({}): available (adds the selected recipe's missing materials to the refinery; "
                  "hooks {})",
                  kModule, FabricatorKeyName(), hooks);
+        // Its entry in the Fabricator's own key bar (optional): a clone of one of the bar's hints.
+        std::string lw;
+        if (ugui::Resolve(lw) && legend_hint::Resolve(lw)) {
+            off(fabUiClass_, "_inputLegend", offFabUiLegend_, lw);
+            off(fabUiClass_, "_pinRecipeEvent", offFabUiPinEvent_, lw);
+        }
+        fabHintOk_ = lw.empty();
+        if (fabHintOk_)
+            SR2_INFO("[{}] Fabricator key bar entry: available ([{}] Add materials, before the bar's Pin entry)", kModule,
+                     FabricatorKeyName());
+        else
+            SR2_WARN("[{}] Fabricator key bar entry: NOT available ({})", kModule, lw);
     }
 }
 
@@ -3250,8 +3276,8 @@ void Sandbox::FabricatorTick(unsigned long long now) {
                      open ? std::format("open: {} adds the selected recipe's missing materials", FabricatorKeyName())
                           : std::string("closed"));
         fabOpen_ = open;
-        bridge::SetFabricatorHint(fabOpen_, kFabricatorKey);
     }
+    FabricatorHintTick(now);
     bool down = false;
     if (fabOpen_ && !sr2::ui::overlay::IsOpen()) {
         DWORD pid = 0;
@@ -3260,6 +3286,92 @@ void Sandbox::FabricatorTick(unsigned long long now) {
     }
     if (down && !fabKeyDown_) DoFabricatorMaterials();
     fabKeyDown_ = down;
+}
+
+// "[G] Add materials" in the Fabricator's own key bar (bottom left), right before its "[Z] Pin" entry: a clone of
+// one of the bar's hints (modules/common/legend_hint.h, shared with map_tools' "[RMB] Teleport"). The bar is
+// FabricatorUI._inputLegend (an InputLegend); the Pin entry is the active hint whose configuration's InputEvent
+// is FabricatorUI._pinRecipeEvent. The bar is rebuilt per page (sidebar / gadgets / upgrades / pinned), so the
+// clone's place is checked 4 times a second; without a Pin entry it goes last. It lives inside the Fabricator
+// UI, so it hides and dies with it; Sandbox off destroys it. Runs under a native-fault guard: a fault turns the
+// entry off for the session (and marks the module faulted).
+void Sandbox::FabricatorHintTick(unsigned long long now) {
+    if (!fabHintOk_) return;
+    std::string err, fault;
+    bool native = false;
+    const bool ok = sr2::core::Try([&] {
+        if (!ugui::GuardNative(
+                [&] {
+                    if (fabHint_.Alive()) fabHint_.Tick();
+                    else if (fabHint_.Exists()) fabHint_.Destroy();  // died with the Fabricator UI
+                    if (!fabOpen_) {
+                        fabHintSince_ = 0;
+                        return;
+                    }
+                    if (now < fabHintNext_) return;
+                    fabHintNext_ = now + 250;
+                    if (!fabHintSince_) fabHintSince_ = now;
+                    Il2CppObject* ui = OpenFabricator();
+                    if (!ui) return;
+                    std::string chain;
+                    Il2CppObject* legend = legend_hint::FollowLegend(unity::Field<Il2CppObject*>(ui, offFabUiLegend_), ui,
+                                                                     "FabricatorUI._inputLegend", chain);
+                    Il2CppObject* pin = legend_hint::HintFor(legend, unity::Field<Il2CppObject*>(ui, offFabUiPinEvent_));
+                    Il2CppObject* tmpl = legend_hint::Template(legend);
+                    if (fabHint_.Alive() && tmpl &&
+                        ugui::GetParent(unity::TransformOf(fabHint_.GameObject())) !=
+                            ugui::GetParent(unity::TransformOf(tmpl)))
+                        fabHint_.Destroy();  // another Fabricator's bar
+                    if (!fabHint_.Alive()) {
+                        std::string why = !legend ? "no InputLegend (" + chain + ")"
+                                          : !tmpl ? "none of the bar's hints is shown yet (" + chain + ")"
+                                                  : "";
+                        if (tmpl && !fabHint_.Create(tmpl, "SR2Mods.FabricatorKeyHint", why)) tmpl = nullptr;
+                        if (!tmpl) {
+                            if (!fabHintFailLogged_ && now - fabHintSince_ >= 3000) {
+                                fabHintFailLogged_ = true;
+                                SR2_INFO("[{}] no [{}] Add materials entry in the Fabricator's key bar 3 s after it opened: {}",
+                                         kModule, FabricatorKeyName(), why);
+                            }
+                            return;
+                        }
+                        fabHint_.SetLook(FabricatorKeyName(), "Add materials");
+                        if (!fabHintLogged_) {
+                            fabHintLogged_ = true;
+                            SR2_INFO("[{}] [{}] Add materials entry cloned from the Fabricator key bar's '{}' ({} key icon(s), "
+                                     "label {}; Pin entry {}; {})",
+                                     kModule, FabricatorKeyName(), unity::GetName(unity::GameObjectOf(tmpl)),
+                                     fabHint_.IconCount(), fabHint_.HasLabel() ? "ok" : "MISSING",
+                                     pin ? "found, placed before it" : "not shown, placed last", chain);
+                        }
+                    }
+                    fabHint_.PlaceBefore(pin);
+                },
+                &fault))
+            native = true;
+    }, &err);
+    if (native) {
+        fabHintOk_ = false;
+        fabHint_.Abandon();
+        sr2::core::MarkModuleFaulted(kModule, "Fabricator key bar entry: " + fault);
+    } else if (!ok) {
+        fabHintOk_ = false;
+        SR2_WARN("[{}] Fabricator key bar entry failed ({}); off for this session", kModule, err);
+    }
+}
+
+// Sandbox switched off (or faulted): the key bar entry goes.
+void Sandbox::DropFabricatorHint() {
+    if (sr2::core::ModuleFaulted(kModule) || ugui::RuntimeFrozen()) {
+        fabHint_.Abandon();
+        return;
+    }
+    std::string fault;
+    if (!sr2::core::Try([&] {
+            if (!ugui::GuardNative([&] { fabHint_.Destroy(); }, &fault)) fabHint_.Abandon();
+        }))
+        fabHint_.Abandon();
+    fabHintSince_ = 0;
 }
 
 // The selected recipe of the open Fabricator (FabricatorItem): what the player lacks of it (times the panel's

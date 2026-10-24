@@ -181,10 +181,6 @@ bool WantsSnapshot();
 // also with Sandbox off (modules/sandbox/cheated_save.cpp). Any thread.
 void SetSaveCheated(bool cheated);
 bool SaveCheated();
-// The game's Fabricator is open while Sandbox is on: the overlay shows a small hint for the
-// "add missing materials" key `vk`. Refreshed about once a second; stale after 3 s. Any thread.
-void SetFabricatorHint(bool open, int vk);
-int FabricatorHintKey();  // the key to show, 0 = no hint
 
 // ---- render thread ----
 std::shared_ptr<const Snapshot> Get();  // nullptr until the first publish
