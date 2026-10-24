@@ -75,8 +75,9 @@ public:
     bool Setup(sr2::il2cpp::Resolver& R, const char* module, std::string& why);
     bool Ready() const { return ready_; }
 
-    // Main thread. Builds and shows the dialog (input locked). false = could not be built.
-    bool Open(const Receipt& r);
+    // Main thread. Builds and shows the dialog (input locked), `note` above the buttons (e.g. an empty
+    // silo; Sell is disabled when nothing can be sold). false = could not be built.
+    bool Open(const Receipt& r, const std::string& note = {});
     // Main thread: replace the rows (receipt changed) and show `note` above the buttons;
     // `canSell` false disables Sell (market closed / nothing left).
     void Refresh(const Receipt& r, const std::string& note, bool canSell);

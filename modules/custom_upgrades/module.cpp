@@ -598,7 +598,7 @@ public:
     SiloSummary SellAllNow(Il2CppObject* plot, const std::string& id, const char* via, bool queueNotices,
                            const custom_upgrades::ui::Receipt* plan = nullptr);
     bool OpenReceipt(Il2CppObject* plot, Il2CppObject* activator, const std::string& id,
-                     const custom_upgrades::ui::Receipt& quote);
+                     const custom_upgrades::ui::Receipt& quote, const char* note = nullptr);
     void ReceiptTick(float dt);
     void CloseReceipt(const char* why);
     bool WorldQuery(Il2CppObject* plot, custom_upgrades::world::CoopRequest& req);
@@ -1703,8 +1703,8 @@ const char* ModIconName(int32_t id) {
         case CORRAL_MUSIC_2: return "music_2";
         case COOP_HENS_1: return "hens_1";
         case COOP_HENS_2: return "hens_2";
-        case GARDEN_GROWTH_1: return "growth_1";
-        case GARDEN_GROWTH_2: return "growth_2";
+        // GARDEN_GROWTH_1 / _2 (Sprinkler II / III): none - the vanilla Sprinkler upgrade icon (iconFrom; round 10
+        // "use the default sprinkler upgrade icon"); growth_1 / growth_2 stay embedded but unused.
         case INCIN_ASH_BOOST: return "ash_boost";
         // COOP_AIR_NET: none - the corral's own Air Net icon (iconFrom, user request "use the air net icon
         // from corrals"); assets/icons/coop_air_net.png stays embedded but unused.
@@ -2530,36 +2530,35 @@ bool CustomUpgrades::OnSiloButton(Il2CppObject* activator) {
     const UpgradeDef* d = FindDef(SILO_SELL_ALL);
     std::string id;
     if (!d || !OwnsKey(plot, *d, &id)) {
-        silo_.Message(activator, "This silo has no Sell-All Button", false);
+        SR2_INFO("[{}] sell all: pressed on a silo without the Sell-All Button - button removed", kModule);
         worldAccum_ = kWorldTickSeconds;  // remove the stale button
         return true;
     }
-    // The receipt first: nothing is sold until the player confirms it.
+    // Round 10 ("remove the overlay on the button ... when no plorts to sell still open the dialog"): no
+    // text drawn over the button any more; the receipt always opens, an empty / closed-market one with a
+    // note and Sell disabled. Nothing is sold until the player confirms it.
     if (receipt_.Ready()) {
         custom_upgrades::ui::Receipt quote;
         Summarize(plot, false, nullptr, &quote);
-        if (!quote.marketAvailable) silo_.Message(activator, "The Plort Market can't be reached right now", false);
-        else if (quote.marketClosed) silo_.Message(activator, "The Plort Market is closed - nothing sold", false);
-        else if (quote.lines.empty()) silo_.Message(activator, "No plorts in this silo", false);
-        else if (OpenReceipt(plot, activator, id, quote)) return true;
-        else SR2_WARN("[{}] sell all (plot '{}'): the receipt could not be opened - selling at once", kModule, id);
+        const char* note = !quote.marketAvailable ? "The Plort Market can't be reached right now."
+                           : quote.marketClosed   ? "The Plort Market is closed - nothing can be sold now."
+                           : quote.lines.empty()  ? "There are no plorts in this silo."
+                                                  : "";
+        if (OpenReceipt(plot, activator, id, quote, note)) return true;
+        SR2_WARN("[{}] sell all (plot '{}'): the receipt could not be opened - selling at once", kModule, id);
         if (!quote.marketAvailable || quote.marketClosed || quote.lines.empty()) return true;
     }
     const SiloSummary s = SellAllNow(plot, id, "world button", false);
-    if (!s.marketAvailable) silo_.Message(activator, "The Plort Market can't be reached right now", false);
-    else if (s.marketClosed) silo_.Message(activator, "The Plort Market is closed - nothing sold", false);
-    else if (s.plorts == 0) silo_.Message(activator, "No plorts in this silo", false);
-    else if (!s.noticed)  // fallback: no HUD notices (the currency popup comes from TrySell showUi)
-        silo_.Message(activator, std::format("Sold {} plort{} for {} Newbucks", s.plorts, s.plorts == 1 ? "" : "s", s.value),
-                      true);
+    if (s.plorts > 0 && !s.noticed)  // no HUD notices: the currency popup (TrySell showUi) is the feedback
+        SR2_INFO("[{}] sell all (plot '{}'): sold without HUD notices", kModule, id);
     return true;
 }
 
 // ---------------------------------------------------------------- sell-all receipt --
 
 bool CustomUpgrades::OpenReceipt(Il2CppObject* plot, Il2CppObject* activator, const std::string& id,
-                                 const custom_upgrades::ui::Receipt& quote) {
-    if (!receipt_.Open(quote)) return false;
+                                 const custom_upgrades::ui::Receipt& quote, const char* note) {
+    if (!receipt_.Open(quote, note ? note : "")) return false;
     receiptPlot_ = plot;
     receiptButton_ = activator;
     if (Il2CppGCHandle h = unity::NewGCHandle(plot)) receiptHandles_.push_back(h);
@@ -2597,7 +2596,6 @@ void CustomUpgrades::ReceiptTick(float dt) {
         return;
     }
     Il2CppObject* plot = receiptPlot_;
-    Il2CppObject* button = receiptButton_;
     const UpgradeDef* d = FindDef(SILO_SELL_ALL);
     std::string ownedId;
     if (!unity::IsAlive(plot) || !IsA(plot, plotClass_) || !d || !OwnsKey(plot, *d, &ownedId) || ownedId != id) {
@@ -2622,17 +2620,10 @@ void CustomUpgrades::ReceiptTick(float dt) {
     }
     // Close first: the input lock (paused time) goes, then the sale; its HUD notices are queued
     // and show as soon as the HUD takes them.
+    // No text over the button afterwards (round 10): the HUD notices and the currency popup show the sale.
     const custom_upgrades::ui::Receipt plan = receiptQuote_;
-    const bool buttonAlive = unity::IsAlive(button);
     CloseReceipt("confirmed");
-    const SiloSummary s = SellAllNow(plot, id, "receipt", true, &plan);
-    if (!buttonAlive) return;
-    if (!s.marketAvailable) silo_.Message(button, "The Plort Market can't be reached right now", false);
-    else if (s.marketClosed) silo_.Message(button, "The Plort Market is closed - nothing sold", false);
-    else if (s.plorts == 0) silo_.Message(button, "Nothing was sold", false);
-    else if (!s.noticed)
-        silo_.Message(button, std::format("Sold {} plort{} for {} Newbucks", s.plorts, s.plorts == 1 ? "" : "s", s.value),
-                      true);
+    SellAllNow(plot, id, "receipt", true, &plan);
 }
 
 // The Hen Collector's own button (the elder collector's, kept on the clone with a null Collector,
