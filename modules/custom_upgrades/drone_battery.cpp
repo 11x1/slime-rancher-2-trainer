@@ -214,8 +214,9 @@ void BatterySaver::Tick(float unscaledDt) {
         }
         if (level != look.level) {
             if (level > 0)
-                SR2_INFO("[{}] battery saver: station {}: {} active (battery drain x{:.2f})", module_, station,
-                         BatteryLevelName(level), 1.0f / kBatteryFactor[level]);
+                SR2_INFO("[{}] battery saver: station {}: {} active (battery drain x{:.2f}: {:.2f} instead of {:.2f} "
+                         "energy per game hour)", module_, station, BatteryLevelName(level),
+                         1.0f / kBatteryFactor[level], rate / kBatteryFactor[level], rate);
             look.level = level;
             look.first = true;
             look.time = now;

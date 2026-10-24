@@ -627,6 +627,13 @@ user feedback ("they should be refinery upgrades, not in a separate panel"). Now
   until the accumulated refund is worth adding. New log lines: `station <id>: first refund +X energy for N world s
   (battery A -> B of 1000)` per station and level, then once a minute `Drone Battery Saver IV gave back X energy to N
   station(s) in the last 60 s: <id> +x (battery y), ...`.
+- **Checked in the log (round 4, user: "check urself pls").** Refunds happen. Battery Saver IV, 3 stations: first refund
+  +0.02 energy for 164 world s each, then +0.4 energy per station per real minute (1.1-1.3 in total; 0.0 / 0.9 in minutes
+  the game was paused / in menus). Battery Saver II on one station: +0.1-0.2 a minute. Numbers: 1 real s = 60 world s, so
+  a real minute is a game hour; +0.4 at x0.50 means the vanilla drain (`EnergyDepletedPerHour`) is about 0.8 energy per
+  game hour and the station now loses about 0.4 (log: 321.8 -> 318 in 12 minutes). The refund is right, it is just small
+  in absolute terms because the vanilla drain is slow (`ENERGY_OVERCHARGE_THRESH` 100, max 1000). The `active` line now also
+  prints the drain per game hour (with and without the saver).
 - **Migration.** Old sidecars hold `drone_battery.station.<actor id>` = 1..4. On the first tick after a load the
   highest tier of any station becomes the global level (if higher than an owned one), all those keys are erased
   and one line is logged.
