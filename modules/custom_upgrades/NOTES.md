@@ -104,8 +104,7 @@ Kept for when gamepad support comes back:
   destination (silo, corral feeder, ...) now also takes the chickens out of the Hen Collector, through
   its two output ports, like the deluxe coop's elder collector. Fast-forward (sleep) uses the same
   entries. The contents the drones take leave the sidecar copy with the next tick.
-- Not a separate "Hen Collector" source: a new `DroneTaskSourceType` value would need the UI's
-  source definitions (an asset) and would be written into the vanilla save's `DroneTaskData`.
+- Separate "Hen Collector" / "Elder Collector" sources: see the next section.
 - Known edge: turning custom upgrades off while a drone flies to a Hen Collector port that still
   holds chickens leaves that drone with a destroyed port (vanilla has the same case when a deluxe coop
   is demolished). Selling is refused while it holds chickens, so selling can't cause it.
@@ -113,52 +112,63 @@ Kept for when gamepad support comes back:
 Not checked in game yet: a drone with Coop -> Silo (target Meat, or Hen) emptying the Hen Collector,
 the log lines, no errors after buying another coop upgrade (re-link) or selling the Hen Collector.
 
-### Drone source "Hen Collector" (user request, on top of the Coop linking; `drone_source.cpp`)
+### Drone sources "Hen Collector" and "Elder Collector" (user requests, on top of the Coop linking; `drone_source.cpp`)
 
-- A real source in the program's source picker, right after Coop, while custom upgrades are on and
-  at least one coop has a Hen Collector, for the targets Coop is offered for (meat, hens, roosters).
-  It takes only from the Hen Collector ports: no live chickens, no elder collector.
-- In memory the program carries our `DroneTaskSourceType` value `0x53520101`. Hooks:
-  `RanchDrone.GatherSourceTask` (our type -> `DroneTaskSource` with one new
+- Two real sources in the program's source picker, right after Coop (Coop, Hen Collector, Elder
+  Collector), while custom upgrades are on. Hen Collector takes only from the Hen Collector ports;
+  Elder Collector (round 4: "elder hens show up as Hen Collector, should be Elder Collector ... using
+  the game's own coop upgrade") takes only from the deluxe coop's vanilla elder collector. Neither
+  takes live chickens. Coop still covers everything (live chickens, elder collector, Hen Collector).
+- **Which source for which target.** The vanilla elder-collector part accepts every target, so Coop
+  is offered for meats, elders and single hens / roosters / elders. Before round 4 the Hen Collector
+  was inserted whenever Coop was, so it also showed for an elder target (empty: the Hen Collector
+  never holds elders). Now a source is inserted only when the target's predicate
+  (`DroneTaskTarget.<Predicate>k__BackingField`) wants a type the kind holds: Hen Collector =
+  task config `MeatTypeGroup` minus `ElderGroup` minus UnstableMeat (the Hen Collector's slot rule);
+  Elder Collector = `ElderGroup` members (found once per session by name with one
+  FindObjectsOfTypeAll; log `elder types for Elder Collector: ...`). And only when a storage of that
+  kind exists: Hen Collector = the coop tick's Hen Collector storages, Elder Collector = any other
+  storage in `RanchMetadata.plots[].elderCollectors` (that is the vanilla elder collector of a deluxe
+  coop; the RanchMetadata comes from the drones seen).
+- In memory a program carries our `DroneTaskSourceType` value `0x53520101` (Hen) / `0x53520102`
+  (Elder). Hooks: `RanchDrone.GatherSourceTask` (our type -> `DroneTaskSource` with one new
   `RanchDroneSourceProgramElderCollector`; an unknown type would throw in vanilla),
-  `RanchDrone.GatherSourceTasks` (insert after Coop), `RanchDroneSourceProgramElderCollector.GetSources`
-  (for a station whose program has our type: only the Hen Collector slots, as a `StorageMetadata[]`),
-  `DroneUIDefinitionSource.FindSourceDefinition` (a runtime copy of the Coop definition: "Hen
-  Collector" through text_override, the Hen icon, sort index Coop + 1).
+  `RanchDrone.GatherSourceTasks` (insert after Coop, see above), `RanchDroneSourceProgramElderCollector.GetSources`
+  (for a station whose program has our type: only that kind's slots, as a `StorageMetadata[]`),
+  `DroneUIDefinitionSource.FindSourceDefinition` (a runtime copy of the Coop definition: name through
+  text_override, sort index Coop + 1 for both; `GatherSourceOptions` keeps the list order).
+- **Icons** (round 4: "remove the plot icon from the collector and replace it with chicken/elder"): the
+  plain sprites, no composing. Hen Collector = the task config's `HenType.icon`; Elder Collector = the
+  `ElderGroup` member whose name has "Hen" (the elder hen). Until known, Coop's icon. The composed
+  Plort Collector + Hen icon (`drone_icon.cpp`) is gone.
 - **Save (user decision: "save it as coop, the sidecar says the true source").**
   `DroneStationGadgetModel.Pull` gives the save a copy of the program data that says COOP (PullGadget
   turns it into the saved `DroneTaskV01` right away); the live data keeps ours. If the copy can't be
-  made the live data becomes Coop (logged). The sidecar value `drone_hen_source.stations` lists the
-  station actor ids (`PlacedGadgetV07.ActorId`, stable across loads) whose program is Hen Collector. A
-  ranch drone station has one program, so the station id is the key.
+  made the live data becomes Coop (logged). The sidecar values `drone_hen_source.stations` /
+  `drone_elder_source.stations` list the station actor ids (`PlacedGadgetV07.ActorId`, stable across
+  loads) per kind. A ranch drone station has one program, so the station id is the key.
 - **Load:** the first ~1 Hz tick that sees a listed station whose saved program is Coop switches it
   back (`DroneStation.AssignRanchTask` when its drone exists, else the program data; `RanchDrone.Init`
-  then builds our source). Until then (about a second) the drone runs as Coop.
+  then builds our source). Until then (about a second) the drone runs as Coop. An Elder Collector
+  station waits until the ranch is known (a drone seen).
+- **Migration:** a Hen Collector program whose target is elders (ELDERS, or SINGLE with an elder; made
+  before round 4) becomes Elder Collector (log `... now Elder Collector` / `elder target: Elder
+  Collector holds the elders`), or Coop when no coop has an elder collector.
 - **Stale entries:** a listed station whose program is now something else (changed by the player,
   or not Coop in the save) is dropped; listed ids that no station has any more (picked up and placed
   again = a new actor id, demolished) are dropped with a log line - a re-placed station has a Coop
-  program. No Hen Collector left (sold) -> the program falls back to Coop (logged) and the entry goes.
+  program. No storage of the kind left (Hen Collector sold, deluxe coop gone) -> the program falls
+  back to Coop (logged) and the entry goes.
 - **Custom upgrades off / faulted:** `OnDisable` writes Coop into every program that had ours (plain
   field writes, before the hooks go off, so a later save can't see our value); `Cleanup` (main thread)
   re-programs those drones with Coop. When it is on again the sidecar's stations are mapped back.
-- **Icon (user request): the Plort Collector source icon with the Hen on its output opening**
-  (`drone_icon.cpp`). Asset data (UnityPy): `DroneSourceDefinitions` in the drone station menu scene;
-  PLORT_COLLECTOR uses `iconPatchCorralCollector` (512 x 512, full-colour art, not readable): a
-  collector whose dark round opening spans x 141..314, y 147..320 (Unity y up), a pink plort leaving
-  it. The Hen sprite (the task config's `HenType.icon` = `iconBirdHen`) is scaled so its opaque box is
-  200 px wide and centred on the opening (228, 233); no tint (both are coloured art, not glyphs). Built
-  once, at the first definition lookup after a drone source was built (that brings the Hen icon):
-  `Graphics.Blit` into a temporary RenderTexture + `Texture2D.ReadPixels` of each sprite rect, composite
-  on the CPU (bilinear, premultiplied alpha), new Texture2D + `Sprite.Create`, DontUnloadUnusedAsset +
-  GC handle (never destroyed). The definition's `_icon` is that sprite, so the picker, the applied
-  program and the Drone List all show it. Any failure: the plain Hen icon (log `icon not composed`).
-  Offline preview with the same numbers: `scratchpad/hen-source-icon.png` (`scratchpad/henicon/compose.py`).
 - **Without the mod:** the save only ever holds Coop programs; it loads and runs as Coop (the drone
   takes live chickens and the elder collector; the Hen Collector itself is gone without the mod).
 
-Not checked in game yet: the option in the source picker (name, icon, position), applying it, a drone
-emptying only the Hen Collector, save + reload (log `restored from the sidecar`), the Drone List tab
-showing it, selling the Hen Collector (fallback log), turning custom upgrades off with such a program.
+Checked in game (round 3): Hen Collector source works. Not checked yet: the new icons, Elder Collector
+in the picker (only for elder targets, only with a deluxe coop), a drone emptying only the elder
+collector, Hen Collector no longer offered for an elder target, save + reload of both (log `restored
+from the sidecar`), the migration of an elder-target Hen Collector program.
 
 ## Demolish clears the plot (user report round 4)
 
@@ -617,6 +627,13 @@ user feedback ("they should be refinery upgrades, not in a separate panel"). Now
   until the accumulated refund is worth adding. New log lines: `station <id>: first refund +X energy for N world s
   (battery A -> B of 1000)` per station and level, then once a minute `Drone Battery Saver IV gave back X energy to N
   station(s) in the last 60 s: <id> +x (battery y), ...`.
+- **Checked in the log (round 4, user: "check urself pls").** Refunds happen. Battery Saver IV, 3 stations: first refund
+  +0.02 energy for 164 world s each, then +0.4 energy per station per real minute (1.1-1.3 in total; 0.0 / 0.9 in minutes
+  the game was paused / in menus). Battery Saver II on one station: +0.1-0.2 a minute. Numbers: 1 real s = 60 world s, so
+  a real minute is a game hour; +0.4 at x0.50 means the vanilla drain (`EnergyDepletedPerHour`) is about 0.8 energy per
+  game hour and the station now loses about 0.4 (log: 321.8 -> 318 in 12 minutes). The refund is right, it is just small
+  in absolute terms because the vanilla drain is slow (`ENERGY_OVERCHARGE_THRESH` 100, max 1000). The `active` line now also
+  prints the drain per game hour (with and without the saver).
 - **Migration.** Old sidecars hold `drone_battery.station.<actor id>` = 1..4. On the first tick after a load the
   highest tier of any station becomes the global level (if higher than an owned one), all those keys are erased
   and one line is logged.
