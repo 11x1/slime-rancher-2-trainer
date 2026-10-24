@@ -144,6 +144,14 @@ uint64_t sr2_decoder_read(sr2_decoder* d, float* out, uint64_t frames) {
     return 0;
 }
 
+int sr2_decoder_seek(sr2_decoder* d, uint64_t frame) {
+    if (!d) return 0;
+    if (d->ogg) return frame == 0 ? stb_vorbis_seek_start(d->ogg) : stb_vorbis_seek(d->ogg, (unsigned int)frame);
+    if (d->mp3) return drmp3_seek_to_pcm_frame(d->mp3, frame) ? 1 : 0;
+    if (d->wav) return drwav_seek_to_pcm_frame(d->wav, frame) ? 1 : 0;
+    return 0;
+}
+
 void sr2_decoder_close(sr2_decoder* d) {
     if (!d) return;
     if (d->ogg) stb_vorbis_close(d->ogg);

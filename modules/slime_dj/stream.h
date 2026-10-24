@@ -27,7 +27,8 @@ public:
 
     enum class State { Opening, Ready, Failed };
 
-    static std::shared_ptr<Stream> Start(const std::filesystem::path& path);
+    // `startFrame`: decode from that PCM frame (seek); chunks then count from there.
+    static std::shared_ptr<Stream> Start(const std::filesystem::path& path, uint64_t startFrame = 0);
     ~Stream();
 
     State state() const { return state_.load(); }
@@ -36,7 +37,7 @@ public:
     uint32_t channels() const { return channels_; }       // 1 or 2 (output)
     uint32_t rate() const { return rate_; }
     uint32_t chunkFrames() const { return chunkFrames_; }
-    uint64_t totalFrames() const { return total_.load(); } // file's own count (0 = unknown) until done, then exact
+    uint64_t totalFrames() const { return total_.load(); } // song frames, from frame 0: the file's own count (0 = unknown) until done, then exact
 
     // Next chunk (exactly chunkFrames() * channels() floats; the last one is zero-padded).
     // `frames` gets the real (unpadded) frames in it. False if none is ready yet.
@@ -47,7 +48,7 @@ public:
 
 private:
     Stream() = default;
-    void Run(std::filesystem::path path);
+    void Run(std::filesystem::path path, uint64_t startFrame);
 
     mutable std::mutex mu_;
     std::condition_variable cv_;

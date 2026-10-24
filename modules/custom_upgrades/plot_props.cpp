@@ -83,6 +83,7 @@
 #include "core/log.h"
 #include "core/resolver.h"
 #include "core/unity.h"
+#include "modules/slime_dj/api.h"
 
 namespace sr2::modules::custom_upgrades::world {
 namespace {
@@ -631,6 +632,7 @@ void PlotProps::Impl::Create(Il2CppObject* plot, const KindDef& def, Il2CppObjec
     const bool scattered = std::any_of(parts.begin(), parts.end(), [](const auto& p) { return p.first->slot >= 0; });
     const CoopSlots layout = scattered ? CoopLayout(id) : CoopSlots{};
     int built = 0;
+    std::vector<Il2CppObject*> clones;
     for (const auto& [part, src] : parts) {
         Il2CppObject* clone = unity::Instantiate(src, holderTr);
         if (!unity::IsAlive(clone) || !IsA(clone, gameObjectClass)) continue;
@@ -648,6 +650,7 @@ void PlotProps::Impl::Create(Il2CppObject* plot, const KindDef& def, Il2CppObjec
         Call(trSetLocalRotation, tr, {&rot}, "Transform.set_localRotation");
         Call(trSetLocalScale, tr, {&scale}, "Transform.set_localScale");
         if (part->activate) unity::SetActive(clone, true);  // still inactive in the hierarchy (holder)
+        clones.push_back(clone);
         ++built;
     }
     if (sr2::core::ModuleFaulted(module)) {
@@ -660,6 +663,11 @@ void PlotProps::Impl::Create(Il2CppObject* plot, const KindDef& def, Il2CppObjec
         return;
     }
     unity::SetActive(holder, true);
+    // Music Box II: the second speaker plays the Slime DJ song too (its vanilla audio was stripped with
+    // the game scripts). Dropped by slime_dj when Unity destroys the holder.
+    if (def.kind == kPropCorralMusic)
+        for (Il2CppObject* clone : clones)
+            if (unity::IsAlive(clone)) sr2::modules::slime_dj::RegisterEmitter(clone, sr2::modules::slime_dj::EmitterKind::kSpeaker);
     SR2_INFO("[{}] {} props built on plot '{}' ({} of {} piece(s){}{})", module, def.name, id, built, def.count,
              scattered ? ", scattered by plot id" : "", SolidKind(def.kind) ? ", colliders kept" : "");
 }

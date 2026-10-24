@@ -7,8 +7,8 @@ Plays your own songs from the corral Music Box ("slime speakers"). Overlay tab: 
 
 Put `.ogg` (Vorbis), `.mp3` or `.wav` files in `<game folder>\sr2mods_music\` (next to
 `SlimeRancher2.exe`; the module creates the folder on its first start). Subfolders are read too,
-up to 4 levels. Then press the refresh icon in the tab bar (Rescan), or reopen the game. "Open
-folder" on the Songs card opens it in Explorer.
+up to 4 levels. Then press Rescan on the Songs card (or the refresh icon in the tab bar), or reopen the game.
+"Open folder" next to it opens the folder in Explorer.
 
 The list shows "Artist - Title" from the file's tags (Vorbis comments, ID3v2.2/2.3/2.4
 `TIT2`/`TPE1`, WAV `LIST/INFO` `INAM`/`IART`), else the file name. Files that can't be decoded
@@ -19,6 +19,8 @@ are listed dimmed with the reason.
 | file | what |
 |---|---|
 | `module.cpp` | the module: music boxes, speakers, the clip ring, queue, requests, snapshot |
+| `api.h` | public emitter API for other modules (`RegisterEmitter` / `UnregisterEmitter`, `SongPlaying`, `SongName`) |
+| `emitters.cpp/.h` | the emitter registry behind `api.h` (module side: `Collect`, `Generation`, `SetPlaying`) |
 | `library.cpp/.h` | folder scan on a background thread, per-file cache (path + size + write time), ID3v2 reader |
 | `stream.cpp/.h` | one song being decoded on a background thread into 0.5 s chunks (bounded queue) |
 | `codecs.c/.h` | the only TU that compiles stb_vorbis, dr_mp3, dr_wav (CMake target `sr2_codecs`, C, `/W0`) behind a small streaming C API |
@@ -38,7 +40,8 @@ per frame). A box counts while `MusicBoxUpgrader.MusicBox` (the GameObject the v
 upgrade switches on) is active in the hierarchy, i.e. the corral owns the upgrade and the plot is
 loaded. Music Box II (custom_upgrades) keeps the same GameObject, so it plays too.
 
-**Several boxes: all in sync.** Every owned box nearby (at most 12) gets a speaker: a new
+**Several boxes: all in sync.** Every owned box nearby (at most 12) and every registered emitter
+(at most 24, see below) gets a speaker: a new
 GameObject `sr2dj_Speaker` with a Unity `AudioSource`, parented (`SetParent(…, false)`) to the
 box's first `SECTR_AudioSource` (where the vanilla tune comes from) or to the box itself. All
 speakers play the same clip and were started together, so the song is positional at every corral
@@ -48,9 +51,53 @@ destroyed. The first live speaker is the clock (see below); if it goes, the next
 If every box goes (you leave the ranch), the song pauses where it was and resumes when a box is
 back.
 
-**3D settings.** Copied from the vanilla cue (`SECTR_AudioSource.Cue`): `MinDistance`,
-`MaxDistance`, `Falloff` (SECTR Linear 0 / Logrithmic 1 -> Unity Linear / Logarithmic),
-`spatialBlend` 1, doppler 0, priority 32. Without a cue: 3-40 m logarithmic.
+Drift check (every box scan): every speaker's `timeSamples` is compared with the clock speaker's
+(all readings come from the same audio update). `Play()` starts at the next audio update, so a
+speaker that joined later can trail by a mix buffer (~20 ms); one that is more than 30 ms off on
+two scans in a row is set back to the clock's position (logged, first 5 times).
+
+**Amplify (setting `amplify`, default off).** Why a toggle and not something else: boxes in sync
+already add up physically where their ranges overlap (two coherent sources), so "play all in
+sync" is always on. The toggle adds an explicit boost on top: each other speaker within a
+speaker's hearing range (positions from `Transform.get_position` every box scan) adds 25 % to its
+volume and its hearing range, up to 2x. The volume part only helps while the speaker is below
+full volume (Unity clamps `AudioSource.volume` to 1, so Volume x the game's music slider must be
+under 100 %); the range part always works, which with linear rolloff also makes it louder at
+any given distance.
+
+**Emitters (`api.h`, stable API for other modules).** Any GameObject can play the song:
+
+```cpp
+#include "modules/slime_dj/api.h"
+namespace dj = sr2::modules::slime_dj;
+dj::RegisterEmitter(go, dj::EmitterKind::kBooth);            // or kSpeaker / kRadio
+dj::RegisterEmitter(go, dj::EmitterKind::kRadio, 0.5f, 0.8f); // half the hearing range, 80 % volume
+dj::UnregisterEmitter(go);
+bool on = dj::SongPlaying(); std::string name = dj::SongName();  // any thread
+```
+
+- `obj` is a GameObject or any Component on it. Slime DJ adds a child `sr2dj_Speaker` with its own
+  `AudioSource` (same 3D setup as a music box speaker) that plays the shared song clip in sync
+  with every music box: started together, or joined at the clock speaker's `timeSamples`, and
+  kept there by the drift check. Emitters play anywhere (also off the ranch), so a song keeps
+  playing while at least one emitter or music box exists.
+- `rangeScale` (0.1-4) multiplies the Hearing range setting, `volumeScale` (0-1) the volume. The
+  kind is informative (logged); it does not change the sound today.
+- Register again with the same object to change kind / scales. Unregister when the object goes;
+  objects Unity destroyed are dropped at the next scan anyway (every 2 s while a song plays or
+  the tab is open; a (un)register triggers a scan on the next frame).
+- Main thread, not inside a detour. Register takes a GC handle; Unregister only queues it, the
+  slime_dj tick frees it. Registrations survive the module being off and apply when it is on.
+- At most 24 emitter speakers (plus 12 music boxes); 256 registrations.
+- Current users: custom_upgrades `plot_props.cpp` registers the Music Box II second speaker
+  (the cloned `Music` model, whose vanilla audio was stripped with the game scripts).
+
+**3D settings.** Setting `range` (Hearing range, default 60 m, 10-200 m) x the emitter's
+`rangeScale` x Amplify's boost = `maxDistance`; `minDistance` = a fifth of it; rolloff Linear (full
+volume up to minDistance, silent at maxDistance; Unity's Logarithmic never reaches silence and
+stays at its maxDistance level forever beyond it), `spatialBlend` 1, doppler 0, priority 32. The
+vanilla cue's (`SECTR_AudioSource.Cue`) MinDistance / MaxDistance / Falloff are only logged now:
+users found the copied range far too short for a song.
 
 **Streaming clip (large files).** One `AudioClip.Create(name, 16 chunks, channels, rate,
 stream: false)` per song, looping: an 8 s ring. The decoder thread keeps up to 20 chunks (10 s)
@@ -80,7 +127,9 @@ plain `AudioSource` under it `mute = true` (only if it was not muted already). I
 Pause, Stop, when the queue ends, when the box loses its speaker, and when the module is turned
 off. It stays silent between two songs.
 
-**Volume.** `AudioSource.volume = volume setting x music bus`. The music bus is the first
+**Volume.** `AudioSource.volume = volume setting x music bus x emitter volumeScale x Amplify boost`,
+clamped to 1 by Unity (so the setting tops out at 100 %; it used to allow 150 %, which never did
+anything). The music bus is the first
 `SECTR_AudioBus` whose name contains "music" under `SECTR_AudioSystem.MasterBus` (the system is
 found with `FindFirstObjectByType` once, retried every 5 s until found; the bus tree is logged).
 Its `EffectiveVolume` is what the game's music volume slider drives
@@ -89,6 +138,15 @@ master bus volume is used.
 
 **Pause.** The speakers pause while the vanilla cue's bus reports `Paused` (game pause menu),
 while you pause, while buffering, and while no box is nearby.
+
+**Seek.** The Now playing bar is a seek bar (tab sends `Op::Seek` with seconds on release). The
+module starts a new decoder at that frame (`Stream::Start(path, startFrame)` ->
+`sr2_decoder_seek`: `stb_vorbis_seek`, `drmp3_seek_to_pcm_frame`, `drwav_seek_to_pcm_frame`) and a
+new clip; `Current::base` is the song frame the stream started at, so ring positions stay
+relative and the shown position is `base + playPos`. All speakers restart on the new clip in the
+same frame, so they stay in sync. The player's pause is kept. A seek lands at most 0.5 s before
+the end. MP3 has no seek table: drmp3 decodes up to the target on the decoder thread, so a far
+seek in a long MP3 takes a moment ("Loading...").
 
 **Queue and shuffle.** Click a song: plays now (the queue stays). +: appended to the queue (starts
 it if nothing plays). When a song ends: the queue's first; if the queue is empty and `shuffle` is
@@ -99,7 +157,9 @@ Play with nothing loaded starts the same way. Three failed songs in a row stop p
 
 | key | default | |
 |---|---|---|
-| `volume` | 1.0 (100 %) | 0-150 %, on top of the game's music volume |
+| `volume` | 1.0 (100 %) | 0-100 %, on top of the game's music volume |
+| `range` | 60 m | hearing range: full volume to a fifth of it, silent at it (10-200 m) |
+| `amplify` | off | each other speaker in range: +25 % volume and range, up to 2x |
 | `shuffle` | on | random songs when the queue is empty |
 | `mute_vanilla` | on | silence the music box's own tune while a song plays |
 
@@ -107,8 +167,10 @@ Play with nothing loaded starts the same way. Three failed songs in a row stop p
 
 - `slime_dj: music folder '…': N song(s) (M newly read, K not playable) in X ms`
 - `slime_dj: music bus '…' (buses: …)` or a warning with the bus tree
-- `slime_dj: speaker on music box '…' at '…': N vanilla source(s), cue '…' a-b m …` (first speaker only)
-- `slime_dj: playing '…' (file)`
+- `slime_dj: speaker on music box '…' at '…': N vanilla source(s), cue '…' a-b m …; hearing range N m` (first speaker only)
+- `slime_dj: playing '…' (file)`, `slime_dj: seek to N s in '…'`
+- `slime_dj: speaker on emitter '…' (kind K, range xA, volume xB)`
+- `slime_dj: speaker N ms off the others, moved back in sync`
 
 ## Not verified in game yet
 
@@ -120,4 +182,6 @@ game. To check:
   line above shows how many were found) and that `Volume = 0` silences it;
 - the music bus name and that its `EffectiveVolume` follows the music slider;
 - that the vanilla cue's bus pauses in the pause menu (else songs keep playing there);
-- the 3D range copied from the cue (maybe too short for a song; the vanilla tune is quiet).
+- the hearing range default (60 m, linear) and Amplify;
+- the Music Box II second speaker playing (emitter registered by custom_upgrades plot_props);
+- seeking (Vorbis / MP3 / WAV) and that the speakers stay in sync after it.
