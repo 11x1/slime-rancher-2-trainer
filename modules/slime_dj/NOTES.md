@@ -18,7 +18,7 @@ are listed dimmed with the reason.
 
 | file | what |
 |---|---|
-| `module.cpp` | the module: music boxes, speakers, the clip ring, queue, requests, snapshot |
+| `module.cpp` | the module: music boxes, speakers, channels (global queue, Corral Radios), the clip ring, queue, muffle, requests, snapshot |
 | `api.h` | public emitter API for other modules (`RegisterEmitter` / `UnregisterEmitter`, `SongPlaying`, `SongName`) |
 | `emitters.cpp/.h` | the emitter registry behind `api.h` (module side: `Collect`, `Generation`, `SetPlaying`) |
 | `library.cpp/.h` | folder scan on a background thread, per-file cache (path + size + write time), ID3v2 reader |
@@ -317,6 +317,75 @@ setting goes off, the module is disabled; ripples in flight fade on their own (m
 After a native fault the module stops for the session and leaves the walls as they are (handles
 leaked by design).
 
+**Channels: the global queue and Corral Radios (round 4 idea: "queue up a Radio upgrade for slimes to
+make a playlist").** Playback is split into `Channel`s: `global_` (the queue, as before) and one per
+loaded corral that owns the **Corral Radio** (custom_upgrades plot upgrade, corral, needs the Music Box,
+1500; `custom_upgrades::kCorralRadio`). Each channel has its own `Current` (decoder stream, clip ring,
+clock, end / buffering); `clipGen_` counts across channels, so a clip generation names one channel's clip.
+Every speaker has `ch` (what it plays) and `corral` (index into `corrals_` of the last box scan),
+assigned every box scan by `AssignSpeakers`: a box speaker belongs to its own corral, an emitter to the
+corral whose footprint holds it (`kEmitterHalf` 5.5 m around the plot root along the plot's axes, so the
+Music Box II prop on the corner post counts); a corral with a radio -> that radio's channel, else the
+global queue. A speaker that changes channel stops, drops its clip and joins the other channel's song at
+that channel's clock in `TickSong`. Everything per channel works as before for the global song (sync,
+drift check, rejoin, clock, pause when the channel has no speaker), only restricted to its speakers.
+The vanilla tune is silenced per speaker while its own channel has a song, so a radio corral whose radio
+is off (or waiting for a slot) plays its own tune, also while the global queue plays elsewhere.
+
+- *Corrals* (`BuildCorrals`, every box scan): for each active box its `MusicBoxUpgrader` (plot root):
+  position + `Transform.right / forward`, the walls (`WallUpgrader.UpgradeWalls` active = High Walls; one
+  of `AirNetUpgrader.AirNets` active = Air Net; both components sit on the plot root next to
+  `MusicBoxUpgrader`, offsets by name), and with custom upgrades on the `LandPlot`
+  (`Component.GetComponentInParent(Type, true)`), `custom_upgrades::Owns(plot, kCorralRadio)` and the plot
+  key (`custom_upgrades::PlotKey` = `LandPlotLocation._id`). Log `N corral(s) with a music box, M with High
+  Walls / Air Net` on a change.
+- *Radios* (`SyncRadios`): a channel per corral with the radio found in this scan; created when it appears,
+  dropped (song stopped, its speakers back to the global queue) when its corral is not found (zone
+  unloaded, radio sold, custom upgrades off). Its state is read from the plot's sidecar value
+  `slime_dj.radio` (custom_upgrades per-plot value, lines `v=1`, `on=0|1`, `shuffle=0|1`, `index=N`, then
+  `song=<file relative to the music folder>` per entry; song ids hash the full path, so the file is kept)
+  when it appears (another save may be loaded since), and written back after every change and every song
+  change, so it follows the exact `.sav` like the upgrades (saved with the next game save). Up to 500
+  entries, 32 radios.
+- *Slots* (`AllocateSlots`): at most `kMaxRadioStreams` = 4 radios decode at once (the global queue not
+  counted). A radio keeps its slot while it is on, has songs and is loaded; free slots go to the nearest
+  waiting radios (distance from the camera at the scan). A radio with a slot and no song starts its
+  playlist at the entry it played last (resume after a load / zone change: that song starts again from its
+  beginning; positions inside a song are not kept). Waiting radios show "Waiting: 4 radios play already".
+  Nothing starts before the music folder has been read.
+- *Order*: next entry, wrapping round; with the radio's own shuffle a random other entry. A missing or
+  unplayable file is skipped; none playable -> the radio switches off (status line). Three failed songs in
+  a row switch it off too. Seek is for the global song only.
+- *Starting after a load*: the box scan only runs while something plays or the tab is open. With custom
+  upgrades on, a `MusicBoxUpgrader.Apply` record (every plot with upgrades passes there on load) triggers
+  one probe scan even while idle, so a radio left on in the save finds its corral and starts.
+- *Not with radios*: walls dance (`SyncDancer` takes only corrals that play the global song; the dancer
+  has one beat source), `SongPlaying` / `SongName` of `api.h` (the global song).
+
+**Muffle behind High Walls (setting `muffle_walls`, default on; same idea: "muffle the music when it's coming
+from slime plots (based on double wall upgrade, air net)").** Every speaker gets a Unity
+`AudioLowPassFilter` on its own GameObject when it is made (switched off, cutoff 22 kHz). Every frame
+(`TickMuffle`): main camera position (the AudioListener sits on it) against each walled corral of the last
+scan: outside (more than `kCorralHalf` 4.9 m from the centre along the plot's x or z axis, or below -3 m /
+above +8 m of the plot root) -> High Walls + Air Net 750 Hz and 60 % volume, High Walls 2 kHz / 80 %, Air
+Net alone 6.5 kHz / 92 %; inside, or a corral without either: clear. Smoothed (log cutoff and volume,
+time constant 0.35 s, so walking in or out fades in about a second); the filter is switched off
+(`Behaviour.enabled`) while the cutoff is back at 22 kHz. The volume factor multiplies the speaker volume
+in `TickMix`. Walls / net are read at every box scan (2 s), so a purchase takes effect within 2 s.
+Emitters in the corral's footprint (Music Box II prop, a speaker placed inside) are muffled with it.
+
+*AudioLowPassFilter in this build.* The managed class (UnityEngine.AudioModule) keeps `set_cutoffFrequency`
+and `set_lowpassResonanceQ`; `customCutoffCurve` was stripped. UnityPlayer.dll registers all
+`AudioLowPassFilter::*_Injected` icalls (name table at 0x181B26EE0, function table right before it at
+0x181B263E0, 352 entries). The native `set_cutoffFrequency` (0x180150110) maps the value to a level
+`clamp((f - 10) / 21990, 0, 1)` and writes it into the filter's lowpass-level curve (+0x58) as a single key;
+the getter reads key 0 back. So the frequency *is* the (constant) curve and no default distance curve can
+override what we set (the worry from the editor's "Low-Pass" curve on the AudioSource). The curve setter
+refuses an empty curve ("customCutoffCurve must be passed an AnimationCurve with at least 1 element") and
+throws on null. If `AddComponent` still fails, the log says so and Muffle only lowers the volume (no
+own PCM filter: the global clip is shared by speakers inside and outside a corral, so a filter in the
+feed cannot depend on the listener).
+
 ## Settings
 
 | key | default | |
@@ -326,6 +395,7 @@ leaked by design).
 | `amplify` | off | each other speaker in range: +25 % volume and range, up to 2x |
 | `shuffle` | on | random songs when the queue is empty |
 | `mute_vanilla` | on | silence the music box's own tune while a song plays |
+| `muffle_walls` | on | music from a corral with High Walls (and/or Air Net) sounds muffled from outside |
 | `dance_walls` | off | a ripple runs round the corral walls on every beat; walls and Air Net glow and change colour (corrals within hearing range) |
 | `dance_intensity` | 1.0 (100 %) | 10-200 %, how strongly they ripple, glow and change colour; steeper above 100 % (shown while `dance_walls` is on) |
 
@@ -350,6 +420,13 @@ leaked by design).
 - `slime_dj: walls dance at N corral(s)` (when the count changes), `slime_dj: walls dance stopped (setting off|no
   song); walls restored`
 - `slime_dj: 'Walls dance to the music' unavailable (…)` (Setup; a class / method missing)
+- `slime_dj: N corral(s) with a music box, M with High Walls / Air Net (muffled from outside…)` (on a change)
+- `slime_dj: 'Muffle behind High Walls' unavailable (…)`, `slime_dj: AudioLowPassFilter could not be added; …`,
+  `slime_dj: Corral Radio unavailable (…)`
+- `slime_dj: radio 'Corral NNNN' (plot '…'): N song(s) in its playlist, on|off[, shuffle]` (radio found),
+  `slime_dj: radio '…' playing '…' (file)`, `slime_dj: radio '…' switched on|off`, `slime_dj: radio '…' gone (…)`,
+  `slime_dj: radio '…' stopped: …`, `slime_dj: N speaker(s) switched between the global queue and a corral radio`
+  (first 20)
 
 ## Not verified in game yet
 
@@ -367,6 +444,11 @@ game. To check:
 - box cache: no `frame:slime_dj took` warnings in normal play; a Music Box bought on a new corral,
   and corrals after a teleport back to the ranch, get a speaker within ~2 s without a scene search
   (the minute line shows `scene searches 0`).
+- muffle: that the AudioLowPassFilter on our speaker is audible (cutoff values), the inside test of the
+  corral footprint (4.9 m, plot axes, -3..+8 m) and the transition speed;
+- Corral Radio: the per-plot sidecar value round trip (save, reload), four radios at once plus the global
+  song (CPU: five decoder threads), slot hand-over to the nearest waiting radio, speakers switching
+  channel when the radio is bought / sold;
 - walls dance: round 8 showed the height bob (so property blocks and transforms reach the fields);
   round 9 build: that the beat ripples bulge the walls outwards and travel round the corral, that
   `_RipplePushScale` in the block makes them stronger with the bass (if not, the ripples still show

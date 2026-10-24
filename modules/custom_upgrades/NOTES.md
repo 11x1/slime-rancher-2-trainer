@@ -1122,6 +1122,17 @@ and whether the phantom purchase is gone. Also not checked yet: sizes and height
 `Glow` / `Embers` play on their own once active (they may be sub-emitters of `FireTest`) and look
 right, and that nothing of the stripped clones still logs errors.
 
+## Corral Radio (round 4 idea: "a Radio upgrade for slimes to make a playlist from music")
+
+Corral upgrade `corral_radio` (id 0x53520014 = `api.h kCorralRadio`, price 1500, needs the vanilla Music
+Box, own card at the end of the corral list, icon = the vanilla Music Box icon until an
+`assets/icons/corral_radio.png` is added: `ModIconName` picks it up through `mod_icons::Has`). It does
+nothing in this module: slime_dj asks `custom_upgrades::Owns(plot, kCorralRadio)` at every box scan and
+plays the corral's own playlist, which it keeps as the per-plot value `slime_dj.radio` (`PlotKey` gives
+the key the per-plot values use, for the radio's name). Selling the Music Box is refused while the radio is
+owned (`VanillaDependent`, via `needs`); selling the radio keeps its playlist value, so buying it back
+restores the playlist. Details: `modules/slime_dj/NOTES.md` "Channels".
+
 ## Vacpack upgrades (Fabricator)
 
 `vacpack_upgrades.cpp`, `fabricator_levels.cpp`. Bought through the vanilla flow (recipe panel, cost check,
