@@ -1,11 +1,11 @@
 # sandbox
 
-Edits the character's resources from the overlay's **Misc > Sandbox** tab: Newbucks, health / energy / radiation, what each vacpack slot holds (and unlocking locked slots), spawning items in front of the player, crafting fabricator gadgets at no cost, adding crafting materials to the refinery, infinite health, teleporting to the map marker and unlocking the ranch expansions. Off by default. While it is on, achievements are paused (see "Achievements paused").
+Edits the character's resources from the overlay's **Misc > Sandbox** tab: Newbucks, health / energy / radiation, what each vacpack slot holds (and unlocking locked slots), spawning items in front of the player, crafting fabricator gadgets at no cost, adding crafting materials to the refinery, infinite health, teleporting to the map marker and unlocking the ranch expansions. Off by default. While it is on, achievements are paused (see "Achievements paused"), and a save it was used in is marked as cheated: achievements stay blocked in that save for good (see "Cheated saves").
 
 ## Turning it on
 
 - The module's only setting is the automatic `enabled` (default **off**, persisted in `sr2mods.json` like every module's).
-- While it is off, the tab shows a short explanation and an **Enable sandbox** button. The button, and the tab bar's Enabled switch, open a confirmation dialog ("Sandbox edits change your save directly. Enable?", Cancel / Enable; Esc cancels). Only **Enable** writes `sandbox.enabled = 1`. Turning it off needs no confirmation.
+- While it is off, the tab shows a short explanation and an **Enable sandbox** button. The button, and the tab bar's Enabled switch, open a confirmation dialog ("Sandbox edits change your save directly. Enable?" plus a warning that this marks the save as cheated and disables achievements in it permanently; Cancel / Enable; Esc cancels). Only **Enable** writes `sandbox.enabled = 1`. Turning it off needs no confirmation.
 - No other path turns it on by accident: the in-game Options "Mods" tab has no Sandbox row (`options_tab.cpp` skips the module), and profiles neither save nor load `sandbox` (`core/profiles.cpp`, `Skipped()`), so loading a shared profile can't enable it. Editing `sr2mods.json` by hand still works.
 
 ## Save safety
@@ -159,7 +159,7 @@ The module does the same for every loaded activator whose door is locked, withou
 
 ## Achievements paused
 
-While the module is enabled no achievement progress is made: no Steam unlock or stat, and the save's achievement progress does not move. The Sandbox page shows a warning banner across both columns at its top, "Steam achievements are paused while Sandbox is on." (since 2026-10-24; before, a dim line at the bottom). Code: `modules/sandbox/achievements.cpp`.
+While the module is enabled, and while a save marked as cheated is loaded (see "Cheated saves"), no achievement progress is made: no Steam unlock or stat, and the save's achievement progress does not move. The Sandbox page shows a warning banner across both columns at its top, "Steam achievements are paused while Sandbox is on." or, in a marked save, "Steam achievements are disabled for this save (Sandbox was used)." (since 2026-10-24; before, a dim line at the bottom). Code: `modules/sandbox/achievements.cpp`.
 
 How the game does it (1.3.0, decompiled):
 - `MetaGameDirector` (`MonomiPark.SlimeRancher`) owns `List<AchievementData> Achievements` (nested class `MetaGameDirector.AchievementData`; enum `MetaGameDirector.Achievement`, 27 entries) and an `IMetaGamePlatform _platform`. `AchievementData.CurrentProgress` is the in-game tracker; `PullMetaGameData` saves it into `MetaGameDirectorModel.ProgressPerAchievement` and `SetModel` restores it on load.
@@ -168,7 +168,7 @@ How the game does it (1.3.0, decompiled):
 - `SteamMetaGamePlatform.Grant` (0xB30F00) is the only caller of `SteamUserStats.SetStat` / `SetAchievement` / `StoreStats` (`IndicateAchievementProgress` is never called).
 - Beallionaire: `HandleSoldPlort(price)` grants the first sale of a 30 s window and adds later ones to `_tempBeallionaireProgress`, which `Update` / `ClearPendingBeallionaireUpdate` flush through `SetAchievementProgress` when the window ends.
 
-Hooks (created in `Setup`, on and off with the module; DetourGuard each; the detour checks the pause flag and the object's class, nothing else):
+Hooks (created in `Setup` and always on since the cheated-save mark, HookManager module and fault name `sandbox_achievements`; before, they were switched with the module. DetourGuard each; the detour checks two flags (Sandbox on, save marked) and the object's class, nothing else):
 
 | hook | while Sandbox is on | why |
 |---|---|---|
@@ -177,17 +177,56 @@ Hooks (created in `Setup`, on and off with the module; DetourGuard each; the det
 | `MetaGameDirector.HandleSoldPlort(int)` | skipped | keeps Sandbox-time sales out of the pending Beallionaire total, which would otherwise be flushed after Sandbox is turned off |
 | `SteamMetaGamePlatform.Grant(AchievementData)` | skipped | backstop: nothing reaches Steam, including a load that syncs older save progress (it syncs again on the next load with Sandbox off) |
 
-Nothing is queued: blocked calls are dropped, so turning Sandbox off replays nothing. The first blocked call per enable logs one line (`[sandbox] achievements paused: blocked ... while Sandbox is on`); turning the module on / off logs `achievements paused` / `resumed`.
+Nothing is queued: blocked calls are dropped, so turning Sandbox off replays nothing. The first blocked call per enable or marked save logs one line (`[sandbox] achievements blocked: ... (Sandbox is on)` / `(this save is marked as cheated)`); turning the module on / off logs `Sandbox on: achievements paused` / `Sandbox off: achievements resumed` (`stay blocked` in a marked save).
 
-The hooks are required: if one can't be resolved the module fails setup and Sandbox can't be enabled (fail closed). If the module faults, its hooks are disabled with it (Sandbox edits stop too).
+The hooks are required: if one can't be resolved the module fails setup and Sandbox can't be enabled (fail closed). They have their own fault name: a fault in the module's editing code stops the edits but not the block; a fault in one of these detours makes them pass-through (logged).
 
 Limits:
 - Achievements the game derives from world state (treasure pods opened, upgrades owned, vacpack contents in `CheckAmmo`, Slimepedia entries, query achievements) are checked again by the game later, for example by `ValidatePersistantAchievements` on every load. Anything Sandbox put into the world (gadgets, items, Newbucks) still counts then if the save is played with Sandbox off. That is the game re-reading the save, not replayed progress.
 - A Beallionaire window opened before Sandbox was enabled and ending while it is on loses its pending total.
 
+## Cheated saves
+
+Since 2026-10-24 (feature/sandbox-cheated-save). Using Sandbox marks a save as **cheated** for good: Steam achievements and stats stay blocked in it, also with Sandbox off. Saves without the mark behave as before (blocked only while Sandbox is on). Code: `modules/sandbox/cheated_save.cpp`; the block itself is in `achievements.cpp` (`SetSaveCheated`).
+
+**When a save is marked.** Turning Sandbox on (after the confirmation) while a save is running, or loading a save while Sandbox is on. Then, for the rest of that session, every game save (manual, autosave, save on quit) marks the new `.sav` file too, so the mark follows the game through its rotation files. The file the session was loaded from is marked at once, so "for good" holds even if you quit without saving.
+
+**Where.** In the per-save sidecar `sr2mods_saves\<GameName>_<i>.sav.json` (same name as the `.sav` file; the file custom_upgrades uses, see `re/custom-upgrades.md` 1.2):
+```json
+"sandbox": { "cheated": true, "since": "2026-10-24 13:05:12", "game": "<GameName>", "save": "<GameName>_<i>", "save_number": 42 }
+```
+`since` is when Sandbox was first used in that line of saves (carried to every later file); `save_number` is `GameMetadata.SaveNumber` of that file. The game reuses rotation file names (`SaveGameImpl` takes the first free `<GameName>_<i>`), so a mark counts only if its `save` matches the file and its `save_number` matches the file's (0 = not checked). The sandbox only adds or replaces its `sandbox` entry and keeps everything else in the file (temp file + rename; a sidecar it can't parse is never replaced). Sharing the file with custom_upgrades:
+- Order inside one game save: `SaveGameImpl` -> `StoreGameData` -> `CleanupAutosaves` (our mark, written synchronously) -> return -> custom_upgrades' `AfterSave` rewrites the sidecar from its state. Its `WriteSidecar` therefore keeps an existing `sandbox` entry whose `save_number` is the one it writes (or 0).
+- A sidecar with only the sandbox entry (no `format`, `plots` or `values`: custom upgrades never saved that file) is "no custom upgrade data" for custom_upgrades (`ReadSidecarFile` returns `kForeignSidecar`), so its fallback to the newest older sidecar still applies and no custom upgrades are lost.
+- Sidecars live in the game folder, not the Steam Cloud save folder: the mark does not follow a save to another PC (copy the sidecar by hand). The game has no "copy save" function (`AutoSaveDirector` only saves, loads and deletes games), so there is no copy to follow.
+
+**Clearing it.** Not possible from the UI. By hand: close the game (or go to the title screen), open the save's sidecar and delete its `"sandbox": {...}` entry (or set `"cheated": false`). Do it for every file of that game that has one (a session saved several times marked each file). While a marked save is running, the mark is kept in memory and written again with the next save.
+
+**Hooks** (HookManager module and fault name `sandbox_saves`, created in `Setup` and always on; the module has `SetupWhileDisabled`, so `Setup` runs at startup also with Sandbox off; the editing part of the module does nothing while off):
+
+| hook | what we do |
+|---|---|
+| `AutoSaveDirector.BeginLoad(GameSaveIdentifier, Stream)` (0x5CDB50; the struct `{GameName, SaveName}` arrives by reference) | before the original: read the loaded file's sidecar. A mark turns the block on at once, before the scenes load, so `ValidatePersistantAchievements` and the other load-time checks are blocked; no mark turns it off. Loads from the save list and Continue go through it (`LoadGameBehaviorModel.InvokeBehavior` -> `BeginLoad`; quick_start's auto-continue too). The save number is checked once the game runs. |
+| `AutoSaveDirector.CleanupAutosaves(string)` (0x5CE040) | its only caller is `SaveGameImpl` (call at 0x5D15FA, after the file was stored, success path only; found by scanning the binary for calls to it). After the original: the new file is the newest `<GameName>_<digits>.sav` in `FileStorageProvider.savePath`, its number `_currentGameMetadata.SaveNumber` (already incremented). A marked session (or Sandbox on) writes the mark into its sidecar. |
+| `LoadGameBehaviorModel.get_Label()` (0x725C90, optional) | the save list's buttons and the title screen's Continue button (`ContinueGameBehaviorModel` derives from it). The getter builds a new `LocalizedString` each call whose one argument is `Summary.DisplayName`; for a save whose sidecar has the mark (`Summary.SaveName` + `SaveNumber`) that argument becomes `"<name> [Sandbox]"` (`List<object>.set_Item` through runtime_invoke). The sidecar is read once and then only `stat`'ed, at most every 2 s per file; nothing runs per frame. The tag is plain text (the label is a localized smart string). One log line per tagged file. |
+
+Plus one main-thread frame callback, throttled to 1 Hz (`SceneContext.Instance` + `GameModel`, `_currentGameMetadata`): on the title screen (no `GameModel`, no load pending) it clears the session, which lifts the block; a running save it did not see being loaded (fallback load, unexpected number) is looked up by game name and save number among the sidecars; with Sandbox on and the save not marked yet, it marks it.
+
+**What blocks when** (`achievements.cpp`): the four achievement hooks are always on now (HookManager module and fault name `sandbox_achievements`, so a fault in the editing code does not lift the block) and block while `Sandbox on || loaded save marked`. The mark flag clears at the title screen and when a save without the mark is loaded. Nothing is queued while blocked (calls are dropped; Beallionaire's pending total collects nothing while blocked), so loading a clean save after a marked one replays nothing.
+
+**Overlay.** The Sandbox page's banner says "Steam achievements are disabled for this save (Sandbox was used)." while the loaded save is marked, else "Steam achievements are paused while Sandbox is on.". With Sandbox off and a marked save loaded, the off card shows the same line in the warning colour. The confirmation dialog says that enabling marks the save as cheated and disables achievements in it for good.
+
+**Log lines.** `[sandbox] loading save '<file>' (game '<game>'): marked as cheated (...)` / `no Sandbox mark`; `[sandbox] Sandbox is on: save '<file>' ... marked as cheated`; `[sandbox] new save file '<file>' (save #N) marked as cheated, like the save it was made from`; `[sandbox] left save game '<game>' (title screen) - its Sandbox mark no longer applies`; `[sandbox] achievements blocked: ... (this save is marked as cheated)`; `[sandbox] save list: '<name>' (<file>) tagged [Sandbox]`; at startup `[sandbox] cheated-save hooks ready (always on): ...`.
+
+**Limits.**
+- A save written while the mod was not installed has no sidecar, so it is not marked. There is deliberately no fallback to older sidecars: a marked save of another branch of the same game must not mark a clean one.
+- Loads that skip `BeginLoad` (the game's fallback after a broken save, `LoadFallbackSave`) are seen by the 1 Hz poll only, so the load-time achievement checks of such a load are not blocked.
+- Sandbox-only sidecars of rotated-out saves stay behind (harmless; custom_upgrades prunes sidecars of deleted `.sav` files when it writes).
+- Not seen in game yet: everything in this section.
+
 ## Threading and faults
 
-- Hooks only for the achievement pause and infinite health (above). One main-thread frame callback: the snapshot for the tab every 250 ms, only while the tab was drawn in the last 0.6 s (`ui/sandbox_bridge.h`, plus the extras state in `ui/sandbox_extras_bridge.h`), the infinite-energy / infinite-health top-ups, and the queued HUD notices (a retry every 0.25 s while one waits).
+- Hooks only for the achievement pause, the cheated-save mark and infinite health (above). One main-thread frame callback: the snapshot for the tab every 250 ms, only while the tab was drawn in the last 0.6 s (`ui/sandbox_bridge.h`, plus the extras state in `ui/sandbox_extras_bridge.h`), the infinite-energy / infinite-health top-ups, and the queued HUD notices (a retry every 0.25 s while one waits).
 - The tab's buttons post an `Action` to the main thread (`main_thread::Post`); the module validates it, applies it, logs one line (`[sandbox] Newbucks set: 1,200 -> 5,000`, ...), sets the tab's status line (spawns, crafts and refinery adds that worked: a HUD notice instead, see Spawner) and refreshes the snapshot.
 - Every game call is `Resolver::Invoke` (runtime_invoke, managed exceptions captured and logged). A native fault there marks the module faulted (`MarkModuleFaulted`); from then on it makes no game calls.
 - Each step re-reads the player: `SceneContextUtility.TryGetPlayerState`, `IsAlive` + class checks on `PlayerState`, `PlayerModel`, `AmmoSlotManager`, every `AmmoSlot` and every item.

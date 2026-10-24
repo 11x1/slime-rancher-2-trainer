@@ -162,6 +162,10 @@ void SetStatus(std::string text, bool error);
 void SetHandler(void (*fn)(const Action&));
 // The tab was drawn within the last ~0.6 s.
 bool WantsSnapshot();
+// The loaded save is marked as cheated (Sandbox was used in it): achievements stay blocked in it,
+// also with Sandbox off (modules/sandbox/cheated_save.cpp). Any thread.
+void SetSaveCheated(bool cheated);
+bool SaveCheated();
 
 // ---- render thread ----
 std::shared_ptr<const Snapshot> Get();  // nullptr until the first publish

@@ -17,8 +17,12 @@ std::shared_ptr<const Snapshot> g_snap;  // guarded by g_mutex
 Status g_status;                          // guarded by g_mutex
 std::atomic<void (*)(const Action&)> g_handler{nullptr};
 std::atomic<unsigned long long> g_viewed{0};
+std::atomic<bool> g_cheated{false};
 
 }  // namespace
+
+void SetSaveCheated(bool cheated) { g_cheated.store(cheated, std::memory_order_relaxed); }
+bool SaveCheated() { return g_cheated.load(std::memory_order_relaxed); }
 
 void Publish(Snapshot s) {
     auto p = std::make_shared<const Snapshot>(std::move(s));
