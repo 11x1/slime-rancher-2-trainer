@@ -4,7 +4,9 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <format>
 #include <initializer_list>
 #include <optional>
@@ -61,6 +63,7 @@ struct SaleNotices::Impl {
     const MethodInfo* entryCtor = nullptr;     // NotificationEntry(provider, group, icon, name, style)
     const MethodInfo* styleDefault = nullptr;  // static NotificationEntryStyle.get_Default
     size_t offPending = 0;                     // ItemAcquisitionNotificationList._pendingNotifications
+    size_t offDisplay = 0, offAvailable = 0;   // its _displayEntries (the page's slots) / _availableDisplayCount (optional)
     size_t offZoneName = 0;                    // ZoneDefinition._localizedName
     Il2CppObject* (*objectNew)(Il2CppClass*) = nullptr;  // il2cpp_object_new
     struct Text {
@@ -72,7 +75,8 @@ struct SaleNotices::Impl {
         Il2CppGCHandle owner = nullptr, str = nullptr;  // the cloned ZoneDefinition and its LocalizedString
         Il2CppObject* ls = nullptr;
     };
-    Name names[4];
+    static constexpr size_t kNames = 16;  // more than a page plus the next one (each entry keeps its string until shown)
+    Name names[kNames];
     size_t nextName = 0;
     bool loggedText = false, loggedNoSink = false;
     Il2CppClass* gadgetClass = nullptr;  // GadgetDefinition
@@ -214,7 +218,7 @@ int CanQueue(SaleNotices::Impl& p, Il2CppObject* list) {
 
 // One of our LocalizedStrings (round robin), created on first use from a loaded ZoneDefinition.
 Il2CppObject* NextName(SaleNotices::Impl& p) {
-    auto& n = p.names[p.nextName++ % 4];
+    auto& n = p.names[p.nextName++ % SaleNotices::Impl::kNames];
     Il2CppObject* owner = n.owner ? unity::GCHandleTarget(n.owner) : nullptr;
     if (owner && unity::IsAlive(owner) && n.ls) return n.ls;
     if (n.ls) sr2::core::text_override::Remove(n.ls);
@@ -241,6 +245,11 @@ Il2CppObject* NextName(SaleNotices::Impl& p) {
 }
 
 // true = done with the text queue (shown or given up), false = try again later.
+// The list shows its pending entries a page at a time (ShowNextPage takes up to one page once every
+// shown entry has faded out), and an entry's text is read from its LocalizedString only when it is shown.
+// So notices are handed over a page at a time, only while the list is idle (nothing pending, every display
+// slot free): each page's strings stay untouched until it was shown, and a burst of notices (one per
+// spawned item type) shows page after page instead of reusing strings that are still waiting.
 bool TryFlushText(SaleNotices::Impl& p) {
     Il2CppObject* list = p.List(true);
     if (!list) return false;
@@ -250,6 +259,18 @@ bool TryFlushText(SaleNotices::Impl& p) {
     if (can < 0) return true;
     if (can == 0) return false;  // HUD suppressed (menu open)
     auto* pending = unity::Field<Il2CppObject*>(list, p.offPending);
+    if (pending && unity::ListCount(pending) > 0) return false;  // the list is still busy with earlier entries
+    size_t page = 4;
+    if (p.offDisplay) {
+        void* slots = unity::Field<void*>(list, p.offDisplay);
+        const size_t n = slots ? unity::ArrayLength(slots) : 0;
+        if (n > 0) {
+            page = n;
+            if (p.offAvailable && unity::Field<int32_t>(list, p.offAvailable) < static_cast<int32_t>(n))
+                return false;  // a page is still showing
+        }
+    }
+    page = std::min(page, SaleNotices::Impl::kNames / 2);
     const auto& a = api();
     Il2CppClass* pk = pending && a.il2cpp_object_get_class ? a.il2cpp_object_get_class(pending) : nullptr;
     const MethodInfo* add = pk ? Resolver::Get().Method(pk, "Add", 1) : nullptr;
@@ -263,7 +284,9 @@ bool TryFlushText(SaleNotices::Impl& p) {
     if (!ok || !boxedStyle) return true;
     void* style = reinterpret_cast<char*>(boxedStyle) + 2 * sizeof(void*);
     int added = 0;
-    for (auto& t : p.texts) {
+    size_t used = 0;
+    for (; used < p.texts.size() && used < page; ++used) {
+        auto& t = p.texts[used];
         Il2CppObject* ls = NextName(p);
         if (!ls) {
             SR2_WARN("[{}] text notices: no LocalizedString to carry the text - '{}' not shown", p.module, t.text);
@@ -283,7 +306,9 @@ bool TryFlushText(SaleNotices::Impl& p) {
         p.loggedText = true;
         SR2_INFO("[{}] text notices: {} notice(s) added to the HUD's pending notifications", p.module, added);
     }
-    return true;
+    p.texts.erase(p.texts.begin(), p.texts.begin() + static_cast<std::ptrdiff_t>(used));
+    if (added) p.waited = 0.0f;  // a long sequence is not dropped as "HUD not available"
+    return p.texts.empty();
 }
 
 }  // namespace
@@ -411,6 +436,10 @@ bool SaleNotices::SetupText(Resolver& R, std::string& why) {
     }
     p.offPending = *pending;
     p.offZoneName = *zoneName;
+    auto display = R.FieldOffset(p.listClass, "_displayEntries", nullptr);
+    auto available = R.FieldOffset(p.listClass, "_availableDisplayCount", nullptr);
+    p.offDisplay = display ? *display : 0;
+    p.offAvailable = available ? *available : 0;
     p.gadgetClass = R.Class(kImage, "", "GadgetDefinition", nullptr);
     if (p.gadgetClass) {
         auto t = R.FieldOffset(p.gadgetClass, "Type", nullptr);
