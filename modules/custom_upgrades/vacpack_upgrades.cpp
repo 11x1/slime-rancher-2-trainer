@@ -150,6 +150,10 @@ constexpr int kSpecCount = static_cast<int>(sizeof(kSpecs) / sizeof(kSpecs[0]));
 
 // Number keys of the extra slots (settings, Win32 virtual-key codes).
 constexpr const char* kSlotKeySetting[kExtraSlots] = {"extra_slot_key_1", "extra_slot_key_2"};
+// The game binds Slot1..Slot6 to 1-6 and the water slot (Slot7) to R: 7 and 8 are free.
+constexpr int kSlotKeyDefault[kExtraSlots] = {'7', '8'};
+constexpr int kSlotKeyOld[kExtraSlots] = {'8', '9'};  // the first builds' defaults (migrated once)
+constexpr const char* kSlotKeyMigrated = "extra_slot_keys_v2";  // free-text marker: the migration ran
 
 int ScaleAmount(const Spec& s, int amount) {
     switch (s.kind) {
@@ -1275,7 +1279,7 @@ void BindKeyDetour(Il2CppObject* self, Il2CppObject* actionRef, const MethodInfo
 }
 
 // The game's slot keys (VacuumItem.SelectSlot(InputEventData), value = vanilla slot index): a
-// vanilla index after our slots (the water slot, key 7) selects its slot in our layout.
+// vanilla index after our slots (the water slot, Slot7 = R by default) selects its slot in our layout.
 void SelectSlotDetour(Il2CppObject* self, void* data, const MethodInfo* mi) {
     bool handled = false;
     if (self && data && g.vanillaSlotCount && g.insertAt > 0 && On())
@@ -1671,8 +1675,8 @@ bool VacpackUpgrades::Setup(sr2::core::ModuleContext& ctx, Host host, std::strin
                                     reinterpret_cast<void**>(&g.origSelect)))
             report += std::format(" VacuumItem.SelectSlot@0x{:X}", Resolver::Rva(selP));
         else
-            SR2_WARN("[{}] vacpack: the water slot's number key is not remapped ({}) - key 7 selects Extra Tank III's "
-                     "slot", kModule, err);
+            SR2_WARN("[{}] vacpack: the water slot's key is not remapped ({}) - it selects Extra Tank III's slot",
+                     kModule, err);
         if (!g.selectSlotInt || !g.activeEnabled || !g.lockState || !g.timeScale || !g.vacItemClass)
             SR2_WARN("[{}] vacpack: extra slot number keys unavailable ({})", kModule, err);
         if (!g.rtGetSize || !g.ammoUiClass)
@@ -1685,13 +1689,27 @@ bool VacpackUpgrades::Setup(sr2::core::ModuleContext& ctx, Host host, std::strin
         d.label = k == 0 ? "Extra Tank III slot key" : "Extra Tank IV slot key";
         d.group = "Vacpack";
         d.kind = settings::Kind::Key;
-        d.def = '8' + k;
+        d.def = kSlotKeyDefault[k];
         d.min = 0;
         d.max = 255;
         d.step = 1;
-        d.tooltip = std::format("Selects the Extra Tank {} slot. The game's own number keys cover slots 1-7 only.",
-                                k == 0 ? "III" : "IV", 7 + k);
+        d.tooltip = std::format("Selects the Extra Tank {} slot. The game binds slots 1-6 to the keys 1-6 and the "
+                                "water slot to R, so 7 and 8 are free.",
+                                k == 0 ? "III" : "IV");
         settings::Register(d);
+    }
+    // One-time: the first builds defaulted to 8 / 9 (thinking the game's key 7 was the water slot's;
+    // it is R). A key still on its old default moves to the new one.
+    if (settings::GetString(kModule, kSlotKeyMigrated).empty()) {
+        std::string moved;
+        for (int k = 0; k < kExtraSlots; ++k)
+            if (settings::Saved(kModule, kSlotKeySetting[k]) && settings::GetInt(kModule, kSlotKeySetting[k]) == kSlotKeyOld[k]) {
+                settings::Set(kModule, kSlotKeySetting[k], kSlotKeyDefault[k]);
+                moved += std::format("{}{} {} -> {}", moved.empty() ? "" : ", ", k == 0 ? "Extra Tank III" : "Extra Tank IV",
+                                     static_cast<char>(kSlotKeyOld[k]), static_cast<char>(kSlotKeyDefault[k]));
+            }
+        settings::SetString(kModule, kSlotKeyMigrated, "1");
+        if (!moved.empty()) SR2_INFO("[{}] vacpack: slot keys moved to the new defaults: {}", kModule, moved);
     }
     g.ready = ready_ = true;
     return true;
