@@ -80,7 +80,8 @@ public:
     // Worker thread, after Setup: false = unavailable (`why`).
     bool SetupText(sr2::il2cpp::Resolver& R, std::string& why);
     bool TextReady() const { return textReady_; }
-    // Main thread: queue one notice; false = not possible now (no text sink) - callers just log.
+    // Main thread: queue one notice; false = not possible now (no text sink) - callers just log. Queued
+    // notices go to the list a page at a time, only while it is idle, so a burst shows page after page.
     bool QueueText(Il2CppObject* icon, const std::string& text);
     // Main thread: the game's teleporter sprite for such notices (the icon of a TELEPORTER gadget definition,
     // home teleporter, found once among the loaded GadgetDefinitions and kept); nullptr if none.
