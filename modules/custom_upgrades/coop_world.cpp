@@ -1706,6 +1706,7 @@ void CoopWorld::Impl::UnlinkDrones(Il2CppObject* plot, const std::string& why) {
 // ---------------------------------------------------------------- api --
 
 void CoopWorld::Tick(const QueryFn& query, const LookupFn& lookup) {
+    henStorages_.clear();
     if (!ready_ || !impl_) return;
     Impl& p = *impl_;
     Il2CppObject* lookupDirector = nullptr;
@@ -1736,6 +1737,8 @@ void CoopWorld::Tick(const QueryFn& query, const LookupFn& lookup) {
         } else if (have.hen) {
             p.ServeHen(have.hen, c, req);
             if (!sr2::core::ModuleFaulted(p.module)) p.LinkDrones(c.plot, have.hen, req.id);
+            if (Il2CppObject* st = p.InChildren(unity::TransformOf(have.hen), p.siloStorageClass, true))
+                henStorages_.push_back(st);
         }
         if (sr2::core::ModuleFaulted(p.module)) return;
     }
@@ -1794,6 +1797,7 @@ void CoopWorld::Snapshot(const QueryFn& query) {
 }
 
 void CoopWorld::RemoveAll(const QueryFn* query) {
+    henStorages_.clear();
     if (!ready_ || !impl_) return;
     for (const Impl::CoopInfo& c : impl_->Coops()) {
         if (query) {
@@ -1825,6 +1829,7 @@ int CoopWorld::StoredHens(Il2CppObject* plot) {
 }
 
 void CoopWorld::Remove(Il2CppObject* plot, bool airNet, bool henCollector) {
+    if (henCollector) henStorages_.clear();  // the next tick lists the remaining ones
     if (!ready_ || !impl_ || !unity::IsAlive(plot)) return;
     Impl::Children have = impl_->Scan(plot, generation_, true);
     if (airNet && have.airNet) {
@@ -1841,6 +1846,7 @@ void CoopWorld::Remove(Il2CppObject* plot, bool airNet, bool henCollector) {
 
 void CoopWorld::Reset() {
     ++generation_;
+    henStorages_.clear();
     if (impl_) impl_->timers.clear();
 }
 

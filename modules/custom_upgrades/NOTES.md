@@ -115,6 +115,41 @@ findings from in-game tests that are easy to get wrong again.
 Not checked in game yet: a drone with Coop -> Silo (target Meat, or Hen) emptying the Hen Collector,
 the log lines, no errors after buying another coop upgrade (re-link) or selling the Hen Collector.
 
+### Drone source "Hen Collector" (user request, on top of the Coop linking; `drone_source.cpp`)
+
+- A real source in the program's source picker, right after Coop, while custom upgrades are on and
+  at least one coop has a Hen Collector, for the targets Coop is offered for (meat, hens, roosters).
+  It takes only from the Hen Collector ports: no live chickens, no elder collector.
+- In memory the program carries our `DroneTaskSourceType` value `0x53520101`. Hooks:
+  `RanchDrone.GatherSourceTask` (our type -> `DroneTaskSource` with one new
+  `RanchDroneSourceProgramElderCollector`; an unknown type would throw in vanilla),
+  `RanchDrone.GatherSourceTasks` (insert after Coop), `RanchDroneSourceProgramElderCollector.GetSources`
+  (for a station whose program has our type: only the Hen Collector slots, as a `StorageMetadata[]`),
+  `DroneUIDefinitionSource.FindSourceDefinition` (a runtime copy of the Coop definition: "Hen
+  Collector" through text_override, the Hen icon, sort index Coop + 1).
+- **Save (user decision: "save it as coop, the sidecar says the true source").**
+  `DroneStationGadgetModel.Pull` gives the save a copy of the program data that says COOP (PullGadget
+  turns it into the saved `DroneTaskV01` right away); the live data keeps ours. If the copy can't be
+  made the live data becomes Coop (logged). The sidecar value `drone_hen_source.stations` lists the
+  station actor ids (`PlacedGadgetV07.ActorId`, stable across loads) whose program is Hen Collector. A
+  ranch drone station has one program, so the station id is the key.
+- **Load:** the first ~1 Hz tick that sees a listed station whose saved program is Coop switches it
+  back (`DroneStation.AssignRanchTask` when its drone exists, else the program data; `RanchDrone.Init`
+  then builds our source). Until then (about a second) the drone runs as Coop.
+- **Stale entries:** a listed station whose program is now something else (changed by the player,
+  or not Coop in the save) is dropped; listed ids that no station has any more (picked up and placed
+  again = a new actor id, demolished) are dropped with a log line - a re-placed station has a Coop
+  program. No Hen Collector left (sold) -> the program falls back to Coop (logged) and the entry goes.
+- **Custom upgrades off / faulted:** `OnDisable` writes Coop into every program that had ours (plain
+  field writes, before the hooks go off, so a later save can't see our value); `Cleanup` (main thread)
+  re-programs those drones with Coop. When it is on again the sidecar's stations are mapped back.
+- **Without the mod:** the save only ever holds Coop programs; it loads and runs as Coop (the drone
+  takes live chickens and the elder collector; the Hen Collector itself is gone without the mod).
+
+Not checked in game yet: the option in the source picker (name, icon, position), applying it, a drone
+emptying only the Hen Collector, save + reload (log `restored from the sidecar`), the Drone List tab
+showing it, selling the Hen Collector (fallback log), turning custom upgrades off with such a program.
+
 ## Buy menu cards (fixes after the test of build 506a4f60)
 
 - **Purchase / Sell overlap.** The buttons size themselves: the prefab `TextButton_NoneSelectable`
