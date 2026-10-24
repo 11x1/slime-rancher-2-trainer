@@ -642,7 +642,7 @@ void PulseRow(const settings::Def& d, ImVec2 a, ImVec2 b) {
     dl->AddRect(pa, pb, WithAlpha(col, 0.9f * k), U(8), 0, U(2));
 }
 
-// Called in "##body" after the page: scroll the found row into view (also as the page's saved
+// Called in the page's body window ("##body_<page>") after the page: scroll the found row into view (also as the page's saved
 // scroll position, so KeepPageScroll keeps it), then start the pulse.
 void ScrollToHighlight(const std::string& page) {
     if (g_hl.key.empty() || g_hl.start >= 0) return;
