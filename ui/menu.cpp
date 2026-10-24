@@ -3,6 +3,9 @@
 
 #include "menu.h"
 
+#include <windows.h>
+#include <shellapi.h>
+
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
@@ -18,6 +21,7 @@
 #include "core/log.h"
 #include "core/profiles.h"
 #include "discord_bridge.h"
+#include "game_input.h"
 #include "hud_edit.h"
 #include "menu_layout.h"
 #include "item_grid.h"
@@ -662,8 +666,12 @@ void DrawMoveRow(const settings::Def& d, hud_edit::Element e) {
     ImGui::PopStyleColor();
     HoverTip(tip);
     ImGui::SameLine(x0 + avail - ctlW);
+    // Not while a game menu (map, pause menu, inventory) is open: it covers the HUD and owns the mouse.
+    const bool menuOpen = game_input::GameMenuOpen();
+    ImGui::BeginDisabled(menuOpen);
     if (ImGui::Button("Move", ImVec2(ctlW, 0))) hud_edit::Begin(e);
-    HoverTip(tip);
+    ImGui::EndDisabled();
+    HoverTip(menuOpen ? std::string("Close the game's menu first (pause menu, map, inventory): it covers the HUD.") : tip);
     ImGui::PopID();
 }
 
@@ -2851,7 +2859,10 @@ void KeyValue(const char* k, const std::string& v, ImU32 vcol, const std::string
         while (le > s && (le[-1] == ' ' || le[-1] == '\n')) --le;
         const float tw = ImGui::CalcTextSize(s, le).x;
         if (first) {
-            ImGui::SameLine(x0 + avail - tw);
+            // Not SameLine(x): inside BeginGroup its offset counts from the group's start, which put the
+            // first line one card padding too far right (flush with the card's border).
+            ImGui::SameLine(0.0f, 0.0f);
+            ImGui::SetCursorPosX(x0 + avail - tw);
             ImGui::AlignTextToFramePadding();
         } else {
             ImGui::SetCursorPosX(x0 + avail - tw);
@@ -2870,6 +2881,22 @@ void KeyValue(const char* k, const std::string& v, ImU32 vcol, const std::string
 namespace dsc = ::sr2::ui::discord;
 char g_discordId[32] = {};
 bool g_discordIdEditing = false;
+
+// A web page in the default browser. ShellExecuteW runs on a short-lived thread (as Open folder), so a
+// slow shell never stalls the render thread.
+DWORD WINAPI OpenUrlThread(LPVOID p) {
+    std::wstring* url = static_cast<std::wstring*>(p);
+    const HINSTANCE r = ShellExecuteW(nullptr, L"open", url->c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(r) <= 32) SR2_WARN("ui: cannot open the browser (ShellExecute {})", reinterpret_cast<INT_PTR>(r));
+    delete url;
+    return 0;
+}
+
+void OpenUrl(const char* asciiUrl) {
+    auto* url = new std::wstring(asciiUrl, asciiUrl + std::strlen(asciiUrl));
+    if (HANDLE t = CreateThread(nullptr, 0, &OpenUrlThread, url, 0, nullptr)) CloseHandle(t);
+    else delete url;
+}
 
 void DiscordCard(const Host& h, const ModuleView& mv, float w) {
     const Palette& P = theme::Colors();
@@ -2900,30 +2927,41 @@ void DiscordCard(const Host& h, const ModuleView& mv, float w) {
             "directly; nothing is sent anywhere else.");
     ImGui::Dummy(ImVec2(0, U(2)));
 
-    // Application id: kept in sync with sr2mods.json while the field is not being edited.
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted("Application ID");
-    const char* idHelp = "Discord shows a presence for an application. Create one (free) at "
-                         "discord.com/developers/applications: New Application, give it the name your profile should "
-                         "show after \"Playing\" (for example \"Slime Rancher 2\"), then copy the Application ID from "
-                         "General Information and paste it here. Saved in sr2mods.json "
-                         "(modules.discord_rpc.application_id).";
-    HoverTip(idHelp);
-    const float ctlW = std::min(U(260), std::floor(avail * 0.55f));
-    ImGui::SameLine(x0 + avail - ctlW);
-    if (!g_discordIdEditing) CopyToBuf(g_discordId, sizeof(g_discordId), settings::GetString(dsc::kModule, dsc::kKeyAppId));
-    ImGui::SetNextItemWidth(ctlW);
-    ImGui::InputTextWithHint("##appid", "paste your application id", g_discordId, sizeof(g_discordId),
-                             ImGuiInputTextFlags_CharsDecimal | ImGuiInputTextFlags_AutoSelectAll);
-    g_discordIdEditing = ImGui::IsItemActive();
-    if (ImGui::IsItemDeactivatedAfterEdit()) settings::SetString(dsc::kModule, dsc::kKeyAppId, g_discordId);
-    HoverTip(idHelp);
-    DimText("You need your own Discord application id: create an app at discord.com/developers/applications and "
-            "paste its Application ID (hover the field for the steps).");
+    const settings::Def* official = nullptr;
+    for (const auto& g : mv.groups)
+        for (const auto& d : g.defs)
+            if (d.key == dsc::kKeyOfficial) official = &d;
+    ImGui::BeginDisabled(!on);
+    if (official) DrawRow(h, *official, official->label, false);
+    ImGui::EndDisabled();
+    const bool ownApp = !official || !IsOn(*official);
+
+    if (ownApp) {
+        // Application id: kept in sync with sr2mods.json while the field is not being edited.
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Application ID");
+        const char* idHelp = "Discord shows a presence for an application. Create one (free) in the Discord "
+                             "Developer Portal (the button below): New Application, give it the name your profile "
+                             "should show after \"Playing\", then copy the Application ID from General Information "
+                             "and paste it here. Saved in sr2mods.json (modules.discord_rpc.application_id).";
+        HoverTip(idHelp);
+        const float ctlW = std::min(U(260), std::floor(avail * 0.55f));
+        ImGui::SameLine(x0 + avail - ctlW);
+        if (!g_discordIdEditing) CopyToBuf(g_discordId, sizeof(g_discordId), settings::GetString(dsc::kModule, dsc::kKeyAppId));
+        ImGui::SetNextItemWidth(ctlW);
+        ImGui::InputTextWithHint("##appid", "paste your application id", g_discordId, sizeof(g_discordId),
+                                 ImGuiInputTextFlags_CharsDecimal | ImGuiInputTextFlags_AutoSelectAll);
+        g_discordIdEditing = ImGui::IsItemActive();
+        if (ImGui::IsItemDeactivatedAfterEdit()) settings::SetString(dsc::kModule, dsc::kKeyAppId, g_discordId);
+        HoverTip(idHelp);
+        DimText("Create an application in the Discord Developer Portal and paste its Application ID (hover the field "
+                "for the steps).");
+    }
 
     ImGui::BeginDisabled(!on);
     for (const auto& g : mv.groups)
-        for (const auto& d : g.defs) DrawRow(h, d, d.label, false);
+        for (const auto& d : g.defs)
+            if (&d != official) DrawRow(h, d, d.label, false);
     ImGui::EndDisabled();
 
     const dsc::Status st = dsc::GetStatus();
@@ -2933,12 +2971,29 @@ void DiscordCard(const Host& h, const ModuleView& mv, float w) {
                       : st.level == dsc::Level::Error ? P.err
                                                       : P.dim;
     KeyValue("Status", on ? st.text : std::string("Off."), col);
+
+    // Reconnect (skips any retry wait) and, with an own application, the Developer Portal in the browser.
+    ImGui::Dummy(ImVec2(0, U(2)));
+    const float gap = U(8);
+    const float bw = ownApp ? std::floor((avail - gap) * 0.5f) : avail;
+    ImGui::BeginDisabled(!on);
+    if (ImGui::Button("Reconnect", ImVec2(bw, 0))) dsc::RequestReconnect();
+    ImGui::EndDisabled();
+    HoverTip("Connect to the Discord app again now, for example after starting Discord or changing the application.");
+    if (ownApp) {
+        ImGui::SameLine(0, gap);
+        if (ImGui::Button("Developer Portal", ImVec2(bw, 0))) OpenUrl(dsc::kDevPortalUrl);
+        HoverTip(std::string("Opens ") + dsc::kDevPortalUrl + " in your browser, to create an application and copy "
+                 "its id.");
+    }
     EndCard();
 }
 
+// Overlay and Status on the left, Discord Rich Presence on the right.
 void DrawSettingsPage(const Host& h, const ModuleView* ui, const std::vector<ModuleView>& views) {
     const Palette& P = theme::Colors();
     const float w = ColumnWidth();
+    ImGui::BeginGroup();
     BeginCard("overlay", w);
     CardHeading("Overlay", P.head);
     if (ui)
@@ -2946,7 +3001,7 @@ void DrawSettingsPage(const Host& h, const ModuleView* ui, const std::vector<Mod
             for (const auto& d : g.defs)
                 if (d.key != kKeyOverlayTheme) DrawRow(h, d, d.key == kKeyOverlayHint ? "Show hint at startup" : d.label, false);
     EndCard();
-    ImGui::SameLine(0, U(kGap));
+    ImGui::Dummy(ImVec2(0, U(kGap) - ImGui::GetStyle().ItemSpacing.y));
     BeginCard("status", w);
     CardHeading("Status", P.head);
     KeyValue("Options menu tab", OptionsTabStatus(), P.dim);
@@ -2957,10 +3012,11 @@ void DrawSettingsPage(const Host& h, const ModuleView* ui, const std::vector<Mod
     else
         KeyValue("Game build", h.versionStatus, h.versionMismatch ? P.warn : P.dim);
     EndCard();
+    ImGui::EndGroup();
     if (const ModuleView* mv = FindView(views, layout::kDiscordModule)) {
-        ImGui::Dummy(ImVec2(0, U(kGap) - ImGui::GetStyle().ItemSpacing.y));
+        ImGui::SameLine(0, U(kGap));
         ImGui::PushID(mv->module.c_str());
-        DiscordCard(h, *mv, ImGui::GetContentRegionAvail().x);
+        DiscordCard(h, *mv, w);
         ImGui::PopID();
     }
 }
