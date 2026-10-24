@@ -5,7 +5,7 @@ This module shortens the time from launch to playing. It is native only and reso
 | setting | default | what it does |
 |---|---|---|
 | `skip_intro` | on | Makes the Monomi Park logo, the warning screen and the game logo end after one frame each. Answers the "press any key" prompt automatically. Scene loading is never skipped. |
-| `auto_continue` | off | Once per launch, when the main menu is ready, does what the **Continue** button does (loads the most recent save). Holding **Shift** while the game window is in front, at any point before it fires, cancels it for that launch. The cancel is logged. |
+| `auto_continue` | off | Once per launch, when the main menu is ready, does what the **Continue** button does (loads the most recent save). Holding **Shift** while the game window is in front (and the mod menu closed), at any point before it fires, cancels it for that launch. The cancel is logged. |
 | `auto_continue_delay` | 0.5 s (0-5) | How long the main menu stays interactive before auto-continue fires. |
 | `skip_new_game_intro` | on | When a new save starts, ends the story intro (the text frames shown before the player gets control) right away through the game's own end-of-intro path. The main quest, tutorials and camera are set up exactly as after a watched intro. |
 
@@ -81,13 +81,14 @@ Caveat: anything the game does in the background during the logos (for example p
 **auto_continue**
 - **`MainMenuLandingRootUI.OnEnable`**: marks "menu seen". The hook itself belongs to the always-on `[modded]` title-screen label (`ui/modded_label.cpp`, see `ui/NOTES.md`), because MinHook allows one hook per target. `Setup` registers a listener with `modded_label::SetMenuEnableListener`; the label's post-hook calls it after the original, and the listener runs inside this module's `DetourGuard`. If that hook is not installed, auto_continue is unavailable (logged).
 - **Frame callback (every 0.1 s)**: the menu counts as ready when all of these hold:
-  - `SceneLoader` is not loading
-  - `MainMenuLandingRootUI` is alive and active in the hierarchy
-  - no active `CompanyLogoScene` overlay and no active `PlatformEngagementPrompt`
+  - hard (a Continue does nothing otherwise): the game's `SceneLoader` is not loading. That is `SystemContext.Instance.SceneLoader`, the instance `LoadGameBehaviorModel.InvokeBehavior` checks (falls back to the first `SceneLoader` found when `SystemContext` is not resolved)
+  - soft: `MainMenuLandingRootUI` is alive and active in the hierarchy, no active `CompanyLogoScene` overlay, no active `PlatformEngagementPrompt`
+
+  Soft checks hold it up for at most 3 s after the hard one holds, and only before the menu was ever ready; then it goes on anyway (logged as a warning naming the check). Round 10 fix: the user's launch of 2026-10-25 sat 16 s at the main menu without ever logging "main menu interactive" and the player clicked Continue themselves; the module did not log which check held it, so now every new reason is logged (`auto_continue: waiting for the main menu: <reason> (N s after it was enabled)`, at most 8 lines), and a cosmetic check can no longer block it for good.
 
   After `auto_continue_delay` it checks `ButtonBehaviorConditionUtility.HasContinueGame()`. If that is true, it calls `InvokeBehavior()` on the `ContinueGameBehaviorModel` found in `_models` (or `_subListModels`) that has a `GameDataSummary`.
 - **Submenu fallback**: if Continue lives in a submenu that was never opened, its model does not exist. The module then makes the same calls `InvokeBehavior` makes: `AutoSaveDirector.BeginLoad(GetSaveToContinue().SaveIdentifier, null)`.
-- **Once per process**: it only fires at the first main menu of the launch. If `auto_continue` is off then, it stays off until the next launch. It cancels if Shift is held while the game window is in front, or if a scene load starts from the menu before it fires (the player acted). It gives up if the menu never becomes ready within 120 s.
+- **Once per process**: it only fires at the first main menu of the launch. If `auto_continue` is off then, it stays off until the next launch. It cancels if Shift is held while the game window is in front and the mod menu is closed (Shift typed in the mod menu, or Shift+Tab tried there, does not count), or if a scene load starts once the menu was there with no load running (the player acted; before round 10 this was only noticed after the menu had counted as ready, so a manual Continue went unlogged). It gives up if the menu never becomes ready within 120 s.
 - **Overlay note**: while it is pending, the overlay shows "Hold Shift to stay in the main menu" top left (with "Continuing in N s" once the menu is ready), and "Staying in the main menu" for 2.5 s after a Shift cancel. The frame callback publishes the state through `ui/quick_start_hint.h` (atomics only; the render thread makes no game calls).
 
 **skip_new_game_intro**

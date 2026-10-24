@@ -36,13 +36,15 @@
 //   auto_continue (default off), auto_continue_delay
 //     * MainMenuLandingRootUI.OnEnable (post-hook owned by ui/modded_label.cpp, which
 //       calls our listener) marks "menu seen". A frame
-//       callback waits until the landing UI is active, the logo overlay and the
-//       prompt are gone and SceneLoader.IsSceneLoadInProgress is false, waits
-//       auto_continue_delay, then calls InvokeBehavior() on the menu's
-//       ContinueGameBehaviorModel (what the Continue button does) if
-//       ButtonBehaviorConditionUtility.HasContinueGame() and the model has a save
-//       summary. Once per process; holding Shift while the game window is in the
-//       foreground at any point before it fires cancels it for this launch.
+//       callback waits until SystemContext.SceneLoader.IsSceneLoadInProgress is
+//       false and (for at most kMenuSoftWait more) the landing UI is active and the
+//       logo overlay and the prompt are gone, waits auto_continue_delay, then calls
+//       InvokeBehavior() on the menu's ContinueGameBehaviorModel (what the Continue
+//       button does) if ButtonBehaviorConditionUtility.HasContinueGame() and the
+//       model has a save summary. Once per process; holding Shift while the game
+//       window is in the foreground and the mod menu is closed, at any point before
+//       it fires, cancels it for this launch, and so does a scene load the player
+//       starts from the menu.
 //   skip_new_game_intro (default on)
 //     * New game: AutoSaveDirector.StartNewGame's load step calls
 //       CutsceneDirector.SpawnIntroSequence, which pushes IntroSequenceUIRoot (the
@@ -92,6 +94,7 @@
 #include "core/settings.h"
 #include "core/unity.h"
 #include "ui/modded_label.h"
+#include "ui/overlay.h"
 #include "ui/quick_start_hint.h"
 
 namespace sr2::modules {
@@ -132,6 +135,8 @@ constexpr int kPromptMinFrames = 2;          // frames between Onloaded and our 
 constexpr double kPromptGiveUp = 20.0;       // s: prompt never became ready -> leave it to the player
 constexpr double kMenuPollInterval = 0.1;    // s between main-menu readiness checks
 constexpr double kMenuGiveUp = 120.0;        // s after "menu seen" without ever being ready
+constexpr double kMenuSoftWait = 3.0;        // s the soft readiness checks may hold it up (see MenuState)
+constexpr int kMaxWaitLogs = 8;              // "waiting for the main menu" lines per launch
 
 // CompanyLogoScene timing floats, with how often StartUpCoroutine waits for
 // each (logoBackgroundHoldTime twice; blink happens inside the hold; the
@@ -221,7 +226,10 @@ private:
     void TryAutoInteract();
     void CheckShift();
     void TryAutoContinue();
-    bool MenuReady(Il2CppObject*& landing, Il2CppObject*& loader, bool& loading);
+    Il2CppObject* GameSceneLoader();
+    enum class Menu { Ready, Soft, Hard };
+    Menu MenuState(Il2CppObject*& landing, bool& loading, std::string& why);
+    void LogMenuWait(const std::string& why);
     Il2CppObject* FindContinueModel(Il2CppObject* landing, size_t listOffset);
     bool DirectContinue(std::string& err);
     void ContinueDone(std::string_view why, bool info);
@@ -245,6 +253,8 @@ private:
     size_t offAnimDur_ = 0, offEaFade_ = 0;
     Il2CppClass* loaderClass_ = nullptr;      // SceneLoader
     size_t offLoading_ = 0;                   // <IsSceneLoadInProgress>k__BackingField
+    Il2CppClass* sysCtxClass_ = nullptr;      // SystemContext (optional): the SceneLoader the menu buttons use
+    size_t offSysLoader_ = 0;                 // SystemContext.<SceneLoader>k__BackingField
     Il2CppClass* landingClass_ = nullptr;     // MainMenuLandingRootUI
     size_t offModels_ = 0;
     bool hasSubModels_ = false;
@@ -285,7 +295,13 @@ private:
     bool menuSeen_ = false;
     Clock::time_point menuSeenAt_{};
     bool menuReady_ = false;
+    bool menuEverReady_ = false;
+    bool menuIdleSeen_ = false;  // the landing menu was there with no scene load running
     Clock::time_point menuReadyAt_{};
+    bool softWaiting_ = false;  // only soft checks fail, since softSince_
+    Clock::time_point softSince_{};
+    std::string lastWait_;  // last "waiting for the main menu" reason logged
+    int waitLogs_ = 0;
     double nextMenuPoll_ = 0;
     bool hintDone_ = false;  // overlay note finished for this launch
     // skip_new_game_intro (identity only, never dereferenced)
@@ -446,6 +462,14 @@ bool QuickStart::Setup(sr2::core::ModuleContext& ctx) {
         loaderClass_ = n.Class(kSceneNs, "SceneLoader");
         if (!n.Offset(loaderClass_, "<IsSceneLoadInProgress>k__BackingField", offLoading_))
             return ctx.Fail("SceneLoader.IsSceneLoadInProgress not resolved: " + why);
+        // The instance the menu's Continue checks (LoadGameBehaviorModel.InvokeBehavior reads
+        // SystemContext.Instance.SceneLoader); optional, FindObjectOfType(SceneLoader) otherwise.
+        std::string optWhy;
+        Need opt{ctx.resolver(), optWhy};
+        sysCtxClass_ = opt.Class("", "SystemContext");
+        if (!opt.Offset(sysCtxClass_, "<SceneLoader>k__BackingField", offSysLoader_)) sysCtxClass_ = nullptr;
+        if (!sysCtxClass_)
+            SR2_INFO("[{}] SystemContext.SceneLoader not resolved ({}); using the first SceneLoader found", kModule, optWhy);
     }
 
     std::string introWhy, contWhy, newGameWhy;
@@ -685,25 +709,69 @@ void QuickStart::ContinueDone(std::string_view why, bool info) {
 
 void QuickStart::CheckShift() {
     if (shiftCanceled_ || !continueOk_) return;
+    // Shift typed in the mod menu (or Shift+Tab tried there) is not "hold Shift at launch".
+    if (sr2::ui::overlay::IsOpen()) return;
     if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) == 0 || !IsGameWindowForeground()) return;
     shiftCanceled_ = true;
     if (settings::GetBool(kModule, kAutoContinue))
         SR2_INFO("[{}] auto_continue: Shift held at startup - cancelled for this launch", kModule);
 }
 
-bool QuickStart::MenuReady(Il2CppObject*& landing, Il2CppObject*& loader, bool& loading) {
+// The SceneLoader the menu's Continue checks: SystemContext.Instance.SceneLoader (the first
+// SceneLoader found when SystemContext is not resolved or not there yet).
+Il2CppObject* QuickStart::GameSceneLoader() {
+    if (sysCtxClass_) {
+        Il2CppObject* ctx = unity::FindObjectOfType(sysCtxClass_);
+        if (ctx && unity::IsAlive(ctx) && IsA(ctx, sysCtxClass_)) {
+            auto* loader = unity::Field<Il2CppObject*>(ctx, offSysLoader_);
+            if (loader && unity::IsAlive(loader) && IsA(loader, loaderClass_)) return loader;
+        }
+    }
+    Il2CppObject* loader = unity::FindObjectOfType(loaderClass_);
+    return loader && unity::IsAlive(loader) && IsA(loader, loaderClass_) ? loader : nullptr;
+}
+
+// Hard checks (a Continue would not work otherwise): the game's SceneLoader is there and not loading.
+// Soft checks (cosmetic, wait for them at most kMenuSoftWait): the landing menu is active and the boot
+// overlays (logo scene, engagement prompt) are gone. why = the first check that fails.
+QuickStart::Menu QuickStart::MenuState(Il2CppObject*& landing, bool& loading, std::string& why) {
+    landing = nullptr;
     loading = false;
-    loader = unity::FindObjectOfType(loaderClass_);
-    if (!loader || !unity::IsAlive(loader) || !IsA(loader, loaderClass_)) return false;
+    Il2CppObject* loader = GameSceneLoader();
+    if (!loader) {
+        why = "no SceneLoader";
+        return Menu::Hard;
+    }
     loading = unity::Field<bool>(loader, offLoading_);
-    if (loading) return false;
-    landing = unity::FindObjectOfType(landingClass_);
-    if (!landing || !unity::IsAlive(landing) || !IsA(landing, landingClass_) || !unity::ActiveInHierarchy(landing))
-        return false;
+    if (loading) {
+        why = "a scene load is in progress";
+        return Menu::Hard;
+    }
+    Il2CppObject* l = unity::FindObjectOfType(landingClass_);  // active GameObjects only
+    if (l && unity::IsAlive(l) && IsA(l, landingClass_)) landing = l;
+    if (!landing || !unity::ActiveInHierarchy(landing)) {
+        why = "the main menu (MainMenuLandingRootUI) is not active";
+        return Menu::Soft;
+    }
     // Boot overlays still up? (both deactivate themselves when the menu is revealed)
-    if (logoClass_ && unity::FindObjectOfType(logoClass_)) return false;
-    if (promptClass_ && unity::FindObjectOfType(promptClass_)) return false;
-    return true;
+    if (logoClass_ && unity::FindObjectOfType(logoClass_)) {
+        why = "the logo scene (CompanyLogoScene) is still active";
+        return Menu::Soft;
+    }
+    if (promptClass_ && unity::FindObjectOfType(promptClass_)) {
+        why = "the 'press any key' prompt is still active";
+        return Menu::Soft;
+    }
+    why.clear();
+    return Menu::Ready;
+}
+
+void QuickStart::LogMenuWait(const std::string& why) {
+    if (why == lastWait_ || waitLogs_ >= kMaxWaitLogs) return;
+    lastWait_ = why;
+    ++waitLogs_;
+    SR2_INFO("[{}] auto_continue: waiting for the main menu: {} ({:.1f} s after it was enabled)", kModule, why,
+             SecondsSince(menuSeenAt_));
 }
 
 Il2CppObject* QuickStart::FindContinueModel(Il2CppObject* landing, size_t listOffset) {
@@ -753,23 +821,49 @@ void QuickStart::TryAutoContinue() {
     nextMenuPoll_ = clock + kMenuPollInterval;
 
     Il2CppObject* landing = nullptr;
-    Il2CppObject* loader = nullptr;
     bool loading = false;
-    if (!MenuReady(landing, loader, loading)) {
-        if (menuReady_) {
-            if (loading)
-                ContinueDone("a scene load started from the main menu before auto-continue fired - cancelled", true);
-            else
-                menuReady_ = false;  // menu hidden again (e.g. a submenu); wait for it to come back
-        } else if (SecondsSince(menuSeenAt_) > kMenuGiveUp) {
-            ContinueDone(std::format("main menu never became ready within {:.0f} s - giving up", kMenuGiveUp), false);
+    std::string why;
+    const Menu state = MenuState(landing, loading, why);
+    if (!loading) {
+        if (landing) menuIdleSeen_ = true;  // in the menu with no load running
+    } else if (menuIdleSeen_) {
+        // The menu was idle and a load started: the player chose something (Continue, Load, New Game).
+        ContinueDone("a scene load started from the main menu before auto-continue fired - cancelled", true);
+        return;
+    }
+    bool go = state == Menu::Ready;
+    if (state == Menu::Soft) {
+        // Only cosmetic checks fail: if the menu never was ready, wait for them a little, then go on (a
+        // Continue works as soon as no scene load runs). Once it was ready, a soft failure is the menu
+        // being hidden (a submenu): wait for it to come back.
+        if (!softWaiting_ && !menuEverReady_) {
+            softWaiting_ = true;
+            softSince_ = Clock::now();
         }
+        if (softWaiting_ && SecondsSince(softSince_) >= kMenuSoftWait) {
+            if (!menuReady_)
+                SR2_WARN("[{}] auto_continue: {} {:.0f} s after no scene load was running - continuing anyway",
+                         kModule, why, kMenuSoftWait);
+            go = true;
+        }
+    } else {
+        softWaiting_ = false;
+    }
+    if (!go) {
+        LogMenuWait(why);
+        if (menuReady_)
+            menuReady_ = false;  // menu hidden again (e.g. a submenu); wait for it to come back
+        else if (!menuEverReady_ && SecondsSince(menuSeenAt_) > kMenuGiveUp)
+            ContinueDone(std::format("main menu never became ready within {:.0f} s ({}) - giving up", kMenuGiveUp, why),
+                         false);
         return;
     }
     if (!menuReady_) {
         menuReady_ = true;
+        menuEverReady_ = true;
         menuReadyAt_ = Clock::now();
-        SR2_INFO("[{}] main menu interactive | {}", kModule, ProcessTime());
+        SR2_INFO("[{}] main menu interactive{} | {}", kModule, state == Menu::Ready ? "" : " (soft checks skipped)",
+                 ProcessTime());
     }
     const double delay = settings::GetFloat(kModule, kAutoContinueDelay);
     if (SecondsSince(menuReadyAt_) < delay) return;
