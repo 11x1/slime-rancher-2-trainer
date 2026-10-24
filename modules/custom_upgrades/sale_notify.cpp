@@ -34,6 +34,7 @@ constexpr size_t kMaxQueued = 64;
 
 struct SaleNotices::Impl {
     const char* module = "custom_upgrades";
+    const char* label = "sell-all";
     Il2CppClass* listClass = nullptr;      // ItemAcquisitionNotificationList
     Il2CppClass* providerClass = nullptr;  // DroneActivityNotificationProvider
     Il2CppClass* sceneClass = nullptr;     // DroneActivitySceneNotifications
@@ -43,8 +44,14 @@ struct SaleNotices::Impl {
     const MethodInfo* canQueueAny = nullptr;   // ItemAcquisitionNotificationList.get_CanQueueAny
     const MethodInfo* handleAvail = nullptr;   // ItemAcquisitionNotificationList.HandleNotificationAvailable
     const MethodInfo* addPlortSold = nullptr;  // DroneActivitySceneNotifications.AddPlortSold(IdentifiableType, int)
+    const MethodInfo* addCollected = nullptr;  // DroneActivitySceneNotifications.AddResourceCollected(IdentifiableType, int) (optional)
 
-    std::vector<std::pair<Il2CppObject*, int>> queue;
+    struct Entry {
+        Il2CppObject* type;
+        int count;
+        Notice kind;
+    };
+    std::vector<Entry> queue;
     float retry = 0.0f;
     float waited = 0.0f;
     bool loggedFirst = false;
@@ -107,17 +114,17 @@ struct SaleNotices::Impl {
                     if (auto* p = static_cast<Il2CppObject*>(unity::ArrayAt(arr, i)))
                         providers += (providers.empty() ? "" : ", ") + unity::ClassName(p);
             }
-            SR2_INFO("[{}] sell-all notices: no HUD notification list with the drone provider (first active list {}, "
+            SR2_INFO("[{}] {} notices: no HUD notification list with the drone provider (first active list {}, "
                      "providers [{}]; {} list(s) loaded, {} active) - text feedback instead",
-                     module, unity::IsAlive(first) ? "found" : "none", providers, seen, active);
+                     module, label, unity::IsAlive(first) ? "found" : "none", providers, seen, active);
         }
         return nullptr;
     }
     Il2CppObject* Found(Il2CppObject* list, bool active, size_t seen) {
         if (!loggedScan) {
             loggedScan = true;
-            SR2_INFO("[{}] sell-all notices: drone provider found on another HUD notification list ({}, list #{} of "
-                     "the loaded ones)", module, active ? "active" : "inactive", seen);
+            SR2_INFO("[{}] {} notices: drone provider found on another HUD notification list ({}, list #{} of "
+                     "the loaded ones)", module, label, active ? "active" : "inactive", seen);
         }
         return list;
     }
@@ -136,7 +143,7 @@ struct SaleNotices::Impl {
         Il2CppObject* provider = Provider(list);
         Il2CppObject* scene = provider ? unity::Field<Il2CppObject*>(provider, offActive) : nullptr;
         if (!scene || !IsA(scene, sceneClass)) {
-            SR2_WARN("[{}] sell-all notices: HUD drone notification provider not found - {} notice(s) dropped", module,
+            SR2_WARN("[{}] {} notices: HUD drone notification provider not found - {} notice(s) dropped", module, label,
                      queue.size());
             return true;
         }
@@ -146,18 +153,22 @@ struct SaleNotices::Impl {
         if (!boxed || !*reinterpret_cast<bool*>(reinterpret_cast<char*>(boxed) + 2 * sizeof(void*)))
             return false;  // HUD suppressed (menu open): it would discard them
         int added = 0;
-        for (auto& [type, count] : queue) {
-            if (count <= 0 || !unity::IsAlive(type) || !IsA(type, identClass)) continue;
-            int32_t n = count;
-            Call(addPlortSold, scene, {type, &n}, "DroneActivitySceneNotifications.AddPlortSold", &ok);
+        for (Entry& e : queue) {
+            if (e.count <= 0 || !unity::IsAlive(e.type) || !IsA(e.type, identClass)) continue;
+            const bool collected = e.kind == Notice::kCollected;
+            if (collected && !addCollected) continue;
+            int32_t n = e.count;
+            Call(collected ? addCollected : addPlortSold, scene, {e.type, &n},
+                 collected ? "DroneActivitySceneNotifications.AddResourceCollected"
+                           : "DroneActivitySceneNotifications.AddPlortSold",
+                 &ok);
             if (!ok) return true;
             ++added;
         }
         if (added) Call(handleAvail, list, {provider}, "ItemAcquisitionNotificationList.HandleNotificationAvailable", &ok);
         if (!loggedFirst && added) {
             loggedFirst = true;
-            SR2_INFO("[{}] sell-all: {} plort notice(s) handed to the HUD (drone 'plorts sold' notifications)", module,
-                     added);
+            SR2_INFO("[{}] {}: {} notice(s) handed to the HUD (drone notifications)", module, label, added);
         }
         return true;
     }
@@ -166,9 +177,10 @@ struct SaleNotices::Impl {
 SaleNotices::SaleNotices() = default;
 SaleNotices::~SaleNotices() { delete impl_; }
 
-bool SaleNotices::Setup(Resolver& R, const char* module, std::string& why) {
+bool SaleNotices::Setup(Resolver& R, const char* module, std::string& why, const char* label) {
     auto* p = new Impl();
     p->module = module;
+    p->label = label;
     std::string err;
     p->listClass = R.Class(kImage, kHudNs, "ItemAcquisitionNotificationList", &err);
     p->providerClass = R.Class(kImage, kNotifNs, "DroneActivityNotificationProvider", &err);
@@ -189,6 +201,7 @@ bool SaleNotices::Setup(Resolver& R, const char* module, std::string& why) {
         delete p;
         return false;
     }
+    p->addCollected = R.MethodByParams(p->sceneClass, "AddResourceCollected", {"IdentifiableType", "System.Int32"}, nullptr);
     p->offProviders = *offProviders;
     p->offActive = *offActive;
     delete impl_;
@@ -203,18 +216,20 @@ bool SaleNotices::Available() {
     return list && impl_->Provider(list);
 }
 
-void SaleNotices::Queue(const std::vector<std::pair<Il2CppObject*, int>>& sold) {
+bool SaleNotices::CanCollect() const { return ready_ && impl_->addCollected; }
+
+void SaleNotices::Queue(const std::vector<std::pair<Il2CppObject*, int>>& sold, Notice kind) {
     if (!ready_ || sold.empty()) return;
     auto& q = impl_->queue;
     for (const auto& e : sold) {
         bool merged = false;
-        for (auto& [type, count] : q)
-            if (type == e.first) {
-                count += e.second;
+        for (Impl::Entry& x : q)
+            if (x.type == e.first && x.kind == kind) {
+                x.count += e.second;
                 merged = true;
                 break;
             }
-        if (!merged && q.size() < kMaxQueued) q.push_back(e);
+        if (!merged && q.size() < kMaxQueued) q.push_back({e.first, e.second, kind});
     }
     impl_->waited = 0.0f;
     impl_->retry = 0.0f;
@@ -232,7 +247,7 @@ void SaleNotices::Frame(float dt) {
     if (impl_->TryFlush()) {
         impl_->queue.clear();
     } else if (impl_->waited > kMaxWaitSeconds) {
-        SR2_INFO("[{}] sell-all notices: HUD not available for {:.0f} s - {} notice(s) dropped", impl_->module,
+        SR2_INFO("[{}] {} notices: HUD not available for {:.0f} s - {} notice(s) dropped", impl_->module, impl_->label,
                  kMaxWaitSeconds, impl_->queue.size());
         impl_->queue.clear();
     }
