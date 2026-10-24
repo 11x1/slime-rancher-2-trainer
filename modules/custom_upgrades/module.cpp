@@ -7,6 +7,9 @@
 //
 //   tier                 plot         needs                 price   effect
 //   Music Box II        corral       Music Box             2000    2x calming bonus
+//   (not a tier: Corral Radio, corral, needs Music Box, 1500: the corral plays its own Slime DJ
+//   playlist instead of the global queue; slime_dj reads ownership through api.h Owns and keeps
+//   the playlist as a per-plot value "slime_dj.radio")
 //   Faster Hens I        coop         -                     2000    hens lay 1.5x as often
 //   Faster Hens II       coop         Faster Hens I         4000    hens lay 2x as often
 //   Sprinkler II         garden       Sprinkler             2000    crops grow 1.5x as fast
@@ -306,6 +309,7 @@ enum CustomId : int32_t {
     SILO_CAPACITY_4 = custom_upgrades::kIdBase + 0x0062,
     SILO_CAPACITY_5 = custom_upgrades::kIdBase + 0x0063,
     CORRAL_MUSIC_2 = custom_upgrades::kIdBase + 0x0013,
+    CORRAL_RADIO = custom_upgrades::kCorralRadio,  // 0x0014: own Slime DJ playlist (modules/slime_dj)
     COOP_HENS_1 = custom_upgrades::kIdBase + 0x0020,
     COOP_HENS_2 = custom_upgrades::kIdBase + 0x0021,
     GARDEN_GROWTH_1 = custom_upgrades::kIdBase + 0x0030,
@@ -366,6 +370,11 @@ const UpgradeDef kDefs[] = {
     {CORRAL_MUSIC_2, "corral_music_2", kPlotCorral, kUpgMusicBox, 2000, F(Family::kMusicBox), 2.0f, kUpgMusicBox, 0,
      "Music Box II", "A catchier tune that calms this corral's slimes twice as well.",
      "Buy Music Box II for this corral?"},
+    // ---- Slime DJ (no effect of its own here: slime_dj asks Owns(plot, kCorralRadio)) ----
+    {CORRAL_RADIO, "corral_radio", kPlotCorral, kUpgMusicBox, 1500, kNoFamily, 1.0f, kUpgMusicBox, 0, "Corral Radio",
+     "Tunes this corral's music box to its own station: pick its songs in the mod menu (Ranch > Slime DJ > Corral "
+     "radios).",
+     "Buy the Corral Radio for this corral?"},
     {COOP_HENS_1, "coop_hens_1", kPlotCoop, 0, 2000, F(Family::kCoop), 1.5f, kUpgDeluxeCoop, 0, "Faster Hens I",
      "Cozier nests help this coop's hens lay eggs 1.5x as fast.", "Buy Faster Hens I for this coop?"},
     {COOP_HENS_2, "coop_hens_2", kPlotCoop, COOP_HENS_1, 4000, F(Family::kCoop), 2.0f, kUpgDeluxeCoop, 0,
@@ -620,6 +629,9 @@ public:
     Il2CppObject* HiddenMenuItemOf(size_t fieldOffset, Il2CppObject* value, Il2CppObject*& standIn);
     float TierMultiplier(Il2CppObject* obj, int family);
     std::string PlotValueOf(Il2CppObject* plot, const std::string& key);
+    std::string PlotKeyOf(Il2CppObject* plot) {
+        return unity::IsAlive(plot) && IsA(plot, plotClass_) ? PlotId(plot) : std::string();
+    }
     bool SetPlotValueOf(Il2CppObject* plot, const std::string& key, const std::string& value);
     std::string SaveValueOf(const std::string& key);
     bool SetSaveValueOf(const std::string& key, const std::string& value);
@@ -1702,6 +1714,8 @@ const char* ModIconName(int32_t id) {
     switch (id) {
         case SILO_SELL_ALL: return "sell_all";
         case CORRAL_MUSIC_2: return "music_2";
+        // Placeholder: the vanilla Music Box icon (iconFrom) until assets/icons/corral_radio.png exists.
+        case CORRAL_RADIO: return sr2::ui::mod_icons::Has("corral_radio") ? "corral_radio" : nullptr;
         case COOP_HENS_1: return "hens_1";
         case COOP_HENS_2: return "hens_2";
         // GARDEN_GROWTH_1 / _2 (Sprinkler II / III): none - the vanilla Sprinkler upgrade icon (iconFrom; round 10
@@ -3574,6 +3588,20 @@ bool IsModGadget(Il2CppObject* def) { return quantum::IsOurs(def) || dj::Owns(de
 std::string Name(int32_t upgrade) {
     const UpgradeDef* d = FindDef(upgrade);
     return d ? d->title : "custom upgrade";
+}
+
+bool Owns(Il2CppObject* landPlot, int32_t upgrade) {
+    if (!Active() || !main_thread::IsMainThread() || !IsCustomUpgrade(upgrade)) return false;
+    bool r = false;
+    g_hasGuard.Run([&] { r = g_self->Owns(landPlot, upgrade); });
+    return r;
+}
+
+std::string PlotKey(Il2CppObject* landPlot) {
+    if (!Active() || !main_thread::IsMainThread()) return {};
+    std::string r;
+    g_hasGuard.Run([&] { r = g_self->PlotKeyOf(landPlot); });
+    return r;
 }
 
 std::string CanSell(Il2CppObject* landPlot, int32_t upgrade, std::string* brief) {
