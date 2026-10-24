@@ -236,6 +236,7 @@
 #include "modules/custom_upgrades/drone_source.h"
 #include "modules/custom_upgrades/plot_menu_slider.h"
 #include "modules/custom_upgrades/plot_props.h"
+#include "modules/custom_upgrades/gadget_look.h"
 #include "modules/custom_upgrades/quantum_link.h"
 #include "modules/custom_upgrades/dj_buildables.h"
 #include "modules/custom_upgrades/radio_shop.h"
@@ -2183,6 +2184,7 @@ void CustomUpgrades::FrameCheck(float dt) {
     if (On() && notices_.Ready()) g_siloGuard.Run([&] { notices_.Frame(dt); });  // queued sale notices
     if (On() && receipt_.IsOpen()) g_siloGuard.Run([&] { ReceiptTick(dt); });   // Sell-All receipt input
     if (On() && vacpack_.Ready()) vacpack_.Frame();  // extra vacpack slots' number keys
+    if (On() && quantum_.Ready()) quantum_.Frame();  // the Quantum Storage Links' glow glitch
     if (battery_.Ready()) {  // drone battery refunds (every ~2 s); off: forget the last looks
         if (On()) g_batteryGuard.Run([&] { battery_.Tick(dt); });
         else battery_.Reset();
@@ -3254,6 +3256,15 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         if (!world_.Setup(R, kModule, werr))
             SR2_WARN("[{}] coop world objects unavailable ({}) - Coop Air Net and Hen Collector are not offered", kModule, werr);
     }
+    // Game-UI looks of the mod's gadget definitions (label, preview, description; optional: missing ->
+    // the base gadget's label / preview / description).
+    {
+        std::string gerr, greport;
+        if (custom_upgrades::gadget_look::Setup(ctx, kModule, gerr, greport))
+            SR2_INFO("[{}] mod gadget looks ready:{}", kModule, greport);
+        else SR2_WARN("[{}] mod gadget looks unavailable ({}) - mod gadgets show their base gadget's label and preview",
+                      kModule, gerr);
+    }
     // Quantum Storage Link gadget (optional; missing -> not offered, nothing else changes).
     {
         custom_upgrades::quantum::Host qhost;
@@ -3262,6 +3273,13 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         qhost.value = [this](const std::string& k) { return SaveValueOf(k); };
         qhost.setValue = [this](const std::string& k, const std::string& v) { return SetSaveValueOf(k, v); };
         qhost.lookup = [this] { return LookupDirector(); };
+        qhost.notify = [this](const std::vector<std::pair<Il2CppObject*, std::string>>& lines) {
+            if (!notices_.TextReady() || !notices_.Available()) return false;
+            bool any = false;
+            for (const auto& [icon, text] : lines) any = notices_.QueueText(icon, text, false) || any;
+            if (any) notices_.FlushText();
+            return any;
+        };
         std::string qerr, qreport;
         if (quantum_.Setup(ctx, std::move(qhost), qerr, qreport)) SR2_INFO("[{}] Quantum Storage Link ready:{}", kModule, qreport);
         else SR2_WARN("[{}] Quantum Storage Link unavailable ({}) - not offered", kModule, qerr);
@@ -3423,6 +3441,9 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         std::string nerr;
         if (!notices_.Setup(R, kModule, nerr))
             SR2_WARN("[{}] sell-all HUD notices unavailable ({}) - text feedback only", kModule, nerr);
+        else if (std::string terr; !notices_.SetupText(R, terr))  // free-text notices: Use on a Quantum Storage Link
+            SR2_WARN("[{}] text HUD notices unavailable ({}) - Use on a Quantum Storage Link opens the refinery screen",
+                     kModule, terr);
         std::string rerr;
         if (!receipt_.Setup(R, kModule, rerr))
             SR2_WARN("[{}] sell-all receipt unavailable ({}) - the Sell-All button sells at once", kModule, rerr);

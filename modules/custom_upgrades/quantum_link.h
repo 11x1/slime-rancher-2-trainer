@@ -23,6 +23,8 @@
 
 #include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "modules/custom_upgrades/buildables.h"
 
@@ -40,6 +42,8 @@ struct Host {
     std::function<std::string(const std::string&)> value;           // per-save sidecar value
     std::function<bool(const std::string&, const std::string&)> setValue;
     std::function<Il2CppObject*()> lookup;                          // LookupDirector
+    // HUD notices (icon Sprite or nullptr, text), shown as one burst; false = not possible now.
+    std::function<bool(const std::vector<std::pair<Il2CppObject*, std::string>>&)> notify;
 };
 
 class QuantumLink {
@@ -50,6 +54,9 @@ public:
 
     // Main thread, ~1 Hz while custom upgrades are on and a save is loaded.
     void Tick();
+    // Main thread, every frame while custom upgrades are on: the links' glow glitch (field reads only
+    // between glitches).
+    void Frame();
     // Main thread: custom upgrades off / faulted. Our definition out of the favourite slots, the held
     // gadget and the variant list; every link back to a plain-looking Refinery Link (the sidecar keeps
     // which ones are quantum). Also after a fault (no game calls then besides what is needed).
@@ -72,7 +79,8 @@ bool Placed();
 Il2CppObject* Sources(Il2CppObject* predicate, Il2CppObject* program);
 // Any thread: `def` is the Quantum Storage Link definition (a runtime clone, never saved as itself).
 bool IsOurs(Il2CppObject* def);
-// The Quantum Storage Link gadget's icon (a Sprite) once known, else nullptr.
+// The Quantum Storage Link gadget's icon (a Sprite: our purple copy of the Refinery Link's, else the
+// Refinery Link's) once known, else nullptr.
 Il2CppObject* SourceIcon();
 
 // ---- for buildables.cpp (main thread) ----

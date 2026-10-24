@@ -86,6 +86,7 @@
 //     (withdrawals in the station menu, uploads) and frees slots unused for 30 s.
 
 #include "modules/custom_upgrades/quantum_link.h"
+#include "modules/custom_upgrades/gadget_look.h"
 #include "modules/custom_upgrades/variant_ext.h"
 
 #include <windows.h>
@@ -145,6 +146,10 @@ constexpr double kTakeFxSeconds = 1.5;
 constexpr int kStaleTicks = 5;       // ticks with a readable model list before a never-seen listed id is stale
 constexpr int kStaleTicksEmpty = 60; // the same when the save has no Refinery Link at all
 constexpr int32_t kTeleporterType = 1;  // GadgetDefinition.Types.TELEPORTER
+constexpr float kGlowScale = 0.3f;      // the teleporter FX on top (round 9: "the portal effect is too big")
+constexpr float kGlowHeight = 1.0f;
+constexpr double kUseCooldown = 1.5;    // Use on a link: cloud notices at most this often
+constexpr int kUseLines = 5;            // cloud types listed by Use
 
 struct Vec3 {
     float x, y, z;
@@ -187,6 +192,7 @@ using PlaceFn = void (*)(Il2CppObject*, void*, const MethodInfo*);
 using PickupFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
 using VariantFn = void (*)(Il2CppObject*, Il2CppObject*, Il2CppObject*, const MethodInfo*);
 using DecFn = void (*)(Il2CppObject*, int32_t, const MethodInfo*);
+using InteractFn = void (*)(Il2CppObject*, const MethodInfo*);
 PersistFn g_origPersist = nullptr;
 HasBpFn g_origHasBp = nullptr;
 HasBpFn g_origHelperBp = nullptr;
@@ -198,6 +204,8 @@ PlaceFn g_origPlace = nullptr;
 PickupFn g_origPickup = nullptr;
 VariantFn g_origVariant = nullptr;
 DecFn g_origDec = nullptr;
+InteractFn g_origActivator = nullptr;  // UIActivator.OnInteract
+InteractFn g_origDisplay = nullptr;    // UIDisplayInteractable.OnInteract
 
 // Read by the GetPersistenceId detour (any thread; set once on the main thread, never cleared).
 std::atomic<Il2CppObject*> g_ours{nullptr};
@@ -217,7 +225,7 @@ struct Impl {
     Il2CppClass* slotDefClass = nullptr, *ammoModelClass = nullptr, *storageMetaClass = nullptr, *rendererClass = nullptr;
     Il2CppClass* gameObjectClass = nullptr, *monoClass = nullptr, *colliderClass = nullptr, *rigidbodyClass = nullptr;
     Il2CppClass* jointClass = nullptr, *fabItemClass = nullptr, *cloudCtrlClass = nullptr, *teleNodeClass = nullptr;
-    Il2CppClass* gadgetItemClass = nullptr;
+    Il2CppClass* gadgetItemClass = nullptr, *interactableClass = nullptr;
     // offsets
     size_t offLocName = 0, offPrefab = 0, offIcon = 0, offRefId = 0, offHashInit = 0;
     size_t offDesc = 0, offCosts = 0, offVariantOf = 0, offGrad1 = 0, offGrad2 = 0, offGType = 0, offLinked = 0;
@@ -243,7 +251,7 @@ struct Impl {
     const MethodInfo* spawnFx = nullptr, *rendGetMaterials = nullptr, *rendGetShared = nullptr, *rendSetShared = nullptr;
     const MethodInfo* matPropNames = nullptr, *matGetColor = nullptr, *matSetColor = nullptr, *matGetShader = nullptr;
     const MethodInfo* fabItemCtor = nullptr, *fabCheck = nullptr, *spend = nullptr, *addItem = nullptr;
-    const MethodInfo* setFavorite = nullptr, *setHeld = nullptr, *hasBp = nullptr;
+    const MethodInfo* setFavorite = nullptr, *setHeld = nullptr, *hasBp = nullptr, *lsGetString = nullptr;
     using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
     using ArrayNewFn = Il2CppObject* (*)(Il2CppClass*, uintptr_t);
     using WBarrierFn = void (*)(Il2CppObject*, void**, void*);
@@ -263,6 +271,7 @@ struct Impl {
     Il2CppObject* slotDef = nullptr;
     Il2CppObject* cloudFx = nullptr;  // drone station: cloud withdraw FX prefab
     Il2CppObject* glowSrc = nullptr;  // teleporter active FX
+    Il2CppObject* icon = nullptr;     // our purple copy of the Refinery Link's icon (nullptr: not made)
     bool defFailed = false, slotDefTried = false, fxTried = false;
     std::string baseRefId;
 
@@ -310,13 +319,22 @@ struct Impl {
         std::vector<RendRec> rends;
         std::vector<Il2CppGCHandle> handles;
         double nextPulse = 0.0, nextTakeFx = 0.0;
+        // the glitch (Frame): the glow drops out and comes back in a stutter every few seconds
+        Il2CppObject* glow = nullptr;     // the glow's GameObject
+        std::vector<Il2CppObject*> interactables;  // the link's BaseUIInteractables (Use)
+        double glitchAt = 0.0, glitchEnd = 0.0, nextFlip = 0.0;
+        bool glitching = false;
+        uint32_t rng = 1;
     };
     std::map<int64_t, Rec> recs;
     std::unordered_set<Il2CppObject*> storages;  // identities of our storages (Decrement detour)
+    std::unordered_set<Il2CppObject*> interactables;  // the links' Use components (OnInteract detours)
+    double lastUse = 0.0;
+    std::set<std::string> loggedInteractables;
     std::unordered_set<int64_t> seenIds;         // listed ids seen present since the load
     int stableTicks = 0;
     unsigned generation = 1;
-    bool loggedNoCatcher = false, loggedGlow = false;
+    bool loggedNoCatcher = false, loggedGlow = false, loggedPreview = false;
     std::set<std::string> loggedShaders;
     // slots (shared by every link)
     Il2CppObject* slotType[kSlots] = {};
@@ -544,6 +562,10 @@ struct Impl {
     void Undecorate(Rec& rec, bool restore);
     void DropRec(int64_t id, bool restore);
     void Pulse(Rec& rec, Il2CppObject* at);
+    void MakeLook();
+    void Glitch(Rec& rec, double now);
+    bool OnUse(Il2CppObject* interactable);
+    std::string NameOf(Il2CppObject* type);
     // ---- slots ----
     int SlotOf(Il2CppObject* type) const {
         for (int i = 0; i < kSlots; ++i)
@@ -776,6 +798,20 @@ void DecrementDetour(Il2CppObject* self, int32_t count, const MethodInfo* mi) {
     g_guard.Run([&] { g->OnTaken(storage, slot, count); });
 }
 
+// Use (the interact key) on a placed Quantum Storage Link: instead of the Refinery Link's refinery
+// screen, HUD notices say what the drones take here (the Quantum Cloud's contents). Round 9: "pressing
+// Use on it shows the refinery still". Pointer lookups only for every other interactable. If no notice
+// can be shown, the refinery screen opens as before.
+template <InteractFn* Orig>
+void InteractDetour(Il2CppObject* self, const MethodInfo* mi) {
+    if (g && g->armed && self && main_thread::IsMainThread() && !g->Faulted() && g->interactables.count(self)) {
+        bool handled = false;
+        g_guard.Run([&] { handled = g->OnUse(self); });
+        if (handled) return;
+    }
+    (*Orig)(self, mi);
+}
+
 // ---------------------------------------------------------------- definition --
 
 bool Impl::EnsureDefinition() {
@@ -835,6 +871,7 @@ bool Impl::EnsureDefinition() {
     ScaleCost();
     g_base.store(b, std::memory_order_release);
     g_ours.store(d, std::memory_order_release);
+    MakeLook();
     SR2_INFO("[{}] quantum link: definition '{}' built from '{}' (variant of the Refinery Link, same prefab '{}')", module,
              rid, baseRefId, unity::GetName(prefab));
     return true;
@@ -1215,12 +1252,16 @@ bool Impl::Build(int64_t id, Il2CppObject* root, Rec& rec) {
         if (unity::IsAlive(glow)) {
             Strip(glow);
             Il2CppObject* gtr = unity::TransformOf(glow);
-            Vec3 pos{0.0f, 1.1f, 0.0f}, scale{0.5f, 0.5f, 0.5f};
+            Vec3 pos{0.0f, kGlowHeight, 0.0f}, scale{kGlowScale, kGlowScale, kGlowScale};
             Call(trSetLocalPos, gtr, {&pos}, "Transform.set_localPosition");
             Call(trSetLocalRot, gtr, {&id0}, "Transform.set_localRotation");
             Call(trSetLocalScale, gtr, {&scale}, "Transform.set_localScale");
             unity::SetActive(glow, true);  // still inactive in the hierarchy (holder)
             TintRenderers(glow, nullptr, "glow");
+            rec.glow = glow;
+            if (Il2CppGCHandle h = unity::NewGCHandle(glow)) rec.handles.push_back(h);
+            rec.rng = static_cast<uint32_t>(id * 2654435761u) | 1u;
+            rec.glitchAt = Now() + 2.0 + static_cast<double>(id % 7) * 0.4;
         }
     } else if (!loggedGlow) {
         loggedGlow = true;
@@ -1270,6 +1311,19 @@ bool Impl::Build(int64_t id, Il2CppObject* root, Rec& rec) {
             rec.sms[i] = sm;
         }
     if (rec.storage) storages.insert(rec.storage);
+    // Use: the link's interactables (logged once per class, so we know what the Refinery Link uses)
+    if (interactableClass)
+        for (Il2CppObject* c : AllInChildren(root, interactableClass)) {
+            if (Il2CppGCHandle h = unity::NewGCHandle(c)) rec.handles.push_back(h);
+            rec.interactables.push_back(c);
+            interactables.insert(c);
+            const std::string cn = unity::ClassName(c);
+            if (loggedInteractables.insert(cn).second)
+                SR2_INFO("[{}] quantum link: Use component '{}' on '{}'{}", module, cn, unity::GetName(unity::GameObjectOf(c)),
+                         cn == "MonomiPark.SlimeRancher.UI.UIActivator" || cn == "MonomiPark.SlimeRancher.UI.UIDisplayInteractable"
+                             ? " - Use shows the Quantum Cloud"
+                             : " - not hooked, Use keeps its vanilla action");
+        }
     if (Il2CppGCHandle h = unity::NewGCHandle(root)) rec.handles.push_back(h);
     SR2_INFO("[{}] quantum link: actor {} built ({} renderer(s) tinted, glow {}, drone storage {}, drone port {})", module, id,
              rec.rends.size(), glowSrc ? "on" : "off", rec.storage ? "ready" : "missing", rec.catcher ? "ready" : "missing");
@@ -1279,6 +1333,7 @@ bool Impl::Build(int64_t id, Il2CppObject* root, Rec& rec) {
 // Materials back (restore) and our objects away; handles freed. The GameObject may be gone already.
 void Impl::Undecorate(Rec& rec, bool restore) {
     if (rec.storage) storages.erase(rec.storage);
+    for (Il2CppObject* c : rec.interactables) interactables.erase(c);
     if (restore && unity::IsAlive(rec.root)) {
         bool ok = false;
         for (const RendRec& rr : rec.rends) {
@@ -1312,6 +1367,109 @@ void Impl::Pulse(Rec& rec, Il2CppObject* at) {
     if (!ok) return;
     Quat id0{0.0f, 0.0f, 0.0f, 1.0f};
     Call(spawnFx, nullptr, {cloudFx, &pos, &id0}, "FXHelpers.SpawnAndPlayFX");
+}
+
+// Our icon (a purple copy of the Refinery Link's, also the drone source's) and the gadget looks: own
+// description on the Fabricator card (the vanilla getter walks VariantOf to the Refinery Link's), the
+// gadget-mode label "Quantum Storage Link" while held, a purple placement preview.
+void Impl::MakeLook() {
+    std::string why;
+    Il2CppObject* baseIcon = unity::Field<Il2CppObject*>(base, offIcon);
+    icon = gadget_look::TintedSprite(baseIcon, {kPurple.r, kPurple.g, kPurple.b}, 0.85f, why);
+    if (icon) {
+        SetRef(ours, offIcon, icon);
+        SR2_INFO("[{}] quantum link: icon = a purple copy of the Refinery Link's", module);
+    } else {
+        SR2_INFO("[{}] quantum link: no purple icon ({}) - the Refinery Link's icon is used", module, why);
+    }
+    if (!gadget_look::Ready()) return;
+    gadget_look::Look look;
+    Il2CppObject* name = unity::Field<Il2CppObject*>(ours, offLocName);
+    Il2CppObject* desc = unity::Field<Il2CppObject*>(ours, offDesc);
+    look.name = name != unity::Field<Il2CppObject*>(base, offLocName) ? name : nullptr;
+    look.description = desc != unity::Field<Il2CppObject*>(base, offDesc) ? desc : nullptr;
+    look.icon = icon;
+    look.dressPreview = [this](Il2CppObject* placeholder) {
+        const int n = gadget_look::TintTree(placeholder, {kPurple.r, kPurple.g, kPurple.b}, 0.6f, {kCyan.r, kCyan.g, kCyan.b},
+                                            "Quantum Storage Link preview");
+        if (!loggedPreview) SR2_INFO("[{}] quantum link: placement preview tinted ({} material(s))", module, n);
+        loggedPreview = true;
+    };
+    gadget_look::Register(ours, std::move(look));
+}
+
+// The glow drops out and comes back in a stutter (on / off every 30-80 ms with a jitter in place and
+// size) for about half a second every 3.5-8 s. The ghost drones' look (ComponentAcquisitionDroneController:
+// a material float "_PhaseValue" faded 0 -> 1 in Update) is a property of their own shader, so it can't
+// be put on the teleporter FX; this stutter imitates it with transform and active state only.
+void Impl::Glitch(Rec& rec, double now) {
+    auto rnd = [&rec] {
+        rec.rng ^= rec.rng << 13;
+        rec.rng ^= rec.rng >> 17;
+        rec.rng ^= rec.rng << 5;
+        return static_cast<float>(rec.rng & 0xFFFFFF) / static_cast<float>(0x1000000);
+    };
+    Il2CppObject* tr = unity::TransformOf(rec.glow);
+    if (!tr) return;
+    if (!rec.glitching) {
+        rec.glitching = true;
+        rec.glitchEnd = now + 0.35 + rnd() * 0.3;
+        rec.nextFlip = now;
+    }
+    if (now >= rec.glitchEnd) {  // back to normal
+        rec.glitching = false;
+        rec.glitchAt = now + 3.5 + rnd() * 4.5;
+        Vec3 pos{0.0f, kGlowHeight, 0.0f}, scale{kGlowScale, kGlowScale, kGlowScale};
+        Call(trSetLocalPos, tr, {&pos}, "Transform.set_localPosition");
+        Call(trSetLocalScale, tr, {&scale}, "Transform.set_localScale");
+        unity::SetActive(rec.glow, true);
+        return;
+    }
+    if (now < rec.nextFlip) return;
+    rec.nextFlip = now + 0.03 + rnd() * 0.05;
+    const bool on = rnd() < 0.5f;
+    if (on) {
+        Vec3 pos{(rnd() - 0.5f) * 0.14f, kGlowHeight + (rnd() - 0.5f) * 0.1f, (rnd() - 0.5f) * 0.14f};
+        Vec3 scale{kGlowScale * (0.6f + rnd() * 0.7f), kGlowScale * (0.4f + rnd() * 0.8f), kGlowScale * (0.6f + rnd() * 0.7f)};
+        Call(trSetLocalPos, tr, {&pos}, "Transform.set_localPosition");
+        Call(trSetLocalScale, tr, {&scale}, "Transform.set_localScale");
+    }
+    unity::SetActive(rec.glow, on);
+}
+
+std::string Impl::NameOf(Il2CppObject* type) {
+    Il2CppObject* ls = IsA(type, identTypeClass) ? unity::Field<Il2CppObject*>(type, offLocName) : nullptr;
+    bool ok = false;
+    Il2CppObject* str = ls && lsGetString ? Call(lsGetString, ls, {}, "LocalizedString.GetLocalizedString", &ok) : nullptr;
+    std::string name = ok ? unity::ToUtf8(reinterpret_cast<Il2CppString*>(str)) : std::string();
+    return name.empty() ? unity::GetName(type) : name;
+}
+
+// Use on a link: one burst of HUD notices - what the link is for, then the largest cloud amounts.
+bool Impl::OnUse(Il2CppObject* interactable) {
+    if (!host.notify) return false;
+    const double now = Now();
+    if (now - lastUse < kUseCooldown) return true;  // a held key / double press: no second burst
+    std::vector<std::pair<Il2CppObject*, std::string>> lines;
+    lines.emplace_back(icon ? icon : unity::Field<Il2CppObject*>(base, offIcon),
+                       "Quantum Storage Link: ranch drones set to this source take items from your Quantum Cloud here");
+    const auto entries = CloudEntries(Cloud());
+    int total = 0;
+    for (const auto& e : entries) total += e.second;
+    for (size_t i = 0; i < entries.size() && static_cast<int>(i) < kUseLines; ++i)
+        lines.emplace_back(unity::Field<Il2CppObject*>(entries[i].first, offIcon),
+                           std::format("{} in the Quantum Cloud: {}", NameOf(entries[i].first), entries[i].second));
+    if (entries.size() > static_cast<size_t>(kUseLines))
+        lines.emplace_back(nullptr, std::format("... and {} more type(s)", entries.size() - kUseLines));
+    if (entries.empty()) lines.emplace_back(nullptr, "The Quantum Cloud is empty - explorer drones fill it");
+    if (!host.notify(lines)) {
+        SR2_INFO("[{}] quantum link: Use - HUD notices not available now, the Refinery Link screen opens", module);
+        return false;
+    }
+    lastUse = now;
+    SR2_INFO("[{}] quantum link: Use on '{}' - Quantum Cloud shown ({} type(s), {} item(s)) instead of the refinery screen",
+             module, unity::GetName(unity::GameObjectOf(interactable)), entries.size(), total);
+    return true;
 }
 
 // ---------------------------------------------------------------- cloud / slots --
@@ -1690,6 +1848,9 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
     p->cloudCtrlClass = cls(kImage, "MonomiPark.SlimeRancher.Drone", "DroneStationCloudExtractionController");
     p->teleNodeClass = cls(kImage, "MonomiPark.SlimeRancher.World.Teleportation", "TeleporterNode");
     p->gadgetItemClass = cls(kImage, "MonomiPark.SlimeRancher.Player.PlayerItems", "GadgetItem");
+    p->interactableClass = cls(kImage, "MonomiPark.SlimeRancher.UI", "BaseUIInteractable");
+    Il2CppClass* uiActivator = cls(kImage, "MonomiPark.SlimeRancher.UI", "UIActivator");
+    Il2CppClass* uiDisplay = cls(kImage, "MonomiPark.SlimeRancher.UI", "UIDisplayInteractable");
     Il2CppClass* fabCategory = cls(kImage, kFab, "GadgetFabricateCategory");
     Il2CppClass* fabRuntime = cls(kImage, kFab, "GadgetFabricateCategoryRuntime");
     Il2CppClass* helper = cls(kImage, kFab, "GadgetDirectorHelper");
@@ -1828,6 +1989,7 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
     p->addItem = byParams(gadgetDir, "AddItem", {"IdentifiableType", "System.Int32"});
     p->setFavorite = method(gadgetsModel, "SetFavorite", 2);
     p->setHeld = method(p->gadgetItemClass, "SetHeldGadget", 1);
+    p->lsGetString = R.Method(p->lsClass, "GetLocalizedString", 0, nullptr);  // optional (type names in Use notices)
     if (!p->lsCtor || !p->ammoModelCtor || !p->fabItemCtor) why = "constructors not found";
     // hooks
     const MethodInfo* persistMi = byParams(saveRef, "GetPersistenceId", {"IdentifiableType"});
@@ -1841,6 +2003,8 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
     const MethodInfo* pickupMi = method(p->gadgetItemClass, "PickupGadget", 1);
     const MethodInfo* variantMi = method(p->gadgetClass, "ChangeVariant", 2);
     const MethodInfo* decMi = method(p->storageMetaClass, "Decrement", 1);
+    const MethodInfo* activatorMi = method(uiActivator, "OnInteract", 0);
+    const MethodInfo* displayMi = method(uiDisplay, "OnInteract", 0);
     if (!runtimeMi && why.empty()) why = "GadgetFabricateCategoryRuntime..ctor(3) not found";
     p->hasBp = hasBpMi;
     if (!why.empty()) return fail();
@@ -1868,6 +2032,10 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
         {"GadgetItem.PickupGadget", pickupMi, reinterpret_cast<void*>(&PickupDetour), reinterpret_cast<void**>(&g_origPickup)},
         {"Gadget.ChangeVariant", variantMi, reinterpret_cast<void*>(&ChangeVariantDetour), reinterpret_cast<void**>(&g_origVariant)},
         {"StorageMetadata.Decrement", decMi, reinterpret_cast<void*>(&DecrementDetour), reinterpret_cast<void**>(&g_origDec)},
+        {"UIActivator.OnInteract", activatorMi, reinterpret_cast<void*>(&InteractDetour<&g_origActivator>),
+         reinterpret_cast<void**>(&g_origActivator)},
+        {"UIDisplayInteractable.OnInteract", displayMi, reinterpret_cast<void*>(&InteractDetour<&g_origDisplay>),
+         reinterpret_cast<void**>(&g_origDisplay)},
     };
     constexpr size_t kHooks = std::size(hooks);
     void* ptrs[kHooks] = {};
@@ -1889,7 +2057,27 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
     }
     p->armed = true;
     ready_ = true;
+    // The gadget-mode label of an aimed-at placed link (a vanilla Refinery Link to the game).
+    gadget_look::AddPlacedLabel([](Il2CppObject* gadget, Il2CppObject* def) -> Il2CppObject* {
+        if (!g || !g->armed || !g->ours || def != g->base || g->Faulted() || !g->Listed(g->ActorOfGadget(gadget))) return nullptr;
+        Il2CppObject* name = unity::Field<Il2CppObject*>(g->ours, g->offLocName);
+        return name != unity::Field<Il2CppObject*>(g->base, g->offLocName) ? name : nullptr;
+    });
     return true;
+}
+
+void QuantumLink::Frame() {
+    if (!ready_ || !g || g->recs.empty() || !main_thread::IsMainThread() || g->Faulted()) return;
+    const double now = Now();
+    for (auto& [id, rec] : g->recs) {
+        if (!rec.glow || (!rec.glitching && now < rec.glitchAt)) continue;
+        if (!unity::IsAlive(rec.glow)) {
+            rec.glow = nullptr;
+            continue;
+        }
+        g_guard.Run([&] { g->Glitch(rec, now); });
+        if (g->Faulted()) return;
+    }
 }
 
 // ---------------------------------------------------------------- api --
@@ -1997,6 +2185,7 @@ bool IsOurs(Il2CppObject* def) { return def && def == g_ours.load(std::memory_or
 
 Il2CppObject* SourceIcon() {
     if (!g || !g->base) return nullptr;
+    if (g->icon && unity::IsAlive(g->icon)) return g->icon;  // our purple copy
     Il2CppObject* icon = unity::Field<Il2CppObject*>(g->base, g->offIcon);
     return unity::IsAlive(icon) ? icon : nullptr;
 }
