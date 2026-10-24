@@ -49,6 +49,47 @@ Status: built, not yet tested in game.
   open. Changes apply immediately.
 - The dialog closes by itself when the page goes away (tab switch, destination changed, menu closed).
 
+## Programs action and dialog (custom_upgrades' several programs per drone)
+
+The data and the rotation are custom_upgrades' (`modules/custom_upgrades/drone_programs.h`, NOTES
+"Several programs per drone"); the UI is here because this module owns the station menu hooks (one hook
+per address). It shows only while custom_upgrades is on (`drone_programs::Available`).
+
+- Programming page: a second pill `[P] Programs` (one program) / `[P] Program 2/3` right of the
+  **target's** Change pill (a clone of the target's PromptContainer, no wrap, fitted to the label).
+  Opens with **P**, the pad's **left stick click** or a click.
+- Dialog (same frame as the price-limit one): one row per program: number, target (icon + name),
+  source, destination (names / icons from the menu's `DroneUIDefinitionSource`), **Edit** (the running
+  one says **Running**) and **Remove** (with 2+ programs); **Add program** (a copy of the running one,
+  which then runs; the dialog closes so it can be changed on the page; up to 3); with 2+ programs a
+  "Next program" row: **When idle** | **After each delivery**. Arrows move the focus frame, Enter
+  selects, P / Esc / Close / backdrop close.
+- Edit = `drone_programs::Run` + `DroneProgramViewModel.RevertChangesToLastAppliedProgram`, so the page
+  shows the program that now runs; the dialog closes. Remove / mode rebuild the dialog in place.
+- While the program page is open the station's rotation waits (`NoteMenuOpen`).
+
+To check in game (programs):
+
+1. Log: `[custom_upgrades] drone programs ready (up to 3 per station)`, `station ui ready` without
+   "page refresh ... NOT available" / "program names: NOT available".
+2. Custom upgrades on, open a station: `[P] Programs` right of the target's Change pill (position, no
+   overlap with the source option, key glyph). Custom upgrades off: no pill.
+3. P / click: the dialog with program 1 (names and icons right, Running). Add program: closes, pill
+   `Program 2/2`, page unchanged; change the target / source / destination, Start Program: log
+   `program 2 changed`.
+4. Reopen: two rows, Edit on program 1 -> page shows program 1, pill `Program 1/2`.
+5. Close the menu: the drone works program 1; when it has nothing to do (rests at the station), log
+   `program 1 -> 2 (nothing to do)` and it works program 2; and back.
+6. "After each delivery": with two programs that both have work, the drone alternates after each load.
+   A drone carrying something never switches (no dumped cargo).
+7. Remove the running program: the other one runs, the page shows it; down to one program: pill
+   `Programs`, sidecar entry gone.
+8. Save while program 2 runs, reload: log `2 programs restored from the sidecar`, program 1 runs. Load
+   the save without the mod (or with custom upgrades off): the station has program 1.
+9. Program 1 with the Hen Collector / Quantum Storage Link source: saved as Coop / Silo, restored with
+   the true source after a load.
+10. Pick the station up: log `extra programs dropped (the station is gone ...)`.
+
 ## How the station is known in the drone logic
 
 `ScorePlort.CanDroneDeposit(id, ignoreShutdown)` has no drone parameter. Its market caller is the

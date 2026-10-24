@@ -181,6 +181,51 @@ in the picker (only for elder targets, only with a deluxe coop), a drone emptyin
 collector, Hen Collector no longer offered for an elder target, save + reload of both (log `restored
 from the sidecar`), the migration of an elder-target Hen Collector program.
 
+### Several programs per drone (idea "Several programs per automation bee"; `drone_programs.cpp`)
+
+- Up to 3 programs per ranch drone station. The game has one: `DroneStationGadgetModel._taskData`
+  (target type + ident, source, destination). The others wait in the mod; switching is the game's own
+  `DroneStation.AssignRanchTask` (new task data + `RanchDrone.AssignTask` -> `DroneBehaviorPlexer.OnTaskChanged`
+  rebuilds the drone's programs), the same call as Start Program.
+- **When.** "When idle" (default): the drone has nothing to do with the current program = its current
+  behaviour (`DroneBehaviorPlexer._currBehaviour`) is `RanchDroneBehaviourRest` / `Idle` and its ammo
+  (`RanchDrone._ammo.IsEmpty()`) is empty for 2 ticks (~2 s). "After each delivery": also when the ammo
+  went from full to empty (a load was put somewhere). Never while the drone holds something: the next
+  program's destination may not take it and `RanchDroneBehaviourDumpAmmo` would destroy the cargo. A
+  program runs at least 3 s; after a whole round of idle programs the next try waits 20 s. No switching
+  without battery (`GetCurrentEnergy() <= 0`, the drone rests anyway) and while the station's program page
+  is open (the UI calls `NoteMenuOpen`). Log: `drone programs: station N: program 1 -> 2 (nothing to
+  do)`, at most one line per station per 30 s (`[+N switch(es) not logged]`).
+- **Editing.** The page always shows the running program. Changing it there and pressing Start Program
+  changes that program (the tick sees the station's task data differ from the stored one: `program N
+  changed (...)`); so does the game falling back (e.g. Hen Collector -> Coop when no Hen Collector is
+  left).
+- **Save (vanilla-safe).** The vanilla save always holds program 1: drone_source's `Pull` detour asks
+  `SaveFilter` (any thread, mutex) and hands the save a copy of program 1 with its source mapped to
+  Coop / Silo when it is one of ours, whatever runs at that moment. The sidecar keeps all of them with
+  the true sources: `drone_programs.station.<actor id>` = `v1;idle|delivery;<t>:<ident asset name or
+  ->:<source>:<sink>|...`. Ident names resolve through one `FindObjectsOfTypeAll(IdentifiableType)` per
+  session. Only stations with 2+ programs have an entry.
+- **Load.** First tick that sees the station: its entry is read and program 1 is compared with the
+  save's program (target, ident, destination, source modulo the vanilla mapping). Same -> restored,
+  program 1 runs with its true source (`station N: 3 programs restored from the sidecar`); different
+  (changed without the mod) or unreadable -> the extra programs are dropped (logged). A station that is
+  gone drops its entry.
+- **Drone source lists.** Stations with an entry are skipped by the Hen / Elder Collector and Quantum
+  Storage Link lists (`ManagedFilter`): rotating to and from such a source would add and drop list
+  entries every few seconds, and program 1's true source comes back from this sidecar. The "no storage
+  left -> vanilla source" fallback still runs for them.
+- **Custom upgrades off / faulted.** Every station gets program 1 back, its source already vanilla
+  (field writes first, `AssignProgram` on the main thread in `Cleanup`); the sidecar stays, so switching
+  on again restores the programs. Without the mod the save has program 1 only.
+- **Known limits.** Fast-forward (sleeping / away) runs only the program that is current then. A drone
+  holding plorts back because of drone_price_limit keeps its cargo and so stays on its program.
+- **UI** lives in `modules/drone_price_limit/station_dialog.cpp` (owns the station menu hooks): a
+  `[P] Programs` / `[P] Program 2/3` pill right of the target's Change pill, and the programs dialog
+  (see that module's NOTES). It shows only while custom upgrades are on.
+
+Not checked in game yet: everything in this section (see the test list in the drone_price_limit NOTES).
+
 ## Quantum Storage Link (user request: "drones take items out of a quantum storage link and put them into acceptable inputs")
 
 `quantum_link.cpp` (gadget, visuals, cloud mirror; its gadget hooks also carry the Slime DJ buildables through

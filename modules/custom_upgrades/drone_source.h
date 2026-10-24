@@ -34,6 +34,38 @@ inline constexpr int32_t kHenSourceType = 0x53520101;
 inline constexpr int32_t kElderSourceType = 0x53520102;
 inline constexpr int32_t kQuantumSourceType = 0x53520110;
 
+// A station program as plain data (DroneTaskData: TargetType, TargetIdentType, SourceType, SinkType).
+struct ProgramData {
+    int32_t target = 0;            // DroneTaskTargetType (0 = NONE)
+    Il2CppObject* ident = nullptr; // IdentifiableType for SINGLE, else null (an asset: lives all session)
+    int32_t source = 0;            // DroneTaskSourceType, may be one of ours
+    int32_t sink = 0;              // DroneTaskSinkType
+    bool operator==(const ProgramData&) const = default;
+    bool Valid() const { return target != 0 && source != 0 && sink != 0; }
+};
+
+// Helpers for the several-programs rotation (drone_programs.cpp). Main thread unless noted; all of them
+// return false / null / 0 while the drone sources are not set up.
+int64_t StationIdOf(Il2CppObject* stationModel);                 // any thread (plain field read)
+bool ReadProgram(Il2CppObject* stationModel, ProgramData& out);  // any thread (plain field reads)
+bool StationModels(std::vector<Il2CppObject*>& out);             // the save's DroneStationGadgetModels
+Il2CppObject* DroneOf(Il2CppObject* stationModel);               // its live RanchDrone (verified) or null
+// The station's program -> `p`: with its drone the game's own DroneStation.AssignRanchTask (our source
+// types through the GatherSourceTask detour), else the program data only. Logs one line when `why`.
+bool AssignProgram(Il2CppObject* stationModel, const ProgramData& p, const char* why);
+// The program data only (plain field writes, any thread; the drone keeps what it runs until it is
+// programmed again). For turning the rotation off without game calls.
+bool SetProgramData(Il2CppObject* stationModel, const ProgramData& p);
+// Our source type -> its vanilla save type (Coop / Silo); any other type unchanged. Any thread.
+int32_t VanillaSource(int32_t source);
+// Any thread (the Pull detour): `id`'s program for the save instead of the live one (true = use `out`;
+// its source may be ours, it is mapped to the vanilla type like any other).
+using SaveFilter = bool (*)(int64_t id, ProgramData& out);
+// Main thread (the drone source tick): `id` is managed by the several-programs rotation; its sidecar
+// keeps the true sources, so the drone source lists leave it alone.
+using ManagedFilter = bool (*)(int64_t id);
+void SetProgramHooks(SaveFilter save, ManagedFilter managed);
+
 class HenSource {
 public:
     // Worker thread. false = not available (`why`); the Coop linking of the Hen Collector still works.

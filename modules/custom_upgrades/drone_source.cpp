@@ -171,6 +171,8 @@ GatherSourcesFn g_origGatherSources = nullptr;
 GetSourcesFn g_origGetSources = nullptr;
 FindDefFn g_origFindDef = nullptr;
 PullFn g_origPull = nullptr;
+std::atomic<SaveFilter> g_saveFilter{nullptr};      // drone_programs: program 1 goes to the save
+std::atomic<ManagedFilter> g_managedFilter{nullptr};  // drone_programs: stations its sidecar describes
 
 struct Impl {
     const char* module = "custom_upgrades";
@@ -280,6 +282,9 @@ struct Impl {
     void AddChickenOptions(Il2CppObject* drone, Il2CppObject* target, Il2CppObject* list);
     void AddQuantumOption(Il2CppObject* drone, Il2CppObject* list);
     Il2CppObject* CopyAsVanilla(Il2CppObject* data, int32_t vanilla);
+    Il2CppObject* CopyProgram(const ProgramData& p);
+    Il2CppObject* LiveDrone(Il2CppObject* model, int64_t id);
+    bool Assign(Il2CppObject* model, const ProgramData& p, const char* why);
     bool Switch(Il2CppObject* model, int64_t id, int kind, const char* why, int32_t vanilla = kSourceCoop);
     void QuantumTick(const std::vector<Il2CppObject*>& stations, const std::unordered_set<int64_t>& first,
                      const std::unordered_map<int64_t, int32_t>& reverted);
@@ -347,6 +352,20 @@ void PullDetour(Il2CppObject* self, double* a, bool* b, int8_t* c, void** d, voi
                 double* f, int32_t* h, Il2CppObject* lookups, const MethodInfo* mi) {
     g_origPull(self, a, b, c, d, e, taskData, f, h, lookups, mi);
     if (!g || !taskData || !*taskData || !g->offTdSource) return;
+    // Several programs (drone_programs.cpp): the save keeps program 1, whichever one runs now.
+    if (SaveFilter filter = g_saveFilter.load()) {
+        ProgramData first;
+        if (filter(g->StationId(self), first)) {
+            if (Il2CppObject* copy = g->CopyProgram(first)) {
+                *taskData = copy;  // source already mapped to the vanilla type
+                return;
+            }
+            if (!g->loggedPullFallback)
+                SR2_WARN("[{}] drone programs: save copy failed - the running program is saved instead of program 1",
+                         g->module);
+            g->loggedPullFallback = true;
+        }
+    }
     Il2CppObject* data = *taskData;
     const int kind = KindOf(unity::Field<int32_t>(data, g->offTdSource));
     if (kind < 0) return;
@@ -729,6 +748,65 @@ Il2CppObject* Impl::CopyAsVanilla(Il2CppObject* data, int32_t vanilla) {
     return copy;
 }
 
+// A new DroneTaskData holding `p` with its source mapped to the vanilla type (for the save). Plain
+// field writes besides il2cpp_object_new: any thread.
+Il2CppObject* Impl::CopyProgram(const ProgramData& p) {
+    if (!objectNew || !taskDataClass) return nullptr;
+    Il2CppObject* copy = objectNew(taskDataClass);
+    if (!copy) return nullptr;
+    unity::Field<int32_t>(copy, offTdTarget) = p.target;
+    SetRef(copy, reinterpret_cast<void**>(reinterpret_cast<char*>(copy) + offTdIdent), p.ident);
+    unity::Field<int32_t>(copy, offTdSource) = VanillaSource(p.source);
+    unity::Field<int32_t>(copy, offTdSink) = p.sink;
+    return copy;
+}
+
+// The station's drone as last seen by GatherSourceTask, if it still belongs to this model.
+Il2CppObject* Impl::LiveDrone(Il2CppObject* model, int64_t id) {
+    auto it = drones.find(id);
+    Il2CppObject* drone = it != drones.end() ? it->second : nullptr;
+    if (drone && (!unity::IsAlive(drone) || !IsA(drone, droneClass) ||
+                  unity::Field<Il2CppObject*>(drone, offDroneModel) != model))
+        drone = nullptr;
+    return drone;
+}
+
+// The whole program (target, source, destination) -> `p`, the same way as Switch.
+bool Impl::Assign(Il2CppObject* model, const ProgramData& p, const char* why) {
+    if (!TaskOf(model)) return false;
+    const int64_t id = StationId(model);
+    Il2CppObject* drone = LiveDrone(model, id);
+    Il2CppObject* station = drone ? unity::Field<Il2CppObject*>(drone, offDroneStation) : nullptr;
+    bool assigned = false;
+    if (station && unity::IsAlive(station)) {
+        int32_t tt = p.target, src = p.source, sk = p.sink;
+        bool ok = false;
+        Il2CppObject* target = objectNew(taskTargetClass);
+        if (target)
+            Call(targetCtor, target, {unity::Field<Il2CppObject*>(drone, offDroneCfg), &tt, p.ident}, "DroneTaskTarget..ctor",
+                 &ok);
+        Il2CppObject* source = ok ? Call(gatherSourceMi, drone, {&src}, "RanchDrone.GatherSourceTask", &ok) : nullptr;
+        Il2CppObject* sink = ok && source ? Call(gatherSinkMi, drone, {&sk}, "RanchDrone.GatherSinkTask", &ok) : nullptr;
+        bool analytics = false;
+        if (ok && source && sink)
+            Call(assignMi, station, {target, source, sink, &analytics}, "DroneStation.AssignRanchTask", &ok);
+        assigned = ok && source && sink;
+    }
+    if (!assigned) {
+        Il2CppObject* live = TaskOf(model);  // AssignRanchTask may have replaced it
+        if (!live) return false;
+        unity::Field<int32_t>(live, offTdTarget) = p.target;
+        SetRef(live, reinterpret_cast<void**>(reinterpret_cast<char*>(live) + offTdIdent), p.ident);
+        unity::Field<int32_t>(live, offTdSource) = p.source;
+        unity::Field<int32_t>(live, offTdSink) = p.sink;
+    }
+    if (KindOf(p.source) >= 0) NoteKnown(model);
+    if (why)
+        SR2_INFO("[{}] drone programs: station {} program set ({}; {})", module, id, why,
+                 assigned ? "drone re-programmed" : "program data only");
+    return true;
+}
+
 // The station's program to one of our sources (kind >= 0) or to the vanilla type `vanilla` (-1: Coop,
 // or Silo for a Quantum Storage Link program). With its drone: the game's own AssignRanchTask (new task
 // data + the drone's programs); without (station not loaded): the data only, RanchDrone.Init builds the
@@ -736,11 +814,7 @@ Il2CppObject* Impl::CopyAsVanilla(Il2CppObject* data, int32_t vanilla) {
 bool Impl::Switch(Il2CppObject* model, int64_t id, int kind, const char* why, int32_t vanilla) {
     Il2CppObject* task = TaskOf(model);
     if (!task) return false;
-    Il2CppObject* drone = nullptr;
-    if (auto it = drones.find(id); it != drones.end()) drone = it->second;
-    if (drone && (!unity::IsAlive(drone) || !IsA(drone, droneClass) ||
-                  unity::Field<Il2CppObject*>(drone, offDroneModel) != model))
-        drone = nullptr;
+    Il2CppObject* drone = LiveDrone(model, id);
     Il2CppObject* station = drone ? unity::Field<Il2CppObject*>(drone, offDroneStation) : nullptr;
     bool assigned = false;
     if (station && unity::IsAlive(station)) {
@@ -835,6 +909,15 @@ void Impl::QuantumTick(const std::vector<Il2CppObject*>& stations, const std::un
         if (!id || !task) continue;
         present.insert(id);
         const int32_t src = unity::Field<int32_t>(task, offTdSource);
+        if (ManagedFilter managed = g_managedFilter.load(); managed && managed(id)) {
+            // Several programs: drone_programs' sidecar keeps the true sources.
+            listed.erase(id);
+            if (src == K.type) {
+                NoteKnown(model);
+                if (!available[kQuantum]) Switch(model, id, -1, "no Quantum Storage Link left", kSourceSilo);
+            }
+            continue;
+        }
         const bool isFirst = first.count(id) > 0;
         const bool isListed = listed.count(id) > 0;
         const bool restore = isFirst && isListed && src == kSourceSilo && available[kQuantum];
@@ -887,6 +970,59 @@ void Impl::QuantumTick(const std::vector<Il2CppObject*>& stations, const std::un
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------- helpers for drone_programs --
+
+int64_t StationIdOf(Il2CppObject* stationModel) { return g ? g->StationId(stationModel) : 0; }
+
+bool ReadProgram(Il2CppObject* stationModel, ProgramData& out) {
+    Il2CppObject* task = g ? g->TaskOf(stationModel) : nullptr;
+    if (!task) return false;
+    out.target = unity::Field<int32_t>(task, g->offTdTarget);
+    out.ident = unity::Field<Il2CppObject*>(task, g->offTdIdent);
+    out.source = unity::Field<int32_t>(task, g->offTdSource);
+    out.sink = unity::Field<int32_t>(task, g->offTdSink);
+    return true;
+}
+
+bool StationModels(std::vector<Il2CppObject*>& out) {
+    out.clear();
+    if (!g || !g->hooked || !main_thread::IsMainThread() || Impl::Faulted(g->module)) return false;
+    return g->Stations(out);
+}
+
+Il2CppObject* DroneOf(Il2CppObject* stationModel) {
+    if (!g || !main_thread::IsMainThread()) return nullptr;
+    const int64_t id = g->StationId(stationModel);
+    return id ? g->LiveDrone(stationModel, id) : nullptr;
+}
+
+bool AssignProgram(Il2CppObject* stationModel, const ProgramData& p, const char* why) {
+    if (!g || !g->hooked || !main_thread::IsMainThread() || Impl::Faulted(g->module)) return false;
+    bool ok = false;
+    g_guard.Run([&] { ok = g->Assign(stationModel, p, why); });
+    return ok;
+}
+
+bool SetProgramData(Il2CppObject* stationModel, const ProgramData& p) {
+    Il2CppObject* task = g ? g->TaskOf(stationModel) : nullptr;
+    if (!task) return false;
+    unity::Field<int32_t>(task, g->offTdTarget) = p.target;
+    g->SetRef(task, reinterpret_cast<void**>(reinterpret_cast<char*>(task) + g->offTdIdent), p.ident);
+    unity::Field<int32_t>(task, g->offTdSource) = p.source;
+    unity::Field<int32_t>(task, g->offTdSink) = p.sink;
+    return true;
+}
+
+int32_t VanillaSource(int32_t source) {
+    const int k = KindOf(source);
+    return k >= 0 ? VanillaOf(k) : source;
+}
+
+void SetProgramHooks(SaveFilter save, ManagedFilter managed) {
+    g_saveFilter.store(save);
+    g_managedFilter.store(managed);
+}
 
 // ---------------------------------------------------------------- setup --
 
@@ -1103,6 +1239,17 @@ void HenSource::Tick(const std::vector<Il2CppObject*>& henStorages, bool quantum
         const bool restore = first && was >= 0 && src == kSourceCoop;
         if (auto pit = pending.find(id); pit != pending.end() && pit->second == kSourceCoop && KindOf(src) < 0 && !restore)
             p.Switch(model, id, -1, "custom upgrades were off");
+        if (ManagedFilter managed = g_managedFilter.load(); managed && managed(id)) {
+            // Several programs: drone_programs' sidecar keeps the true sources (program 1 is restored
+            // from there, the others run in turn), so no list entry here.
+            setListed(id, -1);
+            if (cur >= 0) {
+                p.NoteKnown(model);
+                if (!p.available[cur] && (cur == kHen || elders >= 0))
+                    p.Switch(model, id, -1, cur == kHen ? "no Hen Collector left" : "no Elder Collector left");
+            }
+            continue;
+        }
         if (first) {
             if (restore) {
                 const int want = fitKind(was, task);
