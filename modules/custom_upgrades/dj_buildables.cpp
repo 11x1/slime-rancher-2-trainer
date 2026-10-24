@@ -38,8 +38,7 @@
 //   * Dressing a listed, loaded actor: booth = clutter hidden, a boombox lying face up on the desk (the
 //     deck), two small ones on the front corners, two big boomboxes on the floor beside it (emitters), a
 //     bench with the flower pillow and the game's slime attachment point behind it (largos allowed), E on
-//     the desk root; speaker = bench and boombox hidden, a stack of two boomboxes (the top one tilted by the
-//     variant) with one box collider, stacking allowed on top, an emitter; radio = the night light hidden,
+//     the desk root; speaker = bench and boombox hidden, a stack of two boomboxes with one box collider, stacking allowed on top, an emitter; radio = the night light hidden,
 //     a small boombox instead, upright and box-shaped, an emitter. Every clone is script-free except the
 //     pillow's attachment point. The boomboxes dance and show their notes only while they play.
 //   * Plain placed Boomboxes (not DJ Speakers) are left as they are but play the song too when switched
