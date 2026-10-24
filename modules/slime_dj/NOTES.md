@@ -23,6 +23,8 @@ are listed dimmed with the reason.
 | `emitters.cpp/.h` | the emitter registry behind `api.h` (module side: `Collect`, `Generation`, `SetPlaying`) |
 | `library.cpp/.h` | folder scan on a background thread, per-file cache (path + size + write time), ID3v2 reader |
 | `stream.cpp/.h` | one song being decoded on a background thread into 0.5 s chunks (bounded queue) |
+| `beat.cpp/.h` | beat analysis of the decoded PCM on the decoder thread (bass level + onsets per 10 ms) |
+| `walls.cpp/.h` | "Walls dance to the music": corral energy walls and Air Net pulse with the analysis |
 | `codecs.c/.h` | the only TU that compiles stb_vorbis, dr_mp3, dr_wav (CMake target `sr2_codecs`, C, `/W0`) behind a small streaming C API |
 | `ui/slime_dj_bridge.cpp/.h` | snapshot / request exchange with the overlay tab (same pattern as the sandbox) |
 
@@ -179,6 +181,75 @@ it if nothing plays). When a song ends: the queue's first; if the queue is empty
 on (default), a random playable song (not the one that just played); otherwise playback stops.
 Play with nothing loaded starts the same way. Three failed songs in a row stop playback.
 
+**Walls dance to the music (setting `dance_walls`, default off; `dance_intensity` 10-200 %).**
+User request: "make the plot futuristic walls wave based on beat from the speakers on custom music
+... same for the roof net if bought, i want to have a party with my slimes".
+
+*Analysis* (`beat.cpp`, no libraries, no game calls). The decoder thread feeds every decoded chunk
+(after the down-mix) into the stream's `BeatTrack`, so it runs seconds ahead of the play head and
+is ready long before the walls need it. Mono mix, Hann window of ~23 ms rounded to a power of two
+(1024 frames at 44.1/48 kHz), one radix-2 FFT per 10 ms hop. Per hop one 16-bit entry:
+- bass level: energy of the 35-160 Hz bins in dB against a peak that falls 2 dB/s, mapped over a
+  24 dB window to 0..1 (0 while the peak is under -60 dB);
+- onset: spectral flux (rise of `log1p(100 x amplitude)` per bin up to 3 kHz, bass bins x3) that
+  is a local maximum and above a running mean + 1.5 deviations (~0.5 s), at least 120 ms after the
+  previous one, not in the first 0.3 s; strength 0.3..1 from how far above the threshold.
+Memory 2 bytes per hop (7 KB per minute, capped at 6 hours). After a seek the track starts at the
+seek frame (`Reset(rate, startFrame)`), entries stay in song frames. Offline test (scratchpad
+harness, synthetic 120 BPM kick/snare/hat/pad track at 44.1 kHz): 39 of 39 kicks after the warm-up
+found at exactly 0.500 s spacing, level 0.8 on the kick decaying to 0 between; plain tones and the
+5.1 test WAV give no onsets.
+
+*Reading it* (`module.cpp` `TickDancer`, every frame): song frame = `base + playPos` minus 40 ms
+(`timeSamples` runs ahead of what is heard by about the output buffer); `Query(last, now)` gives
+the level at `now` and the strongest onset in between, so no beat is lost at low frame rates and
+none repeats while the play head stands still. Nothing is read while the song is paused (you, the
+pause menu, buffering) or past its end: the walls settle and are restored.
+
+*Which corrals* (`SyncDancer`, every box scan = 2 s, also right after the setting goes on): music
+box speakers (not emitters) that play the current clip, whose box is within the speaker's hearing
+range (Amplify included) of the main camera. Their `MusicBoxUpgrader` (from the box scan) is the
+plot root, which also carries `WallUpgrader` and `AirNetUpgrader` (prefab dump: `patchCorral` root
+components). At most 12 corrals.
+
+*What is animated* (corral prefab `patchCorral`, asset bundle dump):
+- `WallUpgrader.StandardWalls` = "Base Corral", `.UpgradeWalls` = "High Wall Corral"; the active
+  one is used. Under `Frame/techCorralPostNN` (4, turned 90 deg apart) `/empty_postBase` (the
+  corner) sits "corralField": one MeshRenderer, an L-shaped energy field covering half of the two
+  sides at that corner (bounds 4.9 x 3.2 x 4.9, y 0.17-3.39). High Walls add "corralField (1)" on
+  top (y 3.38). So 4 or 8 renderers, only those named `corralField*` (other renderers under the
+  walls root, posts, the net, the solar shield, are skipped and named in the log). Material
+  "CorralBarrier" (HDRP transparent shader graph): `_Intensity` 3, `_Color` white, `_EmissionColor`,
+  ripple / `_HitTime` / `_Health` props. The fields have no collider (the barriers are the
+  separate "corralBarrier" boxes, layer 29), so scaling them changes nothing in play.
+- `AirNetUpgrader.AirNets` = [Base Air Net (under Base Corral), High Air Net (under High Wall
+  Corral)]; the active one = the owned net for the current walls. "NetTrigger": MeshRenderer +
+  `AirNet` + BoxCollider on the same object, so the net is never moved or scaled. Material "AirNet"
+  (same shader family, `_Intensity` 1). `AirNet.Awake/Update` set `_Health` on its own material
+  instance (0x982840 loads `StringLiteral__Health`), `OnCollisionEnter` sets `_HitTime`; we touch
+  neither, so a hit or broken net still shows.
+- The barrier ripples (`CorralBarrierRippleCollision.SpawnRippleHere`) use
+  `Shader.SetGlobalVectorArray`, not the renderers.
+
+Per frame, per cached renderer: `MaterialPropertyBlock.Clear` + `Renderer.GetPropertyBlock(work)`
+(keeps anything the game put there) + `SetFloat(_Intensity)` + `SetColor(_Color)` +
+`SetPropertyBlock`, and for wall fields `Transform.set_localScale` (direct native calls, no
+searches; one shared work block). The look, with I = intensity, e = smoothed bass level (attack
+30 ms, release 150 ms), p = beat pulse (jumps to the onset strength, decays with 0.2 s), and a
+chase angle that turns a quarter round the corral per beat (smoothed 90 ms); w = how close a
+renderer is to the chase (cos^2 of its corner angle minus the chase, the upper field trailing by
+0.6 rad: a wave going round and up):
+- glow: `_Intensity` = base x (1 + I x (0.8 e + 2.0 p w));
+- colour: `_Color` = base mixed towards a colour wheel (hue +0.11 per beat, spread around the
+  corners) by min(1, 0.6 I) x (0.35 + 0.65 max(e, p w));
+- height (wall fields only): localScale.y x (1 + I x (0.04 e + 0.10 p w)).
+Cached per plot (GC handles for renderer, transform and a per-renderer snapshot block taken with
+`GetPropertyBlock` before the first change, plus the original localScale); rebuilt when the plot's
+active walls root or net changes (High Walls / Air Net bought or sold). Restore = `SetPropertyBlock
+(snapshot)` and the original localScale: when the song pauses (after the walls settled), stops or
+changes plot range, the setting goes off, the module is disabled. After a native fault the module
+stops for the session and leaves the walls as they are (handles leaked by design).
+
 ## Settings
 
 | key | default | |
@@ -188,6 +259,8 @@ Play with nothing loaded starts the same way. Three failed songs in a row stop p
 | `amplify` | off | each other speaker in range: +25 % volume and range, up to 2x |
 | `shuffle` | on | random songs when the queue is empty |
 | `mute_vanilla` | on | silence the music box's own tune while a song plays |
+| `dance_walls` | off | corral energy walls and Air Net pulse with the beat (corrals within hearing range) |
+| `dance_intensity` | 1.0 (100 %) | 10-200 %, how strongly they pulse, grow and change colour (shown while `dance_walls` is on) |
 
 ## Log lines
 
@@ -200,6 +273,11 @@ Play with nothing loaded starts the same way. Three failed songs in a row stop p
 - `slime_dj: N music box(es), M emitter(s) registered; speakers: B on boxes, E on emitters (K switched off)` (when a count changes)
 - `slime_dj: N speaker(s) had stopped (object switched off and on); rejoined in sync` (first 10)
 - `slime_dj: speaker N ms off the others, moved back in sync`
+- `slime_dj: walls dance at 'patchCorral…': N wall field(s) under '…', M net renderer(s) under '…'; wall _Intensity X
+  _Color (r, g, b), net _Intensity Y[ (other renderers skipped: …)]` (per corral built, first 24)
+- `slime_dj: walls dance at N corral(s)` (when the count changes), `slime_dj: walls dance stopped (setting off|no
+  song); walls restored`
+- `slime_dj: 'Walls dance to the music' unavailable (…)` (Setup; a class / method missing)
 
 ## Not verified in game yet
 
@@ -214,3 +292,8 @@ game. To check:
 - the hearing range default (60 m, linear) and Amplify;
 - the Music Box II second speaker playing (emitter registered by custom_upgrades plot_props);
 - seeking (Vorbis / MP3 / WAV) and that the speakers stay in sync after it.
+- walls dance: that `_Intensity` / `_Color` in a property block visibly change the CorralBarrier
+  and AirNet shaders (if the log shows the values but nothing glows, only the height bob is left;
+  an HDRP GPU Resident Drawer could also ignore property blocks), that the beat looks in time
+  (lag constant `kDanceLagSeconds` 40 ms), and that everything is back to normal after Stop /
+  Pause / setting off / leaving the ranch.
