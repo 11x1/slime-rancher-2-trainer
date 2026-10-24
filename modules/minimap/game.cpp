@@ -153,6 +153,7 @@ bool Resolve(Symbols& s, std::string& err, std::vector<std::string>& optionalMis
     s.playerMapMarker = c.Class(nsUiMap, "PlayerMapMarker", false);
     s.pmmArrow = c.Field(s.playerMapMarker, "_arrowRect", false);
     s.pmmRotOffset = c.Field(s.playerMapMarker, "_rotationOffset", false);
+    s.pmmBelow = c.Field(s.playerMapMarker, "_moveBelowMarkersTransform", false);
 
     s.sceneLoader = c.Class("MonomiPark.SlimeRancher.SceneManagement", "SceneLoader", false);
     s.sceneLoadInProgress = c.Bind(c.Method(s.sceneLoader, "get_IsSceneLoadInProgress", 0, false),

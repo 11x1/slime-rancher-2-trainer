@@ -81,9 +81,14 @@ SR2Mods.Minimap        RectTransform with anchor = pivot = (pos_x, 1 - pos_y) / 
     BackgroundOverlay  MapDefinition.MapBackgroundOverlay
     Rotator            z rotation for "rotate with player"
       Page             our copy of the page; local space == prefab page space
-        Art / fog / dynamic copies, Marker icons, Icon (pods / nodes / teleporter gadgets)
-  Arrow/PlayerArrow    Image, always centred (GTA style): the game's player-marker sprite pivoted on the
-                       sprite's own pivot, or the classic procedural arrow (setting arrow_style)
+        Art / fog / dynamic copies
+        PlayerCone     game marker only: the view cone (own nested Canvas), under every icon
+        Marker icons, Icon (pods / nodes / teleporter gadgets)
+  Arrow                always centred (GTA style), setting arrow_style:
+    PlayerArrow        classic: the procedural arrow
+    GameMarker         game marker: copy of the full map's PlayerMarker prefab (own nested Canvas)
+      Facing           = PlayerMapMarker._arrowRect, turns with the heading: FacingArrow
+      BeaIcon          upright
   Frame                procedural ring or a configured game sprite
   Level                TMP label, Grey Labyrinth only
 ```
@@ -110,9 +115,32 @@ How the minimap uses it:
 The arrow follows `PlayerMapMarker.Rotate` (0x7332A0): `z = -(eulerY + _rotationOffset)` (constants 57.2958 / 0.0174533 read from the binary), where the rotation is `PlayerDisplayOnMap.GetCurrentRotation()` (0x52D9F0) = `gameObject.transform.rotation` (identity while in a hidden cell).
 
 - The arrow never moves: the page moves (and in rotate mode turns) under it.
-- `arrowZ = rot - yaw + styleBase + arrow_rotation_offset`; styleBase = `-_rotationOffset` for the game marker, `+180` for the classic arrow (its texture points up, the game's marker sprite was observed 180 deg off), so the default offset 180 is right for both styles.
+- `arrowZ = rot - yaw - _rotationOffset` (game marker; `_rotationOffset` is 0 in 1.3.0) or `rot - yaw` (classic arrow). These are the fixed offsets the user confirmed with the old `arrow_rotation_offset` slider (0 for the game marker, 180 for the classic arrow on top of its old +180 base): both point like `PlayerMapMarker.Rotate`. The slider is gone; a saved value is ignored (logged once at startup: "setting arrow_rotation_offset (...) is no longer used"; core keeps the key in `sr2mods.json` like every unregistered key).
 - Rotate-with-player mode: the Rotator turns by `+yaw` (rot == yaw), so the arrow points up.
 - Icons are counter-rotated and counter-scaled, so they stay upright and do not grow with the page scale. Like the arrow, their screen size is proportional to the zoom, but with their own base: 8.5 % of the minimap times `clamp(zoom / 1.0, 0.6, 1.75)` (`IconZoomFactor()`, `kIconBaseZoom`), so at the default zoom 1x they keep their old fixed size (5.1 % at 0.5x, 14.9 % from 1.75x up). The first version reused the arrow factor `clamp(zoom / 2.5, 0.4, 1.6)`, which made them 40 % of their old size at the default zoom.
+
+## Player marker ("Game marker" style)
+
+The full map's player icon is the `MapMarkerPrefabMapping._playerMarkerPrefab` prefab (bundle `duplicateassetisolation_assets__54b00e46….bundle`, read with UnityPy, 1.3.0):
+
+```
+PlayerMarker  50x50, pivot (0.5, 0.45); PlayerMapMarker{_arrowRect = FacingFrame, _moveBelowMarkersTransform = Cone,
+              _rotationOffset = 0}, CanvasGroup 1, Animator "PlayerMarker"
+  FacingFrame             50x50, = _arrowRect (PlayerMapMarker.Rotate turns it)
+    Cone                  scale 0.7, CanvasGroup 1, Animator "PlayerMarkerCone"; reparented under the icon layer
+      Cone                Image fxPlayerMarkerCone, 100x100, pivot (0.5, 0), y -16
+    FacingArrow           Image framePlayerMarker, 54x62.75, pivot (0.5, 0.43)
+  BeaIcon                 Image player_face, 24x28, y +2, preserveAspect (upright)
+```
+
+The old code took the FIRST Image under `_arrowRect`, which is the cone, so the minimap showed only the view cone (that was the "observed 180 deg off" sprite). Now every visible Image of the prefab is copied (`LoadGameMarker`, once per page build while its sprites live): sprite, colour x CanvasGroup alphas, type, preserveAspect, rect corners via `TransformPoint`/`InverseTransformPoint` in `_arrowRect` space (parts that turn) or the root's space (upright parts), and the original pivot. Our copy:
+
+- `Arrow/GameMarker` (centred, scale = arrow px / 50, own nested Canvas): a `Facing` container at `_arrowRect`'s origin, turned to `arrowZ`, holding FacingArrow; BeaIcon upright after it (prefab order).
+- The cone (`_moveBelowMarkersTransform` subtree) goes into our page as `PlayerCone` (own nested Canvas), created in `FinishBuild` after the art and before every icon, so icons are drawn over it like in the full map (`PlayerMapMarker.SetBelowMarkerLayer`). Placed every frame at the player point + the facing origin (screen offset turned by -rot, divided by the page scale), rotation `arrowZ - rot`, scale `k / s`; each only set when it changes.
+- Animation, from the Animator clips (streamed clips decoded from the bundle; path hashes are CRC32 of the paths): the root controller loops `ChooseLoop` -> `MapMarkerPulse` (4 s: FacingArrow localScale.xy 1, 0.75, 1, 0.75, 1 at 0..4 s, per-segment cubics reproduced exactly) or, picked by a random `LoopChoice`, `MapMarkerPulse_Rare` (the same pulse plus a BeaIcon rotation wobble 30/-20/10/-4/1 deg around t = 1 s; NOT reproduced). The cone controller loops `MapMarkerPulse_Cone` (4 s: Cone y -16 -> -14 -> -16, Image alpha 1 -> 0.75 -> 1, smoothstep). Driven from the module clock every frame; the nested Canvases keep these per-frame changes from rebatching the page.
+- If the prefab has no visible image, the classic arrow is used (WARN). If its sprites are unloaded, the copy is dropped and read again at the next page build.
+- Log: `minimap: player marker from the game (N images, root 50 high, facing origin (x,y), prefab rotation offset 0): 'Cone' sprite 'fxPlayerMarkerCone' 70x70 at (...) turns, under the icons, pulses; ...`.
+- Page art using one of these sprites is skipped (backstop to the `MapMarkerBase` subtree skip).
 
 ## Object sources (no periodic scene scans)
 
@@ -352,7 +380,7 @@ R = required, Setup fails without it. O = optional, the feature degrades and the
 | `MapDirector.Marker` (nested class) | validates `Markers` dictionary values | O |
 | `MapMarkerBase` | non-filterable marker art (player / nav markers) is not copied | O |
 | `MapDirector._viewModel`, `MapViewModel._prefabMapping`, `MapPrefabMapping._entries` (`Map`, `Prefab`) | page prefab sources | O |
-| `MapMarkerPrefabMapping._playerMarkerPrefab`, `PlayerMapMarker._arrowRect/_rotationOffset` | arrow sprite + offset | O |
+| `MapMarkerPrefabMapping._playerMarkerPrefab`, `PlayerMapMarker._arrowRect/_rotationOffset/_moveBelowMarkersTransform` | game player marker (parts, turning part, offset, cone layer) | O |
 | `SceneLoader.get_IsSceneLoadInProgress` | no map queries during loads | O |
 | `HudUI` (`Awake` hook, `_debugText` font) | parent canvas | O |
 | `TreasurePod` (`Awake`/`OnDestroy` hooks, `get_CurrState`), `MapTreasurePodCounterDefinition`/`MapCounterDefinition.Icon` | pods | O |
@@ -395,8 +423,7 @@ All settings apply live.
 | `zoom` | float | 0.5–4; 1.0 ≈ 160 m |
 | `zoom_key` | key | `]`; ×2, wraps to 0.5 |
 | `orientation` | enum | north up / rotate with player |
-| `arrow_style` | enum | game marker / classic arrow (default: classic). Size = 13% of the minimap x clamp(zoom / 2.5, 0.4, 1.6), both styles. The icons scale in the same proportion but are at their old size at 1x: clamp(zoom, 0.6, 1.75) |
-| `arrow_rotation_offset` | float | 180; -180..180 (degrees added to the arrow heading) |
+| `arrow_style` | enum | game marker / classic arrow (default: classic). Size = 13% of the minimap x clamp(zoom / 2.5, 0.4, 1.6), both styles (game marker: its 50-unit root rect gets that height). The icons scale in the same proportion but are at their old size at 1x: clamp(zoom, 0.6, 1.75). See "Player marker" |
 | `show_altitude` | bool | OFF: the "Alt N m" label at the bottom of the minimap in the Grey Labyrinth (hidden, and its text re-set when shown again) |
 | `icon_teleporters` (Icons) | bool | on |
 | `icon_treasure_pods` (Icons) | bool | on |
