@@ -9,7 +9,7 @@
 //   Music Box II        corral       Music Box             2000    2x calming bonus
 //   Faster Hens I        coop         -                     2000    hens lay 1.5x as often
 //   Faster Hens II       coop         Faster Hens I         4000    hens lay 2x as often
-//   Sprinkler II         garden       -                     2000    crops grow 1.5x as fast
+//   Sprinkler II         garden       Sprinkler             2000    crops grow 1.5x as fast
 //   Sprinkler III        garden       Sprinkler II          4000    crops grow 2x as fast
 //   (save ids garden_growth_1 / _2: the tiers were called Fast Growth I / II until round 8)
 //   Ash Booster          incinerator  Ash Trough            1500    2x ash per incinerated food
@@ -41,10 +41,9 @@
 //
 //   Each chain has ONE menu card (Shown): the first tier not owned yet, or the last one once
 //   all are owned (greyed, checkmark). Faster Hens I -> II and Sprinkler II -> III share a
-//   card; a tier on a vanilla upgrade (Music Box II, Ash Booster) takes over that upgrade's
-//   card once it is owned (the vanilla item leaves the list while the tier card stands at its
-//   index, and comes back for every other plot / when the module stops). Sprinkler II / III is listed
-//   right after the Sprinkler (`after`). A card that shows a tier not owned yet gets Buy (the
+//   card; a tier on a vanilla upgrade (Music Box II, Sprinkler II / III, Ash Booster) takes over that
+//   upgrade's card once it is owned (the vanilla item leaves the list while the tier card stands at its
+//   index, and comes back for every other plot / when the module stops). A card that shows a tier not owned yet gets Buy (the
 //   vanilla Purchase button) and, next to it, sell_upgrades' Sell button for the tier below
 //   (api.h ChainSellTarget). Prerequisites: custom `needs` or a vanilla upgrade via the
 //   original LandPlot.HasUpgrade. Selling is refused while a higher tier - or, for a vanilla
@@ -366,12 +365,14 @@ const UpgradeDef kDefs[] = {
     {COOP_HENS_2, "coop_hens_2", kPlotCoop, COOP_HENS_1, 4000, F(Family::kCoop), 2.0f, kUpgDeluxeCoop, 0,
      "Faster Hens II", "The coziest nests around: hens lay eggs twice as fast. Replaces Faster Hens I.",
      "Buy Faster Hens II for this coop?"},
-    {GARDEN_GROWTH_1, "garden_growth_1", kPlotGarden, 0, 2000, F(Family::kGarden), 1.5f, kUpgSprinkler, kUpgSprinkler,
+    // Tiers of the vanilla Sprinkler card (round 8: "not extending sprinkler I like I wanted to"): needs the
+    // Sprinkler, so ChainVanillaRoot puts the whole chain on its card (Sprinkler -> II -> III).
+    {GARDEN_GROWTH_1, "garden_growth_1", kPlotGarden, kUpgSprinkler, 2000, F(Family::kGarden), 1.5f, kUpgSprinkler, 0,
      "Sprinkler II",
      "Far, Far Range ranchers swear by a third sprinkler head. Well-watered crops grow 1.5x as fast!",
      "Buy Sprinkler II for this garden?"},
     {GARDEN_GROWTH_2, "garden_growth_2", kPlotGarden, GARDEN_GROWTH_1, 4000, F(Family::kGarden), 2.0f, kUpgSprinkler,
-     kUpgSprinkler, "Sprinkler III",
+     0, "Sprinkler III",
      "A fourth head soaks every last row. Ogden would approve: crops grow twice as fast! Replaces Sprinkler II.",
      "Buy Sprinkler III for this garden?"},
     {INCIN_ASH_BOOST, "incinerator_ash_boost", kPlotIncinerator, kUpgAshTrough, 1500, F(Family::kAsh), 2.0f,
@@ -522,6 +523,7 @@ struct MenuInjection {
     std::vector<Injected> items;
     std::vector<HiddenVanilla> hidden;
     std::vector<Il2CppObject*> storageTitles;  // vanilla "Additional Storage" _title objects we relabel
+    std::string storageReport;                 // last logged Additional Storage card state (logged on change)
     bool failed = false;               // clone/verification failed: never retried for this config
 };
 
@@ -605,7 +607,9 @@ public:
     std::string CanSellCustom(Il2CppObject* plot, int32_t upg, std::string* brief);
     bool RemoveCustom(Il2CppObject* plot, int32_t upg, std::string& notes);
     std::string VanillaDependentOf(Il2CppObject* plot, int32_t vanillaUpg);
-    bool ChainSellTargetOf(Il2CppObject* plot, Il2CppObject* item, int32_t& upgrade, Il2CppObject*& priceItem);
+    bool ChainSellTargetOf(Il2CppObject* plot, Il2CppObject* item, int32_t& upgrade, Il2CppObject*& priceItem,
+                           std::string* why = nullptr);
+    Il2CppObject* HiddenMenuItemOf(size_t fieldOffset, Il2CppObject* value, Il2CppObject*& standIn);
     float TierMultiplier(Il2CppObject* obj, int family);
     std::string PlotValueOf(Il2CppObject* plot, const std::string& key);
     bool SetPlotValueOf(Il2CppObject* plot, const std::string& key, const std::string& value);
@@ -662,6 +666,7 @@ private:
     void RestoreVanilla(MenuInjection& inj);
     void MergeStorageCards(Il2CppObject* plot, MenuInjection& inj, const std::vector<std::pair<Il2CppObject*, int32_t>>& cards);
     void RefreshAvailability(Il2CppObject* plot, const MenuInjection& inj);
+    void ReportStorageCards(Il2CppObject* plot, MenuInjection& inj);
     bool Shown(Il2CppObject* plot, const UpgradeDef& d);
     Il2CppObject* MarketIcon();
     void SetTexts(const Injected& in, const std::string& title, const std::string& desc, const std::string& prompt);
@@ -1587,6 +1592,10 @@ bool CustomUpgrades::Visible(Il2CppObject* plot, const UpgradeDef& d) {
     if (IsSiloCapacity(d) && !capacityOk_) return false;        // nothing could apply the capacity
     if (!d.needs) return true;
     if (!custom_upgrades::IsCustomUpgrade(d.needs)) return VanillaOwned(plot, d.needs);  // vanilla prerequisite
+    // A higher tier of a chain on a vanilla card needs that vanilla upgrade too: a save that owns Sprinkler II
+    // without the Sprinkler (bought before round 9, when Sprinkler II needed nothing) keeps the vanilla Sprinkler
+    // card buyable instead of covering it with Sprinkler III.
+    if (const int32_t root = ChainVanillaRoot(d); root && !VanillaOwned(plot, root)) return false;
     const UpgradeDef* r = FindDef(d.needs);
     return r && OwnsKey(plot, *r);
 }
@@ -2060,6 +2069,35 @@ void CustomUpgrades::AfterMenuUpdate(Il2CppObject* root) {
         if (p->config == config) inj = p.get();
     if (!inj || inj->failed) return;
     RegisterTexts(plot, *inj);  // again: the original may have changed what the pre hook read
+    if (PlotType(plot) == kPlotSilo) ReportStorageCards(plot, *inj);
+}
+
+// Round 8: "silo additional storage is separate upgrades again" (no code path found that undoes the merge).
+// After the game built / refreshed the menu: which Additional Storage cards are in the list now, logged when
+// it changes. More than one means something put them back after BeforeMenuUpdate (logged as a warning).
+void CustomUpgrades::ReportStorageCards(Il2CppObject* plot, MenuInjection& inj) {
+    if (!inj.list) return;
+    std::string listed;
+    int count = 0;
+    for (size_t i = 0, n = unity::ListCount(inj.list); i < n && i < 64; ++i) {
+        auto* item = static_cast<Il2CppObject*>(unity::ListAt(inj.list, i));
+        if (!IsA(item, upgItemClass_) || !unity::IsAlive(item)) continue;
+        const int32_t u = unity::Field<int32_t>(item, offItemUpgrade_);
+        const auto at = std::find(std::begin(kUpgStorageSections), std::end(kUpgStorageSections), u);
+        if (at == std::end(kUpgStorageSections)) continue;
+        ++count;
+        listed += std::format("{}STORAGE{} at {}{}", listed.empty() ? "" : ", ", 2 + (at - std::begin(kUpgStorageSections)), i,
+                              VanillaOwned(plot, u) ? " (owned)" : "");
+    }
+    std::string report = std::format("{} card(s): {}; {} vanilla card(s) out of the list", count,
+                                     listed.empty() ? "none" : listed, inj.hidden.size());
+    if (report == inj.storageReport) return;
+    inj.storageReport = report;
+    if (count > 1) {
+        SR2_WARN("[{}] silo menu: Additional Storage NOT merged after the game's update - {}", kModule, report);
+    } else {
+        SR2_INFO("[{}] silo menu: Additional Storage {}", kModule, report);
+    }
 }
 
 void CustomUpgrades::Cleanup(const char* why) {
@@ -2913,37 +2951,60 @@ std::string CustomUpgrades::VanillaDependentOf(Il2CppObject* plot, int32_t vanil
 }
 
 bool CustomUpgrades::ChainSellTargetOf(Il2CppObject* plot, Il2CppObject* item, int32_t& upgrade,
-                                       Il2CppObject*& priceItem) {
-    if (!main_thread::IsMainThread() || !item || !unity::IsAlive(plot) || !IsA(plot, plotClass_)) return false;
+                                       Il2CppObject*& priceItem, std::string* why) {
+    auto no = [why](std::string r) {
+        if (why) *why = std::move(r);
+        return false;
+    };
+    if (!main_thread::IsMainThread() || !item || !unity::IsAlive(plot) || !IsA(plot, plotClass_)) return no("no plot");
     for (auto& inj : injections_) {
         if (inj->failed) continue;
         for (const Injected& in : inj->items) {
             if (in.item != item) continue;
             const UpgradeDef& d = *in.def;
             // Only the card of a chain showing a tier that is not owned yet; an owned card sells itself.
-            if (!in.inList || d.family == kNoFamily || !d.needs || PlotType(plot) != d.plotType || OwnsKey(plot, d))
-                return false;
+            if (!in.inList) return no(std::format("{}: card not in the list", d.title));
+            if (d.family == kNoFamily || !d.needs) return no(std::format("{}: not a tier above another", d.title));
+            if (PlotType(plot) != d.plotType) return no(std::format("{}: other plot type", d.title));
+            if (OwnsKey(plot, d)) return no(std::format("{}: owned (sells itself)", d.title));
             if (custom_upgrades::IsCustomUpgrade(d.needs)) {
                 const UpgradeDef* r = FindDef(d.needs);
-                if (!r || r->family != d.family || !OwnsKey(plot, *r)) return false;
+                if (!r || r->family != d.family || !OwnsKey(plot, *r))
+                    return no(std::format("{}: the tier below is not owned", d.title));
                 for (const Injected& o : inj->items)
                     if (o.def == r && unity::IsAlive(o.item)) {
                         upgrade = r->id;
                         priceItem = o.item;
                         return true;
                     }
-                return false;
+                return no(std::format("{}: no menu item for {}", d.title, r->title));
             }
-            // Chain on a vanilla upgrade: only while this card stands in for the vanilla one.
-            const bool standsIn = std::any_of(inj->hidden.begin(), inj->hidden.end(),
-                                              [&](const HiddenVanilla& h) { return h.item == in.base; });
-            if (!in.base || !standsIn || !unity::IsAlive(in.base) || !VanillaOwned(plot, d.needs)) return false;
+            // Chain on a vanilla upgrade (Music Box, Sprinkler, Ash Trough): the vanilla upgrade below, priced by
+            // its own menu item. The card stands at the vanilla card's place whenever it is shown (Shown needs
+            // the vanilla upgrade), so ownership is what counts; the item is the one BuildInjection pinned.
+            if (!in.base || !unity::IsAlive(in.base))
+                return no(std::format("{}: vanilla menu item of upgrade {} not found", d.title, d.needs));
+            if (!VanillaOwned(plot, d.needs)) return no(std::format("{}: vanilla upgrade {} not owned", d.title, d.needs));
             upgrade = d.needs;
             priceItem = in.base;
             return true;
         }
     }
-    return false;
+    return no("not a custom card");
+}
+
+Il2CppObject* CustomUpgrades::HiddenMenuItemOf(size_t fieldOffset, Il2CppObject* value, Il2CppObject*& standIn) {
+    standIn = nullptr;
+    for (auto& inj : injections_) {
+        if (inj->failed) continue;
+        for (const HiddenVanilla& h : inj->hidden) {
+            if (!h.item || !unity::IsAlive(h.item) || unity::Field<Il2CppObject*>(h.item, fieldOffset) != value) continue;
+            for (const Injected& in : inj->items)
+                if (in.base == h.item && in.inList) standIn = in.item;
+            return h.item;
+        }
+    }
+    return nullptr;
 }
 
 // ---------------------------------------------------------------- per-save values --
@@ -3486,13 +3547,26 @@ std::string VanillaDependent(Il2CppObject* landPlot, int32_t vanillaUpgrade) {
     return r;
 }
 
-bool ChainSellTarget(Il2CppObject* landPlot, Il2CppObject* item, int32_t& upgrade, Il2CppObject*& priceItem) {
+bool ChainSellTarget(Il2CppObject* landPlot, Il2CppObject* item, int32_t& upgrade, Il2CppObject*& priceItem,
+                     std::string* why) {
     upgrade = 0;
     priceItem = nullptr;
-    if (!Active() || !main_thread::IsMainThread()) return false;
+    if (why) why->clear();
+    if (!Active() || !main_thread::IsMainThread()) {
+        if (why) *why = "custom upgrades not active";
+        return false;
+    }
     bool ok = false;
-    g_hasGuard.Run([&] { ok = g_self->ChainSellTargetOf(landPlot, item, upgrade, priceItem); });
+    g_hasGuard.Run([&] { ok = g_self->ChainSellTargetOf(landPlot, item, upgrade, priceItem, why); });
     return ok;
+}
+
+Il2CppObject* HiddenMenuItem(size_t fieldOffset, Il2CppObject* value, Il2CppObject*& standIn) {
+    standIn = nullptr;
+    if (!Active() || !main_thread::IsMainThread() || !value || fieldOffset < 2 * sizeof(void*)) return nullptr;
+    Il2CppObject* r = nullptr;
+    g_hasGuard.Run([&] { r = g_self->HiddenMenuItemOf(fieldOffset, value, standIn); });
+    return r;
 }
 
 float Multiplier(Il2CppObject* plotOrComponent, Family family) {

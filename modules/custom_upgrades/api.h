@@ -11,6 +11,7 @@
 // All functions are safe to call when the module is disabled / faulted /
 // never set up: they then report "not active" / "can't sell" / multiplier 1.
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -53,7 +54,15 @@ std::string VanillaDependent(Il2CppObject* landPlot, int32_t vanillaUpgrade);
 // that shows a tier NOT owned yet: the owned tier below it, which the card's Sell button sells
 // (a custom id, or the vanilla upgrade the chain starts on), and the menu item whose price the
 // refund is based on. False for every other item (an owned item sells itself).
-bool ChainSellTarget(Il2CppObject* landPlot, Il2CppObject* item, int32_t& upgrade, Il2CppObject*& priceItem);
+// `why` (optional) gets the reason when there is no target (for the log).
+bool ChainSellTarget(Il2CppObject* landPlot, Il2CppObject* item, int32_t& upgrade, Il2CppObject*& priceItem,
+                     std::string* why = nullptr);
+
+// Main thread. Vanilla plot menu items we took out of their list (a tier card stands in for them, or a
+// merged Additional Storage card): the one whose reference field at `fieldOffset` is `value` (pointer
+// compare, e.g. its _infoButtonLabel), with the card that stands in its place now (`standIn`, may be
+// null for a merged storage card). Null if none.
+Il2CppObject* HiddenMenuItem(size_t fieldOffset, Il2CppObject* value, Il2CppObject*& standIn);
 
 // Purchasable per-plot tiers (plot_upgrades applies the effects).
 enum class Family : int {
