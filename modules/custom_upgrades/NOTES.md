@@ -535,6 +535,20 @@ dialog.
   are unknown. Log once: `silo sell button on plot '...' tinted gold (cap): N colour(s) on <renderer> (k),
   ...` - if it says `no cap found` or 0 colours, the renderer names / shader need a look. A later palette
   change leaves our instanced materials alone (they are in no palette map).
+- **Gold button, round 8** (test: "button is NOT gold", log had `tinted gold (cap): 24 colour(s) on
+  button_button (24)`). The cap's material is the palette shader `RanchTech01` (24 slots `_Color00` ..
+  `_Color72` picked per vertex by a UV2 mask; corral prefab via UnityPy), so the 24 writes were the right
+  ones; ApplyPalette / ColorPaletteApplicator (IDA: SetupForTarget only maps shared materials, keeps unknown
+  ones; Apply only recolours mapped materials) cannot undo them. No StaticColorizer on the button. The
+  cause was not found for sure; two weak spots are fixed: the tint ran once per button, keyed by the raw
+  GameObject pointer (no GC handle, so a rebuilt button could look "already tinted"), and nothing would
+  notice a later material swap or a MaterialPropertyBlock (wins over material values; StaticColorizer /
+  ColorPalette.SetColors(Renderer) write them). Now the instanced materials are named `sr2mods_gold`, every
+  tick checks the cap's shared material name and tints again when it is not ours (log `materials were
+  replaced (was '...') - tinted again`), the same colours also go into a MaterialPropertyBlock on each
+  tinted renderer, and the tint is stronger: cap 85 %, base (`button_base`) 35 % (no cap: everything
+  40 %). First log line now: `tinted gold (cap + base): N colour(s) on button_button (24 at 85 %),
+  button_base (.. at 35 %); property block on K renderer(s)`.
 - Log: `silo receipt ready`, `sell all (plot '...'): receipt shown, N plort(s) in T type(s) for V`,
   `receipt cancelled, nothing sold`, `receipt changed before the sale (...) - refreshed`, then the
   usual `sell all (receipt, plot '...'): sold ...`. Without the dialog parts (setup failed) the button
