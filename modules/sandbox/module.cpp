@@ -1141,6 +1141,11 @@ void Sandbox::EnsureRelations() {
             for (uintptr_t p : r.plorts) (*rel)[p].plortOf.push_back(it.id);
         }
     }
+    // Slime -> the largos it is a base slime of (the context menu's "Spawn: <slime> <other> Largo").
+    for (const bridge::Item& it : *spawnables_)
+        if (it.kind == bridge::Kind::Largo)
+            for (uintptr_t b : {it.base, it.base2})
+                if (b) (*rel)[b].largos.push_back(it.id);
     SR2_INFO("[{}] slime diets: {} related item(s)", kModule, rel->size());
     relations_ = std::move(rel);
 }
@@ -1421,7 +1426,9 @@ bool Sandbox::EnsureSpawnables() {
             std::vector<std::string> names;
             for (size_t i = 0, n = unity::ArrayLength(bases); i < n && names.size() < 2; ++i) {
                 auto* b = static_cast<Il2CppObject*>(unity::ArrayAt(bases, i));
-                if (b && b != o && IsA(b, slimeDefClass_) && unity::IsAlive(b)) names.push_back(ItemName(b));
+                if (!b || b == o || !IsA(b, slimeDefClass_) || !unity::IsAlive(b)) continue;
+                names.push_back(ItemName(b));
+                (names.size() == 1 ? item.base : item.base2) = reinterpret_cast<uintptr_t>(b);
             }
             std::sort(names.begin(), names.end());
             if (!names.empty()) item.family = names[0];

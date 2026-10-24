@@ -51,6 +51,7 @@ struct Item {
     bool tarr = false;      // spawn list: in GameModel.tarrTypeGroup (grayed out while Tarrs are off)
     std::string family;     // largo: the base slime it is listed under (the alphabetically first of its two)
     std::string family2;    // largo: its other base slime (sort key within the family)
+    uintptr_t base = 0, base2 = 0;  // largo: its two base slimes (SlimeDefinition.BaseSlimes, ids as above)
 };
 
 // How items relate through slime diets (SlimeDefinition.Diet), by item id. Ids
@@ -60,6 +61,7 @@ struct Relation {
     std::vector<uintptr_t> plorts;       // slime: what it produces (SlimeDiet.ProduceIdents)
     std::vector<uintptr_t> favouriteOf;  // food: slimes that have it as a favourite (base slimes first)
     std::vector<uintptr_t> plortOf;      // plort: slimes that produce it (base slimes first)
+    std::vector<uintptr_t> largos;       // slime: the largos it is a base slime of (Item::base / base2)
 };
 using Relations = std::unordered_map<uintptr_t, Relation>;
 

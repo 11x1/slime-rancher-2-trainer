@@ -15,6 +15,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/build_info.h"
@@ -1728,10 +1729,13 @@ void StowItem(int sel, uintptr_t id, int amount, bool replace) {
     sbx::Request(a);
 }
 
-// Right-click menu for an item (picker tiles, vacpack slots, spawner tiles): "Give slime /
-// food / plort" from the diets, done the grid's way (vacpack: into a slot that holds it or an
-// empty one, the slot's maximum, nothing is replaced; spawner: spawn the current count in front
-// of you). Largos are not listed directly: one "Largos" row opens them in a submenu. That is
+// Right-click menu for an item (picker tiles, vacpack slots, spawner tiles): "Give: X" (vacpack)
+// or "Spawn: X" (spawner) for the related slimes, foods and plorts from the diets, done the grid's
+// way (vacpack: into a slot that holds it or an empty one, the slot's maximum, nothing is replaced;
+// spawner: spawn the current count in front of you). Largos (of a slime, of a plort, or loving a
+// food) are always spawned with the spawner's count, since the vacpack can't hold them, and read
+// "Spawn: <this item's slime> <other> Largo". They are not listed directly: one "Largos" row opens
+// them in a submenu. That is
 // ImGui's BeginMenu, so the first menu stays open while the submenu is used, and its safe
 // triangle (from the cursor to the submenu's near edge) keeps the submenu open while the mouse
 // moves diagonally into it across the other rows.
@@ -1753,12 +1757,20 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                 ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.soft), "%s", self->name.c_str());
             }
             struct Give {
-                const char* verb;
+                std::string label;
                 const sbx::Item* it;
                 bool can;
+                bool spawn;        // spawned in front of the player (largos always: the vacpack can't hold them)
+                std::string sort;  // largos: the other slime's short name
             };
             std::vector<Give> gives, largos;
-            auto collect = [&](const char* verb, uintptr_t id) {
+            auto spawnable = [&](uintptr_t id) -> const sbx::Item* {
+                if (s.spawnables)
+                    for (const sbx::Item& c : *s.spawnables)
+                        if (c.id == id) return &c;
+                return nullptr;
+            };
+            auto collect = [&](uintptr_t id) {
                 // Vacpack: it must be in the vacpack list with room in a slot; spawner: in the spawn list.
                 const sbx::Item* it = nullptr;
                 bool can = false;
@@ -1769,30 +1781,67 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                             can = HasRoomFor(s, c);
                             break;
                         }
-                } else if (!vac && s.spawnables) {
-                    for (const sbx::Item& c : *s.spawnables)
-                        if (c.id == id) {
-                            it = &c;
-                            can = !(c.tarr && s.tarrsOff);
-                            break;
-                        }
+                } else if (!vac) {
+                    if ((it = spawnable(id))) can = !(it->tarr && s.tarrsOff);
                 }
                 if (!it) it = FindItem(s, id);  // known from the other list: shown grayed out
-                if (!it) return;
-                (it->kind == sbx::Kind::Largo ? largos : gives).push_back({verb, it, can});
+                if (!it || it->kind == sbx::Kind::Largo) return;
+                for (const Give& g : gives)
+                    if (g.it == it) return;
+                gives.push_back({std::format("{}: {}", vac ? "Give" : "Spawn", it->name), it, can, !vac, {}});
+            };
+            // Largos are always spawned (they can't go in the vacpack), labelled "Spawn: <this item's base
+            // slime> <other> Largo" whatever order the game's own name has, sorted by the other slime.
+            auto shortName = [&](uintptr_t id, const std::string& fallback) {
+                const sbx::Item* b = id ? FindItem(s, id) : nullptr;
+                std::string n = b ? b->name : fallback;
+                constexpr std::string_view kSuffix = " Slime";
+                if (n.size() > kSuffix.size() && n.ends_with(kSuffix)) n.resize(n.size() - kSuffix.size());
+                return n;
+            };
+            uintptr_t baseOf = 0;  // the hovered item's base slime: the slime itself, or the slime a plort comes from
+            if (self->kind == sbx::Kind::Slime) baseOf = self->id;
+            else if (self->kind == sbx::Kind::Plort && r)
+                for (uintptr_t id : r->plortOf)
+                    if (const sbx::Item* m = FindItem(s, id); m && m->kind == sbx::Kind::Slime) {
+                        baseOf = id;
+                        break;
+                    }
+            auto collectLargo = [&](uintptr_t id) {
+                const sbx::Item* it = spawnable(id);
+                const bool can = it && !(it->tarr && s.tarrsOff);
+                if (!it) it = FindItem(s, id);
+                if (!it || it->kind != sbx::Kind::Largo) return;
+                for (const Give& g : largos)
+                    if (g.it == it) return;
+                std::string first, other;
+                if (baseOf && (it->base == baseOf || it->base2 == baseOf)) {
+                    first = shortName(baseOf, {});
+                    other = it->base == baseOf ? shortName(it->base2, it->family2) : shortName(it->base, it->family);
+                } else {
+                    first = shortName(0, it->family);
+                    other = shortName(0, it->family2);
+                }
+                std::string label = first.empty() || other.empty() ? "Spawn: " + it->name
+                                                                   : std::format("Spawn: {} {} Largo", first, other);
+                largos.push_back({std::move(label), it, can, true, other.empty() ? it->name : other});
             };
             if (r) {
-                for (uintptr_t id : r->favouriteOf) collect("Give slime", id);
-                for (uintptr_t id : r->favourites) collect("Give food", id);
-                for (uintptr_t id : r->plorts) collect("Give plort", id);
-                for (uintptr_t id : r->plortOf) collect("Give slime", id);
+                for (uintptr_t id : r->favouriteOf) collect(id);
+                for (uintptr_t id : r->favourites) collect(id);
+                for (uintptr_t id : r->plorts) collect(id);
+                for (uintptr_t id : r->plortOf) collect(id);
+                for (uintptr_t id : r->largos) collectLargo(id);
+                for (uintptr_t id : r->plortOf) collectLargo(id);
+                for (uintptr_t id : r->favouriteOf) collectLargo(id);
             }
-            const float e = U(22), rowW = U(240), fs = theme::kSmallSize + 0.5f;
+            std::stable_sort(largos.begin(), largos.end(), [](const Give& a, const Give& b) { return a.sort < b.sort; });
+            const float e = U(22), rowW = U(250), fs = theme::kSmallSize + 0.5f;
             int row = 0;
             auto entry = [&](const Give& g) {
                 ImGui::PushID(++row);
                 const ImVec2 p = ImGui::GetCursorScreenPos();
-                const std::string label = std::format("{}: {}", g.verb, g.it->name);
+                const std::string& label = g.label;
                 ImGui::BeginDisabled(!g.can);
                 const bool hit = ImGui::Selectable("##give", false, 0, ImVec2(rowW, e));
                 ImGui::EndDisabled();
@@ -1801,13 +1850,12 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                 const ImVec2 ts = TextSize(theme::Body(), fs, label.c_str());
                 Text(dl, theme::Body(), fs, ImVec2(p.x + e + U(8), p.y + (e - ts.y) * 0.5f), g.can ? P.text : P.dim, label.c_str());
                 if (!g.can && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    Tooltip(vac ? "No unlocked vacpack slot holds this or is empty. Empty a slot first." : "Not available here.");
+                    Tooltip(g.it->tarr && s.tarrsOff ? "Tarrs are disabled in this save's game settings."
+                            : g.spawn        ? "Not in the spawn list."
+                                             : "No unlocked vacpack slot holds this or is empty. Empty a slot first.");
                 if (hit && g.can) {
-                    if (vac) {
-                        StowItem(g_sbxSlot, g.it->id, 0, false);
-                    } else {
-                        SbxRequest(sbx::Op::Spawn, g_spawnCount, -1, g.it->id);
-                    }
+                    if (g.spawn) SbxRequest(sbx::Op::Spawn, g_spawnCount, -1, g.it->id);
+                    else StowItem(g_sbxSlot, g.it->id, 0, false);
                 }
                 ImGui::PopID();
             };
