@@ -270,18 +270,8 @@ void UpgradesTab(const Helpers& h, const ub::State& st) {
         const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem | ImGuiHoveredFlags_AllowWhenOverlappedByItem);
         if (pressed) openMenu = u.id;
         WheelLevels(u);
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort) && !ImGui::IsPopupOpen(kUpgradeCtx)) {
-            // The item tooltips' look: name, tag, the tier in its colour, keycaps for the controls.
-            Tip tip;
-            tip.name = u.name;
-            tip.tag = "Upgrade";
-            tip.tagCol = h.upgradeAccent;
-            const bool custom = u.vanillaLevels > 0 && level >= u.vanillaLevels;
-            tip.lines.push_back({TierText(u, level), custom ? P.warn : level >= 0 ? P.ok : P.dim});
-            if (u.discoverable && !u.discovered) tip.lines.push_back({"Hidden in the Fabricator until found.", P.dim});
-            tip.keys = {{"Shift+Wheel", "±1 level"}, {"Ctrl+Wheel", "max / not bought"}, {"RMB", "more"}};
-            h.tip(tip);
-        }
+        // No tooltip on the entry (round 8 feedback: name and tier are on it; the controls are in the
+        // right-click menu).
         dl->AddRectFilled(a, b, hovered ? P.frameHover : P.frame, U(8));
         // Icon tile, dimmed while not bought.
         item_grid::Tile t;
@@ -299,16 +289,27 @@ void UpgradesTab(const Helpers& h, const ub::State& st) {
         Text(dl, theme::kSmallSize, ImVec2(tx, a.y + U(25)), level < 0 ? P.dim : P.soft, tier.c_str());
         dl->PopClipRect();
         Circles(dl, ImVec2(tx, b.y - U(15)), std::max(U(40), textW), u, level);
-        // - / +
+        // - / +, the glyphs drawn as lines in the button's centre (the font's '-' / '+' sit above the
+        // middle of a square button).
         const float by = a.y + (eh - btn) * 0.5f;
+        auto glyph = [&](bool plus) {
+            const ImVec2 c((ImGui::GetItemRectMin().x + ImGui::GetItemRectMax().x) * 0.5f,
+                           (ImGui::GetItemRectMin().y + ImGui::GetItemRectMax().y) * 0.5f);
+            const float half = std::round(btn * 0.2f), th = std::max(1.0f, std::round(U(1.6f)));
+            const ImU32 col = ImGui::GetColorU32(ImGuiCol_Text);  // includes the disabled alpha
+            dl->AddRectFilled(ImVec2(c.x - half, c.y - th * 0.5f), ImVec2(c.x + half, c.y + th * 0.5f), col);
+            if (plus) dl->AddRectFilled(ImVec2(c.x - th * 0.5f, c.y - half), ImVec2(c.x + th * 0.5f, c.y + half), col);
+        };
         ImGui::SetCursorScreenPos(ImVec2(b.x - pad - 2 * btn - U(4), by));
         ImGui::BeginDisabled(level < 0);
-        if (ImGui::Button("-##dn", ImVec2(btn, btn))) RequestLevel(u, level - 1);
+        if (ImGui::Button("##dn", ImVec2(btn, btn))) RequestLevel(u, level - 1);
+        glyph(false);
         ImGui::EndDisabled();
         HoverTip(h, level == 0 ? "Back to not bought." : "One level down.");
         ImGui::SameLine(0, U(4));
         ImGui::BeginDisabled(level >= u.levels - 1);
-        if (ImGui::Button("+##up", ImVec2(btn, btn))) RequestLevel(u, level + 1);
+        if (ImGui::Button("##up", ImVec2(btn, btn))) RequestLevel(u, level + 1);
+        glyph(true);
         ImGui::EndDisabled();
         HoverTip(h, "One level up, free.");
         ImGui::PopID();
@@ -372,18 +373,8 @@ void BlueprintTab(const Helpers& h, const sbx::Snapshot& s, int cat, const std::
         g_ctxCategory = cat;
         ImGui::OpenPopup(kBlueprintCtx);
     }
-    if (r.hovered >= 0 && !ImGui::IsPopupOpen(kBlueprintCtx)) {
-        // Name, the category as the tag, owned count; the state shows on the tile (faded = locked) and in
-        // what the left click does.
-        const sbx::Recipe* rec = list[static_cast<size_t>(r.hovered)];
-        Tip tip;
-        tip.name = rec->name;
-        tip.tag = title;
-        tip.tagCol = h.gadgetAccent;
-        if (rec->owned > 0) tip.lines.push_back({std::format("{} in your inventory", rec->owned), 0});
-        tip.keys = {{"LMB", Unlocked(*rec) ? "lock blueprint" : "unlock blueprint"}, {"RMB", "more"}};
-        h.tip(tip);
-    }
+    // Only the name (the tiles are icons); click locks / unlocks, the faded tile shows the state.
+    if (r.hovered >= 0 && !ImGui::IsPopupOpen(kBlueprintCtx)) h.tooltip(list[static_cast<size_t>(r.hovered)]->name);
     Popup(h, kBlueprintCtx, [&] {
         const sbx::Recipe* rec = nullptr;
         for (const sbx::Recipe* x : list)
@@ -467,17 +458,16 @@ void ModTab(const Helpers& h, const ub::State& st) {
         ImGui::OpenPopup(kModCtx);
     }
     if (r.hovered >= 0 && !ImGui::IsPopupOpen(kModCtx)) {
-        // The item tooltips' look: name, "Mod" tag, the state in its colour, what unlocks it, keycaps.
+        // The item tooltips' look: name, "Mod" tag, the state in its colour, what unlocks it.
         const ub::ModBlueprint& m = st.mods[static_cast<size_t>(r.hovered)];
         const Palette& P = theme::Colors();
         Tip tip;
         tip.name = m.name;
-        tip.tag = "Added by the mod";
+        tip.tag = "Mod";
         tip.tagCol = h.gadgetAccent;
         tip.lines.push_back({ModState(m), ModUnlocked(m) ? P.ok : P.dim});
         tip.lines.push_back({m.hint, 0});
         if (m.owned > 0) tip.lines.push_back({std::format("{} unplaced", m.owned), 0});
-        tip.keys = {{"LMB", ModUnlocked(m) ? "lock" : "unlock"}, {"RMB", "more"}};
         h.tip(tip);
     }
     Popup(h, kModCtx, [&] {
