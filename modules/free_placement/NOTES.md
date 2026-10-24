@@ -42,6 +42,26 @@ All in `MonomiPark.SlimeRancher.Player.PlayerItems.GadgetItem`:
   never overhangs); ignore_range raises `MaxValidPlacementDist` to the footprint ray length. A depth counter marks
   "inside UpdateFootprint" for the scoped hooks below.
 - `Gadget.IsCompletelyGrounded` -> true while inside UpdateFootprint (ignore_slope).
+- allow_upside_down (child of ignore_slope, default on): both thresholds become -90 (sin = -1, any normal).
+  The footprint test is strict (`normal.y > sin(threshold)`), so an exact (0,-1,0) normal (flat underside of a box
+  collider) would still fail; `RaycastHit.get_normal` is hooked and, only inside UpdateFootprint on the main thread
+  with this option, returns y = -0.99999994 instead of -1 (same direction, x = z = 0). That getter is folded with
+  `ParticleCollisionEvent.get_normal` (RVA 0x339E700, 66 direct callers), so the detour is a pass-through
+  everywhere else. Nothing else filters downward faces: the footprint ray (`RaycastNonAlloc`) hits from any side,
+  and the game's footprint rotation `LookRotation(player direction projected onto the surface, normal)` already
+  puts the gadget's up along the normal; `PlaceGadgetEvent` instantiates with the placeholder's rotation, so the
+  preview and the placed gadget match.
+- Save round trip: `GadgetModel.PullBase` saves the transform's full euler angles (`PlacedGadgetV07.Rot`, a
+  Vector3) and `GadgetModel.GetRot` rebuilds the rotation from all three, so upside-down gadgets load as placed.
+- Teleporters (`GadgetTeleporterNode` anywhere in the held definition's prefab, one `GetComponentInChildren`
+  per definition, cached, logged once) keep the vanilla slope limits for both ignore_slope and upside-down:
+  `TeleportNetwork` passes the destination node's `eulerAngles` to `TeleportablePlayer.TeleportTo` ->
+  `IPlayerController.set_Rotation` -> `KinematicCharacterMotor.SetRotation`, and `KFCCharacterController.
+  UpdateRotation` keeps the motor's `_characterUp`, so the player would arrive tilted / upside down. (The first
+  free_placement version let teleporters onto walls; this fixes that too.)
+- Other gadget kinds checked by reasoning only: items they spawn (feeders, water taps, chicken cloner) fall with
+  gravity from below the gadget; launch pads launch along the pad's up (downwards); gordo snares and drone
+  stations use their transform as is. None of them read the grounded check after placement.
 - `Gadget.IsOverlapping(float, LayerMask, bool)` -> false while inside UpdateFootprint and the mask equals the
   metadata's `GadgetOverlapLayers` (ignore_collision). The spawner callers are outside the scope.
 - `IsInLinkedGadgetRange` -> true (ignore_range).
@@ -60,4 +80,6 @@ own `InstantiateGadget`, the footprint ray length (reach), the layer-0 rule for 
 
 - Height offset: the placeholder sits under the footprint, whose position is set through `Rigidbody.set_position`
   each frame (applied at the physics step), so a transform offset would fight it; floating gadgets were left out.
-- Placing upside down / on ceilings (normal.y < 0): left out on purpose.
+- Straight overhead: the footprint hides while the hit is within `MinPlacementFootprintVisibleDist` measured
+  horizontally (vanilla rule, also for the floor at your feet); step back a little to place on a ceiling.
+- With ignore_collision off, the overlap test (with its floor tolerance) may report a ceiling gadget as blocked.
