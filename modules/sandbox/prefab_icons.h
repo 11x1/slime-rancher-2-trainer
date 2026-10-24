@@ -7,9 +7,10 @@
 // GameObject is active (LOD1+ children skipped), a new GameObject with a MeshFilter (the shared
 // mesh) and a MeshRenderer (the shared materials) at the same place relative to the prefab root,
 // on layer 31, 10 km above the world origin. A disabled orthographic Camera (culling only layer
-// 31, solid magenta clear, no HDR / MSAA) frames their bounds from the front right and above, a
-// directional Light (culling only layer 31) lights them, and Camera.Render draws them into a
-// 128 x 128 RenderTexture. Texture2D.ReadPixels copies the result to the CPU, where the background
+// 31, solid magenta clear, no HDR / MSAA) frames their bounds from the front right and above, three
+// directional Lights (key, fill, rim) light them, and Camera.Render draws them into a 128 x 128 sRGB
+// RenderTexture; while the drawn pixels are too dark the lights are made stronger and it renders again
+// (at most 3 renders), then levels / a gamma lift on the CPU (round 9: "rendered icons are very dim"). Texture2D.ReadPixels copies the result to the CPU, where the background
 // is made transparent (the clear alpha if the pipeline kept it, else the magenta key), then
 // Apply, Sprite.Create. Every created object is destroyed with DestroyImmediate in the same call,
 // so nothing is left in the scene for the game's own cameras (or the save) to see.
@@ -65,6 +66,8 @@ public:
     // shifts the finished image's colours towards it, keeping the shading. `parts` (optional) gets the
     // number of meshes drawn.
     Il2CppObject* RenderPieces(const std::vector<Piece>& pieces, const float* tint, std::string& why, int* parts = nullptr);
+    // How the last successful render was lit and levelled (renders, light gain, levels), for log lines.
+    std::string LastLook() const;
 
 private:
     struct Impl;

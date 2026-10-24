@@ -2570,10 +2570,9 @@ Il2CppObject* Sandbox::GadgetPrefab(const char* prefabName) {
 // The mod buildables' icons, rendered from the game prefabs they are made of and dressed as custom_upgrades
 // dresses them when placed (dj_buildables.cpp Build, quantum_link.cpp tint; prefab_icons.h RenderPieces):
 //   Quantum Storage Link = the Refinery Link, colours shifted to the link's purple;
-//   DJ Booth = the Scientist Desk without its lab clutter, a small boombox on it (the mixer), two big ones
-//   beside it (the speakers) and the flower pillow behind it;
-//   DJ Speaker = the Boombox with its boombox leaning back 30 degrees at 1.25x (the tilted kind);
-//   Slime Radio = the boombox model alone (the toy shows a small boombox).
+//   DJ Booth = the Scientist Desk without its lab clutter, the deck (a boombox lying face up), two monitors on the
+//   front corners, two big speakers beside it and the bench with the flower pillow behind it;
+//   DJ Speaker Stack / Slime Radio = the speaker stack (two boomboxes; the radio is a small one).
 // One per refresh, each tried once per session; a failure keeps the base gadget's icon (logged).
 bool Sandbox::RenderNextModIcon() {
     namespace bld = sr2::modules::custom_upgrades::buildables;
@@ -2619,36 +2618,39 @@ bool Sandbox::RenderNextModIcon() {
     } else if (i.id == bld::kDjBooth && basePrefab && boombox) {
         Piece desk;
         desk.prefab = basePrefab;
-        desk.skip = {"scientistDesk_bubbleScroll", "scientistDesk_glass", "scientistDesk_glass_LOD01", "vials", "vials_LOD01",
-                     "decoLabBeaker01", "decoLabClipboard", "decoLabWrenchMonkey03_0", "pens"};
+        desk.skip = {"scientistDesk_bubbleScroll", "scientistDesk_glass", "scientistDesk_glass_LOD01", "scientistDesk_misc01",
+                     "scientistDesk_misc01_LOD01", "vials", "vials_LOD01", "decoLabBeaker01", "decoLabClipboard",
+                     "decoLabWrenchMonkey03_0", "pens"};
         pieces.push_back(std::move(desk));
-        boomboxPiece(0.0f, 1.22f, 0.05f, 180.0f, 0.5f);  // the mixer
-        for (float side : {-1.0f, 1.0f}) boomboxPiece(side * 1.75f, 0.0f, 0.1f, -side * 12.0f, 1.35f);
+        for (float side : {-1.0f, 1.0f}) {
+            boomboxPiece(side * 1.75f, 0.0f, 0.1f, -side * 12.0f, 1.35f);  // the floor speakers
+            boomboxPiece(side * 0.8f, 1.22f, 0.3f, -side * 12.0f, 0.4f);   // the monitors on the desk's front corners
+        }
+        boomboxPiece(0.0f, 1.22f + 0.3f * 0.45f, -0.2f, 180.0f, 0.45f);  // the deck, lying face up
+        pieces.back().tilt = 90.0f;
+        Piece bench;
+        bench.prefab = boombox;
+        bench.sub = "ranchHouseBench";
+        bench.pos[2] = -1.8f;
+        bench.scale = 0.6f;
+        pieces.push_back(std::move(bench));
         Il2CppObject* pillow = GadgetPrefab("decorFlowerPillowSmall");
         if (pillow) {
             Piece p;
             p.prefab = pillow;
             p.sub = "mesh";
-            p.pos[2] = -1.55f;
+            p.pos[1] = 0.72f;
+            p.pos[2] = -1.8f;
             pieces.push_back(std::move(p));
         }
-        what = std::format("desk without its lab clutter, mixer, 2 speakers, {}", pillow ? "flower pillow" : "no pillow (prefab not found)");
-    } else if (i.id == bld::kDjSpeaker && boombox) {
-        Piece stand;
-        stand.prefab = boombox;
-        stand.skip = {"model_boombox"};
-        pieces.push_back(std::move(stand));
-        Piece box;
-        box.prefab = boombox;
-        box.sub = "model_boombox";
-        box.keepPlace = true;
-        box.tilt = 30.0f;
-        box.scale = 1.25f;
-        pieces.push_back(std::move(box));
-        what = "boombox leaning back 30 degrees, 1.25x";
-    } else if (i.id == bld::kSlimeRadio && boombox) {
-        boomboxPiece(0, 0, 0, 0, 1.0f);
-        what = "the boombox model";
+        what = std::format("desk without its lab clutter, deck, 2 monitors, 2 speakers, bench, {}",
+                           pillow ? "flower pillow" : "no pillow (prefab not found)");
+    } else if ((i.id == bld::kDjSpeaker || i.id == bld::kSlimeRadio) && boombox) {
+        // The speaker stack (dj_buildables.cpp BuildStack): a 1.3x boombox with a 0.85x one on top at 1 m. The Slime
+        // Radio is the same stack, small (the render frames it to the tile anyway).
+        boomboxPiece(0.0f, 0.0f, 0.0f, 0.0f, 1.3f);
+        boomboxPiece(0.0f, 1.0f, 0.0f, 0.0f, 0.85f);
+        what = i.id == bld::kDjSpeaker ? "the speaker stack" : "the little speaker stack";
     }
     if (pieces.empty()) {
         SR2_INFO("[{}] mod icon: {} not rendered (prefab not found:{}{}): the {}'s icon is used", kModule, i.name,
@@ -2663,7 +2665,8 @@ bool Sandbox::RenderNextModIcon() {
     if (icon) {
         sandbox::SetModIcon(i.id, icon);
         lastRecipeState_ = 0;  // into the crafter / spawner lists at the next refresh
-        SR2_INFO("[{}] mod icon: {} rendered ({}; {} mesh(es), {} ms)", kModule, i.name, what, parts, GetTickCount64() - t0);
+        SR2_INFO("[{}] mod icon: {} rendered ({}; {} mesh(es), {} ms; {})", kModule, i.name, what, parts, GetTickCount64() - t0,
+                 prefabIcons_.LastLook());
     } else {
         SR2_INFO("[{}] mod icon: {} not rendered ({}): the {}'s icon is used", kModule, i.name, why.empty() ? "no sprite" : why,
                  i.base);

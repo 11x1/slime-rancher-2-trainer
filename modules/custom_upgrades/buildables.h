@@ -3,7 +3,7 @@
 //
 // The mod's Fabricator buildables are runtime GadgetDefinition clones that the vanilla save must never
 // see (quantum_link.h, dj_buildables.h): the Quantum Storage Link (a Refinery Link variant), the DJ
-// Booth (a Scientist Desk variant), the DJ Speaker (a Boombox variant, three tilts) and the Slime Radio
+// Booth (a Scientist Desk variant), the DJ Speaker Stack (a Boombox variant) and the Slime Radio
 // (a Night Light toy). Never AddItem / AddBlueprint their definitions (`def` below): GadgetsModel.Pull
 // would write an unknown or duplicate persistence id and the save fails. Grant() below is the save-safe
 // way to give them; SetUnlock() the save-safe way to lock / unlock their Fabricator card.

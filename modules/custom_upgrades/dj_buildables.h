@@ -4,10 +4,10 @@
 //
 // Save model (the vanilla save only ever sees vanilla ids), the Quantum Storage Link's scheme
 // (quantum_link.h), on its hooks (variant_ext.h):
-//   * DJ Booth = a variant of the Scientist Desk decoration (same prefab); DJ Speaker / DJ Speaker
-//     (tilted) / DJ Speaker (facing up) = variants of the Boombox decoration. Placed, they ARE the vanilla
+//   * DJ Booth = a variant of the Scientist Desk decoration (same prefab); DJ Speaker Stack = a variant
+//     of the Boombox decoration. Placed, they ARE the vanilla
 //     decoration (saved as one); the sidecar lists which actors are booths ("dj.booths") and speakers
-//     with their tilt ("dj.speakers", "id:kind"). The ~1 Hz tick dresses those: extra meshes cloned from
+//     ("dj.speakers", "id:kind"; one kind since round 9). The ~1 Hz tick dresses those: extra meshes cloned from
 //     the game's own prefabs, the emitter, the dance animation while a song plays.
 //   * Fabricating a DJ Booth / DJ Speaker adds the vanilla Scientist Desk / Boombox to the inventory and
 //     one kit ("dj.booth_kits" / "dj.speaker_kits"); placing the variant uses a kit, picking it up gives

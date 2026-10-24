@@ -405,7 +405,7 @@ of it is offered. Slime DJ plays the song through `slime_dj/api.h` emitters.
   takes the interactables of the hit collider and its parents, so the desk's own box collider (layer 27, as the
   Boombox's) brings up the prompt. Undress destroys both (`DestroyImmediate`, so a new dressing in the same tick can
   add them again).
-- **DJ Speaker** / **DJ Speaker (tilted)** / **DJ Speaker (facing up)** = three variants of the **Boombox**
+- **DJ Speaker Stack** (since round 10 one variant; before: DJ Speaker / tilted / facing up) = a variant of the **Boombox**
   decoration. Round 8 ("only see 1 speaker"): the bench, the vanilla `model_boombox` and its `Collision` ball are
   switched off; a **stack** of two boombox clones stands in their place (1.3 size on the floor, 0.85 on top at 1 m),
   the variant tilts the top one back 0 / 30 / 80 degrees (lifted so its back does not sink into the base), and one
@@ -498,6 +498,52 @@ the radio rolled; E on a DJ speaker inverted the state and the notes always show
 checked yet: the deck / corner speaker / bench positions (all estimated from prefab numbers: the deck's lift and the
 stack heights may need a nudge), E prompt on the booth, filler vs song switching with a slime, a largo on the seat,
 the speaker stack and its collider (stacking on it), the radio staying upright.
+
+### Round 9 feedback (round 10 changes)
+
+User: "dj booth isnt playing standby music when no slime & activated (the same one playing in ranch plots)",
+"ALMOST perfect look, slime keeps dancing when music is turned off", DJ Speaker "not in preview, remove the tilted
+variants and correct the name, also change the preview to match the stacked speakers", "slime radio just disappears
+when vacced (also isnt stacked speakers)", "custom buildables (mod ones) use the default label and the preview is
+also default".
+
+- **Booth standby tune.** Switched on without a slime on the seat (or without a song) the booth plays the corral
+  Music Box's own tune instead of the Boombox's track (which the round-9 log shows as started but the user did not
+  hear). Source: `LookupDirector.GetPlotPrefab(CORRAL)` -> `Music Box/techCorralMusicBox/MusicBox` -> its
+  `SECTR_AudioSource` (abstract; the concrete class's `Play()` / `Stop(bool)` / `get_IsPlaying` are resolved on it).
+  Each booth gets a GameObject `sr2dj_standby` above the desk with a component of that class added (Cue, volume,
+  pitch copied; Loop on, PlayOnStart off). Mode `kModeStandby`: Play when it should and is not playing, Stop on any
+  other mode / undress. The boomboxes dance meanwhile. Without the source (lookup failed, logged once) the old
+  Boombox-track filler is used. Logs `standby tune = the corral music box's '<cue>' (...)`, `DJ Booth actor N plays
+  the corral music box tune (no slime behind the desk)`.
+- **Seat spin.** The "dance" is `SlimeAttachPoint._rotationSpeed` (FixedUpdate rotates the joint bodies by it while a
+  slime is attached; checked in IDA, 0x752700). Read at the dressing (`spin N` in the dressed log line); the record
+  writes it while music plays from the booth, 0 otherwise.
+- **One DJ Speaker Stack.** The tilted / facing-up variants and their definitions are gone; the one variant (still
+  `SlimeDJSpeaker`, same save alias) is called "DJ Speaker Stack". Saved kinds 1 / 2 load as the stack (the kind is
+  clamped to the variant count).
+- **Slime Radio = a small speaker stack** (`BuildStack` at 0.26, toy units), centred on the toy's root (where the
+  night light was). Toys are held by the vacuum (`Vacuumable.Hold`: held layer, `_Held` property on its renderers);
+  the old boombox hung 0.4-0.9 m under the root, i.e. under the nozzle and out of view - likely the "disappears".
+  The box collider is the stack's (centre at the root). In case the vacuum does take it out of the world (actor
+  destroyed: the save had no such case in the logs): a seen radio that leaves the world raises `dj.radios_away`
+  (max 20) and the next Night Light actor that appears within 6 m of the camera (not there at the last scan) is
+  listed as a radio again. Logs `Slime Radio actor N left the world (vacuumed up?) ...`, `Night Light actor N appeared
+  next to you - a Slime Radio again`.
+- **Owed radios.** The round-9 log: a shop radio bought without a dispenser was paid and never spawned (`paid but not
+  spawned (no scene group / camera / toy prefab)`). A failed spawn now goes to `dj.radios_owed` and the tick spawns
+  them (5 at most per tick) as soon as a scene group and a camera exist.
+- **Gadget mode** through `gadget_look` (previous section): booth and speaker definitions are registered with their
+  name (label while held), their own description (Fabricator card) and `dressPreview` = the dressed look built into
+  the placeholder (`sr2look` child: booth clutter hidden, deck, monitors, floor speakers, bench, pillow mesh; speaker:
+  bench / boombox hidden, the stack), every clone stripped of scripts / colliders and put on layer 26 (the overlay
+  layer the game puts the placeholder on). `AddPlacedLabel`: an aimed-at listed booth / stack shows our name. Logs
+  `gadget looks registered for N definition(s)`, `<label> placement preview dressed (N part(s))`.
+
+Not checked in game yet (round 10): the standby tune (audible, positional, stops on off / when a slime sits), the seat
+spin stopping when off, the stack name and preview ghost (ghost look on layer 26), the held / aimed-at labels, the
+radio stack look and size, holding a radio with the vacuum (visible at the nozzle), the away / re-adopt path, owed
+radios after a shop purchase.
 
 ## Mod buildables: Fabricator cards, unlock, API (round 7 fix)
 
@@ -619,6 +665,34 @@ Not checked in game yet: the entry in Daily Deals (position next to the toy, nam
 popup, description, price 1000), buying 1 and several (Newbucks, the dispenser drops Night Lights that turn into
 radios within a second), save + reload with radios still queued, the entry hidden without the Boombox blueprint,
 custom upgrades off (entry gone, dispensed Night Lights stay Night Lights), a mod-free load.
+
+### Round 9 feedback (round 10 changes)
+
+User: "shows up in coocoo corner for 1000 bucks, no preview though, same in normal shop (no preview), coocoo corner
+should respect how it works regarding mod items". The round-9 log: the radio was added to `DailyDeals` (6 items) and to
+`RangeExchange` (158 items, it has toy entries too: the old "any toy entry" fallback), bought once without a spawner
+id, and that radio was never spawned.
+
+- **Daily Deals only, as one of its daily toys.** The category is recognised by its analytics name only. The Daily
+  Deals offer one random toy per restock; at one restock in four the Slime Radio takes that toy's place in the list
+  the UI reads (`kOdds`). Restock key = FNV of `ShopCategoryRuntime._lastSeedUsed` (the seed of its random restock)
+  and the toy's asset GUID (`get_AssetGuid`), so a reload gives the same answer. The vanilla toy entry is removed from
+  `_cachedItemList` (pinned while out, put back at our place when the radio stops being offered); its data and
+  purchase records are untouched. Our item uses the toy's sort index. One per restock: buying sets
+  `dj.shop_radio_bought` = the key and `_isSoldOut`; sold out until the key changes. Logs `daily toy restock XXXXXXXX:
+  the Slime Radio is the daily toy | a vanilla toy (...)`, `Slime Radio stands in for the daily toy (position P of N)`,
+  `Slime Radio taken out of the daily toys (why)`.
+- **Picture.** The display clone's full-art `AssetReference` (built from the Boombox's GUID) now also carries the
+  Boombox reference's `m_SubObjectName` / `m_SubObjectType` (a sprite inside a texture is addressed by both), and
+  `_requiresFullArt` is the Boombox's own (false: the shop shows the icon as the picture). The look log line names
+  the reference.
+- **Queueing.** Vanilla's spawn callback queues under the page's spawner id whatever it is (`ShopDataModel.
+  QueueToSpawnItem`, checked in IDA); ours does the same when the id is not null (an empty id included). Only a null
+  id spawns in front of the player, and that is retried until it works (`dj.radios_owed`).
+
+Not checked in game yet (round 10): the radio as the daily toy (wait for restocks or reload around one), its picture,
+sold out after one purchase, a Coo-Coo Corner purchase arriving (dispenser or in front of you), the Range Exchange
+without the radio.
 
 ## Demolish clears the plot (user report round 4)
 
