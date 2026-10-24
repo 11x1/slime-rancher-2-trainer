@@ -2008,7 +2008,8 @@ private:
             }
             return false;
         };
-        int fogged = 0, revealed = 0, unknown = 0, byAlpha = 0;
+        int fogged = 0, revealed = 0, unknown = 0, byAlpha = 0, noCloud = 0;
+        std::string noCloudNames;  // fogged areas without fog-shader art (the zone links)
         for (Ref& e : elems) {
             Il2CppObject* f = e.get();
             if (!unity::IsAlive(f)) continue;
@@ -2030,17 +2031,23 @@ private:
             }
             ++(state ? revealed : fogged);
             if (state || inFog) continue;  // a revealed area draws no cloud
-            std::string label = "fog area '" + unity::GetName(unity::GameObjectOf(f)) + "'";
+            std::string name = unity::GetName(unity::GameObjectOf(f));
+            std::string label = "fog area '" + name + "'";
+            // Only fog-shader art is a cloud. The zone links ('zone_link_strandmain', ...) are FogMapElements too
+            // (they fade in with their reveal event), but their graphics are a dotted portal line and portal icons
+            // with the default UI material: a hidden link draws nothing, it is no cloud (round 8: the line's rect,
+            // no sprite, refused every Conservatory click).
             bool any = false;
             ugui::ForEachInChildren(unity::GameObjectOf(f), ugui::GraphicClass(), false, [&](Il2CppObject* g) {
+                Il2CppObject* mat = ugui::GraphicGetMaterial(g);
+                if (!mat || !IsFogShader(ugui::MaterialShaderName(mat)) || !ugui::BehaviourEnabled(g)) return true;
                 any = true;
                 if (test(g, label)) inFog = true;
                 return !inFog;
             });
-            if (!any && insideRect(unity::TransformOf(f))) {  // no art at all: its own rect
-                inFog = true;
-                ++rectOnly;
-                decided = label + " (its own rect: no fog image)";
+            if (!any) {
+                ++noCloud;
+                if (noCloudNames.size() < 200) noCloudNames += (noCloudNames.empty() ? "" : ", ") + name;
             }
             if (inFog) area = label;
         }
@@ -2066,14 +2073,17 @@ private:
         }
         int result = inFog ? 1 : 0;
         SR2_INFO("map_tools: fog check at map point ({:.0f}, {:.0f}) = world ({:.0f}, {:.0f}), zone '{}': {}; {} fog area(s): "
-                 "{} fogged, {} revealed, {} unknown (state from {}), {} static fog image(s); {} image(s) tested by their "
+                 "{} fogged, {} revealed, {} unknown (state from {}){}, {} static fog image(s); {} image(s) tested by their "
                  "art{}",
                  pm.x, pm.y, wx, wz, zone,
                  result      ? "UNDER " + decided
                  : !strongest.empty() ? "clear (strongest cloud here: " + strongest + ")"
                                  : std::string("clear (no fogged cloud image here)"),
                  elems.size(), fogged, revealed, unknown,
-                 byAlpha ? std::format("the CanvasGroup alpha for {}", byAlpha) : std::string("ShouldBeRevealed"), statics,
+                 byAlpha ? std::format("the CanvasGroup alpha for {}", byAlpha) : std::string("ShouldBeRevealed"),
+                 noCloud ? std::format(", {} fogged with no fog-shader art, not clouds ({})", noCloud, noCloudNames)
+                         : std::string(),
+                 statics,
                  artTested, rectOnly ? std::format(", {} by their rect ({})", rectOnly, rectWhy) : std::string());
         return elems.empty() && statics == 0 ? -1 : result;
     }
