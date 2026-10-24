@@ -60,6 +60,7 @@ struct Slot {
     std::atomic<Il2CppObject*> def{nullptr};
     std::atomic<Il2CppObject*> name{nullptr};
     std::atomic<Il2CppObject*> desc{nullptr};
+    std::atomic<Il2CppObject*> icon{nullptr};
 };
 Slot g_slots[kMax];
 
@@ -73,6 +74,8 @@ Slot* Find(Il2CppObject* def) {
 using DescFn = Il2CppObject* (*)(Il2CppObject*, const MethodInfo*);
 using InfoFn = TargetInfo* (*)(TargetInfo*, Il2CppObject*, Il2CppObject*, bool, bool, uint64_t, const MethodInfo*);
 using HeldFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+using SetItemFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+SetItemFn g_origSetItem = nullptr;
 DescFn g_origDesc = nullptr;
 InfoFn g_origInfo = nullptr;
 HeldFn g_origHeld = nullptr;
@@ -86,6 +89,9 @@ struct Impl {
     std::vector<PlacedLabel> placed;
     std::set<std::string> loggedShaders;
     // offsets
+    size_t offFullArt = 0, offRequiresFullArt = 0, offDetailsIcon = 0, offFabDef = 0;
+    Il2CppClass* fabItemClass = nullptr;
+    const MethodInfo* imageSetSprite = nullptr;
     size_t offHeld = 0, offPlaceholder = 0, offTargeted = 0, offTargetingPlaceholder = 0, offSelected = 0;
     const void* obsClass = nullptr;
     size_t obsValue = 0;
@@ -198,6 +204,21 @@ void HeldDetour(Il2CppObject* self, Il2CppObject* def, const MethodInfo* mi) {
     });
 }
 
+// FabricatorItemDetails.SetItem: a registered definition's card shows its own picture (its full-art
+// reference is cleared on Register, so the dynamic loader does not load the base's over it).
+void SetItemDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo* mi) {
+    g_origSetItem(self, item, mi);
+    if (!self || !item || !g || !g->armed || !main_thread::IsMainThread() || g->Faulted()) return;
+    if (api().il2cpp_object_get_class(item) != g->fabItemClass) return;
+    Slot* s = Find(unity::Field<Il2CppObject*>(item, g->offFabDef));
+    Il2CppObject* icon = s ? s->icon.load(std::memory_order_acquire) : nullptr;
+    if (!icon) return;
+    g_guard.Run([&] {
+        Il2CppObject* image = unity::Field<Il2CppObject*>(self, g->offDetailsIcon);
+        if (unity::IsAlive(image)) g->Call(g->imageSetSprite, image, {icon}, "Image.set_sprite");
+    });
+}
+
 }  // namespace
 
 bool Setup(sr2::core::ModuleContext& ctx, const char* module, std::string& why, std::string& report) {
@@ -252,7 +273,17 @@ bool Setup(sr2::core::ModuleContext& ctx, const char* module, std::string& why, 
     Il2CppClass* rt = cls(kCore, "UnityEngine", "RenderTexture");
     Il2CppClass* graphics = cls(kCore, "UnityEngine", "Graphics");
     Il2CppClass* uobject = cls(kCore, "UnityEngine", "Object");
+    Il2CppClass* identType = cls(kImage, "", "IdentifiableType");
+    const char* kFab = "MonomiPark.SlimeRancher.UI.Fabricator";
+    p->fabItemClass = cls(kImage, kFab, "GadgetFabricatableItem");
+    Il2CppClass* details = cls(kImage, kFab, "FabricatorItemDetails");
+    Il2CppClass* image = cls("UnityEngine.UI", "UnityEngine.UI", "Image");
     if (!why.empty()) return fail();
+    off(identType, "_fullArt", p->offFullArt);
+    off(identType, "_requiresFullArt", p->offRequiresFullArt);
+    off(details, "_icon", p->offDetailsIcon);
+    off(p->fabItemClass, "<Definition>k__BackingField", p->offFabDef);
+    p->imageSetSprite = method(image, "set_sprite", 1);
     off(gadgetItem, "_heldGadget", p->offHeld);
     off(gadgetItem, "_gadgetPlaceholderInstance", p->offPlaceholder);
     off(gadgetDir, "<TargetedGadget>k__BackingField", p->offTargeted);
@@ -290,6 +321,7 @@ bool Setup(sr2::core::ModuleContext& ctx, const char* module, std::string& why, 
     const MethodInfo* descMi = method(gadgetDef, "get_LocalizedDescription", 0);
     const MethodInfo* infoMi = method(gadgetDir, "GetTargetGadgetInfo", 4);
     const MethodInfo* heldMi = method(gadgetItem, "SetHeldGadget", 1);
+    const MethodInfo* setItemMi = method(details, "SetItem", 1);
     if (!why.empty()) return fail();
     struct H {
         const char* name;
@@ -302,6 +334,8 @@ bool Setup(sr2::core::ModuleContext& ctx, const char* module, std::string& why, 
          reinterpret_cast<void**>(&g_origDesc)},
         {"GadgetDirector.GetTargetGadgetInfo", infoMi, reinterpret_cast<void*>(&InfoDetour), reinterpret_cast<void**>(&g_origInfo)},
         {"GadgetItem.SetHeldGadget", heldMi, reinterpret_cast<void*>(&HeldDetour), reinterpret_cast<void**>(&g_origHeld)},
+        {"FabricatorItemDetails.SetItem", setItemMi, reinterpret_cast<void*>(&SetItemDetour),
+         reinterpret_cast<void**>(&g_origSetItem)},
     };
     void* ptrs[std::size(hooks)] = {};
     for (size_t i = 0; i < std::size(hooks); ++i) {
@@ -341,6 +375,11 @@ void Register(Il2CppObject* def, Look look) {
     }
     s->name.store(look.name, std::memory_order_release);
     s->desc.store(look.description, std::memory_order_release);
+    s->icon.store(look.icon, std::memory_order_release);
+    if (look.icon) {  // the card's picture is ours: no full art loaded over it
+        unity::Field<Il2CppObject*>(def, g->offFullArt) = nullptr;
+        unity::Field<bool>(def, g->offRequiresFullArt) = false;
+    }
     s->def.store(def, std::memory_order_release);
     if (look.dressPreview) g->dress[def] = std::move(look.dressPreview);
     else g->dress.erase(def);

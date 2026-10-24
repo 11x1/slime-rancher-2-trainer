@@ -19,9 +19,13 @@
 //     + CopyMeshComponents / CopyGadgetComponents / CopySpecialComponents): the base's prefab, so the base's
 //     look. Its only native callers: PickupGadget, OnItemActivated, PlaceGadgetEvent,
 //     HandleSelectedSlottedGadgetChanged (the variant toggle lands here through SetFavorite).
-// This file owns those three hooks (MinHook: one hook per address - nobody else may hook them) and asks
-// what Register()ed: the description and label of a registered definition, and its preview dresser after
-// SetHeldGadget. Placed-gadget labels: AddPlacedLabel() providers, asked when the label is for an aimed-at
+//   * The Fabricator card's details picture (FabricatorItemDetails.SetItem 0x8089B0): a
+//     UIImageDynamicLoader loads the definition's full art (IFullArtAndIconSource.FullArtReference, the
+//     base's addressable sprite, copied by Instantiate); without a valid reference it leaves the image
+//     alone (RequiresFullArt false).
+// This file owns those four hooks (MinHook: one hook per address - nobody else may hook them) and asks
+// what Register()ed: the description, label and card picture of a registered definition, and its preview
+// dresser after SetHeldGadget. Placed-gadget labels: AddPlacedLabel() providers, asked when the label is for an aimed-at
 // placed gadget (not for the held one).
 //
 // Helpers for the looks: TintTree (instanced materials tinted, like the placed quantum links) and
@@ -48,6 +52,11 @@ struct Rgb {
 struct Look {
     Il2CppObject* name = nullptr;         // LocalizedString: the gadget-mode label while held (nullptr: vanilla)
     Il2CppObject* description = nullptr;  // LocalizedString: GadgetDefinition.LocalizedDescription (Fabricator card)
+    // Sprite for the Fabricator card's details picture (nullptr: the base's full art). Register() then also
+    // clears the definition's full-art reference (IdentifiableType._fullArt / _requiresFullArt) so the
+    // details' UIImageDynamicLoader loads nothing over it. The grid tile and hotbar use
+    // GadgetDefinition.icon: set that field yourself (get_Icon returns it when not null).
+    Il2CppObject* icon = nullptr;
     // After GadgetItem.SetHeldGadget built the placement preview for this definition (the preview's root
     // GameObject; inside the hook's DetourGuard). nullptr: the base's preview.
     std::function<void(Il2CppObject* placeholder)> dressPreview;
