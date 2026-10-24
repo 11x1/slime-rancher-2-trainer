@@ -15,6 +15,9 @@
 // station drained too much since its last look, through the game's own AddEnergy:
 //   R0 = depleteTime - t0 (battery seconds left at the last look, as if depleteTime held since then),
 //   R1 = max(0, R0 - dt / factor), refund = R1 - max(0, depleteTime - now) in energy units.
+// A refund below 0.01 energy is not lost: t0 stays until the accumulated one is worth adding.
+// Log: the first refund per station and level, then one summary line a minute (energy given back,
+// each station's battery), so a test can see it work.
 // The battery always stays a plain vanilla value: a save loads the same with or without the mod,
 // turning custom upgrades off just stops the refunds. Known approximation: across a sleep the
 // game's fast-forward runs the drones on the vanilla battery first and the refund comes after the
@@ -67,8 +70,10 @@ public:
 
 private:
     struct Look {
-        double time = 0.0;  // world time of the last look
-        int level = 0;      // level logged as active
+        double time = 0.0;      // world time the next refund counts from (kept while a refund is too small)
+        int level = 0;          // level logged as active
+        double refunded = 0.0;  // energy given back since the last summary line
+        bool first = true;      // the first refund at this level is logged
     };
     Il2CppObject* SceneContext();
     Il2CppObject* Call(const MethodInfo* m, void* obj, void** args, const char* what, bool* ok);
@@ -91,6 +96,7 @@ private:
     const void* tryGetValueClass_ = nullptr;
 
     float timer_ = 0.0f;
+    float summaryTimer_ = 0.0f;  // real seconds since the last summary line
     const void* gameModel_ = nullptr;  // identity: a new GameModel = a loaded save
     std::unordered_map<int64_t, Look> looks_;
     bool loggedFail_ = false;
