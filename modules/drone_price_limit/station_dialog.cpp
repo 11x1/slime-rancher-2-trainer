@@ -48,8 +48,11 @@
 // the program that runs now. Names / icons: the view model's _definitionSource
 // (DroneUIDefinitionSource.FindTargetDefinition / FindSourceDefinition / FindDestinationDefinition ->
 // DroneUIProgramDefinition<T> _displayName / _icon; our sources' names through text_override), a
-// SINGLE target shows its IdentifiableType's icon and localized name. While the program page is open
-// drone_programs::NoteMenuOpen pauses that station's rotation.
+// SINGLE target shows its IdentifiableType's icon and localized name. The dialog's buttons are clones of
+// the same game prompt (PillButton). While the station menu is open drone_programs::NoteMenuOpen pauses
+// that station's rotation, and FollowStation keeps the page on the station's program: closing the menu
+// asks to discard "changes" (DroneUIDisplay.OnCancel -> _unappliedChangesConfirm) whenever the page
+// differs from the station's task data, also when the station changed and not the page.
 //
 // Pointer input without managed delegates: every clickable part (our prompt, mode buttons, Close, the
 // dimmed backdrop) carries a UnityEngine.UI.Toggle (navigation None, no transition) that we poll and
@@ -119,6 +122,7 @@ namespace unity = sr2::core::unity;
 namespace main_thread = sr2::core::main_thread;
 namespace sui = sr2::modules::custom_upgrades::ui;
 namespace progs = sr2::modules::custom_upgrades::drone_programs;
+namespace drones = sr2::modules::custom_upgrades::drones;
 using sr2::modules::custom_upgrades::drones::ProgramData;
 using sr2::il2cpp::api;
 using sr2::il2cpp::Resolver;
@@ -137,6 +141,7 @@ constexpr int kAlignLeft = 513, kAlignCenter = 514, kAlignRight = 516, kAlignTop
 constexpr int kStateFrames = 10;      // menu state (destination / station) re-read every N frames
 constexpr int kReapplyFrames = 4;     // re-assert the cloned prompt's key / label for a few frames
 constexpr float kPillPadX = 22.0f;    // price-limit pill: inner padding left and right of its key + label
+constexpr uint64_t kOtherTabMs = 120000;  // another tab of the station menu counts as "open" this long
 
 struct Vec2 {
     float x, y;
@@ -205,7 +210,8 @@ struct StationUi::Impl {
     const MethodInfo* tglGetOn = nullptr, *tglSetOnQuiet = nullptr, *selSetTransition = nullptr, *selSetNav = nullptr;
     const MethodInfo* lsGet = nullptr, *entryGetType = nullptr, *gcInstance = nullptr;
     const MethodInfo* kbCurrent = nullptr, *kbC = nullptr, *padCurrent = nullptr, *padR3 = nullptr, *btnPressedThisFrame = nullptr;
-    const MethodInfo* kbP = nullptr, *padL3 = nullptr, *vmRevert = nullptr;
+    const MethodInfo* kbP = nullptr, *padL3 = nullptr, *vmRevert = nullptr, *vmHasChanges = nullptr;
+    size_t offMenuActiveSprite = 0;  // optional: DroneProgramMenu._activeStateSprite (the page's "active" icon)
     using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
     ObjectNewFn objectNew = nullptr;
 
@@ -228,8 +234,17 @@ struct StationUi::Impl {
         int reapply = 0;
         bool shown = false, logged = false, loggedFail = false;
         std::string text;                      // label last set
+        std::string key, want;                 // dialog pills: key glyph ("" = none) and label to re-assert
     };
     Pill limitPill, progPill;
+    std::vector<Pill> dialogPills;  // the programs dialog's buttons: clones of the same game prompt
+    Held menuDisplay;               // the menu's DroneUIDisplay (open = any tab of the station menu shown)
+    bool displayActive = false;
+    uint64_t lastPageMs = 0;        // the program page was last seen active (GetTickCount64)
+    // The station's program as last seen while its menu was open (the page follows it, see FollowStation).
+    ProgramData pageProg;
+    int64_t pageStation = 0;
+    bool pageProgKnown = false;
     int stateCountdown = 0;
     bool marketSelected = false, pageActive = false, menuActive = false;
     int64_t station = 0, labelStation = 0;
@@ -502,6 +517,7 @@ struct StationUi::Impl {
     void ReadState();
     Il2CppObject* StationModel();
     // ---- prompts ----
+    bool ClonePrompt(Pill& P, Il2CppObject* orig, Il2CppObject* parentTr, const char* name);
     void EnsurePill(Pill& P, size_t buttonOff, const char* name, const char* what);
     void SyncPill(Pill& P, bool want, size_t buttonOff, const char* name, const char* what);
     void ApplyPillLook(Pill& P, const char* key);
@@ -514,6 +530,9 @@ struct StationUi::Impl {
     bool BuildShell(const char* name, float panelH, int& layer);
     Il2CppObject* Button(Il2CppObject* prt, const char* name, float x, float y, float w, float h, const std::string& label,
                          Color bg, Color fg, int layer, float border = 0.0f);
+    Il2CppObject* PillButton(Il2CppObject* prt, const char* name, float x, float y, float w, float h, const char* key,
+                             const std::string& label, const Color* bg, const Color* fg, int layer);
+    void FollowStation();
     bool Open();
     // ---- programs dialog ----
     struct Label {
@@ -812,6 +831,8 @@ bool StationUi::Setup(sr2::core::ModuleContext& ctx, const char* module, DialogH
         p->padL3 = pad ? R.Method(pad, "get_leftStickButton", 0, &err) : nullptr;
         p->vmRevert = R.Method(p->vmClass, "RevertChangesToLastAppliedProgram", 0, &err);
         if (!p->vmRevert) report += " page refresh after a program switch: NOT available;";
+        p->vmHasChanges = R.Method(p->vmClass, "HasAnyChanges", 0, &err);
+        if (auto o = R.FieldOffset(p->menuClass, "_activeStateSprite", &err)) p->offMenuActiveSprite = *o;
         if (!p->offVmDefs) report += " program names: NOT available;";
     }
 
@@ -872,7 +893,9 @@ void StationUi::Impl::ForgetMenu() {
     DestroyPill(limitPill);
     DestroyPill(progPill);
     Release(menu);
-    marketSelected = pageActive = menuActive = haveStation = false;
+    Release(menuDisplay);
+    marketSelected = pageActive = menuActive = displayActive = haveStation = false;
+    pageProgKnown = false;
     station = 0;
 }
 
@@ -882,6 +905,13 @@ void StationUi::Impl::ReadState() {
     Il2CppObject* m = menu.p;
     pageActive = unity::ActiveInHierarchy(unity::GameObjectOf(m));
     menuActive = pageActive;
+    // Any tab of the station menu (the program page is inactive on the Drone List / cloud tabs). A closed
+    // display may stay loaded (and active?) until the UI load manager unloads its scene: it counts only
+    // within kOtherTabMs of the program page being seen, so a lingering display can't hold the rotation.
+    const uint64_t nowMs = GetTickCount64();
+    if (pageActive) lastPageMs = nowMs;
+    displayActive = pageActive || (unity::IsAlive(menuDisplay.p) &&
+                                   unity::ActiveInHierarchy(unity::GameObjectOf(menuDisplay.p)) && nowMs - lastPageMs < kOtherTabMs);
     if (pageActive) {  // the option picker sub page covers the program page
         Il2CppObject* picker = unity::Field<Il2CppObject*>(m, offMenuPicker);
         if (unity::IsAlive(picker) && unity::ActiveInHierarchy(unity::GameObjectOf(picker))) pageActive = false;
@@ -929,12 +959,28 @@ void StationUi::Impl::EnsurePill(Pill& P, size_t buttonOff, const char* name, co
         P.loggedFail = true;
         return;
     }
-    Il2CppObject* clone = unity::Instantiate(unity::GameObjectOf(orig), unity::TransformOf(button));
-    if (!unity::IsAlive(clone)) {
+    if (!ClonePrompt(P, orig, unity::TransformOf(button), name)) {
         if (!P.loggedFail) SR2_WARN("[{}] station ui: cloning the Change prompt failed ({})", module, what);
         P.loggedFail = true;
         return;
     }
+    unity::SetActive(P.go, false);
+    P.shown = false;
+    P.reapply = kReapplyFrames;
+    P.text.clear();
+    if (!P.logged) {
+        P.logged = true;
+        SR2_INFO("[{}] station ui: {} action cloned from a Change prompt ({} key icon(s), label {}, click {})", module, what,
+                 P.icons.size(), P.label ? "ok" : "MISSING", P.toggle ? "ok" : "MISSING");
+    }
+}
+
+// A copy of the game's "Change" prompt (`orig`) under `parentTr`, prepared for our own key and label
+// (InputEventDisplay and the label's LocalizeStringEvent off), clickable, fitted to its label. Inactive
+// state as cloned; the caller shows it.
+bool StationUi::Impl::ClonePrompt(Pill& P, Il2CppObject* orig, Il2CppObject* parentTr, const char* name) {
+    Il2CppObject* clone = unity::Instantiate(unity::GameObjectOf(orig), parentTr);
+    if (!unity::IsAlive(clone)) return false;
     Il2CppObject* go = IsA(clone, goClass) ? clone : unity::GameObjectOf(clone);
     P.go = go;
     P.orig = orig;
@@ -981,15 +1027,7 @@ void StationUi::Impl::EnsurePill(Pill& P, size_t buttonOff, const char* name, co
             if (offEncMinW) unity::Field<float>(enc, offEncMinW) = 0.0f;
             if (offEncPadX) unity::Field<float>(enc, offEncPadX) = std::max(unity::Field<float>(enc, offEncPadX), kPillPadX);
         }
-    unity::SetActive(go, false);
-    P.shown = false;
-    P.reapply = kReapplyFrames;
-    P.text.clear();
-    if (!P.logged) {
-        P.logged = true;
-        SR2_INFO("[{}] station ui: {} action cloned from a Change prompt ({} key icon(s), label {}, click {})", module, what,
-                 P.icons.size(), P.label ? "ok" : "MISSING", P.toggle ? "ok" : "MISSING");
-    }
+    return true;
 }
 
 void StationUi::Impl::SyncPill(Pill& P, bool want, size_t buttonOff, const char* name, const char* what) {
@@ -1004,6 +1042,11 @@ void StationUi::Impl::SyncPill(Pill& P, bool want, size_t buttonOff, const char*
 }
 
 void StationUi::Impl::ApplyPillLook(Pill& P, const char* key) {
+    if (!key || !*key) {  // label only (a dialog button without a hotkey)
+        if (unity::IsAlive(P.ied)) unity::SetActive(unity::GameObjectOf(P.ied), false);
+        P.text.clear();
+        return;
+    }
     // InputIcon.SetKey by hand: the first icon shows our key, the others are hidden.
     if (unity::IsAlive(P.ied)) unity::SetActive(unity::GameObjectOf(P.ied), true);
     if (unity::IsAlive(P.group)) unity::SetActive(unity::GameObjectOf(P.group), true);
@@ -1147,6 +1190,64 @@ Il2CppObject* StationUi::Impl::Button(Il2CppObject* prt, const char* name, float
     Il2CppObject* t = Clickable(b);
     Keep(dialogHandles, t);
     return t;
+}
+
+// A button that is the game's own prompt pill (a clone of the target option's "Change" prompt, the same
+// as the [P] Programs action): the game's rounded cyan shape, font, padding and key glyph (`key`, or none).
+// At least w wide (it grows with a longer label), h is the pill's own height. `bg` / `fg` recolour it
+// (selected states). Falls back to our own Button when the prompt can't be cloned. Returns the toggle.
+Il2CppObject* StationUi::Impl::PillButton(Il2CppObject* prt, const char* name, float x, float y, float w, float h,
+                                         const char* key, const std::string& label, const Color* bg, const Color* fg,
+                                         int layer) {
+    Il2CppObject* button = menu.p ? unity::Field<Il2CppObject*>(menu.p, offMenuTarget) : nullptr;
+    Il2CppObject* orig = IsA(button, optionButtonClass) ? unity::Field<Il2CppObject*>(button, offOptPrompt) : nullptr;
+    Pill P;
+    if (!unity::IsAlive(orig) || !IsA(orig, rtClass) || !ClonePrompt(P, orig, prt, name) || !P.label) {
+        if (P.go) Destroy(P.go);
+        FreeLater(P.handles);
+        return Button(prt, name, x, y, w, h, label, bg ? *bg : kCyan, fg ? *fg : kNavy, layer);
+    }
+    Il2CppObject* rt = unity::TransformOf(P.go);
+    At(rt, x, y, w, h);
+    if (encapsulateClass)
+        if (Il2CppObject* enc = unity::GetComponent(P.go, encapsulateClass); unity::IsAlive(enc) && offEncMinW)
+            unity::Field<float>(enc, offEncMinW) = w;
+    unity::SetActive(P.go, true);
+    P.shown = true;
+    P.key = key ? key : "";
+    P.want = label;
+    ApplyPillLook(P, P.key.c_str());
+    SetPillText(P, P.want);
+    if (bg && sdfRectClass) SetColor(unity::GetComponent(P.go, sdfRectClass), *bg);
+    if (fg) Call(tmpSetColor, P.label, {const_cast<Color*>(fg)}, "TMP_Text.set_color");
+    P.reapply = kReapplyFrames;
+    Il2CppObject* t = P.toggle;
+    dialogPills.push_back(std::move(P));
+    return t;
+}
+
+// The station's program changed while its menu is open (the rotation, a drone source falling back to
+// Coop, ...): the page still shows the old one, and closing the menu would ask whether to discard
+// "changes" the player never made (DroneUIDisplay.OnCancel -> _unappliedChangesConfirm when
+// HasAnyChanges). The page follows the station then. A program the player applied (Start Program)
+// matches the page already: HasAnyChanges is false and nothing happens.
+void StationUi::Impl::FollowStation() {
+    Il2CppObject* model = StationModel();
+    ProgramData live;
+    if (!model || !drones::ReadProgram(model, live)) return;
+    const bool changed = pageProgKnown && pageStation == station && live != pageProg;
+    pageProg = live;
+    pageStation = station;
+    pageProgKnown = true;
+    if (!changed) return;
+    Il2CppObject* vm = menu.p ? unity::Field<Il2CppObject*>(menu.p, offMenuVm) : nullptr;
+    if (!IsA(vm, vmClass)) return;
+    bool ok = false;
+    const bool differs = !vmHasChanges || (Unbox<bool>(Call(vmHasChanges, vm, {}, "DroneProgramViewModel.HasAnyChanges", &ok)) && ok);
+    if (!differs) return;
+    RevertPage();
+    SR2_INFO("[{}] station ui: station {}: its program changed while the menu was open - the page shows it again", module,
+             station);
 }
 
 bool StationUi::Impl::Open() {
@@ -1300,6 +1401,8 @@ void StationUi::Impl::Close(const char* why) {
     titleSrc = bodySrc = nullptr;
     cells.clear();
     pRows.clear();
+    for (Pill& P : dialogPills) FreeLater(P.handles);  // destroyed with root
+    dialogPills.clear();
     FreeLater(dialogHandles);
     if (!was || !why) return;  // why == nullptr: rebuilt in place, no line
     if (kind == kDlgPrograms) SR2_INFO("[{}] station ui: programs dialog closed ({}), station {}", module, why, openStation);
@@ -1425,6 +1528,16 @@ void StationUi::Impl::Tick(float dt) {
             menu.p = b;
             menu.h = unity::NewGCHandle(b);
             if (!menu.h) menu.p = nullptr;
+            if (menu.p) {  // its DroneUIDisplay: "the station menu is open" on every tab
+                bool ok = false, inactive = true;
+                Il2CppObject* d = Call(compInParent, menu.p, {unity::TypeOf(displayClass), &inactive},
+                                       "GetComponentInParent(DroneUIDisplay)", &ok);
+                if (ok && unity::IsAlive(d)) {
+                    menuDisplay.p = d;
+                    menuDisplay.h = unity::NewGCHandle(d);
+                    if (!menuDisplay.h) menuDisplay.p = nullptr;
+                }
+            }
         }
         stateCountdown = 0;
     }
@@ -1440,7 +1553,12 @@ void StationUi::Impl::Tick(float dt) {
         const bool wantProg = pageActive && haveStation && progs::Available();
         SyncPill(limitPill, wantLimit, offMenuDest, "sr2mods_PriceLimitPrompt", "price-limit");
         SyncPill(progPill, wantProg, offMenuTarget, "sr2mods_ProgramsPrompt", "programs");
-        if (menuActive && haveStation) progs::NoteMenuOpen(station);  // no program switch under the player's eyes
+        // No program switch while the station menu is open (any tab: closing it from the Drone List tab
+        // also asks about unapplied page changes); and the page follows the station's program.
+        if ((menuActive || displayActive) && haveStation && progs::Available()) {
+            progs::NoteMenuOpen(station);
+            FollowStation();
+        }
         if (limitPill.shown && station != labelStation) {  // the same menu re-bound for another station
             labelStation = station;
             UpdatePillLabel();
@@ -1462,6 +1580,12 @@ void StationUi::Impl::Tick(float dt) {
         ApplyPillLook(progPill, "P");
         UpdateProgramsLabel();
     }
+    for (Pill& P : dialogPills)  // the dialog's pill buttons: key and label again for a few frames
+        if (P.reapply > 0 && unity::IsAlive(P.go)) {
+            --P.reapply;
+            ApplyPillLook(P, P.key.c_str());
+            SetPillText(P, P.want);
+        }
 
     // Hotkeys: C (or the pad's right stick click) toggles the price-limit dialog, P (left stick click)
     // the programs dialog; a click on a prompt opens its dialog.
@@ -1583,7 +1707,9 @@ bool StationUi::Impl::OpenPrograms(int row, int col) {
     const float btnW = 150.0f, btnH = 56.0f;
     const float removeX = rowW - 16.0f - btnW, editX = removeX - 12.0f - btnW;
     const float cellX0 = 70.0f, sepW = 24.0f;
-    const float cellW = (editX - 16.0f - cellX0 - 2 * sepW) / 3.0f;
+    const float activeW = 48.0f;  // the page's own "active" icon left of the running program's pill
+    const float cellW = (editX - 16.0f - activeW - cellX0 - 2 * sepW) / 3.0f;
+    Il2CppObject* activeSprite = offMenuActiveSprite ? unity::Field<Il2CppObject*>(menu.p, offMenuActiveSprite) : nullptr;
     for (int i = 0; i < n; ++i) {
         const ProgramData& pd = view.programs[i];
         const float ry = rowsY + i * (kProgRowH + kProgRowGap);
@@ -1602,6 +1728,7 @@ bool StationUi::Impl::OpenPrograms(int row, int col) {
             Text(rrt, "Name", tx, 4, cx + cellW - tx, kProgRowH - 8, cells3[c].name, 21.0f, kNavy, kAlignLeft, bodySrc, true, true);
             if (c < 2) Text(rrt, "Arrow", cx + cellW, 0, sepW, kProgRowH, ">", 26.0f, kNavy, kAlignCenter, titleSrc);
         }
+        if (running) Sprite(rrt, "Active", editX - activeW, (kProgRowH - 40.0f) * 0.5f, 40, 40, activeSprite);
         std::vector<PBtn> btns;
         PBtn edit;
         edit.action = kActEdit;
@@ -1610,14 +1737,14 @@ bool StationUi::Impl::OpenPrograms(int row, int col) {
         edit.y = ry + (kProgRowH - btnH) * 0.5f;
         edit.w = btnW;
         edit.h = btnH;
-        edit.toggle = Button(prt, "Edit", edit.x, edit.y, btnW, btnH, running ? "Running" : "Edit", running ? kTeal : kCyan,
-                             running ? kWhite : kNavy, layer);
+        edit.toggle = PillButton(prt, "Edit", edit.x, edit.y, btnW, btnH, nullptr, running ? "Running" : "Edit",
+                                 running ? &kTeal : nullptr, running ? &kWhite : nullptr, layer);
         btns.push_back(edit);
         if (n >= 2) {
             PBtn rem = edit;
             rem.action = kActRemove;
             rem.x = kPad + removeX;
-            rem.toggle = Button(prt, "Remove", rem.x, rem.y, btnW, btnH, "Remove", kWhite, kNavy, layer, 3.0f);
+            rem.toggle = PillButton(prt, "Remove", rem.x, rem.y, btnW, btnH, nullptr, "Remove", &kWhite, &kNavy, layer);
             btns.push_back(rem);
         }
         pRows.push_back(btns);
@@ -1631,7 +1758,7 @@ bool StationUi::Impl::OpenPrograms(int row, int col) {
         add.y = addY;
         add.w = 380.0f;
         add.h = kRowH;
-        add.toggle = Button(prt, "Add", add.x, add.y, add.w, add.h, "Add program", kCyan, kNavy, layer);
+        add.toggle = PillButton(prt, "Add", add.x, add.y, add.w, add.h, nullptr, "Add program", nullptr, nullptr, layer);
         pRows.push_back({add});
         pHint = Text(prt, "AddHint", kPad + 400.0f, addY, kPanelW - 2 * kPad - 400.0f, kRowH,
                      "A copy of the running program; it runs now - change it on this page and press Start Program.", 20.0f,
@@ -1656,8 +1783,8 @@ bool StationUi::Impl::OpenPrograms(int row, int col) {
             b.y = modeY;
             b.w = 340.0f;
             b.h = kRowH;
-            b.toggle = Button(prt, i == 0 ? "ModeIdle" : "ModeDelivery", b.x, b.y, b.w, b.h, names[i], sel ? kTeal : kBacker,
-                              sel ? kWhite : kNavy, layer);
+            b.toggle = PillButton(prt, i == 0 ? "ModeIdle" : "ModeDelivery", b.x, b.y, b.w, b.h, nullptr, names[i],
+                                  sel ? &kTeal : &kBacker, sel ? &kWhite : &kNavy, layer);
             btns.push_back(b);
         }
         pRows.push_back(btns);
@@ -1665,8 +1792,8 @@ bool StationUi::Impl::OpenPrograms(int row, int col) {
 
     // ---- footer ----
     Text(prt, "Help", kPad, footY, kPanelW - 2 * kPad - 240, kRowH,
-         "Arrows: choose    Enter: select    P or Esc: close", 22.0f, kNavy, kAlignLeft, bodySrc);
-    closeToggle = Button(prt, "Close", kPanelW - kPad - 220, footY, 220, kRowH, "Close", kCyan, kNavy, layer);
+         "Arrows: choose    Enter: select    Esc: close", 22.0f, kNavy, kAlignLeft, bodySrc);
+    closeToggle = PillButton(prt, "Close", kPanelW - kPad - 220, footY, 220, kRowH, "P", "Close", nullptr, nullptr, layer);
     if (Faulted()) return failOpen("faulted");
 
     unity::SetActive(root, true);
@@ -1779,7 +1906,10 @@ void StationUi::Shutdown() {
         Impl::FreeLater(p.dialogHandles);
         Impl::FreeLater(p.limitPill.handles);
         Impl::FreeLater(p.progPill.handles);
+        for (auto& P : p.dialogPills) Impl::FreeLater(P.handles);
+        p.dialogPills.clear();
         Impl::Release(p.menu);
+        Impl::Release(p.menuDisplay);
         return;
     }
     p.ForgetMenu();

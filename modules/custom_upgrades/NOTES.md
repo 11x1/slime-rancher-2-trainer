@@ -188,14 +188,38 @@ from the sidecar`), the migration of an elder-target Hen Collector program.
   `DroneStation.AssignRanchTask` (new task data + `RanchDrone.AssignTask` -> `DroneBehaviorPlexer.OnTaskChanged`
   rebuilds the drone's programs), the same call as Start Program.
 - **When.** "When idle" (default): the drone has nothing to do with the current program = its current
-  behaviour (`DroneBehaviorPlexer._currBehaviour`) is `RanchDroneBehaviourRest` / `Idle` and its ammo
-  (`RanchDrone._ammo.IsEmpty()`) is empty for 2 ticks (~2 s). "After each delivery": also when the ammo
-  went from full to empty (a load was put somewhere). Never while the drone holds something: the next
-  program's destination may not take it and `RanchDroneBehaviourDumpAmmo` would destroy the cargo. A
-  program runs at least 3 s; after a whole round of idle programs the next try waits 20 s. No switching
-  without battery (`GetCurrentEnergy() <= 0`, the drone rests anyway) and while the station's program page
-  is open (the UI calls `NoteMenuOpen`). Log: `drone programs: station N: program 1 -> 2 (nothing to
+  behaviour (`DroneBehaviorPlexer._currBehaviour`) is `RanchDroneBehaviourRest`, its ammo
+  (`RanchDrone._ammo.IsEmpty()`) is empty and the game's own query `DroneBehaviorPlexer.MaybeHasNextGatherBehavior()`
+  (any source program's `Relevancy(readOnly)`) says no, for 2 ticks (~2 s). `RanchDroneBehaviourIdle` (the
+  at-station flourish) neither counts nor resets: `PickNextBehavior` tries it BEFORE the programs whenever
+  the drone is at its station and a flourish is due, with work or without (until round 9 it counted as idle,
+  so a freshly switched program could be left before the drone started it). "After each delivery": also when
+  the ammo went from full to empty (a load was put somewhere). Never while the drone holds something: the
+  next program's destination may not take it and `RanchDroneBehaviourDumpAmmo` would destroy the cargo. A
+  program runs at least 5 s; after a whole round of idle programs the next try waits 20 s. No switching
+  without battery (`GetCurrentEnergy() <= 0`, the drone rests anyway) and while the station menu is open
+  (any tab; the UI calls `NoteMenuOpen`). Log: `drone programs: station N: program 1 -> 2 (nothing to
   do)`, at most one line per station per 30 s (`[+N switch(es) not logged]`).
+- **Stuck programs.** A program whose drone works (not resting) but holds no cargo for 90 s counts as
+  "found nothing it could pick up" and the next program runs; always logged with what the drone was doing:
+  `program 1 (target 5 source 8 sink 4) held no cargo for 90 s while working, the drone was
+  RanchDroneSourceProgramOutsidePlots (<GetProgramStateStr>) - program 2 runs`. The case (round 9): a
+  dynamic source (Outside Plots / Free Range, `RanchDroneSourceProgramDynamic`) picks an item from the
+  cells (`GetSources`: predicate, not inside a plot, no parent), flies there, and cone-scans for it
+  (`ConeFindTarget`: `Physics.SphereCastNonAlloc` with layers Actor + ActorIgnorePlayer, same
+  IdentifiableType, in the cone). Nothing found -> the gather completes empty and the next pick flies to
+  the same item again: the drone "keeps scanning" and never rests, so the idle rule never fired.
+- **Round 9 finding** (`sr2mods.log` 00:44-01:07, sidecar `5:None:8:4|2:None:9:6`): program 1 = Meats,
+  Outside Plots -> Incinerator, program 2 = Plorts, Free Range -> Refinery. The rotation did switch (lines
+  `program 1 -> 2` every ~40 s) and the plort program worked; the meat program is the one that never got
+  anything: the drone ran it (its scanning is the Outside Plots source's scan) but never picked up a
+  chicken. `AssignRanchTask` itself is complete: it writes a new `DroneTaskData` and `RanchDrone.AssignTask`
+  -> `OnTaskChanged` deselects the current behaviour and builds a new `RanchDroneProgramPlexer` from fresh
+  source / sink programs (GatherSourceTask / GatherSinkTask), exactly what Start Program does. Chickens
+  outside plots with Outside Plots: live chickens walk away from the spot the drone flies to, which looks
+  like the scan miss above (not verified in game). Chickens in a coop need the source Coop (it keeps the
+  coop's minimum hens / roosters). The Incinerator takes items only while its ash trough has room
+  (`Incinerate.GetAshSpace() > 0`).
 - **Editing.** The page always shows the running program. Changing it there and pressing Start Program
   changes that program (the tick sees the station's task data differ from the stored one: `program N
   changed (...)`); so does the game falling back (e.g. Hen Collector -> Coop when no Hen Collector is
@@ -222,7 +246,9 @@ from the sidecar`), the migration of an elder-target Hen Collector program.
   holding plorts back because of drone_price_limit keeps its cargo and so stays on its program.
 - **UI** lives in `modules/drone_price_limit/station_dialog.cpp` (owns the station menu hooks): a
   `[P] Programs` / `[P] Program 2/3` pill right of the target's Change pill, and the programs dialog
-  (see that module's NOTES). It shows only while custom upgrades are on.
+  (see that module's NOTES). It shows only while custom upgrades are on. When the station's program
+  changes while its menu is open, the page follows it (no "discard" prompt for changes the player never
+  made; drone_price_limit NOTES).
 
 Not checked in game yet: everything in this section (see the test list in the drone_price_limit NOTES).
 

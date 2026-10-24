@@ -66,7 +66,28 @@ per address). It shows only while custom_upgrades is on (`drone_programs::Availa
   selects, P / Esc / Close / backdrop close.
 - Edit = `drone_programs::Run` + `DroneProgramViewModel.RevertChangesToLastAppliedProgram`, so the page
   shows the program that now runs; the dialog closes. Remove / mode rebuild the dialog in place.
-- While the program page is open the station's rotation waits (`NoteMenuOpen`).
+- Look (round 9: "make it aligned with slime rancher's UI"): every button of the dialog (Edit / Running,
+  Remove, Add program, the two mode buttons, Close) is a clone of the game's own prompt pill (the target
+  option's `PromptContainer`, the same clone as the `[P] Programs` action: `ClonePrompt`), so shape,
+  font, padding and colours are the game's; Close carries the `P` key glyph like the page's legend, the
+  others show the label only (`InputEventDisplay` hidden). Selected states recolour the pill (Running and
+  the chosen mode teal with white text, Remove white, the other mode grey). The running program also shows
+  the page's own "active" icon (`DroneProgramMenu._activeStateSprite`). Texts keep the menu's header /
+  description fonts, the panel the menu's palette. If the prompt can't be cloned, the old drawn button is
+  used.
+- While the station menu is open (any tab; a tab other than the program page counts for 2 min after the
+  page was last seen, so a closed display that stays loaded can't hold it) the station's rotation waits
+  (`NoteMenuOpen`).
+- **"Discard program" prompt** (round 9): closing the menu runs `DroneUIDisplay.OnCancel`, which opens
+  `_unappliedChangesConfirm` when the page's target / source / destination differ from the station's task
+  data (`MatchesCurrentProgram` of the three sub view models). The station's program can change under an
+  open menu without the player (the rotation on another tab of the menu, which did not pause it before; a
+  drone source falling back to Coop; the sidecar restore). Now every state read (~10 frames) while the menu
+  is open compares the station's program with the last one seen; when it changed and
+  `DroneProgramViewModel.HasAnyChanges()` is true, `RevertChangesToLastAppliedProgram` makes the page show
+  the station's program (log `station ui: station N: its program changed while the menu was open - the page
+  shows it again`). A program the player applied with Start Program matches the page, so nothing happens;
+  real unapplied edits still get the game's prompt.
 
 To check in game (programs):
 
@@ -89,6 +110,11 @@ To check in game (programs):
 9. Program 1 with the Hen Collector / Quantum Storage Link source: saved as Coop / Silo, restored with
    the true source after a load.
 10. Pick the station up: log `extra programs dropped (the station is gone ...)`.
+11. Round 9: the dialog's buttons look like the page's own prompt pills; Close shows the P key; the
+    running row has the page's "active" icon. Switching programs (Edit, or the rotation) and closing the
+    menu without touching the page: no "discard" prompt.
+12. A program that never gets cargo (e.g. Meats, Outside Plots, with chickens running around): after 90 s
+    the next program runs and the log says what the drone was doing.
 
 ## How the station is known in the drone logic
 
