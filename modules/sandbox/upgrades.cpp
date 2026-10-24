@@ -40,6 +40,8 @@
 #include "core/log.h"
 #include "core/module.h"
 #include "core/unity.h"
+#include "modules/custom_upgrades/api.h"
+#include "modules/custom_upgrades/buildables.h"
 #include "ui/item_icons.h"
 #include "ui/sandbox_bridge.h"
 #include "ui/sandbox_upgrades_bridge.h"
@@ -329,10 +331,34 @@ bool GiveComponents(Il2CppObject* spend, const std::vector<Il2CppObject*>& gate,
 }
 
 // ------------------------------------------------------------- publish ----
+// The mod's buildables (custom_upgrades/buildables.h) for the "Mod buildables" tab.
+void PublishMods(ub::State& st) {
+    namespace bld = sr2::modules::custom_upgrades::buildables;
+    if (!sr2::modules::custom_upgrades::Active()) {
+        st.modWhy = "Custom upgrades are off (Options: Custom upgrades).";
+        return;
+    }
+    for (const bld::Info& i : bld::List()) {
+        ub::ModBlueprint m;
+        m.id = i.id;
+        m.name = i.name;
+        m.base = i.base;
+        m.hint = i.hint;
+        if (i.icon && unity::IsAlive(i.icon)) m.icon = sr2::ui::item_icons::Register(i.icon);
+        m.unlocked = i.unlocked;
+        m.baseUnlocked = i.baseUnlocked;
+        m.mode = static_cast<int>(i.unlock);
+        m.owned = i.owned;
+        st.mods.push_back(std::move(m));
+    }
+    if (st.mods.empty()) st.modWhy = "Load a save: the mod's buildables are set up a moment after it is loaded.";
+}
+
 void Publish() {
     ub::State st;
     st.tick = GetTickCount64();
     st.blueprintWhy = g_blueprintWhy;
+    if (Live()) PublishMods(st);
     if (!Live()) {
         st.why = "Sandbox is off.";
     } else if (!g_why.empty()) {
@@ -550,10 +576,26 @@ void DoBlueprints(const std::vector<uintptr_t>& ids, bool unlock) {
     AfterChange();
 }
 
+// The sidecar override of a mod buildable's Fabricator card (custom_upgrades/buildables.h).
+void DoModBlueprint(const std::string& id, long long mode) {
+    namespace bld = sr2::modules::custom_upgrades::buildables;
+    const bld::Unlock u = mode == 1 ? bld::Unlock::kUnlocked : mode == 2 ? bld::Unlock::kLocked : bld::Unlock::kFollowBase;
+    std::string result;
+    if (!bld::SetUnlock(id, u, result)) return Done(false, "Mod blueprint not changed: " + result);
+    std::string name = id, base;
+    for (const bld::Info& i : bld::List())
+        if (i.id == id) name = i.name, base = i.base;
+    Done(true, u == bld::Unlock::kUnlocked ? std::format("{} unlocked in this save (kept in the mod's sidecar)", name)
+               : u == bld::Unlock::kLocked ? std::format("{} locked in this save (kept in the mod's sidecar)", name)
+                                           : std::format("{} follows the {} blueprint again", name, base.empty() ? "base" : base));
+    AfterChange();
+}
+
 // --------------------------------------------------------------- handler ----
 void Handle(const ub::Action& a) {
     if (!Live()) return sr2::ui::sandbox::SetStatus("Sandbox is off.", true);
-    if (!g_why.empty() && a.op != ub::Op::SetBlueprints) return Done(false, "Upgrades unavailable: " + g_why);
+    if (!g_why.empty() && a.op != ub::Op::SetBlueprints && a.op != ub::Op::SetModBlueprint)
+        return Done(false, "Upgrades unavailable: " + g_why);
     switch (a.op) {
         case ub::Op::SetLevel: DoSetLevel(a.id, a.value); break;
         case ub::Op::Discover: DoDiscover(a.id, false); break;
@@ -561,6 +603,7 @@ void Handle(const ub::Action& a) {
         case ub::Op::DiscoverAll: DoDiscover(0, true); break;
         case ub::Op::MaxAll: DoMaxAll(); break;
         case ub::Op::SetBlueprints: DoBlueprints(a.ids, a.value != 0); break;
+        case ub::Op::SetModBlueprint: DoModBlueprint(a.key, a.value); break;
     }
     Publish();
 }

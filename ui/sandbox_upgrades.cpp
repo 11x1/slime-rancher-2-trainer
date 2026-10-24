@@ -29,17 +29,20 @@ using theme::Palette;
 
 constexpr const char* kUpgradeCtx = "##sbx_upg_ctx";
 constexpr const char* kBlueprintCtx = "##sbx_bp_ctx";
+constexpr const char* kModCtx = "##sbx_mod_ctx";
 constexpr const char* kSlotTierCtx = "##sbx_slot_tier";
 constexpr double kPendingSeconds = 0.8;  // a requested change shown until the state has it
 
 float g_scale = 1.0f;
 float U(float v) { return v * g_scale; }
 
-int g_tab = 0;                                  // 0 = Upgrades, 1 + i = recipe category i
+int g_tab = 0;                                  // 0 = Upgrades, 1 + i = recipe category i, 1 + count = Mod buildables
 std::map<int, item_grid::State> g_bpGrid;       // search text per blueprint tab
 uintptr_t g_ctxUpgrade = 0;                     // right-clicked upgrade
 uintptr_t g_ctxBlueprint = 0;                   // right-clicked blueprint
 int g_ctxCategory = -1;                         // its category
+std::string g_ctxMod;                           // right-clicked mod buildable (id)
+item_grid::State g_modGrid;                     // search text of the Mod buildables tab
 
 // Changes asked for but not in a state yet, so quick wheel notches add up and tiles don't flicker.
 struct Pending {
@@ -47,6 +50,7 @@ struct Pending {
     double until = 0;  // ImGui::GetTime() deadline
 };
 std::unordered_map<uintptr_t, Pending> g_levelPending, g_bpPending;
+std::unordered_map<std::string, Pending> g_modPending;  // value = requested mode
 
 ImU32 Mix(ImU32 a, ImU32 b, float t) {
     const ImVec4 x = ImGui::ColorConvertU32ToFloat4(a), y = ImGui::ColorConvertU32ToFloat4(b);
@@ -398,6 +402,98 @@ void BlueprintTab(const Helpers& h, const sbx::Snapshot& s, int cat, const std::
     DimText("Lock takes a blueprint off your list again; gadgets you already have stay.");
 }
 
+// ------------------------------------------------------- mod buildables ----
+// The mod's own buildables (Quantum Storage Link, DJ Booth, DJ Speaker, Slime Radio). Their Fabricator card
+// follows the base gadget's blueprint; Sandbox can unlock / lock it per save (the mod's sidecar, never the
+// vanilla save). Click toggles, right-click: menu with "follow the base blueprint".
+int ModMode(const ub::ModBlueprint& m) {
+    auto it = g_modPending.find(m.id);
+    if (it == g_modPending.end()) return m.mode;
+    if (ImGui::GetTime() < it->second.until && it->second.value != m.mode) return it->second.value;
+    g_modPending.erase(it);
+    return m.mode;
+}
+
+bool ModUnlocked(const ub::ModBlueprint& m) {
+    const int mode = ModMode(m);
+    return mode == 1 || (mode == 0 && m.baseUnlocked);
+}
+
+void RequestMod(const ub::ModBlueprint& m, int mode) {
+    g_modPending[m.id] = {mode, ImGui::GetTime() + kPendingSeconds};
+    ub::Action a;
+    a.op = ub::Op::SetModBlueprint;
+    a.key = m.id;
+    a.value = mode;
+    ub::Request(a);
+}
+
+std::string ModState(const ub::ModBlueprint& m) {
+    switch (ModMode(m)) {
+        case 1: return "Unlocked by Sandbox";
+        case 2: return "Locked by Sandbox";
+        default: return std::format("{} (follows the {} blueprint)", m.baseUnlocked ? "Unlocked" : "Locked", m.base);
+    }
+}
+
+void ModTab(const Helpers& h, const ub::State& st) {
+    std::vector<item_grid::Tile> tiles;
+    tiles.reserve(st.mods.size());
+    for (const ub::ModBlueprint& m : st.mods) {
+        const bool on = ModUnlocked(m);
+        item_grid::Tile t;
+        t.id = std::hash<std::string>{}(m.id);
+        t.name = &m.name;
+        t.icon = m.icon;
+        t.dimmed = !on;
+        t.accent = on ? theme::Colors().ok : 0;
+        t.badge = m.owned > 0 ? m.owned : -1;
+        tiles.push_back(t);
+    }
+    item_grid::Options o;
+    o.scale = g_scale;
+    o.tile = 54.0f;
+    o.height = 120.0f;
+    o.hint = "Search mod buildables...";
+    o.empty = st.mods.empty() ? (st.modWhy.empty() ? "No mod buildables." : st.modWhy.c_str()) : "No matching buildables.";
+    const item_grid::Result r = item_grid::Draw("##bpmod", tiles, g_modGrid, o);
+    if (r.clicked >= 0) {
+        const ub::ModBlueprint& m = st.mods[static_cast<size_t>(r.clicked)];
+        RequestMod(m, ModUnlocked(m) ? 2 : 1);
+    }
+    if (r.rightClicked >= 0) {
+        g_ctxMod = st.mods[static_cast<size_t>(r.rightClicked)].id;
+        ImGui::OpenPopup(kModCtx);
+    }
+    if (r.hovered >= 0 && !ImGui::IsPopupOpen(kModCtx)) {
+        // The item tooltips' look: name, "Mod" tag, the state in its colour, what unlocks it, keycaps.
+        const ub::ModBlueprint& m = st.mods[static_cast<size_t>(r.hovered)];
+        const Palette& P = theme::Colors();
+        Tip tip;
+        tip.name = m.name;
+        tip.tag = "Mod";
+        tip.tagCol = h.gadgetAccent;
+        tip.lines.push_back({ModState(m), ModUnlocked(m) ? P.ok : P.dim});
+        tip.lines.push_back({m.hint, 0});
+        if (m.owned > 0) tip.lines.push_back({std::format("{} unplaced", m.owned), 0});
+        tip.keys = {{"LMB", ModUnlocked(m) ? "lock" : "unlock"}, {"RMB", "more"}};
+        h.tip(tip);
+    }
+    Popup(h, kModCtx, [&] {
+        const ub::ModBlueprint* m = nullptr;
+        for (const ub::ModBlueprint& x : st.mods)
+            if (x.id == g_ctxMod) m = &x;
+        if (!m) return ImGui::CloseCurrentPopup();
+        const int mode = ModMode(*m);
+        MenuTitle(m->name, ModUnlocked(*m) ? "unlocked" : "locked");
+        if (ImGui::MenuItem("Unlock blueprint", nullptr, mode == 1)) RequestMod(*m, 1);
+        if (ImGui::MenuItem("Lock blueprint", nullptr, mode == 2)) RequestMod(*m, 2);
+        if (ImGui::MenuItem(std::format("Follow the {} blueprint", m->base).c_str(), nullptr, mode == 0)) RequestMod(*m, 0);
+    });
+    DimText("The mod's own Fabricator cards unlock with their base gadget's blueprint. Unlock / lock here keeps your "
+            "choice for this save in the mod's sidecar file; the game's save never sees it.");
+}
+
 }  // namespace
 
 void DrawCard(const Helpers& h, const sbx::Snapshot& s, float w) {
@@ -408,13 +504,17 @@ void DrawCard(const Helpers& h, const sbx::Snapshot& s, float w) {
     const auto st = ub::Get();
     const int nCats = s.recipeCategories ? static_cast<int>(s.recipeCategories->size()) : 0;
     // The overlay's sub-tabs (the tab bar's strip, smaller), drawn before the content, so a click shows
-    // the new tab in the same frame.
+    // the new tab in the same frame. Last: the mod's own buildables.
     std::vector<std::string> labels{"Upgrades"};
     for (int i = 0; i < nCats; ++i) labels.push_back((*s.recipeCategories)[static_cast<size_t>(i)]);
-    if (g_tab > nCats) g_tab = 0;
+    labels.push_back("Mod buildables");
+    if (g_tab > nCats + 1) g_tab = 0;
     h.subTabs("##sbx_upg_tabs", labels, g_tab);
     ImGui::Dummy(ImVec2(0, U(2)));
-    if (g_tab == 0) {
+    if (g_tab == nCats + 1) {
+        if (!st || GetTickCount64() - st->tick > 3000) DimText("Reading the mod's buildables...");
+        else ModTab(h, *st);
+    } else if (g_tab == 0) {
         if (!st || GetTickCount64() - st->tick > 3000) DimText("Reading your upgrades...");
         else if (!st->inGame || st->upgrades.empty()) DimText(st->why.empty() ? "No upgrades found." : st->why);
         else UpgradesTab(h, *st);

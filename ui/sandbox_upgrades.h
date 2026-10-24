@@ -1,7 +1,8 @@
 #pragma once
 // The Sandbox page's "Upgrades & Blueprints" card (modules/sandbox/upgrades.cpp, sandbox_upgrades_bridge.h):
 // tabs Upgrades (the Fabricator's vacpack / player upgrades with their game icon and tier) and one per
-// Fabricator gadget category (Utilities, Warp Tech, Decorations: blueprints locked / unlocked). Also the
+// Fabricator gadget category (Utilities, Warp Tech, Decorations: blueprints locked / unlocked) and "Mod
+// buildables" (custom_upgrades' own cards: follow the base blueprint / unlocked / locked per save). Also the
 // tier menu of the vacpack slot row (right-click on an empty or locked slot: the Extra Tank tier).
 // Render thread only; every change is a posted request. Kept out of menu.cpp, which only calls these and
 // hands over its card / tooltip / popup / sub-tab helpers.
