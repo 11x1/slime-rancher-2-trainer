@@ -87,18 +87,61 @@ void ExcFormat(Il2CppException* exc, char* out, size_t n) {
     }
 }
 
+// The managed stack's first frames (il2cpp_format_stack_trace: "at Ns.Class.Method () [0x00000] in <...>:0"
+// per line) as " (at A.B; at C.D; ...)", so a log line says where inside the game a call threw (round 10:
+// the upgrade NullReferenceException took a decompile to place). Empty when the runtime keeps no trace.
+void ExcTrace(Il2CppException* exc, char* out, size_t n) {
+    const Api& a = api();
+    out[0] = '\0';
+    if (!a.il2cpp_format_stack_trace) return;
+    char raw[2048] = {};
+    __try {
+        a.il2cpp_format_stack_trace(exc, raw, static_cast<int>(sizeof(raw) - 1));
+        raw[sizeof(raw) - 1] = '\0';
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    constexpr int kFrames = 5;
+    int frames = 0;
+    const char* p = raw;
+    while (*p && frames < kFrames) {
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+        if (!*p) break;
+        const char* end = p;
+        while (*end && *end != '\r' && *end != '\n') ++end;
+        // "at X.Y (args) [0x00000] in <...>:0" -> "at X.Y (args)"
+        const char* cut = end;
+        for (const char* q = p; q + 1 < end; ++q)
+            if (q[0] == ' ' && q[1] == '[') {
+                cut = q;
+                break;
+            }
+        char frame[256] = {};
+        const size_t len = static_cast<size_t>(cut - p) < sizeof(frame) - 1 ? static_cast<size_t>(cut - p) : sizeof(frame) - 1;
+        memcpy(frame, p, len);
+        AppendC(out, n, frames ? "; " : " (");
+        AppendC(out, n, frame);
+        ++frames;
+        p = end;
+    }
+    if (frames) AppendC(out, n, *p ? "; ...)" : ")");
+}
+
 void DescribeException(Il2CppException* exc, char* out, size_t n) {
     out[0] = '\0';
     char cls[256] = {};
     char msg[768] = {};
+    char trace[768] = {};
     ExcClassName(exc, cls, sizeof(cls));
     ExcMessage(exc, msg, sizeof(msg));
     if (!msg[0] && !cls[0]) ExcFormat(exc, msg, sizeof(msg));
+    ExcTrace(exc, trace, sizeof(trace));
     AppendC(out, n, cls[0] ? cls : "managed exception");
     if (msg[0]) {
         AppendC(out, n, ": ");
         AppendC(out, n, msg);
     }
+    AppendC(out, n, trace);
 }
 
 // Invoke + exception description, all under SEH. On a managed exception the
