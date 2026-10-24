@@ -57,6 +57,7 @@
 #include "modules/sandbox/player_extras.h"
 #include "modules/sandbox/prefab_icons.h"
 #include "modules/sandbox/upgrades.h"
+#include "modules/sandbox/weather.h"
 #include "ui/item_icons.h"
 #include "ui/overlay.h"
 #include "ui/sandbox_bridge.h"
@@ -733,6 +734,7 @@ bool Sandbox::Setup(sr2::core::ModuleContext& ctx) {
                                  [this](bool rebuild) { RefreshFabricator(rebuild); },
                                  [this] { lastRecipeState_ = lastUpgState_ = lastSnap_ = 0; },
                                  [this](bool sync) { return VacpackState(sync); }});  // upgrades.cpp
+    sandbox::SetupWeather(ctx);  // the Weather card (weather.cpp)
 
     g_self = this;
     if (!frameCb_) frameCb_ = main_thread::AddFrameCallback(kModule, [this](float dt) { Tick(dt); });
@@ -1009,6 +1011,7 @@ void Sandbox::OnEnable() {
     bridge::SetHandler(&HandleThunk);
     sandbox::PlayerExtrasEnabled(true);
     sandbox::UpgradesEnabled(true);
+    sandbox::WeatherEnabled(true);
     lastSnap_ = 0;
     togglesSeen_ = 0;  // the save's toggles apply again
     // A list that came out empty (built before the assets were loaded) is tried again.
@@ -1027,6 +1030,7 @@ void Sandbox::OnDisable() {
     bridge::SetHandler(nullptr);
     sandbox::PlayerExtrasEnabled(false);
     sandbox::UpgradesEnabled(false);
+    sandbox::WeatherEnabled(false);
     bridge::Snapshot s;
     s.tick = GetTickCount64();
     s.why = "Sandbox is off.";
@@ -2745,6 +2749,7 @@ void Sandbox::Tick(float dt) {
     }
     sandbox::PlayerExtrasTick(snap);
     sandbox::UpgradesTick(bridge::WantsSnapshot());
+    sandbox::WeatherTick(bridge::WantsSnapshot());
 }
 
 void Sandbox::Done(bool ok, const std::string& text) {
