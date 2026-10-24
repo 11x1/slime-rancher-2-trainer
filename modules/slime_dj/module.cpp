@@ -5,10 +5,11 @@
 // playing song on another one (compiled-in stb_vorbis / dr_mp3 / dr_wav, codecs.c). The main
 // thread only copies decoded PCM into the game's audio.
 //
-// Playback (main thread, one frame callback, no hooks):
-//   * Music boxes: Object.FindObjectsByType(MusicBoxUpgrader, exclude inactive) every 2 s while a
-//     song is loaded or the tab is open; a box counts while MusicBoxUpgrader.MusicBox (the
-//     GameObject the upgrade switches on) is active. Corrals without the upgrade are skipped.
+// Playback (main thread, one frame callback; one recording hook, MusicBoxUpgrader.Apply):
+//   * Music boxes: the known MusicBoxUpgraders (one Object.FindObjectsByType when a song starts /
+//     the tab opens, then whatever the Apply hook reports) are checked every 2 s while a song is
+//     loaded or the tab is open; a box counts while MusicBoxUpgrader.MusicBox (the GameObject the
+//     upgrade switches on) is active. Corrals without the upgrade are skipped.
 //   * Every owned box nearby gets a speaker: a GameObject "sr2dj_Speaker" with a Unity
 //     AudioSource, parented to the box's SECTR audio source (or the box itself), fully 3D with
 //     the Hearing range setting (linear rolloff). All speakers play the same clip in sync
@@ -35,7 +36,7 @@
 //
 // Fault policy (like wall_markers): every game call runs inside one guarded tick or guarded
 // request; a native fault marks the module faulted and stops it for the session. GC handles are
-// freed only in the tick / requests (never in a hook; there are none).
+// freed only in the tick / requests (never in the hook, which only records a raw pointer).
 
 #include <windows.h>
 
@@ -94,6 +95,7 @@ constexpr int kWritesPerTick = 3;        // chunks copied per frame once playing
 constexpr float kBoxScanInterval = 2.0f;
 constexpr float kBusRetryInterval = 5.0f;
 constexpr float kPublishInterval = 0.2f;
+constexpr float kPerfLogInterval = 60.0f;  // box scan timing summary, at most once a minute
 constexpr int kMaxExceptions = 20;
 constexpr int kMaxFailuresInARow = 3;
 // 3D: linear rolloff, full volume up to kFullFraction of the hearing range, silent at the range.
@@ -180,8 +182,44 @@ struct QueueItem {
     uint64_t uid = 0, song = 0;
 };
 
+// Box scan timing, logged once a minute while scans ran (QueryPerformanceCounter ticks).
+struct ScanPerf {
+    int scans = 0, searches = 0;
+    long long sum = 0, max = 0, searchMax = 0;
+    float acc = 0;
+    void Scan(long long t) {
+        ++scans;
+        sum += t;
+        max = std::max(max, t);
+    }
+    void Search(long long t) {
+        ++searches;
+        searchMax = std::max(searchMax, t);
+    }
+};
+
 class SlimeDj;
 SlimeDj* g_self = nullptr;
+
+// MusicBoxUpgrader.Apply(Upgrade) hook (0x98A810, 1.3.0). LandPlot.ApplyUpgrades calls Apply on every
+// PlotUpgrader of the plot for every owned upgrade, on load and on each purchase, so every corral that
+// owns the Music Box passes here when its plot appears or the box is bought. The detour only records
+// the raw `this` (main thread); the tick pins it in the next frame. This replaces the old scene-wide
+// FindObjectsByType every 2 s (8-14 ms on the ranch, user log 2026-10-24).
+using ApplyFn = void (*)(Il2CppObject*, int32_t, const MethodInfo*);
+ApplyFn g_origApply = nullptr;
+sr2::core::DetourGuard g_guardApply{"slime_dj", "MusicBoxUpgrader.Apply"};
+std::atomic<bool> g_recording{false};
+std::vector<Il2CppObject*> g_applied;  // main thread only, drained by the tick every frame
+
+void ApplyDetour(Il2CppObject* self, int32_t upgrade, const MethodInfo* mi) {
+    g_origApply(self, upgrade, mi);
+    if (g_recording.load(std::memory_order_relaxed))
+        g_guardApply.Run([&] {
+            if (self && g_applied.size() < 512 && std::find(g_applied.begin(), g_applied.end(), self) == g_applied.end())
+                g_applied.push_back(self);
+        });
+}
 
 class SlimeDj {
 public:
@@ -189,6 +227,18 @@ public:
         std::string why;
         if (!Resolve(why)) return ctx.Fail(why);
         RegisterSettings();
+        // Optional: without the hook every box scan searches the whole scene again (the old way).
+        {
+            const MethodInfo* apply = Resolver::Get().Method(upgraderClass_, "Apply", 1);
+            void* target = apply ? Resolver::Get().MethodPointer(apply) : nullptr;
+            std::string herr = target ? "" : "MusicBoxUpgrader.Apply(1) not found";
+            hooked_ = target && ctx.hooks().Create(kModule, "slime_dj.MusicBoxUpgrader.Apply", target,
+                                                   reinterpret_cast<void*>(&ApplyDetour),
+                                                   reinterpret_cast<void**>(&g_origApply), &herr);
+            if (!hooked_)
+                SR2_WARN("slime_dj: no MusicBoxUpgrader.Apply hook ({}); music boxes are searched in the whole scene "
+                         "every 2 s (a visible hitch on big ranches)", herr);
+        }
         if (!onChange_) onChange_ = settings::OnChange(kModule, [this](const std::string&) { cfgDirty_.store(true); });
         folder_ = paths::SelfDir() / kFolderName;
         std::error_code ec;
@@ -215,6 +265,11 @@ public:
         }
         g_self = this;
         cfgDirty_.store(true);
+        // Apply calls recorded before a disable may point at objects that are gone: dropped in the
+        // first tick, and the next box scan searches the scene once.
+        dropApplied_ = true;
+        fullScan_ = true;
+        g_recording.store(hooked_);
         if (!scannedOnce_) {
             scannedOnce_ = true;
             library_.Rescan(folder_);
@@ -224,6 +279,7 @@ public:
     }
 
     void OnDisable() {
+        g_recording.store(false);
         bridge::SetHandler(nullptr);
         if (frameCb_) main_thread::RemoveFrameCallback(frameCb_);
         frameCb_ = 0;
@@ -455,6 +511,7 @@ private:
     // Permanent stop: no further game calls this session (handles are leaked on purpose).
     void Die(const std::string& why) {
         dead_.store(true);
+        g_recording.store(false);
         bridge::SetHandler(nullptr);
         if (frameCb_) main_thread::RemoveFrameCallback(frameCb_);
         frameCb_ = 0;
@@ -585,19 +642,60 @@ private:
     }
 
     // ------------------------------------------------------------ speakers ----
-    // Owned music boxes nearby (active MusicBox GameObjects), in scene order.
+    // Known MusicBoxUpgraders (ups_): one scene search (FindObjectsByType, inactive included) when a
+    // song starts / the tab opens / the module is enabled, then only what the Apply hook reports (a
+    // plot with upgrades loaded, an upgrade bought). The scene search walks every object of the scene
+    // (8-14 ms on a big ranch), so it never runs on a timer while the hook works.
+    void AddUpgrader(Il2CppObject* up) {
+        if (!unity::IsAlive(up) || !IsA(up, upgraderClass_) || ups_.size() >= 256) return;
+        for (Il2CppGCHandle h : ups_)
+            if (unity::GCHandleTarget(h) == up) return;
+        if (Il2CppGCHandle h = unity::NewGCHandle(up)) ups_.push_back(h);
+    }
+
+    // Every tick (cheap; usually nothing recorded): pins what the hook saw since the last frame.
+    // True when the hook saw something (an upgrade applied: the box may have just switched on).
+    bool DrainApplied() {
+        if (dropApplied_) {
+            dropApplied_ = false;
+            g_applied.clear();
+            return false;
+        }
+        if (g_applied.empty()) return false;
+        for (Il2CppObject* up : g_applied) AddUpgrader(up);
+        g_applied.clear();
+        return true;
+    }
+
+    void SceneSearch() {
+        const LONGLONG t0 = Qpc();
+        Il2CppObject* type = unity::TypeOf(upgraderClass_);
+        if (!type) return;
+        int32_t inactive = 1 /* FindObjectsInactive.Include */, sort = 0 /* FindObjectsSortMode.None */;
+        bool ok = false;
+        Il2CppObject* arr = Call(findByType_, nullptr, {type, &inactive, &sort}, "Object.FindObjectsByType", &ok);
+        if (!ok || !arr) return;
+        for (size_t i = 0, n = std::min<size_t>(unity::ArrayLength(arr), 256); i < n; ++i)
+            AddUpgrader(static_cast<Il2CppObject*>(unity::ArrayAt(arr, i)));
+        perf_.Search(Qpc() - t0);
+    }
+
+    // Owned music boxes nearby (active MusicBox GameObjects).
     std::vector<Il2CppObject*> FindBoxes() {
         std::vector<Il2CppObject*> out;
         boxUps_.clear();
-        Il2CppObject* type = unity::TypeOf(upgraderClass_);
-        if (!type) return out;
-        int32_t inactive = 0 /* FindObjectsInactive.Exclude */, sort = 0 /* FindObjectsSortMode.None */;
-        bool ok = false;
-        Il2CppObject* arr = Call(findByType_, nullptr, {type, &inactive, &sort}, "Object.FindObjectsByType", &ok);
-        if (!ok || !arr) return out;
-        for (size_t i = 0, n = std::min<size_t>(unity::ArrayLength(arr), 256); i < n; ++i) {
-            auto* up = static_cast<Il2CppObject*>(unity::ArrayAt(arr, i));
-            if (!unity::IsAlive(up) || !IsA(up, upgraderClass_)) continue;
+        if (fullScan_ || !hooked_) {
+            fullScan_ = false;
+            SceneSearch();
+        }
+        for (size_t i = 0; i < ups_.size();) {
+            Il2CppObject* up = Target(ups_[i]);
+            if (!up) {  // plot demolished or its scene unloaded
+                Free(ups_[i]);
+                ups_.erase(ups_.begin() + static_cast<std::ptrdiff_t>(i));
+                continue;
+            }
+            ++i;
             Il2CppObject* box = unity::Field<Il2CppObject*>(up, offMusicBox_);
             if (!unity::IsAlive(box) || !IsA(box, gameObjectClass_) || !unity::ActiveInHierarchy(box)) continue;
             if (std::find(out.begin(), out.end(), box) == out.end()) {
@@ -606,6 +704,19 @@ private:
             }
         }
         return out;
+    }
+
+    void FreeUpgraders() {
+        for (Il2CppGCHandle& h : ups_) Free(h);
+        ups_.clear();
+        boxUps_.clear();
+        fullScan_ = true;
+    }
+
+    static LONGLONG Qpc() {
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        return t.QuadPart;
     }
 
     std::vector<Il2CppObject*> Children(Il2CppObject* tr, Il2CppClass* k) {
@@ -1225,6 +1336,23 @@ private:
         dancer_.Tick(dt, beat, cfg_.danceIntensity);
     }
 
+    // One line a minute while box scans ran: their cost, and how often the scene was searched.
+    void LogPerf(float dt) {
+        perf_.acc += std::isfinite(dt) && dt > 0 ? std::min(dt, 1.0f) : 0.0f;
+        if (perf_.acc < kPerfLogInterval) return;
+        if (perf_.scans > 0) {
+            LARGE_INTEGER f;
+            QueryPerformanceFrequency(&f);
+            const double ms = 1000.0 / static_cast<double>(f.QuadPart);
+            SR2_INFO("slime_dj: box scans in the last {:.0f} s: {} (avg {:.3f} ms, max {:.3f} ms); scene searches {}{}; "
+                     "{} corral(s) known, {} speaker(s)",
+                     perf_.acc, perf_.scans, ms * static_cast<double>(perf_.sum) / perf_.scans, ms * static_cast<double>(perf_.max),
+                     perf_.searches, perf_.searches ? std::format(" (max {:.2f} ms)", ms * static_cast<double>(perf_.searchMax)) : "",
+                     ups_.size(), speakers_.size());
+        }
+        perf_ = ScanPerf{};
+    }
+
     // ---------------------------------------------------------------- tick ----
     void Tick(float dt) {
         Guarded("tick", [&] { TickImpl(dt); });
@@ -1237,14 +1365,23 @@ private:
             if (cfg_.danceWalls && !danced) boxScan_ = 0;  // walls dance turned on: find the corrals now
         }
         const bool viewed = bridge::WantsSnapshot();
-        if (cur_) FindBuses(dt);  // nothing to look up while idle
         boxScan_ -= dt;
+        if (DrainApplied()) boxScan_ = 0;  // a plot with a music box appeared / a box was bought: now
+        // Song started or tab opened after being idle: one scene search as a safety net (on a click, so
+        // a one-off hitch); the hook keeps the cache current from then on.
+        const bool active = cur_ || viewed;
+        if (active != wasActive_) {
+            wasActive_ = active;
+            if (active) fullScan_ = true;
+        }
+        if (cur_) FindBuses(dt);  // nothing to look up while idle
         if (const unsigned g = dj::emitters::Generation(); g != emitterGen_) {
             emitterGen_ = g;  // an emitter was (un)registered: pick it up now
             boxScan_ = 0;
         }
-        if ((cur_ || viewed) && boxScan_ <= 0) {
+        if (active && boxScan_ <= 0) {
             boxScan_ = kBoxScanInterval;
+            const LONGLONG scan0 = Qpc();
             std::vector<Il2CppObject*> boxes = FindBoxes();
             const std::vector<dj::emitters::Entry> emitters = dj::emitters::Collect();
             boxes_ = static_cast<int>(boxes.size());
@@ -1256,7 +1393,9 @@ private:
                 Resync(Master());
                 SyncDancer();
             }
+            perf_.Scan(Qpc() - scan0);
         }
+        LogPerf(dt);
         if (!cur_ && !speakers_.empty()) DestroySpeakers();
         if (!cur_ && !viewed) boxes_ = -1;
         TickSong();
@@ -1277,6 +1416,8 @@ private:
         dancePlots_ = 0;
         StopCurrent();
         DestroySpeakers();
+        FreeUpgraders();
+        wasActive_ = false;
         Free(musicBus_);
         Free(masterBus_);
         Free(cueBus_);
@@ -1447,6 +1588,9 @@ private:
     int failuresInARow_ = 0;
     std::vector<Speaker> speakers_;
     std::vector<std::pair<Il2CppObject*, Il2CppObject*>> boxUps_;  // last box scan: MusicBox GameObject, its MusicBoxUpgrader
+    std::vector<Il2CppGCHandle> ups_;  // known MusicBoxUpgraders (scene search + Apply hook)
+    bool hooked_ = false, fullScan_ = true, dropApplied_ = false, wasActive_ = false;
+    ScanPerf perf_;
     dj::WallDancer dancer_;
     size_t dancePlots_ = 0;
     uint64_t danceLast_ = 0;

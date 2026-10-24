@@ -350,6 +350,11 @@ of it is offered. Slime DJ plays the song through `slime_dj/api.h` emitters.
   `dj.on` (actor ids switched on with E; an id leaves it when its actor is picked up / gone).
 - **Save**: like the Quantum Storage Link (ReferenceId alias in `_reverseIndex`, `GetPersistenceId` detour mapping
   our definitions to the vanilla one for the favourite slots; Cleanup puts the vanilla gadget into those slots).
+- **Per-tick cost** (world tick, 1 Hz; reviewed in the Slime DJ perf round): no scene searches. Actors come from
+  `identifiablesByIdent` lists, records are kept, `Apply` per record is field reads plus at most a
+  `Rigidbody.get_constraints` for radios (upright re-apply only when the vacuum reset it), and emitters re-register
+  only when their volume changes. The save alias check used to build each definition's key with `get_name` +
+  `std::format` and look the `_reverseIndex` offset up by name every tick; both are cached now.
 - **Without the mod**: DJ Booths load as plain Scientist Desks (clutter back), DJ Speakers as plain upright Boomboxes
   (stacked decorations stay stacked: vanilla data), Slime Radios as Night Light toys. Unused kits are gone; the desks
   / boomboxes fabricated with them stay in the inventory. A favourite slot that held a DJ variant holds the vanilla
