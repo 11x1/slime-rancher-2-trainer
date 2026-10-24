@@ -41,7 +41,7 @@ upgrade switches on) is active in the hierarchy, i.e. the corral owns the upgrad
 loaded. Music Box II (custom_upgrades) keeps the same GameObject, so it plays too.
 
 **Several boxes: all in sync.** Every owned box nearby (at most 12) and every registered emitter
-(at most 24, see below) gets a speaker: a new
+(at most 48, see below) gets a speaker: a new
 GameObject `sr2dj_Speaker` with a Unity `AudioSource`, parented (`SetParent(…, false)`) to the
 box's first `SECTR_AudioSource` (where the vanilla tune comes from) or to the box itself. All
 speakers play the same clip and were started together, so the song is positional at every corral
@@ -90,9 +90,33 @@ bool on = dj::SongPlaying(); std::string name = dj::SongName();  // any thread
   the tab is open; a (un)register triggers a scan on the next frame).
 - Main thread, not inside a detour. Register takes a GC handle; Unregister only queues it, the
   slime_dj tick frees it. Registrations survive the module being off and apply when it is on.
-- At most 24 emitter speakers (plus 12 music boxes); 256 registrations.
+- At most 48 emitter speakers (plus 12 music boxes); 256 registrations.
 - Current users: custom_upgrades `plot_props.cpp` registers the Music Box II second speaker
-  (the cloned `Music` model, whose vanilla audio was stripped with the game scripts).
+  (the cloned `Music` model, whose vanilla audio was stripped with the game scripts);
+  `dj_buildables.cpp` the DJ Booth's two speakers, DJ Speakers, Slime Radios and every plain placed
+  Boombox (its `model_boombox`; volume 0 while the Boombox plays its own track).
+- An emitter may be registered while its object is inactive (a plot or actor built while its scene
+  is still off). Its speaker waits and joins when the object is active (next section).
+
+**Switched-off speakers (round 7: "on one pen only from the initial speaker and on the other from
+the second").** Unity refuses `Play()` on a disabled AudioSource, and switching an object off stops
+its sources for good (`playOnAwake` is off on ours, so nothing starts them again). The user log
+showed the Music Box II props rebuilt with `activeInHierarchy false` after a teleport back to the
+ranch, then `speaker 3989 ms off the others` every 4 s: a speaker that never played, compared with
+the clock every 2 s (4 s = two scans). As the clock it even dragged the playing speakers back to its
+frozen position. Which pen's speaker was stuck depended on what was built / toggled when, hence
+"inconsistent". Now every box scan checks each speaker: its GameObject inactive in the hierarchy =
+`live` false: stopped, out of the song (`clipGen` 0), never the clock, no drift check; once active
+again it rejoins at the clock's `timeSamples`. A live speaker that should play but
+`AudioSource.isPlaying` is false (switched off and on between two scans, e.g. the Music Box
+GameObject during a Music Box -> Music Box II sale + purchase) rejoins too (checked from the scan
+after its join). The clock (`Master()`) is the first live speaker that `isPlaying` (or is paused
+with the others), so the play head never freezes on a stopped one; a new clock continues the play
+head from the old one's position (all speakers are in sync).
+
+**Clip kept through zone changes.** `AudioClip.Create`'s clip gets `HideFlags.DontUnloadUnusedAsset`
+(32): the user log had `failed: the AudioClip was destroyed` right after zone changes (the scene
+load's `Resources.UnloadUnusedAssets`), which skipped the song.
 
 **3D settings.** Setting `range` (Hearing range, default 60 m, 10-200 m) x the emitter's
 `rangeScale` x Amplify's boost = `maxDistance`; `minDistance` = a fifth of it; rolloff Linear (full
@@ -169,9 +193,12 @@ Play with nothing loaded starts the same way. Three failed songs in a row stop p
 
 - `slime_dj: music folder '…': N song(s) (M newly read, K not playable) in X ms`
 - `slime_dj: music bus '…' (buses: …)` or a warning with the bus tree
-- `slime_dj: speaker on music box '…' at '…': N vanilla source(s), cue '…' a-b m …; hearing range N m` (first speaker only)
+- `slime_dj: speaker on music box '…' at '…': N vanilla source(s), cue '…' a-b m …; hearing range N m` (first speaker;
+  the others: `speaker on music box '…' at '…' (N vanilla source(s))`)
 - `slime_dj: playing '…' (file)`, `slime_dj: seek to N s in '…'`
-- `slime_dj: speaker on emitter '…' (kind K, range xA, volume xB)`
+- `slime_dj: speaker on emitter '…' (kind K, range xA, volume xB[, switched off for now])`
+- `slime_dj: N music box(es), M emitter(s) registered; speakers: B on boxes, E on emitters (K switched off)` (when a count changes)
+- `slime_dj: N speaker(s) had stopped (object switched off and on); rejoined in sync` (first 10)
 - `slime_dj: speaker N ms off the others, moved back in sync`
 
 ## Not verified in game yet
