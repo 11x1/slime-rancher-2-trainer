@@ -95,6 +95,7 @@ struct Recipe {
     std::string name;
     uint32_t icon = 0;
     int category = -1;      // index into Snapshot::recipeCategories (-1: none)
+    int order = -1;         // position in its category as the game's Fabricator lists it (-1: unknown, after the others)
     std::string cost;       // what the fabricator would charge, e.g. "20 x Pink Plort, 150 Newbucks"
     std::vector<CostLine> costs;  // the same, one entry per ident / currency cost
     bool unlocked = false;  // GadgetDirector.HasBlueprint (materials: always true)
@@ -112,7 +113,7 @@ struct Snapshot {
     int health = 0, maxHealth = 0;
     int energy = 0, maxEnergy = 0;
     int rads = 0;
-    bool infiniteEnergy = false;  // session toggle (not saved)
+    bool infiniteEnergy = false;  // toggle, kept per save (modules/sandbox/cheated_save.h, SaveToggle)
     std::vector<Slot> slots;
     std::shared_ptr<const std::vector<Item>> catalog;  // items the vacpack can hold, sorted by name
     std::shared_ptr<const std::vector<Item>> spawnables;  // items the spawner can place, sorted by name
@@ -122,6 +123,8 @@ struct Snapshot {
     std::shared_ptr<const std::vector<std::string>> recipeCategories;  // the fabricator's category titles
     std::shared_ptr<const std::vector<uint32_t>> recipeCategoryIcons;  // their icons (FabricateCategory._icon), same order
     std::shared_ptr<const std::vector<Recipe>> materials; // crafting materials the refinery stores, sorted by name
+    uintptr_t pinnedRecipe = 0;                           // the recipe pinned in the game's Fabricator (a Recipe::id; 0: none)
+    uint32_t pinnedIcon = 0;                              // the Fabricator's "Pinned" category icon (0: not loaded yet)
     std::string craftWhy;                                 // crafter unavailable: why ("" = available)
     std::shared_ptr<const Relations> relations;           // slime diets (favourites, plorts); nullptr until built
     uint32_t groupIcons[kGroupCount] = {};                // the game's icons for the group tabs (0 = none; All has none)
@@ -159,8 +162,8 @@ struct Action {
     uintptr_t item = 0;
     bool replace = false;  // StowItem: may empty the selected slot if it holds something else
     // Part of a multi-item request (Craft N, Spawn N, Put in slots): 1-based index and the request's size.
-    // The module collects the items' HUD notices and shows one summary after the last; spawns share one
-    // grid in front of the player. 0 / 0: a single request.
+    // Spawns share one grid in front of the player; the items' HUD notices are collected and shown
+    // after the last one, one per item type, in sequence. 0 / 0: a single request.
     int batch = 0, batchSize = 0;
 };
 

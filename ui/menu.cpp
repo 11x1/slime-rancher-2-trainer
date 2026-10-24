@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -53,8 +54,13 @@ float U(float v) { return v * g_scale; }
 std::string g_cat = "ranch";
 std::map<std::string, int> g_tab;  // selected tab per category
 std::string g_lastPage;            // category/tab drawn last frame ("" after the overlay opens)
-std::map<std::string, float> g_pageScroll;  // scroll position per page, kept for the session
-int g_scrollRestore = 0;           // frames left to re-apply a page's saved scroll (clamped while content grows)
+// Scroll position per page, kept for the session (KeepPageScroll).
+struct PageScroll {
+    float want = 0;      // where the user left the page
+    bool pending = false;  // `want` is being re-applied (page shown again, or its content got shorter for a while)
+    double since = 0;    // ImGui::GetTime() when that started (given up after 10 s)
+};
+std::map<std::string, PageScroll> g_pageScroll;
 ImVec2 g_winMin, g_winMax;         // window rect of the last frame
 
 struct Peel {
@@ -1665,23 +1671,20 @@ void ItemTooltip(const sbx::Snapshot& s, const std::string& name, sbx::Kind kind
     ImGui::PopStyleVar(2);
 }
 
-// The hint bar at the bottom of the Sandbox page (pinned under the scrolling page, across the menu's
-// content width): the controls of the grid under the mouse (g_sbxHover), each a keycap (or several
-// joined by '+') and a short label. The keycaps are the HUD edit help bar's at 80 % of its size;
-// labels 2 px bigger than the old hint rows under each grid (which it replaces). Nothing hovered: a
-// short dim line.
+// The Sandbox page's key hints, in the tab bar between the tabs and the switch (DrawTopBar): the
+// controls of the grid under the mouse (g_sbxHover), each a keycap (or several joined by '+') and a
+// short label, no title and no background. The keycaps are the HUD edit help bar's at 80 % of its
+// size, the labels 4 px over the small size's 75 %. Nothing hovered: nothing drawn.
 struct KeyHint {
     const char* keys;  // "Ctrl+Click": one keycap per part
     const char* text;
 };
 
-float SandboxHintBarHeight() { return U(40); }
-
 void SandboxHintBar(ImDrawList* dl, ImVec2 a, ImVec2 b) {
     const Palette& P = theme::Colors();
     static const KeyHint kSlots[] = {{"Click", "select"}, {"Shift+Wheel", "\u00b11"}, {"Ctrl+Wheel", "\u00b110"},
                                      {"Drag", "move / swap"}, {"Right-click", "menu"}};
-    static const KeyHint kPicker[] = {{"Click", "fill slot"},    {"Ctrl+Click", "select"},       {"Shift+Wheel", "\u00b11"},
+    static const KeyHint kPicker[] = {{"Click", "put in a slot"},  {"Ctrl+Click", "select"},       {"Shift+Wheel", "\u00b11"},
                                       {"Ctrl+Wheel", "\u00b110"}, {"Drag", "to a slot"}, {"Right-click", "menu / clear"}};
     static const KeyHint kSpawner[] = {{"Click", "spawn"},         {"Ctrl+Click", "select"}, {"Shift+Wheel", "\u00b11"},
                                        {"Ctrl+Wheel", "\u00b110"}, {"Right-click", "menu / clear"}};
@@ -1689,35 +1692,20 @@ void SandboxHintBar(ImDrawList* dl, ImVec2 a, ImVec2 b) {
                                        {"Right-click", "clear"}};
     const KeyHint* hints = nullptr;
     size_t count = 0;
-    const char* title = nullptr;
     switch (g_sbxHover) {
-        case SbxHover::Slots: hints = kSlots, count = std::size(kSlots), title = "Vacpack slots"; break;
-        case SbxHover::Picker: hints = kPicker, count = std::size(kPicker), title = "Vacpack items"; break;
-        case SbxHover::Spawner: hints = kSpawner, count = std::size(kSpawner), title = "Spawner"; break;
-        case SbxHover::Crafter: hints = kCrafter, count = std::size(kCrafter), title = "Refinery Crafter"; break;
+        case SbxHover::Slots: hints = kSlots, count = std::size(kSlots); break;
+        case SbxHover::Picker: hints = kPicker, count = std::size(kPicker); break;
+        case SbxHover::Spawner: hints = kSpawner, count = std::size(kSpawner); break;
+        case SbxHover::Crafter: hints = kCrafter, count = std::size(kCrafter); break;
         case SbxHover::None: break;
     }
-    dl->AddRectFilled(a, b, P.card, U(8));
-    dl->AddRect(a, b, P.cardBorder, U(8));
+    if (!hints || b.x - a.x < U(40)) return;
     ImFont* f = theme::Body();
-    const float fs = theme::kSmallSize * 0.75f + 2.0f;
+    const float fs = theme::kSmallSize * 0.75f + 4.0f;
     const float capScale = g_scale * 0.8f;
     const ImVec2 ts = TextSize(f, fs, "Ag");
     const float cy = std::round((a.y + b.y) * 0.5f);
-    float x = a.x + U(14);
-    if (!hints) {
-        Text(dl, f, fs, ImVec2(x, std::round(cy - ts.y * 0.5f)), P.dim, "Point at a grid to see its controls.");
-        return;
-    }
-    {
-        ImFont* d = theme::Display();
-        const float ds = theme::kSmallSize + 1;
-        const ImVec2 tsz = TextSize(d, ds, title);
-        Text(dl, d, ds, ImVec2(x, std::round(cy - tsz.y * 0.5f)), P.soft, title);
-        x += tsz.x + U(12);
-        dl->AddLine(ImVec2(x, cy - U(9)), ImVec2(x, cy + U(9)), P.cardBorder, std::max(1.0f, U(1.5f)));
-        x += U(12);
-    }
+    float x = a.x;
     auto parts = [](const char* keys) {
         std::vector<std::string> out(1);
         for (const char* c = keys; *c; ++c) {
@@ -1734,7 +1722,7 @@ void SandboxHintBar(ImDrawList* dl, ImVec2 a, ImVec2 b) {
         const auto ks = parts(h.keys);
         float w = U(4) + TextSize(f, fs, h.text).x;
         for (size_t i = 0; i < ks.size(); ++i) w += hud_edit::KeycapWidth(ks[i].c_str(), capScale) + (i ? plusW : 0.0f);
-        if (x + w > b.x - U(10)) break;  // what doesn't fit is left out (the hints are ordered by importance)
+        if (x + w > b.x) break;  // what doesn't fit is left out (the hints are ordered by importance)
         for (size_t i = 0; i < ks.size(); ++i) {
             if (i) {
                 Text(dl, f, fs, ImVec2(x + U(2), std::round(cy - ts.y * 0.5f)), P.dim, "+");
@@ -1783,6 +1771,43 @@ void PutInSlot(const sbx::Snapshot& s, int idx, const sbx::Item& it, int amount)
     const int n = amount > 0 ? std::min(amount, std::max(1, sl.max)) : std::max(1, sl.max);
     SetSlotPending(idx, it.id, n);
     SbxRequest(sbx::Op::PutItem, n, idx, it.id);
+}
+
+// A click on a picker item: into a free slot that takes it, so a click never throws anything out
+// while there is room ("clicking overrides a slot"): first a slot that already holds it and is not
+// full (the selected one first), then an empty one (the selected one first), each in slot order.
+// Only with neither the selected slot's contents are replaced. `amount` <= 0: up to the slot's maximum.
+void ClickPut(const sbx::Snapshot& s, const sbx::Item& it, int amount) {
+    const int n = std::min(static_cast<int>(s.slots.size()), 32);
+    auto fits = [&](int i) {
+        const sbx::Slot& sl = s.slots[static_cast<size_t>(i)];
+        return sl.unlocked && (it.slotMask & (1u << i)) != 0;
+    };
+    auto find = [&](auto&& want) {
+        if (g_sbxSlot >= 0 && g_sbxSlot < n && fits(g_sbxSlot) && want(g_sbxSlot)) return g_sbxSlot;
+        for (int i = 0; i < n; ++i)
+            if (fits(i) && want(i)) return i;
+        return -1;
+    };
+    const int same = find([&](int i) {
+        const sbx::Slot& sl = s.slots[static_cast<size_t>(i)];
+        return SlotItem(sl, i) == it.id && SlotCount(sl, i) < sl.max;
+    });
+    if (same >= 0) {
+        const sbx::Slot& sl = s.slots[static_cast<size_t>(same)];
+        const int cur = SlotCount(sl, same);
+        const int next = amount > 0 ? std::min(sl.max, cur + amount) : sl.max;
+        SetSlotPending(same, it.id, next);
+        SbxRequest(sbx::Op::SetSlotCount, next, same);
+        return;
+    }
+    const int empty = find([&](int i) { return SlotItem(s.slots[static_cast<size_t>(i)], i) == 0; });
+    if (empty >= 0) {
+        PutInSlot(s, empty, it, amount);
+        return;
+    }
+    if (SlotItem(s.slots[static_cast<size_t>(g_sbxSlot)], g_sbxSlot) == it.id) return;  // full of it already
+    PutInSlot(s, g_sbxSlot, it, amount);  // no free slot: replace what the selected one holds
 }
 
 // "Put in slots" for one item (sbx::Op::StowItem): the module fills the selected slot, then
@@ -1979,7 +2004,8 @@ void OpenItemContext(uintptr_t id, SbxGrid grid) {
 
 // Vacpack: the slots in a row across the top, Fill / Empty for the selected slot, then a grid
 // of what that slot accepts with group tabs, search and "Put in slots" (the controls: SandboxHintBar).
-//   * Item: click fills the selected slot; Ctrl+click selects several; Shift+wheel / Ctrl+wheel
+//   * Item: click puts it into a free slot (ClickPut; the selected one is replaced only when none is
+//     free); Ctrl+click selects several; Shift+wheel / Ctrl+wheel
 //     sets the amount (+-1 / +-10, shown on the tile); drag onto any slot; right-click: give menu.
 //   * Slot: click selects it; Shift+wheel / Ctrl+wheel changes its count (an empty one takes the
 //     last picked item); drag onto another slot to move / swap, or onto the grid to empty it;
@@ -2235,7 +2261,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
             if (!g_vacPick.erase(it.id)) g_vacPick[it.id] = 0;
         } else {
             const auto pk = g_vacPick.find(it.id);
-            PutInSlot(s, g_sbxSlot, it, pk != g_vacPick.end() ? pk->second : 0);
+            ClickPut(s, it, pk != g_vacPick.end() ? pk->second : 0);
         }
     }
     if (r.clearSelection) g_vacPick.clear();
@@ -2411,9 +2437,24 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
     EndCard();
 }
 
-// Crafter: the fabricator's gadget recipes (locked blueprints first) and, in their own section,
-// the crafting materials the refinery stores. Click selects (Shift+wheel: amount), Craft adds
+// Crafter: the fabricator's gadget recipes and the crafting materials the refinery stores, with the
+// game Fabricator's tabs: Pinned (the recipe pinned there), its categories (Utilities, Warp Tech,
+// Decorations), then Crafting Resources. Each category lists its gadgets in the Fabricator's own order
+// (sbx::Recipe::order); a locked blueprint is dimmed in place. While the search box has text, every
+// tab's matches are shown, a section per tab. Click selects (Shift+wheel: amount), Craft adds
 // everything selected at no cost: gadgets to the gadget inventory, materials to the refinery.
+constexpr int kCraftPinned = -3, kCraftMaterials = -2, kCraftAll = -1;
+
+// Tab order of a fabricator category: Utilities, Warp Tech, Decorations, then the rest (by index).
+int CraftCatRank(const std::string& title, int index) {
+    std::string low;
+    for (char c : title) low += static_cast<char>((c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c);
+    if (low.find("util") != std::string::npos) return 0;
+    if (low.find("warp") != std::string::npos) return 1;
+    if (low.find("decor") != std::string::npos) return 2;
+    return 3 + index;
+}
+
 void SandboxCrafter(const sbx::Snapshot& s, float w) {
     const Palette& P = theme::Colors();
     BeginCard("sbx_craft", w);
@@ -2428,50 +2469,69 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
         EndCard();
         return;
     }
-    // Tabs: All, each fabricator category that has recipes (its icon), Materials.
+    // Tabs: Pinned, each fabricator category that has recipes (its icon; without any categories one
+    // "Gadgets" tab), Crafting Resources.
     static std::vector<item_grid::Tab> tabs;
-    static std::vector<int> tabCat;  // category per tab; -1 = all, -2 = materials
+    static std::vector<int> tabCat;  // category per tab; kCraftPinned, kCraftMaterials, kCraftAll (no categories)
+    static std::vector<std::string> tabTitle;
     tabs.clear();
     tabCat.clear();
-    // Categories: the fabricator's own, else its gadget groups (modules/sandbox/NOTES.md, Crafter).
-    const bool noCats = !s.recipeCategories || s.recipeCategories->empty();
-    tabs.push_back({0, 0, 0, noCats ? "All (the fabricator's categories were not found)" : "All"});
-    tabCat.push_back(-1);
+    tabTitle.clear();
+    tabs.push_back({s.pinnedIcon, 'P', KindAccent(sbx::Kind::Gadget), "Pinned (the recipe pinned in the Fabricator)"});
+    tabCat.push_back(kCraftPinned);
+    tabTitle.push_back("Pinned");
+    std::vector<int> cats;
     if (s.recipeCategories) {
+        // Categories: the fabricator's own, else its gadget groups (modules/sandbox/NOTES.md, Crafter).
         std::vector<bool> used(s.recipeCategories->size(), false);
         for (const sbx::Recipe& rc : *s.recipes)
             if (rc.category >= 0 && static_cast<size_t>(rc.category) < used.size()) used[static_cast<size_t>(rc.category)] = true;
-        for (size_t i = 0; i < used.size(); ++i) {
-            if (!used[i]) continue;
-            const std::string& title = (*s.recipeCategories)[i];
-            uint32_t icon = s.recipeCategoryIcons && i < s.recipeCategoryIcons->size() ? (*s.recipeCategoryIcons)[i] : 0;
-            // The fabricator's category sprite is only there once its UI was loaded: else the icon of
-            // the category's first gadget (by name).
-            for (size_t k = 0; k < s.recipes->size() && !icon; ++k)
-                if ((*s.recipes)[k].category == static_cast<int>(i)) icon = (*s.recipes)[k].icon;
-            const unsigned char first = title.empty() ? '?' : static_cast<unsigned char>(title[0]);
-            tabs.push_back({icon, first < 0x80 ? first : '?', KindAccent(sbx::Kind::Gadget), title});
-            tabCat.push_back(static_cast<int>(i));
-        }
+        for (size_t i = 0; i < used.size(); ++i)
+            if (used[i]) cats.push_back(static_cast<int>(i));
+        std::stable_sort(cats.begin(), cats.end(), [&](int x, int y) {
+            return CraftCatRank((*s.recipeCategories)[static_cast<size_t>(x)], x) <
+                   CraftCatRank((*s.recipeCategories)[static_cast<size_t>(y)], y);
+        });
+    }
+    for (int ci : cats) {
+        const size_t i = static_cast<size_t>(ci);
+        const std::string& title = (*s.recipeCategories)[i];
+        uint32_t icon = s.recipeCategoryIcons && i < s.recipeCategoryIcons->size() ? (*s.recipeCategoryIcons)[i] : 0;
+        // The fabricator's category sprite is only there once its UI was loaded: else the icon of
+        // the category's first gadget.
+        for (size_t k = 0; k < s.recipes->size() && !icon; ++k)
+            if ((*s.recipes)[k].category == ci) icon = (*s.recipes)[k].icon;
+        const unsigned char first = title.empty() ? '?' : static_cast<unsigned char>(title[0]);
+        tabs.push_back({icon, first < 0x80 ? first : '?', KindAccent(sbx::Kind::Gadget), title});
+        tabCat.push_back(ci);
+        tabTitle.push_back(title);
+    }
+    if (cats.empty()) {
+        tabs.push_back({0, 0, 0, "Gadgets (the fabricator's categories were not found)"});
+        tabCat.push_back(kCraftAll);
+        tabTitle.push_back("Gadgets");
     }
     if (s.materials && !s.materials->empty()) {
-        tabs.push_back({s.groupIcons[sbx::kGroupResources], 'M', KindAccent(sbx::Kind::Resource), "Crafting materials (refinery)"});
-        tabCat.push_back(-2);
+        tabs.push_back({s.groupIcons[sbx::kGroupResources], 'R', KindAccent(sbx::Kind::Resource), "Crafting Resources (refinery)"});
+        tabCat.push_back(kCraftMaterials);
+        tabTitle.push_back("Crafting Resources");
     }
-    // The tab list changed (categories or materials arrived): stay on the same category.
+    // The tab list changed (categories or materials arrived): stay on the same category. The first
+    // time: Pinned if a recipe is pinned, else the first category.
     static std::vector<int> shownCat;
     if (tabCat != shownCat) {
-        const int was = g_craftGrid.tab >= 0 && static_cast<size_t>(g_craftGrid.tab) < shownCat.size()
-                            ? shownCat[static_cast<size_t>(g_craftGrid.tab)]
-                            : -1;
+        int was = g_craftGrid.tab >= 0 && static_cast<size_t>(g_craftGrid.tab) < shownCat.size()
+                      ? shownCat[static_cast<size_t>(g_craftGrid.tab)]
+                      : kCraftPinned;
+        if (shownCat.empty() && !s.pinnedRecipe) was = tabCat[1];
         const auto at = std::find(tabCat.begin(), tabCat.end(), was);
         g_craftGrid.tab = at != tabCat.end() ? static_cast<int>(at - tabCat.begin()) : 0;
         shownCat = tabCat;
     }
     g_craftGrid.tab = std::clamp(g_craftGrid.tab, 0, static_cast<int>(tabs.size()) - 1);
     const int cat = tabCat[static_cast<size_t>(g_craftGrid.tab)];
+    const bool searching = g_craftGrid.search[0] != 0;
 
-    static const std::vector<std::string> kSections = {"Blueprint not unlocked", "Gadgets", "Crafting materials (refinery)"};
     std::vector<item_grid::Tile> tiles;
     std::vector<const sbx::Recipe*> src;
     std::vector<bool> isMat;
@@ -2492,13 +2552,32 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
         src.push_back(&rc);
         isMat.push_back(material);
     };
-    if (cat != -2) {
-        for (int pass = 0; pass < 2; ++pass)  // locked blueprints first
+    // One tab's items: a category's gadgets in the Fabricator's order (unknown positions last, by name).
+    auto addTab = [&](size_t ti, int section) {
+        const int c = tabCat[ti];
+        if (c == kCraftPinned) {
             for (const sbx::Recipe& rc : *s.recipes)
-                if (rc.unlocked == (pass == 1) && (cat < 0 || rc.category == cat)) add(rc, pass, false);
-    }
-    if ((cat == -1 || cat == -2) && s.materials)
-        for (const sbx::Recipe& rc : *s.materials) add(rc, 2, true);
+                if (s.pinnedRecipe && rc.id == s.pinnedRecipe) add(rc, section, false);
+        } else if (c == kCraftMaterials) {
+            if (s.materials)
+                for (const sbx::Recipe& rc : *s.materials) add(rc, section, true);
+        } else {
+            std::vector<const sbx::Recipe*> v;
+            for (const sbx::Recipe& rc : *s.recipes)
+                if (c == kCraftAll || rc.category == c) v.push_back(&rc);
+            std::stable_sort(v.begin(), v.end(), [](const sbx::Recipe* x, const sbx::Recipe* y) {
+                const int a = x->order < 0 ? INT_MAX : x->order, b = y->order < 0 ? INT_MAX : y->order;
+                return a < b;
+            });
+            for (const sbx::Recipe* rc : v) add(*rc, section, false);
+        }
+    };
+    if (searching)
+        for (size_t ti = 1; ti < tabCat.size(); ++ti) addTab(ti, static_cast<int>(ti));  // the pinned one is in its category
+    else
+        addTab(static_cast<size_t>(g_craftGrid.tab), 0);
+    static std::vector<std::string> sections;
+    sections = tabTitle;
     // Selection entries that are gone from both lists are dropped.
     int picked = 0;
     for (auto it = g_craftPick.begin(); it != g_craftPick.end();) {
@@ -2513,7 +2592,9 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
     o.hint = "Search gadgets...";
     o.tabs = &tabs;
     o.tabsBelow = true;
-    o.sections = &kSections;
+    if (searching) o.sections = &sections;
+    if (!searching && cat == kCraftPinned && !s.pinnedRecipe)
+        o.empty = "Nothing is pinned. Pin a recipe in the game's Fabricator.";
     const std::string craft = picked > 0 ? std::format("Craft {}", picked) : std::string("Craft");
     o.button = craft.c_str();
     o.buttonEnabled = picked > 0;
@@ -2567,14 +2648,16 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
     EndCard();
 }
 
+// The module's last status line, only while it is a fresh error (8 s): what worked is in the log and
+// the HUD notices, not on the page ("Fabricator: added 1 TankBoosterComponent for AmmoCapacity" stayed
+// under the grids).
 void SandboxStatus(const Host& h) {
     const sbx::Status st = sbx::GetStatus();
-    if (st.text.empty()) return;
+    if (st.text.empty() || !st.error || h.nowMs - st.tick >= 8000) return;
     const Palette& P = theme::Colors();
-    const bool fresh = h.nowMs - st.tick < 6000;
     ImGui::Dummy(ImVec2(0, U(2)));
     ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(st.error ? P.err : fresh ? P.head : P.dim), "%s", st.text.c_str());
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.err), "%s", st.text.c_str());
     ImGui::PopTextWrapPos();
 }
 
@@ -2718,7 +2801,7 @@ void SandboxPlayer(const Host& h, const sbx::Snapshot& s, float w) {
     };
     // Infinite health and the two buttons come from the extras bridge (player_extras.cpp).
     const auto st = sbxx::Get();
-    if (!st || h.nowMs - st->tick > 3000) {
+    if (!st || h.nowMs - st->tick > 10000) {
         DimText("Reading...");
         upgradesButton();
         EndCard();
@@ -2789,7 +2872,7 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv) {
                                       : "Steam achievements are paused while Sandbox is on.");
     sbx::MarkViewed();
     const auto snap = sbx::Get();
-    if (!snap || h.nowMs - snap->tick > 3000) {
+    if (!snap || h.nowMs - snap->tick > 10000) {
         OffNote("Reading your character...");
         return;
     }
@@ -3606,10 +3689,15 @@ bool DrawTopBar(const Category& cat, int& ti, const std::vector<ModuleView>& vie
             else Write(*st.sw, on ? 0.0 : 1.0);
         }
         ImGui::EndDisabled();
-        HoverTip(!st.lock.empty() ? st.lock : st.locked ? tab.help : st.sw->tooltip);
-        const ImVec2 ls = TextSize(f, 15, "Enabled");
-        rx -= ls.x + U(9);
-        Text(dl, f, 15, ImVec2(rx, cy - ls.y * 0.5f), WithAlpha(P.soft, st.locked ? 0.45f : 1.0f), "Enabled");
+        HoverTip(!st.lock.empty()           ? st.lock
+                 : st.locked                ? tab.help
+                 : !st.sw->tooltip.empty() ? st.sw->tooltip
+                                            : st.sw->label);
+        // No "Enabled" label: the switch explains itself in its tooltip. On the Sandbox page that room
+        // holds the key hints of the grid under the mouse (from the tab strip to the switch).
+        if (tab.kind == TabKind::Sandbox)
+            if (const ModuleView* mv = FindView(views, tab.module); mv && SandboxHintBarShown(*mv))
+                SandboxHintBar(dl, ImVec2(sa.x + stripW + U(18), cy - U(16)), ImVec2(rx - U(14), cy + U(16)));
     }
     if (tab.kind == TabKind::Module || tab.kind == TabKind::Profiles || (tab.kind == TabKind::SlimeDj && st.on)) {
         rx -= ib + U(10);
@@ -3627,6 +3715,48 @@ bool DrawTopBar(const Category& cat, int& ti, const std::vector<ModuleView>& vie
     ImGui::SetCursorScreenPos(origin);
     ImGui::Dummy(ImVec2(barW, U(kTopH)));
     return closeClicked;
+}
+
+// Called right after BeginChild("##body"): each page keeps its scroll position across page switches
+// and closing / reopening, and while its content is shorter for a moment. Only the user moves it:
+// ImGui clamps the scroll to the content height, so a page whose content shrank for a frame or a few
+// (the Sandbox page while its snapshot is late, a list rebuilt, a card collapsed) used to come back
+// scrolled up, and the clamped position was saved as the page's ("the sandbox menu scrolls back up
+// while working in it"). Now a clamp below the saved position is not saved: the saved one is
+// re-applied (SetScrollY lands next frame, clamped again) until the content is long enough, the user
+// scrolls (wheel over the page, the scrollbar dragged), or 10 s passed.
+void KeepPageScroll(const std::string& page) {
+    PageScroll& ps = g_pageScroll[page];
+    const double now = ImGui::GetTime();
+    if (page != g_lastPage) {
+        g_lastPage = page;
+        ps.pending = ps.want > 0.5f;
+        ps.since = now;
+    }
+    const ImGuiIO& io = ImGui::GetIO();
+    const float y = ImGui::GetScrollY(), maxY = ImGui::GetScrollMaxY();
+    const ImVec2 wp = ImGui::GetWindowPos();
+    const float sbX = wp.x + ImGui::GetWindowWidth() - ImGui::GetStyle().ScrollbarSize;
+    const bool overScrollbar = ImGui::IsMouseHoveringRect(ImVec2(sbX, wp.y), ImVec2(sbX + ImGui::GetStyle().ScrollbarSize, wp.y + ImGui::GetWindowHeight()), false);
+    const bool userScroll =
+        (io.MouseWheel != 0.0f && !io.KeyCtrl && !io.KeyShift &&
+         ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) ||
+        (ImGui::IsMouseDown(ImGuiMouseButton_Left) && overScrollbar && maxY > 0.0f);
+    if (userScroll) ps.pending = false;
+    if (ps.pending) {
+        if (std::fabs(y - ps.want) <= 0.5f || now - ps.since > 10.0) {
+            ps.pending = false;
+        } else {
+            ImGui::SetScrollY(ps.want);
+            return;
+        }
+    }
+    if (!userScroll && y + 0.5f < ps.want && y >= maxY - 0.5f) {  // clamped: the content got shorter
+        ps.pending = true;
+        ps.since = now;
+        return;
+    }
+    ps.want = y;
 }
 
 // ----------------------------------------------------------------- peel ----
@@ -3792,31 +3922,9 @@ bool Draw(const Host& h) {
         const Tab& tab = cat.tabs[static_cast<size_t>(ti)];
         const std::string page = cat.id + "/" + std::to_string(ti);
 
-        // The Sandbox page keeps a hint bar pinned under it (the controls of the grid under the mouse).
-        const ModuleView* sbxView = tab.kind == TabKind::Sandbox ? FindView(views, tab.module) : nullptr;
-        const bool hintBar = sbxView && SandboxHintBarShown(*sbxView);
-        const float footer = hintBar ? SandboxHintBarHeight() + U(12) : 0.0f;
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(18), 0));
-        ImGui::BeginChild("##body", ImVec2(0, -footer), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoBackground);
-        // Each page keeps its scroll position across page switches and closing / reopening.
-        // SetScrollY lands next frame, clamped to the previous frame's content height (the
-        // other page's), so a restore is re-applied for a few frames.
-        if (page != g_lastPage) {
-            g_lastPage = page;
-            g_scrollRestore = 4;
-        }
-        if (g_scrollRestore > 0) {
-            const auto it = g_pageScroll.find(page);
-            const float want = it != g_pageScroll.end() ? it->second : 0.0f;
-            if (std::fabs(ImGui::GetScrollY() - want) > 0.5f) {
-                ImGui::SetScrollY(want);
-                --g_scrollRestore;
-            } else {
-                g_scrollRestore = 0;
-            }
-        } else {
-            g_pageScroll[page] = ImGui::GetScrollY();
-        }
+        ImGui::BeginChild("##body", ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoBackground);
+        KeepPageScroll(page);
         if (h.versionMismatch)
             Banner(P.warn, "This game build differs from the one the mod was made for; some modules may be disabled. " +
                                h.versionStatus);
@@ -3850,11 +3958,6 @@ bool Draw(const Host& h) {
         ImGui::Dummy(ImVec2(0, U(18)));
         ImGui::EndChild();
         ImGui::PopStyleVar();
-        if (hintBar) {
-            const ImVec2 b0 = ImGui::GetItemRectMin(), b1 = ImGui::GetItemRectMax();  // the page (##body)
-            const ImVec2 a(b0.x + U(18), b1.y + U(2)), b(b1.x - U(18), b1.y + U(2) + SandboxHintBarHeight());
-            SandboxHintBar(ImGui::GetWindowDrawList(), a, b);
-        }
         ImGui::EndChild();
         ImGui::PopStyleVar();
     } else {
