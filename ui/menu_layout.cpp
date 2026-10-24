@@ -37,7 +37,8 @@ std::vector<Category> Spec() {
     ranchGeneral.cardHelp = {
         {"custom_upgrades",
          "Adds the mod's own plot upgrades (higher tiers, Coop Air Net, Hen Collector, silo Sell-All Button) to the "
-         "plots' purchase menus. Once on with a save loaded, it stays on for that save."},
+         "plots' purchase menus, and the Battery Saver to the drone station menu. Once on with a save loaded, it "
+         "stays on for that save."},
         {"plot_upgrades", "Applies the effects of the upgrade tiers bought through Custom Upgrades."},
         {"sell_upgrades",
          "Sell an owned plot upgrade back for half its price: select it in the plot's purchase menu and press the "

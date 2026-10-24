@@ -66,6 +66,7 @@
 #include "core/resolver.h"
 #include "core/unity.h"
 #include "modules/custom_upgrades/plot_menu_slider.h"
+#include "modules/drone_price_limit/battery.h"
 
 namespace sr2::modules::drone_price_limit {
 
@@ -144,6 +145,16 @@ constexpr float kRowH = 56.0f;
 constexpr float kCellH = 62.0f;
 constexpr float kCellGap = 6.0f;
 
+// Battery dialog layout.
+constexpr int kTierRows = kBatteryTiers;
+constexpr float kTierGap = 8.0f;
+constexpr float kBtnW[3] = {520.0f, 440.0f, 220.0f};  // Buy, Sell, Close
+constexpr float kBtnGap = 20.0f;
+constexpr float kOpenGuard = 0.3f;  // seconds
+constexpr float kStatusGap = 14.0f;  // battery pill: space after the last status indicator
+constexpr Color kGrey{0.80f, 0.82f, 0.87f, 1.0f};     // disabled button
+constexpr Color kOrange{0.85f, 0.45f, 0.10f, 1.0f};   // "can't" message
+
 std::atomic<bool> g_open{false};  // dialog open: the FocusManager detours route input to it
 
 }  // namespace
@@ -194,18 +205,34 @@ struct StationUi::Impl {
     };
     Held menu;                 // DroneProgramMenu last bound
     Il2CppObject* boundMenu = nullptr;  // raw pointer from the SetViewModel hook (identity, set inside the hook)
-    std::vector<Il2CppGCHandle> pillHandles, dialogHandles;
-    Il2CppObject* pill = nullptr, *pillToggle = nullptr, *pillLabel = nullptr, *pillKeyText = nullptr;
-    Il2CppObject* pillOrig = nullptr;  // the destination's PromptContainer (RectTransform) we cloned
-    std::vector<Il2CppObject*> pillIcons;  // InputIcon transforms of the clone
-    Il2CppObject* pillIed = nullptr, *pillGroup = nullptr;  // their parents (Transforms)
-    int pillReapply = 0;
-    bool pillShown = false;
+    std::vector<Il2CppGCHandle> dialogHandles;
+    // An action pill: a clone of the destination's "Change" PromptContainer with our key and label.
+    struct Pill {
+        const char* name;  // GameObject name
+        const char* key;   // key drawn on it
+        const char* what;  // for the log
+        Il2CppObject* go = nullptr, *toggle = nullptr, *label = nullptr, *keyText = nullptr;
+        Il2CppObject* orig = nullptr;  // the destination's PromptContainer (RectTransform) we cloned
+        std::vector<Il2CppObject*> icons;  // InputIcon transforms of the clone
+        Il2CppObject* ied = nullptr, *group = nullptr;  // their parents (Transforms)
+        std::vector<Il2CppGCHandle> handles;
+        int reapply = 0;
+        bool shown = false;
+        int64_t labelStation = 0;
+        bool logged = false, loggedFail = false;
+    };
+    Pill price{"sr2mods_PriceLimitPrompt", "C", "price-limit"};
+    Pill battery{"sr2mods_BatteryPrompt", "B", "battery saver"};
     int stateCountdown = 0;
     bool marketSelected = false, pageActive = false;
-    int64_t station = 0, labelStation = 0;
+    int64_t station = 0;
     bool haveStation = false;
-    bool loggedPill = false, loggedPillFail = false, loggedOpen = false, loggedOpenFail = false;
+    bool loggedOpen = false, loggedOpenFail = false, loggedBatteryOpen = false;
+    // Battery pill placement: after the status row's last indicator (DroneInfoWidget).
+    size_t offMenuBatteryWidget = 0, offMenuModeWidget = 0, offMenuLocationWidget = 0;
+    Il2CppClass* skipLayoutClass = nullptr;  // optional: keeps the status row's layout off our pill
+    const MethodInfo* rtGetAnchorMin = nullptr, *rtGetAnchorMax = nullptr, *rtGetPivot = nullptr;
+    const MethodInfo* kbB = nullptr, *padL3 = nullptr, *trGetParent = nullptr;
 
     // dialog
     Il2CppObject* root = nullptr, *panelRt = nullptr, *blockerToggle = nullptr, *closeToggle = nullptr;
@@ -225,6 +252,16 @@ struct StationUi::Impl {
     int values[2] = {0, 0};
     int focusRow = 1;  // 0 = mode, 1 = value
     int maxPrice = 100;
+    // battery dialog
+    enum class Kind { kPrice, kBattery };
+    Kind kind = Kind::kPrice;
+    Il2CppObject* tierBg[kTierRows] = {}, *tierState[kTierRows] = {};
+    Il2CppObject* btnBg[3] = {}, *btnText[3] = {}, *btnToggle[3] = {};  // Buy, Sell, Close
+    Il2CppObject* walletText = nullptr, *messageText = nullptr;
+    int focusBtn = 0;
+    float openGuard = 0.0f;  // input ignored right after opening (the press that opened it)
+    float buttonsY = 0.0f;
+    std::string message;
 
     // ---- helpers ----
     bool Faulted() const { return sr2::core::ModuleFaulted(module); }
@@ -459,15 +496,23 @@ struct StationUi::Impl {
     // ---- menu state ----
     void ForgetMenu();
     void ReadState();
-    // ---- prompt ----
-    void EnsurePill();
-    void ApplyPillLook();
-    void PlacePill();
-    void UpdatePillLabel();
-    void DestroyPill();
+    // ---- prompts ----
+    void EnsurePill(Pill& p, Il2CppObject* parentTr);
+    void ApplyPillLook(Pill& p);
+    void PlacePricePill();
+    void PlaceBatteryPill();
+    void UpdatePillLabel(Pill& p);
+    void DestroyPill(Pill& p);
+    void ShowPill(Pill& p, bool want);
+    Il2CppObject* StatusAnchor();  // the last active status indicator (RectTransform)
     // ---- dialog ----
     bool Open();
+    bool OpenBattery();
+    bool BuildRoot(const char* name, float panelH, Il2CppObject*& prt, int& layer);
     void Close(const char* why);
+    void RefreshBattery();
+    void SetBatteryFocus(int b);
+    void PressBattery(int b);
     void BuildSlider();
     void SetMode(LimitMode m);
     void SetFocus(int row);
@@ -743,6 +788,22 @@ bool StationUi::Setup(sr2::core::ModuleContext& ctx, const char* module, DialogH
         p->padR3 = pad ? R.Method(pad, "get_rightStickButton", 0, &err) : nullptr;
         p->btnPressedThisFrame = button ? R.Method(button, "get_wasPressedThisFrame", 0, &err) : nullptr;
         if (!p->btnPressedThisFrame || !p->kbCurrent || !p->kbC) report += " C key: NOT available (click only);";
+        // Battery Saver action: B / the pad's left stick click; placed after the status indicators.
+        p->kbB = kb ? R.Method(kb, "get_bKey", 0, &err) : nullptr;
+        p->padL3 = pad ? R.Method(pad, "get_leftStickButton", 0, &err) : nullptr;
+        if (auto o = R.FieldOffset(p->menuClass, "_batteryWidget", &err)) p->offMenuBatteryWidget = *o;
+        if (auto o = R.FieldOffset(p->menuClass, "_modeWidget", &err)) p->offMenuModeWidget = *o;
+        if (auto o = R.FieldOffset(p->menuClass, "_locationWidget", &err)) p->offMenuLocationWidget = *o;
+        p->rtGetAnchorMin = R.Method(p->rtClass, "get_anchorMin", 0, &err);
+        p->rtGetAnchorMax = R.Method(p->rtClass, "get_anchorMax", 0, &err);
+        p->rtGetPivot = R.Method(p->rtClass, "get_pivot", 0, &err);
+        p->trGetParent = R.Method(transform, "get_parent", 0, &err);
+        p->skipLayoutClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Framework.Layout", "SkipLayout", &err);
+        if (!p->offMenuBatteryWidget || !p->rtGetAnchorMin || !p->rtGetAnchorMax || !p->rtGetPivot || !p->trGetParent) {
+            p->offMenuBatteryWidget = 0;  // no battery action
+            report += " battery saver action: NOT available;";
+        }
+        else if (!p->kbB) report += " B key: NOT available (click only);";
     }
 
     // The slider: our own instance of the plot menu slider, built into the dialog.
@@ -799,7 +860,8 @@ bool StationUi::Setup(sr2::core::ModuleContext& ctx, const char* module, DialogH
 
 void StationUi::Impl::ForgetMenu() {
     if (g_open.load()) Close("menu gone");
-    DestroyPill();
+    DestroyPill(price);
+    DestroyPill(battery);
     Release(menu);
     marketSelected = pageActive = haveStation = false;
     station = 0;
@@ -830,90 +892,107 @@ void StationUi::Impl::ReadState() {
 
 // ---------------------------------------------------------------- prompt --
 
-void StationUi::Impl::DestroyPill() {
-    if (pill && !Faulted()) Destroy(pill);
-    pill = pillToggle = pillLabel = pillKeyText = pillOrig = pillIed = pillGroup = nullptr;
-    pillIcons.clear();
-    pillShown = false;
-    FreeLater(pillHandles);
+void StationUi::Impl::DestroyPill(Pill& p) {
+    if (p.go && !Faulted()) Destroy(p.go);
+    p.go = p.toggle = p.label = p.keyText = p.orig = p.ied = p.group = nullptr;
+    p.icons.clear();
+    p.shown = false;
+    p.labelStation = 0;
+    FreeLater(p.handles);
 }
 
-void StationUi::Impl::EnsurePill() {
-    if (pill && unity::IsAlive(pill)) return;
-    if (pill) DestroyPill();  // died with the menu
+void StationUi::Impl::ShowPill(Pill& p, bool want) {
+    if (p.go && !unity::IsAlive(p.go)) DestroyPill(p);
+    if (p.go && want != p.shown) {
+        unity::SetActive(p.go, want);
+        p.shown = want;
+        if (want) p.reapply = kReapplyFrames;
+    }
+    if (p.shown && station != p.labelStation) {  // the same menu re-bound for another station
+        p.labelStation = station;
+        UpdatePillLabel(p);
+    }
+}
+
+// Clone the destination's "Change" prompt under `parentTr` (inactive until ShowPill).
+void StationUi::Impl::EnsurePill(Pill& p, Il2CppObject* parentTr) {
+    if (p.go && unity::IsAlive(p.go)) return;
+    if (p.go) DestroyPill(p);  // died with the menu
     Il2CppObject* button = unity::Field<Il2CppObject*>(menu.p, offMenuDest);
-    if (!unity::IsAlive(button) || !IsA(button, optionButtonClass)) return;
+    if (!unity::IsAlive(button) || !IsA(button, optionButtonClass) || !unity::IsAlive(parentTr)) return;
     Il2CppObject* orig = unity::Field<Il2CppObject*>(button, offOptPrompt);
     if (!unity::IsAlive(orig) || !IsA(orig, rtClass)) {
-        if (!loggedPillFail) SR2_WARN("[{}] station ui: the destination has no prompt container - no price-limit action", module);
-        loggedPillFail = true;
+        if (!p.loggedFail) SR2_WARN("[{}] station ui: the destination has no prompt container - no {} action", module, p.what);
+        p.loggedFail = true;
         return;
     }
-    Il2CppObject* clone = unity::Instantiate(unity::GameObjectOf(orig), unity::TransformOf(button));
+    Il2CppObject* clone = unity::Instantiate(unity::GameObjectOf(orig), parentTr);
     if (!unity::IsAlive(clone)) {
-        if (!loggedPillFail) SR2_WARN("[{}] station ui: cloning the Change prompt failed", module);
-        loggedPillFail = true;
+        if (!p.loggedFail) SR2_WARN("[{}] station ui: cloning the Change prompt failed ({} action)", module, p.what);
+        p.loggedFail = true;
         return;
     }
     Il2CppObject* go = IsA(clone, goClass) ? clone : unity::GameObjectOf(clone);
-    pill = go;
-    pillOrig = orig;
-    Keep(pillHandles, go);
-    Keep(pillHandles, orig);
-    unity::SetName(go, "sr2mods_PriceLimitPrompt");
+    p.go = go;
+    p.orig = orig;
+    Keep(p.handles, go);
+    Keep(p.handles, orig);
+    unity::SetName(go, p.name);
     Il2CppObject* tr = unity::TransformOf(go);
     // Our own key and label: the clone must not follow the input device / localisation.
     if (Il2CppObject* ied = Find(tr, "InputEventDisplay")) {
         SetEnabled(unity::GetComponent(ied, inputEventDisplayClass), false);
-        pillIed = ied;
-        Keep(pillHandles, ied);
+        p.ied = ied;
+        Keep(p.handles, ied);
     }
     if (Il2CppObject* group = Find(tr, "InputEventDisplay/Icon Group")) {
-        pillGroup = group;
-        Keep(pillHandles, group);
+        p.group = group;
+        Keep(p.handles, group);
         bool ok = false;
         const int n = Unbox<int32_t>(Call(trChildCount, group, {}, "Transform.get_childCount", &ok));
         for (int i = 0; ok && i < n && i < 8; ++i) {
             int32_t idx = i;
             Il2CppObject* child = Call(trGetChild, group, {&idx}, "Transform.GetChild");
             if (unity::IsAlive(child)) {
-                Keep(pillHandles, child);
-                pillIcons.push_back(child);
+                Keep(p.handles, child);
+                p.icons.push_back(child);
             }
         }
     }
     if (Il2CppObject* labelTr = Find(tr, "InputLabel")) {
         SetEnabled(unity::GetComponent(labelTr, lseClass), false);
-        pillLabel = TmpOf(labelTr);
-        Keep(pillHandles, pillLabel);
+        p.label = TmpOf(labelTr);
+        Keep(p.handles, p.label);
     }
     // Clickable: the pill background catches the pointer, a Toggle reports the click.
     if (sdfRectClass) SetRaycast(unity::GetComponent(go, sdfRectClass), true);
-    pillToggle = Clickable(go);
-    Keep(pillHandles, pillToggle);
+    p.toggle = Clickable(go);
+    Keep(p.handles, p.toggle);
     // Fit the pill to our label (no 264 minimum), with room inside its rounded ends.
     if (encapsulateClass)
         if (Il2CppObject* enc = unity::GetComponent(go, encapsulateClass); unity::IsAlive(enc)) {
             if (offEncMinW) unity::Field<float>(enc, offEncMinW) = 0.0f;
             if (offEncPadX) unity::Field<float>(enc, offEncPadX) = std::max(unity::Field<float>(enc, offEncPadX), kPillPadX);
         }
+    // Under a layout group (the status row) our own placement must win.
+    if (skipLayoutClass && &p == &battery) AddComponent(go, skipLayoutClass, "AddComponent(SkipLayout)");
     unity::SetActive(go, false);
-    pillShown = false;
-    pillReapply = kReapplyFrames;
-    if (!loggedPill) {
-        loggedPill = true;
-        SR2_INFO("[{}] station ui: price-limit action cloned from the destination's Change prompt ({} key icon(s), "
-                 "label {}, click {})",
-                 module, pillIcons.size(), pillLabel ? "ok" : "MISSING", pillToggle ? "ok" : "MISSING");
+    p.shown = false;
+    p.reapply = kReapplyFrames;
+    if (!p.logged) {
+        p.logged = true;
+        SR2_INFO("[{}] station ui: {} action cloned from the destination's Change prompt ({} key icon(s), label {}, click "
+                 "{})",
+                 module, p.what, p.icons.size(), p.label ? "ok" : "MISSING", p.toggle ? "ok" : "MISSING");
     }
 }
 
-void StationUi::Impl::ApplyPillLook() {
-    // InputIcon.SetKey by hand: the first icon shows the C key, the others are hidden.
-    if (unity::IsAlive(pillIed)) unity::SetActive(unity::GameObjectOf(pillIed), true);
-    if (unity::IsAlive(pillGroup)) unity::SetActive(unity::GameObjectOf(pillGroup), true);
-    for (size_t i = 0; i < pillIcons.size(); ++i) {
-        Il2CppObject* t = pillIcons[i];
+void StationUi::Impl::ApplyPillLook(Pill& p) {
+    // InputIcon.SetKey by hand: the first icon shows our key, the others are hidden.
+    if (unity::IsAlive(p.ied)) unity::SetActive(unity::GameObjectOf(p.ied), true);
+    if (unity::IsAlive(p.group)) unity::SetActive(unity::GameObjectOf(p.group), true);
+    for (size_t i = 0; i < p.icons.size(); ++i) {
+        Il2CppObject* t = p.icons[i];
         if (!unity::IsAlive(t)) continue;
         if (i > 0) {
             unity::SetActive(unity::GameObjectOf(t), false);
@@ -933,27 +1012,35 @@ void StationUi::Impl::ApplyPillLook() {
         SetEnabled(unity::Field<Il2CppObject*>(icon, offIconKeyLse), false);
         if (unity::IsAlive(text)) {
             SetEnabled(text, true);
-            SetText(text, "C");
-            pillKeyText = text;
+            SetText(text, p.key);
+            p.keyText = text;
         }
     }
-    UpdatePillLabel();
+    UpdatePillLabel(p);
 }
 
-void StationUi::Impl::UpdatePillLabel() {
-    if (!pillLabel || !haveStation || !host.get) return;
-    const StationLimit l = host.get(station);
-    // Short label: "Price limit: 200%" overflowed the pill and wrapped.
-    std::string s = "Limit";
-    if (l.Active()) s += l.mode == LimitMode::kFraction ? std::format(": {}%", l.value) : std::format(": {}", l.value);
-    SetText(pillLabel, s);
+// Short labels: "Price limit: 200%" overflowed the pill and wrapped.
+void StationUi::Impl::UpdatePillLabel(Pill& p) {
+    if (!p.label || !haveStation) return;
+    std::string s;
+    if (&p == &price) {
+        if (!host.get) return;
+        const StationLimit l = host.get(station);
+        s = "Limit";
+        if (l.Active()) s += l.mode == LimitMode::kFraction ? std::format(": {}%", l.value) : std::format(": {}", l.value);
+    } else {
+        static const char* kRoman[] = {"", " I", " II", " III", " IV"};
+        const int tier = host.batteryTier ? std::clamp(host.batteryTier(station), 0, kBatteryTiers) : 0;
+        s = std::string("Battery") + kRoman[tier];
+    }
+    SetText(p.label, s);
 }
 
-void StationUi::Impl::PlacePill() {
-    if (!unity::IsAlive(pill) || !unity::IsAlive(pillOrig)) return;
-    Il2CppObject* rt = unity::TransformOf(pill);
-    const Vec2 opos = GetVec(rtGetPos, pillOrig, "RectTransform.get_anchoredPosition");
-    const Vec2 osize = GetVec(rtGetSize, pillOrig, "RectTransform.get_sizeDelta");
+void StationUi::Impl::PlacePricePill() {
+    if (!unity::IsAlive(price.go) || !unity::IsAlive(price.orig)) return;
+    Il2CppObject* rt = unity::TransformOf(price.go);
+    const Vec2 opos = GetVec(rtGetPos, price.orig, "RectTransform.get_anchoredPosition");
+    const Vec2 osize = GetVec(rtGetSize, price.orig, "RectTransform.get_sizeDelta");
     const Vec2 size = GetVec(rtGetSize, rt, "RectTransform.get_sizeDelta");
     // Same anchors / pivot as the original (pivot x 0.5): to its right, 12 apart.
     const Vec2 want{opos.x + osize.x * 0.5f + 12.0f + size.x * 0.5f, opos.y};
@@ -962,7 +1049,108 @@ void StationUi::Impl::PlacePill() {
         SetVec(rtSetPos, rt, want, "RectTransform.set_anchoredPosition");
 }
 
+// The status row (scene data: DetailsPanel > DescriptionArea > StatusRow, a HorizontalLayout of the
+// ChargeIndicator / ModeIndicator / LocationIndicator pills, DroneProgramMenu._batteryWidget /
+// _modeWidget / _locationWidget): the last active one.
+Il2CppObject* StationUi::Impl::StatusAnchor() {
+    const size_t offs[3] = {offMenuLocationWidget, offMenuModeWidget, offMenuBatteryWidget};
+    for (size_t off : offs) {
+        if (!off) continue;
+        Il2CppObject* w = unity::Field<Il2CppObject*>(menu.p, off);
+        if (!unity::IsAlive(w) || !unity::ActiveInHierarchy(unity::GameObjectOf(w))) continue;
+        Il2CppObject* rt = unity::TransformOf(w);
+        if (unity::IsAlive(rt) && IsA(rt, rtClass)) return rt;
+    }
+    return nullptr;
+}
+
+// Right of the last status indicator, vertically centred on it (same anchors and pivot).
+void StationUi::Impl::PlaceBatteryPill() {
+    Il2CppObject* anchor = StatusAnchor();
+    if (!unity::IsAlive(battery.go) || !anchor) return;
+    Il2CppObject* rt = unity::TransformOf(battery.go);
+    const Vec2 amin = GetVec(rtGetAnchorMin, anchor, "RectTransform.get_anchorMin");
+    const Vec2 amax = GetVec(rtGetAnchorMax, anchor, "RectTransform.get_anchorMax");
+    const Vec2 pivot = GetVec(rtGetPivot, anchor, "RectTransform.get_pivot");
+    const Vec2 apos = GetVec(rtGetPos, anchor, "RectTransform.get_anchoredPosition");
+    const Vec2 asize = GetVec(rtGetSize, anchor, "RectTransform.get_sizeDelta");
+    const Vec2 cmin = GetVec(rtGetAnchorMin, rt, "RectTransform.get_anchorMin");
+    const Vec2 cmax = GetVec(rtGetAnchorMax, rt, "RectTransform.get_anchorMax");
+    const Vec2 cpiv = GetVec(rtGetPivot, rt, "RectTransform.get_pivot");
+    auto differs = [](Vec2 a, Vec2 b) { return std::fabs(a.x - b.x) > 1e-3f || std::fabs(a.y - b.y) > 1e-3f; };
+    if (differs(cmin, amin)) SetVec(rtSetAnchorMin, rt, amin, "RectTransform.set_anchorMin");
+    if (differs(cmax, amax)) SetVec(rtSetAnchorMax, rt, amax, "RectTransform.set_anchorMax");
+    if (differs(cpiv, pivot)) SetVec(rtSetPivot, rt, pivot, "RectTransform.set_pivot");
+    const Vec2 size = GetVec(rtGetSize, rt, "RectTransform.get_sizeDelta");
+    const Vec2 want{apos.x + (1.0f - pivot.x) * asize.x + kStatusGap + pivot.x * size.x,
+                    apos.y + (0.5f - pivot.y) * (asize.y - size.y)};
+    const Vec2 cur = GetVec(rtGetPos, rt, "RectTransform.get_anchoredPosition");
+    if (std::fabs(cur.x - want.x) > 0.5f || std::fabs(cur.y - want.y) > 0.5f)
+        SetVec(rtSetPos, rt, want, "RectTransform.set_anchoredPosition");
+}
+
 // ---------------------------------------------------------------- dialog --
+
+// The dialog's frame: own canvas above the menu (under the DroneUIDisplay), a dimmed backdrop that
+// closes on a click, the bordered white panel (centred, kPanelW x panelH). Also picks the text styles.
+bool StationUi::Impl::BuildRoot(const char* name, float panelH, Il2CppObject*& prt, int& layer) {
+    Il2CppObject* m = menu.p;
+    bool ok = false;
+    bool inactive = true;
+    Il2CppObject* display = Call(compInParent, m, {unity::TypeOf(displayClass), &inactive}, "GetComponentInParent(DroneUIDisplay)", &ok);
+    if (!ok || !unity::IsAlive(display)) return false;
+    Il2CppObject* displayTr = unity::TransformOf(display);
+    layer = Unbox<int32_t>(Call(goGetLayer, unity::GameObjectOf(display), {}, "GameObject.get_layer"), -1);
+    Il2CppObject* hdr = unity::Field<Il2CppObject*>(m, offMenuHeader);
+    Il2CppObject* desc = unity::Field<Il2CppObject*>(m, offMenuDesc);
+    titleSrc = TmpOf(hdr);
+    bodySrc = TmpOf(desc);
+    if (!bodySrc) bodySrc = titleSrc;
+    Keep(dialogHandles, titleSrc);
+    Keep(dialogHandles, bodySrc);
+    Il2CppObject* r = NewUi(name, displayTr, layer);
+    if (!r) return false;
+    root = r;
+    Keep(dialogHandles, r);
+    unity::SetActive(r, false);
+    Il2CppObject* rootRt = unity::TransformOf(r);
+    Rect(rootRt, {0, 0}, {1, 1}, {0.5f, 0.5f}, {0, 0}, {0, 0});
+    {
+        Il2CppObject* parentCanvas = Call(compInParent, displayTr, {unity::TypeOf(canvasClass), &inactive}, "GetComponentInParent(Canvas)", &ok);
+        if (!ok || !unity::IsAlive(parentCanvas)) parentCanvas = nullptr;
+        Il2CppObject* canvas = AddComponent(r, canvasClass, "AddComponent(Canvas)");
+        if (!canvas) return false;
+        int32_t order = parentCanvas ? Unbox<int32_t>(Call(cvGetOrder, parentCanvas, {}, "Canvas.get_sortingOrder")) : 0;
+        int32_t sortLayer = parentCanvas ? Unbox<int32_t>(Call(cvGetLayer, parentCanvas, {}, "Canvas.get_sortingLayerID")) : 0;
+        bool over = true;
+        order += 20;
+        Call(cvSetOverride, canvas, {&over}, "Canvas.set_overrideSorting");
+        Call(cvSetLayer, canvas, {&sortLayer}, "Canvas.set_sortingLayerID");
+        Call(cvSetOrder, canvas, {&order}, "Canvas.set_sortingOrder");
+        if (!AddComponent(r, raycasterClass, "AddComponent(GraphicRaycaster)")) return false;
+    }
+    // Backdrop: far beyond the display's rect (it is smaller than the screen); a click on it closes.
+    if (Il2CppObject* bd = NewUi("Backdrop", rootRt, layer)) {
+        Rect(unity::TransformOf(bd), {0, 0}, {1, 1}, {0.5f, 0.5f}, {0, 0}, {4000, 4000});
+        Il2CppObject* img = AddComponent(bd, imageClass, "AddComponent(Image)");
+        SetColor(img, Color{0.05f, 0.07f, 0.12f, 0.55f});
+        blockerToggle = Clickable(bd);
+        Keep(dialogHandles, blockerToggle);
+    }
+    Il2CppObject* panel = NewUi("Panel", rootRt, layer);
+    if (!panel) return false;
+    prt = unity::TransformOf(panel);
+    panelRt = prt;
+    Keep(dialogHandles, prt);
+    Rect(prt, {0.5f, 0.5f}, {0.5f, 0.5f}, {0.5f, 0.5f}, {0, 0}, {kPanelW, panelH});
+    // Border + white content (the menu's ContentBorder / ContentContainer); the content catches clicks.
+    Box(prt, "Border", -8, -8, kPanelW + 16, panelH + 16, kLavender, 34.0f);
+    if (Il2CppObject* content = Box(prt, "Content", 0, 0, kPanelW, panelH, kWhite, 30.0f)) {
+        SetRaycast(sdfRectClass ? unity::GetComponent(content, sdfRectClass) : unity::GetComponent(content, imageClass), true);
+        Clickable(content);  // never polled: it only stops clicks on the panel from reaching the menu behind it
+    }
+    return !Faulted();
+}
 
 bool StationUi::Impl::Open() {
     if (g_open.load() || !haveStation || !host.get || !host.set) return false;
@@ -973,19 +1161,7 @@ bool StationUi::Impl::Open() {
         Close("open failed");  // removes what was built, frees the handles
         return false;
     };
-    bool ok = false;
-    bool inactive = true;
-    Il2CppObject* display = Call(compInParent, m, {unity::TypeOf(displayClass), &inactive}, "GetComponentInParent(DroneUIDisplay)", &ok);
-    if (!ok || !unity::IsAlive(display)) return failOpen("DroneUIDisplay not found above the program page");
-    Il2CppObject* displayTr = unity::TransformOf(display);
-    const int layer = Unbox<int32_t>(Call(goGetLayer, unity::GameObjectOf(display), {}, "GameObject.get_layer"), -1);
-    Il2CppObject* hdr = unity::Field<Il2CppObject*>(m, offMenuHeader);
-    Il2CppObject* desc = unity::Field<Il2CppObject*>(m, offMenuDesc);
-    titleSrc = TmpOf(hdr);
-    bodySrc = TmpOf(desc);
-    if (!bodySrc) bodySrc = titleSrc;
-    Keep(dialogHandles, titleSrc);
-    Keep(dialogHandles, bodySrc);
+    kind = Kind::kPrice;
 
     // Plorts in the market terminal's order, with their base price.
     struct Row {
@@ -1034,47 +1210,11 @@ bool StationUi::Impl::Open() {
     const float panelH = footY + kRowH + 26.0f;
 
     // ---- root: own canvas above the menu, a dimmed backdrop and the panel ----
-    Il2CppObject* r = NewUi("sr2mods_DronePriceLimitDialog", displayTr, layer);
-    if (!r) return failOpen("GameObject creation failed");
-    root = r;
-    Keep(dialogHandles, r);
-    unity::SetActive(r, false);
-    Il2CppObject* rootRt = unity::TransformOf(r);
-    Rect(rootRt, {0, 0}, {1, 1}, {0.5f, 0.5f}, {0, 0}, {0, 0});
-    {
-        Il2CppObject* parentCanvas = Call(compInParent, displayTr, {unity::TypeOf(canvasClass), &inactive}, "GetComponentInParent(Canvas)", &ok);
-        if (!ok || !unity::IsAlive(parentCanvas)) parentCanvas = nullptr;
-        Il2CppObject* canvas = AddComponent(r, canvasClass, "AddComponent(Canvas)");
-        if (!canvas) return failOpen("Canvas failed");
-        int32_t order = parentCanvas ? Unbox<int32_t>(Call(cvGetOrder, parentCanvas, {}, "Canvas.get_sortingOrder")) : 0;
-        int32_t sortLayer = parentCanvas ? Unbox<int32_t>(Call(cvGetLayer, parentCanvas, {}, "Canvas.get_sortingLayerID")) : 0;
-        bool over = true;
-        order += 20;
-        Call(cvSetOverride, canvas, {&over}, "Canvas.set_overrideSorting");
-        Call(cvSetLayer, canvas, {&sortLayer}, "Canvas.set_sortingLayerID");
-        Call(cvSetOrder, canvas, {&order}, "Canvas.set_sortingOrder");
-        if (!AddComponent(r, raycasterClass, "AddComponent(GraphicRaycaster)")) return failOpen("GraphicRaycaster failed");
-    }
-    // Backdrop: far beyond the display's rect (it is smaller than the screen); a click on it closes.
-    if (Il2CppObject* bd = NewUi("Backdrop", rootRt, layer)) {
-        Rect(unity::TransformOf(bd), {0, 0}, {1, 1}, {0.5f, 0.5f}, {0, 0}, {4000, 4000});
-        Il2CppObject* img = AddComponent(bd, imageClass, "AddComponent(Image)");
-        SetColor(img, Color{0.05f, 0.07f, 0.12f, 0.55f});
-        blockerToggle = Clickable(bd);
-        Keep(dialogHandles, blockerToggle);
-    }
-    Il2CppObject* panel = NewUi("Panel", rootRt, layer);
-    if (!panel) return failOpen("panel creation failed");
-    Il2CppObject* prt = unity::TransformOf(panel);
-    panelRt = prt;
-    Keep(dialogHandles, prt);
-    Rect(prt, {0.5f, 0.5f}, {0.5f, 0.5f}, {0.5f, 0.5f}, {0, 0}, {kPanelW, panelH});
-    // Border + white content (the menu's ContentBorder / ContentContainer); the content catches clicks.
-    Box(prt, "Border", -8, -8, kPanelW + 16, panelH + 16, kLavender, 34.0f);
-    if (Il2CppObject* content = Box(prt, "Content", 0, 0, kPanelW, panelH, kWhite, 30.0f)) {
-        SetRaycast(sdfRectClass ? unity::GetComponent(content, sdfRectClass) : unity::GetComponent(content, imageClass), true);
-        Clickable(content);  // never polled: it only stops clicks on the panel from reaching the menu behind it
-    }
+    Il2CppObject* prt = nullptr;
+    int layer = -1;
+    if (!BuildRoot("sr2mods_DronePriceLimitDialog", panelH, prt, layer))
+        return failOpen("dialog frame not built (DroneUIDisplay / canvas / panel)");
+    Il2CppObject* r = root;
 
     Text(prt, "Title", kPad, titleY, kPanelW - 2 * kPad, 50, "Plort Market price limit", 40.0f, kNavy, kAlignLeft, titleSrc);
     const bool persistent = host.persistent && host.persistent();
@@ -1121,10 +1261,11 @@ bool StationUi::Impl::Open() {
             Text(crt, "Name", 64, 3, cellW - 70, 28, rows[i].name, 20.0f, kNavy, kAlignLeft, bodySrc, false, true);
             float px = 64.0f;
             if (Sprite(crt, "Coin", 64, 33, 24, 24, coin)) px = 92.0f;
-            Il2CppObject* price = Text(crt, "Price", px, 30, cellW - px - 6, 30, rows[i].base > 0 ? std::to_string(rows[i].base) : "?",
-                                       24.0f, kNavy, kAlignLeft, titleSrc, false, true);
-            Keep(dialogHandles, price);
-            cells.push_back({price, rows[i].base});
+            Il2CppObject* priceText = Text(crt, "Price", px, 30, cellW - px - 6, 30,
+                                           rows[i].base > 0 ? std::to_string(rows[i].base) : "?", 24.0f, kNavy, kAlignLeft,
+                                           titleSrc, false, true);
+            Keep(dialogHandles, priceText);
+            cells.push_back({priceText, rows[i].base});
         }
     }
 
@@ -1162,9 +1303,153 @@ void StationUi::Impl::Close(const char* why) {
     modeToggle[0] = modeToggle[1] = modeBg[0] = modeBg[1] = modeText[0] = modeText[1] = nullptr;
     titleSrc = bodySrc = nullptr;
     cells.clear();
+    for (int i = 0; i < kTierRows; ++i) tierBg[i] = tierState[i] = nullptr;
+    for (int i = 0; i < 3; ++i) btnBg[i] = btnText[i] = btnToggle[i] = nullptr;
+    walletText = messageText = nullptr;
+    message.clear();
     FreeLater(dialogHandles);
-    if (was) SR2_INFO("[{}] station ui: dialog closed ({}), station {}: {}", module, why, openStation,
-                      host.get ? Describe(host.get(openStation)) : std::string("?"));
+    if (!was) return;
+    if (kind == Kind::kBattery)
+        SR2_INFO("[{}] station ui: battery dialog closed ({}), station {}: {}", module, why, openStation,
+                 host.batteryTier ? BatteryTierName(host.batteryTier(openStation)) : std::string("?"));
+    else
+        SR2_INFO("[{}] station ui: dialog closed ({}), station {}: {}", module, why, openStation,
+                 host.get ? Describe(host.get(openStation)) : std::string("?"));
+}
+
+// ---------------------------------------------------------------- battery dialog --
+
+bool StationUi::Impl::OpenBattery() {
+    if (g_open.load() || !haveStation || !host.batteryTier || !host.batteryBuy || !host.batterySell) return false;
+    auto failOpen = [&](const char* what) {
+        if (!loggedOpenFail) SR2_WARN("[{}] station ui: battery dialog not opened: {}", module, what);
+        loggedOpenFail = true;
+        Close("open failed");
+        return false;
+    };
+    kind = Kind::kBattery;
+    openStation = station;
+    message.clear();
+    const float titleY = 28.0f, subY = 84.0f, tableY = 166.0f;
+    const float walletY = tableY + kTierRows * (kRowH + kTierGap) + 12.0f;
+    buttonsY = walletY + 52.0f;
+    const float helpY = buttonsY + kRowH + 22.0f;
+    const float panelH = helpY + 40.0f + 26.0f;
+    Il2CppObject* prt = nullptr;
+    int layer = -1;
+    if (!BuildRoot("sr2mods_DroneBatteryDialog", panelH, prt, layer)) return failOpen("dialog frame not built");
+
+    Text(prt, "Title", kPad, titleY, kPanelW - 2 * kPad, 50, "Drone Battery Saver", 40.0f, kNavy, kAlignLeft, titleSrc);
+    Text(prt, "Subtitle", kPad, subY, kPanelW - 2 * kPad, 64,
+         "Makes this station's drone use less battery, so it works longer on the same fuel. Bought for this station "
+         "only, one tier after the other; selling the top tier gives back half its price.",
+         22.0f, kNavy, kAlignTopLeft, bodySrc, true);
+    // Focus frame (behind the focused button).
+    focusFrame = Box(prt, "Focus", 0, 0, 10, 10, Color{0, 0, 0, 0}, 34.0f, 4.0f, kTeal);
+    Keep(dialogHandles, focusFrame);
+    // Tier table: name, effect, price, state.
+    Il2CppObject* coin = CoinSprite();
+    const float w = kPanelW - 2 * kPad;
+    for (int i = 0; i < kTierRows; ++i) {
+        const int tier = i + 1;
+        const float y = tableY + i * (kRowH + kTierGap);
+        Il2CppObject* row = Box(prt, "Tier", kPad, y, w, kRowH, kBacker, 16.0f, 3.0f, kBacker);
+        if (!row) return failOpen("tier row failed");
+        Il2CppObject* rrt = unity::TransformOf(row);
+        tierBg[i] = sdfRectClass ? unity::GetComponent(row, sdfRectClass) : unity::GetComponent(row, imageClass);
+        Keep(dialogHandles, tierBg[i]);
+        Text(rrt, "Name", 22, 0, 280, kRowH, BatteryTierName(tier), 26.0f, kNavy, kAlignLeft, titleSrc);
+        const int pct = static_cast<int>(std::lround(100.0f / kBatteryFactor[tier]));
+        Text(rrt, "Effect", 300, 0, 560, kRowH,
+             std::format("uses {}% of the battery (1/{:g}), lasts {:g}x as long", pct, kBatteryFactor[tier],
+                         kBatteryFactor[tier]),
+             22.0f, kNavy, kAlignLeft, bodySrc);
+        float px = 880.0f;
+        if (Sprite(rrt, "Coin", px, 14, 28, 28, coin)) px += 34.0f;
+        Text(rrt, "Price", px, 0, 150, kRowH, std::to_string(kBatteryPrice[tier]), 26.0f, kNavy, kAlignLeft, titleSrc);
+        tierState[i] = Text(rrt, "State", w - 200, 0, 180, kRowH, "", 22.0f, kTeal, kAlignRight, titleSrc);
+        Keep(dialogHandles, tierState[i]);
+    }
+    walletText = Text(prt, "Wallet", kPad, walletY, 520, 40, "", 24.0f, kNavy, kAlignLeft, titleSrc);
+    messageText = Text(prt, "Message", kPad + 540, walletY, w - 540, 40, "", 22.0f, kOrange, kAlignRight, bodySrc);
+    Keep(dialogHandles, walletText);
+    Keep(dialogHandles, messageText);
+    // Buttons: Buy, Sell, Close.
+    float bx = kPad;
+    const char* names[3] = {"Buy", "Sell", "Close"};
+    for (int i = 0; i < 3; ++i) {
+        Il2CppObject* b = NewUi(names[i], prt, layer);
+        if (!b) return failOpen("button failed");
+        At(unity::TransformOf(b), bx, buttonsY, kBtnW[i], kRowH);
+        btnBg[i] = Shape(b, i == 2 ? kCyan : kGrey, 28.0f);
+        SetRaycast(btnBg[i], true);
+        btnText[i] = Text(unity::TransformOf(b), "Label", 0, 0, kBtnW[i], kRowH, names[i], 24.0f, kNavy, kAlignCenter, titleSrc);
+        btnToggle[i] = Clickable(b);
+        Keep(dialogHandles, btnBg[i]);
+        Keep(dialogHandles, btnText[i]);
+        Keep(dialogHandles, btnToggle[i]);
+        bx += kBtnW[i] + kBtnGap;
+    }
+    closeToggle = btnToggle[2];
+    Text(prt, "Help", kPad, helpY, w, 40, "Left / Right: choose    Enter: press    B or Esc: close", 22.0f, kNavy,
+         kAlignLeft, bodySrc);
+    if (Faulted()) return failOpen("faulted");
+    unity::SetActive(root, true);
+    g_open.store(true);
+    openGuard = kOpenGuard;
+    RefreshBattery();
+    const int tier = host.batteryTier(station);
+    SetBatteryFocus(tier < kBatteryTiers ? 0 : (tier > 0 ? 1 : 2));
+    if (!loggedBatteryOpen) {
+        loggedBatteryOpen = true;
+        SR2_INFO("[{}] station ui: battery dialog opened for station {} ({} owned, {} Newbucks)", module, station,
+                 tier > 0 ? BatteryTierName(tier) : std::string("no tier"), host.newbucks ? host.newbucks() : -1);
+    }
+    return true;
+}
+
+void StationUi::Impl::RefreshBattery() {
+    if (kind != Kind::kBattery || !root) return;
+    const int tier = host.batteryTier(openStation);
+    const int money = host.newbucks ? host.newbucks() : -1;
+    for (int i = 0; i < kTierRows; ++i) {
+        const int t = i + 1;
+        const bool owned = t <= tier, next = t == tier + 1;
+        SetText(tierState[i], owned ? (t == tier ? "Owned (active)" : "Owned") : next ? "Next" : "");
+        Color border = owned ? kTeal : kBacker;
+        if (unity::IsAlive(tierBg[i]) && sdfSetBorderColor && sdfRectClass)
+            Call(sdfSetBorderColor, tierBg[i], {&border}, "SDFGraphic.set_BorderColor");
+    }
+    SetText(walletText, money >= 0 ? std::format("Your Newbucks: {}", money) : std::string("Your Newbucks: ?"));
+    SetText(messageText, message);
+    const bool canBuy = tier < kBatteryTiers && (money < 0 || money >= kBatteryPrice[tier + 1]);
+    SetText(btnText[0], tier < kBatteryTiers ? std::format("Buy {}  ({})", BatteryTierName(tier + 1), kBatteryPrice[tier + 1])
+                                             : std::string("All tiers owned"));
+    SetText(btnText[1], tier > 0 ? std::format("Sell {}  (+{})", BatteryTierName(tier), kBatteryPrice[tier] / 2)
+                                 : std::string("Nothing to sell"));
+    SetColor(btnBg[0], canBuy ? kCyan : kGrey);
+    SetColor(btnBg[1], tier > 0 ? kCyan : kGrey);
+}
+
+void StationUi::Impl::SetBatteryFocus(int b) {
+    focusBtn = std::clamp(b, 0, 2);
+    if (!unity::IsAlive(focusFrame)) return;
+    float x = kPad;
+    for (int i = 0; i < focusBtn; ++i) x += kBtnW[i] + kBtnGap;
+    At(unity::TransformOf(focusFrame), x - 8.0f, buttonsY - 8.0f, kBtnW[focusBtn] + 16.0f, kRowH + 16.0f);
+}
+
+void StationUi::Impl::PressBattery(int b) {
+    if (openGuard > 0.0f) return;
+    if (b == 2) {
+        Close("close");
+        return;
+    }
+    const std::string r = b == 0 ? host.batteryBuy(openStation) : host.batterySell(openStation);
+    message = r;
+    RefreshBattery();
+    UpdatePillLabel(battery);
+    battery.labelStation = 0;  // re-read the label at the next state tick
 }
 
 void StationUi::Impl::BuildSlider() {
@@ -1201,7 +1486,7 @@ void StationUi::Impl::Changed() {
     l.value = values[static_cast<int>(mode)];
     host.set(openStation, l);
     UpdateSheet();
-    UpdatePillLabel();
+    UpdatePillLabel(price);
 }
 
 void StationUi::Impl::SetMode(LimitMode m) {
@@ -1249,6 +1534,11 @@ void StationUi::Impl::UpdateSheet() {
 
 void StationUi::Impl::Navigate(int dir) {
     if (!g_open.load()) return;
+    if (kind == Kind::kBattery) {
+        if (dir == kMoveLeft) SetBatteryFocus(focusBtn - 1);
+        else if (dir == kMoveRight) SetBatteryFocus(focusBtn + 1);
+        return;
+    }
     if (dir == kMoveUp) SetFocus(focusRow - 1);
     else if (dir == kMoveDown) SetFocus(focusRow + 1);
     else if (dir == kMoveLeft || dir == kMoveRight) {
@@ -1259,6 +1549,10 @@ void StationUi::Impl::Navigate(int dir) {
 
 void StationUi::Impl::Submit() {
     if (!g_open.load()) return;
+    if (kind == Kind::kBattery) {
+        PressBattery(focusBtn);
+        return;
+    }
     if (focusRow == 0) SetMode(mode == LimitMode::kPrice ? LimitMode::kFraction : LimitMode::kPrice);
 }
 
@@ -1284,34 +1578,57 @@ void StationUi::Impl::Tick(float dt) {
     if (--stateCountdown <= 0 || g_open.load()) {
         stateCountdown = kStateFrames;
         ReadState();
-        const bool want = pageActive && marketSelected && haveStation;
-        if (want) EnsurePill();
-        if (pill && !unity::IsAlive(pill)) DestroyPill();
-        if (pill && want != pillShown) {
-            unity::SetActive(pill, want);
-            pillShown = want;
-            if (want) pillReapply = kReapplyFrames;
+        const bool wantPrice = pageActive && marketSelected && haveStation;
+        const bool wantBattery = pageActive && haveStation && host.batteryAvailable && host.batteryAvailable() &&
+                                 offMenuBatteryWidget && StatusAnchor() != nullptr;
+        if (wantPrice) EnsurePill(price, unity::TransformOf(unity::Field<Il2CppObject*>(menu.p, offMenuDest)));
+        if (wantBattery) {
+            Il2CppObject* parent = nullptr;
+            if (Il2CppObject* anchor = StatusAnchor(); anchor && trGetParent) {
+                bool ok = false;
+                parent = Call(trGetParent, anchor, {}, "Transform.get_parent", &ok);
+                if (!ok || !unity::IsAlive(parent)) parent = nullptr;
+            }
+            EnsurePill(battery, parent);
         }
-        if (pillShown) PlacePill();
-        if (pillShown && station != labelStation) {  // the same menu re-bound for another station
-            labelStation = station;
-            UpdatePillLabel();
-        }
+        ShowPill(price, wantPrice);
+        ShowPill(battery, wantBattery);
+        if (price.shown) PlacePricePill();
+        if (battery.shown) PlaceBatteryPill();
         // The page went away (tab switch, picker, destination changed, other station): close.
+        const bool want = kind == Kind::kBattery ? wantBattery : wantPrice;
         if (g_open.load() && (!want || station != openStation || !unity::IsAlive(root))) Close("page changed");
     }
-    if (pillShown && pillReapply > 0) {
-        --pillReapply;
-        ApplyPillLook();
-    }
+    for (Pill* p : {&price, &battery})
+        if (p->shown && p->reapply > 0) {
+            --p->reapply;
+            ApplyPillLook(*p);
+        }
 
-    // Hotkey: C (or the pad's right stick click) toggles the dialog; a click on our prompt opens it.
-    const bool hot = (pillShown || g_open.load()) &&
-                     (KeyPressed(kbCurrent, kbC) || KeyPressed(padCurrent, padR3));
-    const bool clicked = pillShown && Clicked(pillToggle);
-    if (g_open.load()) {
-        if (hot || Clicked(closeToggle) || Clicked(blockerToggle)) {
-            Close(hot ? "C" : "click");
+    // Hotkeys: C (or the pad's right stick click) toggles the price-limit dialog, B (left stick click)
+    // the battery dialog; a click on a prompt opens its dialog.
+    const bool open = g_open.load();
+    const bool hotPrice = (price.shown || (open && kind == Kind::kPrice)) &&
+                          (KeyPressed(kbCurrent, kbC) || KeyPressed(padCurrent, padR3));
+    const bool hotBattery = (battery.shown || (open && kind == Kind::kBattery)) &&
+                            (KeyPressed(kbCurrent, kbB) || KeyPressed(padCurrent, padL3));
+    const bool clickedPrice = price.shown && Clicked(price.toggle);
+    const bool clickedBattery = battery.shown && Clicked(battery.toggle);
+    if (open && kind == Kind::kBattery) {
+        if (openGuard > 0.0f) openGuard -= dt;
+        if (hotBattery || Clicked(blockerToggle)) {
+            Close(hotBattery ? "B" : "click");
+            return;
+        }
+        for (int i = 0; i < 3; ++i)
+            if (Clicked(btnToggle[i])) {
+                SetBatteryFocus(i);
+                PressBattery(i);
+                if (!g_open.load()) return;
+            }
+    } else if (open) {
+        if (hotPrice || Clicked(closeToggle) || Clicked(blockerToggle)) {
+            Close(hotPrice ? "C" : "click");
             return;
         }
         for (int i = 0; i < 2; ++i)
@@ -1320,8 +1637,10 @@ void StationUi::Impl::Tick(float dt) {
                 SetMode(static_cast<LimitMode>(i));
             }
         if (sliderReady) slider.Tick(dt);
-    } else if ((hot || clicked) && pillShown) {
+    } else if ((hotPrice || clickedPrice) && price.shown) {
         Open();
+    } else if ((hotBattery || clickedBattery) && battery.shown) {
+        OpenBattery();
     }
 }
 
@@ -1338,9 +1657,10 @@ void StationUi::Shutdown() {
     Impl& p = *impl_;
     if (sr2::core::ModuleFaulted(p.module)) {  // no game calls after a fault: forget, leak nothing we can't free
         g_open.store(false);
-        p.root = p.pill = nullptr;
+        p.root = p.price.go = p.battery.go = nullptr;
         Impl::FreeLater(p.dialogHandles);
-        Impl::FreeLater(p.pillHandles);
+        Impl::FreeLater(p.price.handles);
+        Impl::FreeLater(p.battery.handles);
         Impl::Release(p.menu);
         return;
     }

@@ -2,6 +2,8 @@
 // Link while that plort's current market price is at or above their station's limit.
 // The limit is set per drone station in the station menu (station_dialog.cpp) and stored in the
 // per-save sidecar of custom_upgrades (api.h SaveValue, key "drone_price_limit.station.<actor id>").
+// The module also runs the per-station Battery Saver tiers (battery.h; bought in the same station
+// menu, so they share its hooks).
 //
 // Findings (SR2 1.3.0, GameAssembly.dll disassembled; RVAs for reference only, every
 // lookup below is by name):
@@ -100,6 +102,7 @@
 #include "core/module.h"
 #include "core/unity.h"
 #include "modules/custom_upgrades/api.h"
+#include "modules/drone_price_limit/battery.h"
 #include "modules/drone_price_limit/station_dialog.h"
 
 namespace sr2::modules {
@@ -154,6 +157,7 @@ public:
     void OnEnable() override {
         enabled_.store(true);
         resetCache_.store(true);
+        resetBattery_.store(true);
         SR2_INFO("[{}] enabled: per-station limits ({})", kModule,
                  custom_upgrades::Active() ? "stored per save" : "custom_upgrades off: session only");
     }
@@ -204,6 +208,7 @@ private:
     std::atomic<bool> enabled_{false};
     std::atomic<bool> anyHeld_{false};
     std::atomic<bool> resetCache_{false};  // OnEnable (any thread) -> drop the limit cache on the main thread
+    std::atomic<bool> resetBattery_{false};  // OnEnable -> forget the battery saver's last looks (main thread)
 
     // classes
     Il2CppClass* scorePlortClass_ = nullptr;
@@ -250,6 +255,7 @@ private:
     std::unordered_map<int64_t, StationLimit> sessionLimits_;   // without custom_upgrades
     bool loggedNoStore_ = false;
     drone_price_limit::StationUi ui_;
+    drone_price_limit::BatterySaver battery_;
     const void* baseEcon_ = nullptr;                            // identity of the econ the table belongs to
     const void* baseArray_ = nullptr;                           // identity of the PlortsTable array
     std::unordered_map<const void*, float> baseValues_;         // IdentifiableType -> InitialValue
@@ -260,6 +266,7 @@ sr2::core::DetourGuard g_canDepositGuard{kModule, "ScorePlort.CanDroneDeposit"};
 sr2::core::DetourGuard g_dumpGuard{kModule, "RanchDroneBehaviourDumpAmmo.Relevancy"};
 sr2::core::DetourGuard g_sinksGuard{kModule, "RanchDroneSinkProgramPlortMarket.<GetSinks>.MoveNext"};
 sr2::core::DetourGuard g_uiGuard{kModule, "station ui"};
+sr2::core::DetourGuard g_batteryGuard{kModule, "battery saver"};
 
 using CanDepositFn = bool (*)(Il2CppObject*, Il2CppObject*, bool, const MethodInfo*);
 using RelevancyFn = bool (*)(Il2CppObject*, bool, const MethodInfo*);
@@ -496,8 +503,12 @@ float DronePriceLimit::BaseValueOf(Il2CppObject* id) {
 }
 
 void DronePriceLimit::Frame(float dt) {
-    if (!ui_.Ready() || !Enabled() || sr2::core::ModuleFaulted(kModule)) return;
-    g_uiGuard.Run([&] { ui_.Tick(dt); });
+    if (!Enabled() || sr2::core::ModuleFaulted(kModule)) return;
+    if (battery_.Ready()) {
+        if (resetBattery_.exchange(false)) battery_.Reset();
+        g_batteryGuard.Run([&] { battery_.Tick(dt); });
+    }
+    if (ui_.Ready()) g_uiGuard.Run([&] { ui_.Tick(dt); });
 }
 
 // ---- lifecycle --------------------------------------------------------------------------
@@ -670,22 +681,35 @@ bool DronePriceLimit::Setup(sr2::core::ModuleContext& ctx) {
         report += std::format(" {}@0x{:X}", h.name, Resolver::Rva(p));
     }
 
-    // The station menu action + dialog (optional: without it the limits can't be changed, but stored
-    // limits keep working).
+    // Battery Saver tiers (optional: without it the station menu has no battery action).
+    {
+        std::string bWhy;
+        if (!battery_.Setup(R, kModule, bWhy)) SR2_WARN("[{}] battery saver NOT available: {}", kModule, bWhy);
+    }
+    // The station menu actions + dialogs (optional: without them the limits can't be changed, but
+    // stored limits and owned battery tiers keep working).
     {
         drone_price_limit::DialogHost host;
         host.get = [this](int64_t st) { return GetLimit(st); };
         host.set = [this](int64_t st, const StationLimit& l) { SetLimit(st, l); };
         host.persistent = [] { return custom_upgrades::Active(); };
         host.baseValue = [this](Il2CppObject* id) { return BaseValueOf(id); };
+        if (battery_.Ready()) {
+            host.batteryAvailable = [this] { return battery_.Available(); };
+            host.batteryTier = [this](int64_t st) { return battery_.Tier(st); };
+            host.batteryBuy = [this](int64_t st) { return battery_.BuyNext(st); };
+            host.batterySell = [this](int64_t st) { return battery_.SellTop(st); };
+            host.newbucks = [this] { return battery_.Newbucks(); };
+        }
         std::string uiWhy;
         if (!ui_.Setup(ctx, kModule, std::move(host), uiWhy))
-            SR2_WARN("[{}] station menu action NOT available: {} (stored limits still apply)", kModule, uiWhy);
-        else
-            main_thread::AddFrameCallback(kModule, [](float dt) {
-                if (g_self) g_self->Frame(dt);
-            });
+            SR2_WARN("[{}] station menu actions NOT available: {} (stored limits / battery tiers still apply)", kModule,
+                     uiWhy);
     }
+    if (ui_.Ready() || battery_.Ready())
+        main_thread::AddFrameCallback(kModule, [](float dt) {
+            if (g_self) g_self->Frame(dt);
+        });
 
     g_self = this;
     SR2_INFO("[{}] setup ok:{}; ScorePlort _isCaretakerShop +0x{:X} _sprinkleType +0x{:X} _econDir +0x{:X}; "
