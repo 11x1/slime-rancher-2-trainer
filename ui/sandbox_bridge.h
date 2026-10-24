@@ -127,7 +127,8 @@ struct Snapshot {
     uint32_t groupIcons[kGroupCount] = {};                // the game's icons for the group tabs (0 = none; All has none)
     int upgradeCount = 0;                                 // player upgrades (UpgradeModel.upgradeDefinitions)
     int upgradeLevelsLeft = -1;                           // levels until all are at their last one (-1: unknown)
-    std::string upgradeWhy;                               // why "Unlock all upgrades" is unavailable ("" = it is not)
+    std::string upgradeWhy;                               // why "Max all upgrades" is unavailable ("" = it is not)
+    int upgradesHidden = -1;                              // upgrades the Fabricator hides until found (-1: unknown)
 };
 
 enum class Op {
@@ -147,7 +148,8 @@ enum class Op {
     StowItem,        // slot = selected slot, item (from catalog), value = amount (<= 0: one slot's maximum), replace:
                      // fills the selected slot (replacing its contents only if `replace`), then the slots that hold
                      // the item or are empty; what does not fit is dropped in front of the player
-    UnlockUpgrades,  // every player upgrade to its last level (UpgradeModel.IncrementUpgradeLevel), free
+    UnlockUpgrades,  // "Max all upgrades": every player upgrade to its last level (IncrementUpgradeLevel), free
+    DiscoverUpgrades,  // every upgrade the Fabricator hides until found gets its upgrade component (as if found)
 };
 
 struct Action {

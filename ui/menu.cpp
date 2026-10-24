@@ -2586,8 +2586,10 @@ void SandboxStatus(const Host& h) {
 namespace sbxx = ::sr2::ui::sandbox::extras;
 constexpr const char* kSbxExpPopup = "##sandbox_expansions";
 constexpr const char* kSbxUpgPopup = "##sandbox_upgrades";
+constexpr const char* kSbxDiscPopup = "##sandbox_discover";
 bool g_sbxExpConfirm = false;
 bool g_sbxUpgConfirm = false;
+bool g_sbxDiscConfirm = false;
 
 // A Sandbox confirmation modal (Cancel / `ok`, Esc cancels; Cancel first, so focus never starts on
 // `ok`). `open` opens it once. True on the frame `ok` is clicked.
@@ -2648,13 +2650,22 @@ void SandboxExpansionsConfirm(const sbxx::State& st) {
 }
 
 void SandboxUpgradesConfirm(const sbx::Snapshot& s) {
-    if (SandboxConfirmModal(kSbxUpgPopup, g_sbxUpgConfirm, "Unlock all upgrades?",
+    if (SandboxConfirmModal(kSbxDiscPopup, g_sbxDiscConfirm, "Discover all upgrades?",
+                            std::format("Makes the {} upgrade(s) the Fabricator still hides available to buy, as if "
+                                        "you had found them in the world. You still buy each level at its normal "
+                                        "cost.",
+                                        std::max(0, s.upgradesHidden)),
+                            "Each one gets the upgrade component that finding it gives you (the first level uses it "
+                            "up when you buy it). The game saves the components; there is no way to take them back.",
+                            "Discover"))
+        SbxRequest(sbx::Op::DiscoverUpgrades);
+    if (SandboxConfirmModal(kSbxUpgPopup, g_sbxUpgConfirm, "Max all upgrades?",
                             std::format("Raises every vacpack and player upgrade the Fabricator sells to its last "
                                         "level ({} level(s) to go), as if you had bought them, for free.",
                                         std::max(0, s.upgradeLevelsLeft)),
                             "This changes your save for good: the game saves the upgrade levels, and there is no way "
                             "to take them back.",
-                            "Unlock"))
+                            "Max"))
         SbxRequest(sbx::Op::UnlockUpgrades);
 }
 
@@ -2684,14 +2695,29 @@ void SandboxPlayer(const Host& h, const sbx::Snapshot& s, float w) {
     if (Switch("##infenergy", s.infiniteEnergy)) SbxRequest(sbx::Op::InfiniteEnergy, s.infiniteEnergy ? 0 : 1);
     HoverTip("Keeps energy at its maximum. For this session only: off again after a restart or when Sandbox is "
              "turned off.");
-    // Unlock all upgrades (the main module, Op::UnlockUpgrades): full width, under the extras' buttons.
+    // Discover all upgrades (Op::DiscoverUpgrades) and, smaller beside it, Max all upgrades (Op::UnlockUpgrades):
+    // under the extras' buttons.
     auto upgradesButton = [&] {
+        const float sp = ImGui::GetStyle().ItemSpacing.x;
+        const float maxW = std::min(std::floor(avail * 0.36f), U(150));
+        const bool canFind = s.upgradesHidden > 0;
+        ImGui::BeginDisabled(!canFind);
+        if (ImGui::Button("Discover all upgrades", ImVec2(avail - maxW - sp, U(32)))) g_sbxDiscConfirm = true;
+        ImGui::EndDisabled();
+        HoverTip(canFind ? std::format("Makes the {} upgrade(s) the Fabricator still hides (until you find them in the "
+                                       "world) available to buy, without buying any level. Asks first.",
+                                       s.upgradesHidden)
+                 : s.upgradesHidden == 0 ? std::string("Every upgrade is discovered already.")
+                                         : std::string("The game's upgrade component functions were not found (see the "
+                                                       "log)."));
+        ImGui::SameLine(0, sp);
         const bool can = s.upgradeLevelsLeft > 0;
         ImGui::BeginDisabled(!can);
-        if (ImGui::Button("Unlock all upgrades", ImVec2(avail, U(32)))) g_sbxUpgConfirm = true;
+        if (ImGui::Button("Max all", ImVec2(maxW, U(32)))) g_sbxUpgConfirm = true;
         ImGui::EndDisabled();
-        HoverTip(can ? std::format("Raises every vacpack / player upgrade of the Fabricator ({} upgrade(s), {} level(s) "
-                                   "to go) to its last level as if bought (free). Asks first; the change is saved.",
+        HoverTip(can ? std::format("Max all upgrades: raises every vacpack / player upgrade of the Fabricator ({} "
+                                   "upgrade(s), {} level(s) to go) to its last level as if bought (free). Asks first; "
+                                   "the change is saved.",
                                    s.upgradeCount, s.upgradeLevelsLeft)
                      : s.upgradeWhy.empty() ? std::string("Every upgrade is at its last level already.")
                                             : s.upgradeWhy);
