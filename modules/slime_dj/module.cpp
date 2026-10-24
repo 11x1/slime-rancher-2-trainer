@@ -451,8 +451,8 @@ private:
             "farther, up to double. All boxes always play the song in sync, so boxes close together also add up "
             "on their own.");
         def("dance_walls", "Walls dance to the music", Kind::Bool, 0, 0, 1, 1,
-            "The energy walls of a corral whose music box plays (and its Air Net, if bought) pulse, grow and "
-            "change colour with the beat of the song. Only corrals within hearing range. Everything goes back to "
+            "The energy walls of a corral whose music box plays ripple round the corral on every beat (like a "
+            "shot through the wall), and they and the Air Net, if bought, glow and change colour with the song. Only corrals within hearing range. Everything goes back to "
             "normal when the song stops or pauses.");
         {
             settings::Def x;
@@ -465,7 +465,7 @@ private:
             x.max = 2.0;
             x.step = 0.05;
             x.parent = "dance_walls";
-            x.tooltip = "How strongly the walls pulse, grow and change colour.";
+            x.tooltip = "How strongly the walls ripple, glow and change colour. Above 100 % it gets wild fast.";
             settings::Register(x);
         }
         settings::SetDisplay(kModule, "volume", "%", {}, 100);
