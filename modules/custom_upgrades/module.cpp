@@ -517,6 +517,7 @@ struct MenuInjection {
     Il2CppObject* list = nullptr;      // the category's items list (GC handle held)
     std::vector<Injected> items;
     std::vector<HiddenVanilla> hidden;
+    std::vector<Il2CppObject*> storageTitles;  // vanilla "Additional Storage" _title objects we relabel
     bool failed = false;               // clone/verification failed: never retried for this config
 };
 
@@ -656,6 +657,7 @@ private:
     int32_t ListIndexOf(Il2CppObject* list, Il2CppObject* item);
     void RestoreVanilla(MenuInjection& inj);
     void MergeStorageCards(Il2CppObject* plot, MenuInjection& inj, const std::vector<std::pair<Il2CppObject*, int32_t>>& cards);
+    void RefreshAvailability(Il2CppObject* plot, const MenuInjection& inj);
     bool Shown(Il2CppObject* plot, const UpgradeDef& d);
     Il2CppObject* MarketIcon();
     void SetTexts(const Injected& in, const std::string& title, const std::string& desc, const std::string& prompt);
@@ -781,6 +783,8 @@ public:
     const MethodInfo* slotCountMi_ = nullptr;
     const MethodInfo* decrementMi_ = nullptr;
     const MethodInfo* marketLinkMi_ = nullptr;  // LookupDirector.get_MarketLink (optional)
+    const MethodInfo* itemUpdAvailMi_ = nullptr;   // PlotUpgradePurchaseItemModel.UpdateAvailability (optional)
+    const MethodInfo* itemUpdHiddenMi_ = nullptr;  // PlotUpgradePurchaseItemModel.UpdateHidden (optional)
     const MethodInfo* setHideFlagsMi_ = nullptr;
 
     Bound<Il2CppObject*(Il2CppObject*)> getTransform_;
@@ -1673,7 +1677,8 @@ const char* ModIconName(int32_t id) {
         case GARDEN_GROWTH_1: return "growth_1";
         case GARDEN_GROWTH_2: return "growth_2";
         case INCIN_ASH_BOOST: return "ash_boost";
-        case COOP_AIR_NET: return "coop_air_net";
+        // COOP_AIR_NET: none - the corral's own Air Net icon (iconFrom, user request "use the air net icon
+        // from corrals"); assets/icons/coop_air_net.png stays embedded but unused.
         case COOP_HEN_COLLECTOR: return "hen_collector";
         default: return nullptr;
     }
@@ -1932,6 +1937,7 @@ void CustomUpgrades::BeforeMenuUpdate(Il2CppObject* root) {
         }
     }
     if (storageCards.size() > 1) MergeStorageCards(plot, *inj, storageCards);
+    RefreshAvailability(plot, *inj);
     // Texts now, before the original runs: with the menu open, RebuildUI's original rebinds the
     // cards (RefreshAndAdvance) and so runs LocalizeStringEvent.UpdateString for a card that was
     // just placed (a tier taking over a vanilla card after its purchase). With the texts only
@@ -1967,6 +1973,22 @@ void CustomUpgrades::RegisterTexts(Il2CppObject* plot, const MenuInjection& inj)
 // module stops. Runs after our cards are placed: their recorded indices are vanilla ones too.
 void CustomUpgrades::MergeStorageCards(Il2CppObject* plot, MenuInjection& inj,
                                        const std::vector<std::pair<Il2CppObject*, int32_t>>& cards) {
+    // Tier labels like our other chains (user request "add additional storage tier labels"): the three
+    // vanilla cards share the title "Additional Storage"; each gets the section it adds (STORAGE2 ->
+    // "Additional Storage II", ...). Their own _title objects, registered once; Cleanup removes them.
+    if (inj.storageTitles.empty() && text_override::SinkActive()) {
+        for (const auto& [item, index] : cards) {
+            const int32_t u = unity::Field<int32_t>(item, offItemUpgrade_);
+            const char* tier = u == kUpgStorageSections[0] ? "II" : u == kUpgStorageSections[1] ? "III"
+                               : u == kUpgStorageSections[2] ? "IV" : nullptr;
+            Il2CppObject* title = unity::Field<Il2CppObject*>(item, offItemTitle_);
+            if (!tier || !IsA(title, lsClass_) || !unity::NewGCHandle(item)) continue;  // item pinned (3, never freed)
+            text_override::Set(title, std::string("Additional Storage ") + tier);
+            inj.storageTitles.push_back(title);
+        }
+        SR2_INFO("[{}] silo: {} Additional Storage card(s) labelled with their section (II / III / IV)", kModule,
+                 inj.storageTitles.size());
+    }
     Il2CppObject* keep = cards.back().first;
     for (const auto& [item, index] : cards)
         if (!VanillaOwned(plot, unity::Field<int32_t>(item, offItemUpgrade_))) {
@@ -1977,6 +1999,27 @@ void CustomUpgrades::MergeStorageCards(Il2CppObject* plot, MenuInjection& inj,
         if (item == keep) continue;
         bool removed = false;
         if (ListCall(inj.list, "Remove", item, &removed) && removed) inj.hidden.push_back({item, index});
+    }
+}
+
+// The availability / hidden Funcs of the cards in the list, for this plot - what vanilla's
+// UpdateMenuItemAvailabilityAndHidden does on every menu open (IsAvailable = () => !plot.HasUpgrade(
+// _upgrade), the greyed icon with the checkmark and no Purchase button when false). RebuildUI (a
+// purchase or a sale with the menu open) does not run it, so a card we put in the list there kept the
+// Funcs of its last plot or, never bound this session, the constructor's "always available": a maxed
+// chain (Faster Hens II, Silo Capacity V, ...) showed Purchase and no checkmark until the menu was
+// opened again (user report). Runs before the original, so the rebind already sees the new Funcs; on
+// a menu open the original then does the same once more.
+void CustomUpgrades::RefreshAvailability(Il2CppObject* plot, const MenuInjection& inj) {
+    if (!itemUpdAvailMi_ || !itemUpdHiddenMi_ || !inj.list) return;
+    for (size_t i = 0, n = unity::ListCount(inj.list); i < n && i < 64; ++i) {
+        auto* item = static_cast<Il2CppObject*>(unity::ListAt(inj.list, i));
+        if (!IsA(item, upgItemClass_) || !unity::IsAlive(item)) continue;
+        bool ok = false;
+        Invoke(itemUpdAvailMi_, item, {plot}, "PlotUpgradePurchaseItemModel.UpdateAvailability", &ok);
+        if (!ok) return;
+        Invoke(itemUpdHiddenMi_, item, {plot}, "PlotUpgradePurchaseItemModel.UpdateHidden", &ok);
+        if (!ok) return;
     }
 }
 
@@ -2049,6 +2092,8 @@ void CustomUpgrades::Cleanup(const char* why) {
         }
         restored += static_cast<int>(inj->hidden.size());
         RestoreVanilla(*inj);  // our items out, vanilla cards back
+        for (Il2CppObject* title : inj->storageTitles) text_override::Remove(title);  // vanilla titles again
+        inj->storageTitles.clear();
     }
     if (removed || restored)
         SR2_INFO("[{}] {}: {} custom menu item(s) removed, {} vanilla item(s) put back", kModule, why, removed,
@@ -3059,6 +3104,13 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     off(upgItemClass_, "_promptMessage", offItemPrompt_);
     off(upgItemClass_, "_icon", offItemIcon_);
     off(upgItemClass_, "_unavailableIcon", offItemUnavailIcon_);
+    // Optional: without them a card placed while the menu is open shows its availability at the next open.
+    // No subclass of PlotUpgradePurchaseItemModel exists in 1.3.0, so the virtuals need no dispatch.
+    itemUpdAvailMi_ = R.Method(upgItemClass_, "UpdateAvailability", 1);
+    itemUpdHiddenMi_ = R.Method(upgItemClass_, "UpdateHidden", 1);
+    if (!itemUpdAvailMi_ || !itemUpdHiddenMi_)
+        SR2_WARN("[{}] PlotUpgradePurchaseItemModel.UpdateAvailability / UpdateHidden not found - a maxed tier shows "
+                 "Purchase until the menu is opened again", kModule);
     off(upgItemClass_, "_purchaseCost", offCostField);
     off(purchaseCost, "_currencyCosts", offCurrencyList);
     if (offCurrencyList >= 2 * sizeof(void*)) offCurrencyList -= 2 * sizeof(void*);  // value-type field

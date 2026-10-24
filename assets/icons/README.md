@@ -15,7 +15,7 @@ plot-upgrade icons (white outline, darker shadow band). They are embedded into t
 | `ash_boost.png` | Ash Booster (incinerator) |
 | `sell_all.png` | Sell-All Button (silo) |
 | `sell_all_now.png` | Sell All Plorts Now (silo action) |
-| `coop_air_net.png` | Coop Air Net |
+| `coop_air_net.png` | unused: the Coop Air Net card shows the corral's own Air Net icon (user request) |
 | `hen_collector.png` | Hen Collector |
 | `mods_tab.png` | the "Mods" tab of the in-game Options menu |
 | `map_node.png` | collectible tracker: map data nodes (the game has no sprite for them) |
