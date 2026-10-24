@@ -237,9 +237,10 @@ dialog.
   is disabled while nothing can be sold. Time is paused while it is open, so a change is unlikely.
 - **After the sale** the dialog is already closed; the per-plort HUD notices are queued as before
   (shown once the HUD takes them), the text fallback above the button stays for a missing HUD list.
-  `SaleNotices` (`sale_notify.cpp`) also takes a notice kind now: the sandbox module queues
-  `Notice::kCollected` (`AddResourceCollected`, the drones' cloud-upload notice) for its spawns and
-  crafts; the Sell-All keeps `kPlortSold`.
+  `SaleNotices` (`sale_notify.cpp`) also takes a notice kind: `Notice::kCollected`
+  (`AddResourceCollected`, the drones' cloud-upload notice, "... sent to the Quantum Cloud"). The
+  sandbox used it for its spawns and crafts at first; since 2026-10-24 it queues its own free-text
+  notices instead (`QueueText`, "Spawned 5 Pink Plort"). The Sell-All keeps `kPlortSold`, unchanged.
 - Log: `silo receipt ready`, `sell all (plot '...'): receipt shown, N plort(s) in T type(s) for V`,
   `receipt cancelled, nothing sold`, `receipt changed before the sale (...) - refreshed`, then the
   usual `sell all (receipt, plot '...'): sold ...`. Without the dialog parts (setup failed) the button

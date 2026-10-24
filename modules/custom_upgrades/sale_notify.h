@@ -18,9 +18,10 @@
 // CanQueueAny false, 0x76D2B0) - then it drains and DISCARDS them. So we only hand items over
 // while CanQueueAny is true: a sale from the plot menu waits until the menu is closed.
 //
-// The sandbox module (modules/sandbox) uses the same class for its spawn / craft feedback with
-// Notice::kCollected: DroneActivitySceneNotifications.AddResourceCollected(IdentifiableType, int),
-// the quantum drones' cloud-upload notice (icon, name, count), resolved as optional.
+// Notice::kCollected is DroneActivitySceneNotifications.AddResourceCollected(IdentifiableType, int),
+// the quantum drones' cloud-upload notice (icon, "... sent to the Quantum Cloud", count), resolved as
+// optional. The sandbox module used it for its spawn / craft feedback until 2026-10-24; it now
+// queues free-text notices (QueueText: "Spawned 5 Pink Plort" with the item's icon) instead.
 //
 // Main thread only; every game call through Resolver::Invoke (managed exceptions caught, a native
 // fault marks the module faulted). No GC handles: queued IdentifiableTypes are persistent assets
