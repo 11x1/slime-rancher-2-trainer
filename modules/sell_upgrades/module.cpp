@@ -180,6 +180,14 @@
 //   PromptForPlot detour marks the call and a CreatePopupPrompt detour reorders the popup it returns
 //   while the mark is set (GetComponent<PopupPrompt> on the returned GameObject); every other popup
 //   passes through untouched.
+//   Ranch expansions (round 10: "not on map expansions") use another popup: AccessDoorUI.PromptForExpansion
+//   (0x84B9D0) opens a ConfirmPopup (UIDisplayManager.OpenDisplay, ConfirmPopupSetup(item._title,
+//   item._promptMessage) + Confirm and Cancel prompts). ConfirmPopup.UpdateShowData (0x6D09D0) sorts the
+//   prompts with <>c.<UpdateShowData>b__27_0 (0x6E5960: `b.PromptType - a.PromptType`, so SUBMIT before
+//   CANCEL) and lays them out in its InputLegend in that order. The PromptForExpansion detour remembers the
+//   item's _title; the UpdateShowData detour, for a setup whose Title is that LocalizedString, flags the call
+//   and the comparison detour sorts the other way round while flagged: Cancel left, Purchase right. Every
+//   other ConfirmPopup keeps the game's order.
 //
 // Fault policy: every detour runs its logic inside a DetourGuard (native fault -> module
 // faulted, detours pass-through). Objects are class- and IsAlive-checked; runtime_invoke
@@ -295,6 +303,7 @@ public:
     const char* Name() const override { return kModule; }
     bool DefaultEnabled() const override { return true; }
     bool Setup(sr2::core::ModuleContext& ctx) override;
+    void SetupExpansionPopup(sr2::core::ModuleContext& ctx);
     void OnEnable() override { enabled_.store(true); }
     void OnDisable() override {
         enabled_.store(false);
@@ -369,7 +378,8 @@ private:
                                       bool purchaseVariant, Il2CppObject*& category);
     bool loggedHiddenMatch_ = false;
     int loggedMultiMatch_ = 0;
-    std::string lastNoSell_;  // last "no Sell button" diagnostic (logged when it changes)
+    std::string lastNoSell_;     // last "no Sell button" diagnostic (logged when it changes)
+    std::string lastSellOffer_;  // last "sell offer" line (logged when it changes)
     void NoSell(const std::string& what);
     size_t OffsetIn(Il2CppObject* obj, const char* field, std::unordered_map<Il2CppClass*, size_t>& cache);
     void DestroySellButton();
@@ -650,6 +660,39 @@ Il2CppObject* CreatePopupDetour(Il2CppObject* self, Il2CppObject* body, Il2CppOb
             if (Il2CppObject* popup = unity::GetComponent(go, g_self->popupClass_)) g_self->SwapPopupButtons(popup, true);
         });
     return go;
+}
+
+// Ranch expansion popup (see the header). Main thread only.
+sr2::core::DetourGuard g_expansionGuard{kModule, "AccessDoorUI.PromptForExpansion"};
+using PromptForExpansionFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+PromptForExpansionFn g_origPromptForExpansion = nullptr;
+size_t g_offItemTitle = 0;          // MenuPurchaseItemModel._title
+size_t g_offSetupTitle = 0;         // ConfirmPopupSetup.Title
+Il2CppObject* g_expansionTitle = nullptr;  // identity only: the _title of the last expansion prompted
+int g_reverseSort = 0;              // inside a flagged ConfirmPopup.UpdateShowData
+bool g_loggedExpansion = false;
+void PromptForExpansionDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo* mi) {
+    if (item && g_offItemTitle) g_expansionGuard.Run([&] { g_expansionTitle = unity::Field<Il2CppObject*>(item, g_offItemTitle); });
+    g_origPromptForExpansion(self, item, mi);
+}
+using ConfirmShowFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+ConfirmShowFn g_origConfirmShow = nullptr;
+void ConfirmShowDetour(Il2CppObject* self, Il2CppObject* data, const MethodInfo* mi) {
+    bool flag = false;
+    if (g_self && data && g_expansionTitle && g_offSetupTitle && g_self->On())
+        g_expansionGuard.Run([&] { flag = unity::Field<Il2CppObject*>(data, g_offSetupTitle) == g_expansionTitle; });
+    if (!flag) return g_origConfirmShow(self, data, mi);
+    ++g_reverseSort;
+    g_origConfirmShow(self, data, mi);
+    --g_reverseSort;
+    if (!g_loggedExpansion) SR2_INFO("[{}] expansion purchase popup: prompts reordered (Cancel left, Purchase right)", kModule);
+    g_loggedExpansion = true;
+}
+// PromptSetup structs are passed by reference (IDA: rdx = a, r8 = b).
+using PromptCompareFn = int32_t (*)(Il2CppObject*, void*, void*, const MethodInfo*);
+PromptCompareFn g_origPromptCompare = nullptr;
+int32_t PromptCompareDetour(Il2CppObject* self, void* a, void* b, const MethodInfo* mi) {
+    return g_reverseSort > 0 ? g_origPromptCompare(self, b, a, mi) : g_origPromptCompare(self, a, b, mi);
 }
 
 void OnActionDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo* mi) {
@@ -1163,28 +1206,47 @@ void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
     // Any details bind (selection change, rebuild) replaces our previous button and prompt.
     if (btnGo_) DestroySellButton();
     if (altGo_ || altItem_) DestroyAltPrompt();
-    if (!root_ || !unity::IsAlive(root_) || !vm) return;
-    if (!IsA(view, moreViewClass_) || !unity::IsAlive(view)) return;
+    if (!root_ || !vm || !IsA(view, moreViewClass_) || !unity::IsAlive(view)) return;
+    // Round 10: the exits below log their reason (deduped). Round 9's "no Sell button after selling
+    // Music Box II" logged nothing at all, so that card left through an exit that was silent then.
+    if (!unity::IsAlive(root_)) return;  // plot menu closed: another list menu (shop, Fabricator, ...)
     Il2CppObject* infoLabel = unity::Field<Il2CppObject*>(vm, offVmInfoLabel_);
-    if (!infoLabel) return;
+    if (!infoLabel) {
+        NoSell("the details view model has no info label");
+        return;
+    }
     Il2CppObject* plot = unity::Field<Il2CppObject*>(root_, offActivator_);
-    if (!IsA(plot, plotClass_) || !unity::IsAlive(plot)) return;
+    if (!IsA(plot, plotClass_) || !unity::IsAlive(plot)) {
+        NoSell("the open plot menu has no plot");
+        return;
+    }
     // What the button sells: an owned item (PURCHASED variant) sells itself; the card of a custom
     // tier chain that shows the next tier (Purchase variant) sells the owned tier below it.
     const bool purchaseVariant = unity::Field<Il2CppObject*>(view, offMoreButton_) != nullptr;
     Il2CppObject* category = nullptr;
     Il2CppObject* item = FindItemByInfoLabel(root_, infoLabel, plot, purchaseVariant, category);
-    if (!item || !category) return;  // another menu / not an upgrade item
+    if (!item || !category) {  // not an upgrade item (Demolish, ...) or a card we can't match
+        NoSell(std::format("{} card on plot '{}': its details match no upgrade item of the menu",
+                           purchaseVariant ? "a Purchase" : "a PURCHASED", PlotId(plot)));
+        return;
+    }
 
     int32_t upg = unity::Field<int32_t>(item, offItemUpgrade_);
     Il2CppObject* priceItem = item;
     if (purchaseVariant) {
         std::string why;
         if (!custom_upgrades::ChainSellTarget(plot, item, upg, priceItem, &why)) {
-            // A vanilla card that is not owned has nothing to sell: only our tier cards are worth a line.
-            if (custom_upgrades::IsCustomUpgrade(upg))
+            upg = unity::Field<int32_t>(item, offItemUpgrade_);
+            priceItem = item;
+            if (custom_upgrades::IsCustomUpgrade(upg)) {
                 NoSell(std::format("card '{}': no tier to sell ({})", UpgName(upg), why));
-            return;
+                return;
+            }
+            // A vanilla card that is not owned has nothing to sell (the normal case: no line). One that IS
+            // owned but shows Purchase (availability bound for another plot) sells itself.
+            if (!HasUpgrade(plot, upg)) return;
+            NoSell(std::format("card '{}': {} is owned but shows Purchase - Sell offered for it", unity::GetName(item),
+                               UpgName(upg)));
         }
     }
     if (!priceItem || !HasUpgrade(plot, upg)) {
@@ -1198,20 +1260,38 @@ void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
     int32_t price = 0, refund = 0;
     const bool sellable = reason.empty() && Price(priceItem, refunds, price, refund);
     if (!sellable) NoSell(std::format("{}: {}", UpgName(upg), reason.empty() ? std::string("price unreadable") : reason));
-    else lastNoSell_.clear();
+    else {
+        lastNoSell_.clear();
+        // Successes too (once per card / target / plot), so a missing button can be told from a hidden one.
+        std::string line = std::format("card '{}' ({}) sells {} on plot '{}' for +{}", unity::GetName(item),
+                                       purchaseVariant ? "Purchase" : "PURCHASED", UpgName(upg), PlotId(plot), refund);
+        if (line != lastSellOffer_) {
+            lastSellOffer_ = std::move(line);
+            SR2_INFO("[{}] sell offer: {}", kModule, lastSellOffer_);
+        }
+    }
     // Gamepad / keyboard: the alt action sells it (prompt only while it can be sold now).
     if (sellable && altOk_) CreateAltPrompt(category, item, priceItem, upg, refund);
     if (!sellable && !TemporaryReason(brief)) return;  // no "can't sell" button (user feedback)
 
     const size_t offPrefab = OffsetIn(category, "detailsButton", offDetailsButton_);
     Il2CppObject* prefab = offPrefab ? unity::Field<Il2CppObject*>(category, offPrefab) : nullptr;
-    if (!unity::IsAlive(prefab)) return;
+    if (!unity::IsAlive(prefab)) {
+        NoSell(std::format("{}: the card's category has no detailsButton prefab", UpgName(upg)));
+        return;
+    }
     Il2CppObject* t = getTransform_(view);
     Il2CppObject* parent = unity::IsAlive(t) ? getParent_(t) : nullptr;
-    if (!unity::IsAlive(parent)) return;
+    if (!unity::IsAlive(parent)) {
+        NoSell(std::format("{}: the details button has no parent", UpgName(upg)));
+        return;
+    }
 
     Il2CppObject* go = unity::Instantiate(prefab, parent);
-    if (!unity::IsAlive(go)) return;
+    if (!unity::IsAlive(go)) {
+        NoSell(std::format("{}: the Sell button could not be instantiated", UpgName(upg)));
+        return;
+    }
     btnHandle_ = unity::NewGCHandle(go);
     if (!btnHandle_) {
         if (objectDestroy_) objectDestroy_(go);
@@ -1784,6 +1864,65 @@ int SellUpgrades::RevertVisuals(Il2CppObject* plot, int32_t upg, std::string& no
 
 // ---------------------------------------------------------------- setup --
 
+// Ranch expansion popup order (optional; see the header). Missing pieces: the game's order there, logged.
+void SellUpgrades::SetupExpansionPopup(sr2::core::ModuleContext& ctx) {
+    Resolver& R = Resolver::Get();
+    const auto& a = api();
+    std::string err;
+    auto fail = [&](const std::string& why) {
+        SR2_WARN("[{}] expansion purchase popup order unavailable ({}) - the game's order there", kModule, why);
+    };
+    Il2CppClass* door = R.Class(kImage, "MonomiPark.SlimeRancher.UI.AccessDoor", "AccessDoorUI", &err);
+    Il2CppClass* item = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Purchase", "MenuPurchaseItemModel", &err);
+    Il2CppClass* popup = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Popup", "ConfirmPopup", &err);
+    Il2CppClass* setup = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Popup", "ConfirmPopupSetup", &err);
+    if (!door || !item || !popup || !setup) return fail(err);
+    const MethodInfo* prompt = R.Method(door, "PromptForExpansion", 1, &err);
+    auto oTitle = R.FieldOffset(item, "_title", &err);
+    auto oSetupTitle = R.FieldOffset(setup, "Title", &err);
+    if (!prompt || !oTitle || !oSetupTitle) return fail(err);
+    // ConfirmPopup's IDisplayShowDataHandler<ConfirmPopupSetup>.UpdateShowData is an explicit interface
+    // implementation (dotted metadata name) and the comparison lives in the nested <>c: both found by name suffix.
+    auto bySuffix = [&](Il2CppClass* k, std::string_view suffix, uint32_t argc) -> const MethodInfo* {
+        void* it = nullptr;
+        if (!k || !a.il2cpp_class_get_methods || !a.il2cpp_method_get_name || !a.il2cpp_method_get_param_count) return nullptr;
+        while (const MethodInfo* m = a.il2cpp_class_get_methods(k, &it)) {
+            const char* n = a.il2cpp_method_get_name(m);
+            const std::string_view name = n ? n : "";
+            if (name.size() >= suffix.size() && name.substr(name.size() - suffix.size()) == suffix &&
+                a.il2cpp_method_get_param_count(m) == argc)
+                return m;
+        }
+        return nullptr;
+    };
+    const MethodInfo* show = bySuffix(popup, ".UpdateShowData", 1);
+    Il2CppClass* closure = nullptr;
+    using NestedFn = Il2CppClass* (*)(Il2CppClass*, void**);
+    if (auto nested = Export<NestedFn>("il2cpp_class_get_nested_types"); nested && a.il2cpp_class_get_name) {
+        void* it = nullptr;
+        for (Il2CppClass* k = nested(popup, &it); k; k = nested(popup, &it))
+            if (const char* n = a.il2cpp_class_get_name(k); n && std::string_view(n) == "<>c") closure = k;
+    }
+    const MethodInfo* compare = bySuffix(closure, ".UpdateShowData>b__27_0", 2);
+    if (!show || !compare) return fail(!show ? "ConfirmPopup.UpdateShowData not found" : "ConfirmPopup.<>c.<UpdateShowData>b__27_0 not found");
+    void* pPrompt = R.MethodPointer(prompt, &err);
+    void* pShow = R.MethodPointer(show, &err);
+    void* pCompare = R.MethodPointer(compare, &err);
+    if (!pPrompt || !pShow || !pCompare) return fail("no native body: " + err);
+    g_offItemTitle = *oTitle;
+    g_offSetupTitle = *oSetupTitle;
+    if (!ctx.HookAddress("AccessDoorUI.PromptForExpansion", pPrompt, reinterpret_cast<void*>(&PromptForExpansionDetour),
+                         reinterpret_cast<void**>(&g_origPromptForExpansion)) ||
+        !ctx.HookAddress("ConfirmPopup.<UpdateShowData>b__27_0", pCompare, reinterpret_cast<void*>(&PromptCompareDetour),
+                         reinterpret_cast<void**>(&g_origPromptCompare)) ||
+        !ctx.HookAddress("ConfirmPopup.UpdateShowData", pShow, reinterpret_cast<void*>(&ConfirmShowDetour),
+                         reinterpret_cast<void**>(&g_origConfirmShow)))
+        return fail("hook failed");
+    SR2_INFO("[{}] expansion purchase popup: PromptForExpansion RVA 0x{:X}, ConfirmPopup.UpdateShowData RVA 0x{:X}, "
+             "prompt sort RVA 0x{:X}",
+             kModule, Resolver::Rva(pPrompt), Resolver::Rva(pShow), Resolver::Rva(pCompare));
+}
+
 bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     Resolver& R = ctx.resolver();
     std::string why;
@@ -2183,6 +2322,7 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
                              reinterpret_cast<void**>(&g_origCreatePopup)))
             SR2_WARN("[{}] plot purchase popup hooks failed - that popup keeps the game's order", kModule);
     }
+    SetupExpansionPopup(ctx);
     if (!altOk_)
         SR2_WARN("[{}] alt-action sell unavailable ({}) - selling is mouse-only this session", kModule, altWhy);
     else
