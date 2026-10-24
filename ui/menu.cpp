@@ -1625,7 +1625,8 @@ void ItemTooltip(const sbx::Snapshot& s, const std::string& name, sbx::Kind kind
 }
 
 // Control hints under a grid: each a keycap (or several joined by '+') and what it does,
-// wrapped onto as many lines as the width needs. The keycaps are the HUD edit help bar's.
+// wrapped onto as many lines as the width needs. The keycaps are the HUD edit help bar's, drawn
+// at 70 % of its size and faded, with small dim labels: the hints are secondary to the grid.
 struct KeyHint {
     const char* keys;  // "Ctrl+Click": one keycap per part
     const char* text;
@@ -1634,11 +1635,13 @@ struct KeyHint {
 void KeyHints(std::initializer_list<KeyHint> hints) {
     const Palette& P = theme::Colors();
     ImFont* f = theme::Body();
-    const float fs = theme::kSmallSize;
+    constexpr float kCapScale = 0.7f, kCapAlpha = 0.7f;
+    const float capScale = g_scale * kCapScale;
+    const float fs = theme::kSmallSize * 0.75f;
     const ImVec2 ts = TextSize(f, fs, "Ag");
-    const float lineH = std::max(ts.y + U(10), U(24));
+    const float lineH = std::max(ts.y + U(6), U(17));
     const float avail = ImGui::GetContentRegionAvail().x;
-    const float plusW = TextSize(f, fs, "+").x + U(6);
+    const float plusW = TextSize(f, fs, "+").x + U(4);
     auto parts = [](const char* keys) {
         std::vector<std::string> out(1);
         for (const char* c = keys; *c; ++c) {
@@ -1650,13 +1653,13 @@ void KeyHints(std::initializer_list<KeyHint> hints) {
     auto width = [&](const KeyHint& h) {
         float w = 0;
         const auto ks = parts(h.keys);
-        for (size_t i = 0; i < ks.size(); ++i) w += hud_edit::KeycapWidth(ks[i].c_str(), g_scale) + (i ? plusW : 0.0f);
-        return w + U(6) + TextSize(f, fs, h.text).x;
+        for (size_t i = 0; i < ks.size(); ++i) w += hud_edit::KeycapWidth(ks[i].c_str(), capScale) + (i ? plusW : 0.0f);
+        return w + U(4) + TextSize(f, fs, h.text).x;
     };
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 o = ImGui::GetCursorScreenPos();
     float x = 0, y = 0;
-    const float gap = U(16);
+    const float gap = U(12);
     for (const KeyHint& h : hints) {
         const float w = width(h);
         if (x > 0 && x + w > avail) x = 0, y += lineH;
@@ -1665,12 +1668,12 @@ void KeyHints(std::initializer_list<KeyHint> hints) {
         const auto ks = parts(h.keys);
         for (size_t i = 0; i < ks.size(); ++i) {
             if (i) {
-                Text(dl, f, fs, ImVec2(cx + U(3), std::round(cy - ts.y * 0.5f)), P.dim, "+");
+                Text(dl, f, fs, ImVec2(cx + U(2), std::round(cy - ts.y * 0.5f)), P.dim, "+");
                 cx += plusW;
             }
-            cx += hud_edit::DrawKeycap(dl, cx, cy, ks[i].c_str(), g_scale);
+            cx += hud_edit::DrawKeycap(dl, cx, cy, ks[i].c_str(), capScale, kCapAlpha);
         }
-        Text(dl, f, fs, ImVec2(cx + U(6), std::round(cy - ts.y * 0.5f)), P.soft, h.text);
+        Text(dl, f, fs, ImVec2(cx + U(4), std::round(cy - ts.y * 0.5f)), P.dim, h.text);
         x += w + gap;
     }
     ImGui::Dummy(ImVec2(avail, y + lineH));
