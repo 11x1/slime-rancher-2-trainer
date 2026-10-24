@@ -19,6 +19,8 @@ are listed dimmed with the reason.
 | file | what |
 |---|---|
 | `module.cpp` | the module: music boxes, speakers, the clip ring, queue, requests, snapshot |
+| `api.h` | public emitter API for other modules (`RegisterEmitter` / `UnregisterEmitter`, `SongPlaying`, `SongName`) |
+| `emitters.cpp/.h` | the emitter registry behind `api.h` (module side: `Collect`, `Generation`, `SetPlaying`) |
 | `library.cpp/.h` | folder scan on a background thread, per-file cache (path + size + write time), ID3v2 reader |
 | `stream.cpp/.h` | one song being decoded on a background thread into 0.5 s chunks (bounded queue) |
 | `codecs.c/.h` | the only TU that compiles stb_vorbis, dr_mp3, dr_wav (CMake target `sr2_codecs`, C, `/W0`) behind a small streaming C API |
@@ -47,6 +49,33 @@ bought again, region loaded) joins at the current `timeSamples`; a speaker whose
 destroyed. The first live speaker is the clock (see below); if it goes, the next one takes over.
 If every box goes (you leave the ranch), the song pauses where it was and resumes when a box is
 back.
+
+**Emitters (`api.h`, stable API for other modules).** Any GameObject can play the song:
+
+```cpp
+#include "modules/slime_dj/api.h"
+namespace dj = sr2::modules::slime_dj;
+dj::RegisterEmitter(go, dj::EmitterKind::kBooth);            // or kSpeaker / kRadio
+dj::RegisterEmitter(go, dj::EmitterKind::kRadio, 0.5f, 0.8f); // half the hearing range, 80 % volume
+dj::UnregisterEmitter(go);
+bool on = dj::SongPlaying(); std::string name = dj::SongName();  // any thread
+```
+
+- `obj` is a GameObject or any Component on it. Slime DJ adds a child `sr2dj_Speaker` with its own
+  `AudioSource` (same 3D setup as a music box speaker) that plays the shared song clip in sync
+  with every music box: started together, or joined at the clock speaker's `timeSamples`, and
+  kept there by the drift check. Emitters play anywhere (also off the ranch), so a song keeps
+  playing while at least one emitter or music box exists.
+- `rangeScale` (0.1-4) multiplies the Hearing range setting, `volumeScale` (0-1) the volume. The
+  kind is informative (logged); it does not change the sound today.
+- Register again with the same object to change kind / scales. Unregister when the object goes;
+  objects Unity destroyed are dropped at the next scan anyway (every 2 s while a song plays or
+  the tab is open; a (un)register triggers a scan on the next frame).
+- Main thread, not inside a detour. Register takes a GC handle; Unregister only queues it, the
+  slime_dj tick frees it. Registrations survive the module being off and apply when it is on.
+- At most 24 emitter speakers (plus 12 music boxes); 256 registrations.
+- Current users: custom_upgrades `plot_props.cpp` registers the Music Box II second speaker
+  (the cloned `Music` model, whose vanilla audio was stripped with the game scripts).
 
 **3D settings.** Copied from the vanilla cue (`SECTR_AudioSource.Cue`): `MinDistance`,
 `MaxDistance`, `Falloff` (SECTR Linear 0 / Logrithmic 1 -> Unity Linear / Logarithmic),

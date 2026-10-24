@@ -46,8 +46,10 @@ struct Snapshot {
     double position = 0, duration = 0;  // seconds (duration 0 = unknown)
     bool paused = false;                // paused by the player
     std::string waiting;                // loaded but not audible yet: why ("" = playing or paused)
-    int speakers = 0;                   // music boxes the song plays from
+    int speakers = 0;                   // speakers the song plays from (music boxes + emitters)
+    int emitterSpeakers = 0;            // of those, on registered emitters (slime_dj/api.h)
     int boxes = -1;                     // owned music boxes found nearby (-1 = not looked yet)
+    int emitters = 0;                   // registered emitters alive at the last scan
     bool shuffle = true;                // module setting "shuffle"
 };
 
