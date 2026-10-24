@@ -236,6 +236,19 @@ bool RawInputIsMouse(LPARAM lp) {
     return hdr.dwType == RIM_TYPEMOUSE;
 }
 
+// Alt+Space opens the overlay's search box (spotlight.cpp), but normally it opens the window's
+// system menu: DefWindowProc turns the WM_SYSCHAR ' ' into WM_SYSCOMMAND SC_KEYMENU. While the
+// settings window is open, the Space key messages with Alt and every SC_KEYMENU are kept from the
+// game's window procedure (the key messages are still queued for ImGui). Any SC_KEYMENU, because
+// the game sees the Alt press but not the Space, so the Alt release would enter menu mode.
+bool IsSystemMenuKey(UINT msg, WPARAM wp) {
+    if (!g_open.load(std::memory_order_relaxed)) return false;
+    if (msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP) return wp == VK_SPACE;
+    if (msg == WM_SYSCHAR) return wp == L' ';
+    if (msg == WM_SYSCOMMAND) return (wp & 0xFFF0) == SC_KEYMENU;
+    return false;
+}
+
 // Mod logic of the WndProc detour (C++ part; exceptions never escape).
 WndAction WndFilterCpp(UINT msg, WPARAM wp, LPARAM lp) noexcept {
     LatchMouseDown(msg, wp);  // open or not: the hotkey may be a mouse button
@@ -252,6 +265,7 @@ WndAction WndFilterCpp(UINT msg, WPARAM wp, LPARAM lp) noexcept {
         } catch (...) {
         }
     }
+    if (IsSystemMenuKey(msg, wp)) return WndAction::Swallow;
     if (!IsInputMsg(msg)) return WndAction::PassToGame;
     // Keep the keyboard, and the mouse over the overlay, away from the game
     // while the overlay is open. The mouse outside the overlay's windows goes
