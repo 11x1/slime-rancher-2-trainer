@@ -21,6 +21,7 @@
 #include "backends/imgui_impl_dx11.h"
 #include "backends/imgui_impl_win32.h"
 #include "imgui.h"
+#include "imgui_internal.h"
 
 #include "core/guard.h"
 #include "core/hook_manager.h"
@@ -655,9 +656,21 @@ void RenderFrame() {
             // read on the game's thread), so io.KeyShift / KeyCtrl could be stale until
             // some other input refreshed them (Sandbox grids: Shift+wheel did nothing
             // until the grid was clicked). The async state is the real one.
+            // The backend also queues its stale GetKeyState modifiers with every key message (Shift
+            // held: WM_KEYDOWN repeats ~30 times a second, each queueing "Shift up"). With ours after
+            // them that toggled the modifier twice per frame, and the input queue's trickling spread the
+            // toggles over the next frames, so io.KeyShift flickered and a Shift+wheel notch often came
+            // in a frame with Shift "up" (it scrolled instead). Its modifier events are dropped here and
+            // only the async state is queued.
             if (ForegroundIsGame()) {
+                ImVector<ImGuiInputEvent>& q = ImGui::GetCurrentContext()->InputEventsQueue;
+                for (int i = q.Size - 1; i >= 0; --i)
+                    if (q[i].Type == ImGuiInputEventType_Key &&
+                        (q[i].Key.Key == ImGuiMod_Shift || q[i].Key.Key == ImGuiMod_Ctrl || q[i].Key.Key == ImGuiMod_Alt))
+                        q.erase(q.Data + i);
                 io.AddKeyEvent(ImGuiMod_Shift, KeyDown(VK_SHIFT));
                 io.AddKeyEvent(ImGuiMod_Ctrl, KeyDown(VK_CONTROL));
+                io.AddKeyEvent(ImGuiMod_Alt, KeyDown(VK_MENU));
             }
             io.MouseDrawCursor = !core::main_thread::Ready() || game_input::WantSoftwareCursor();
         } else {

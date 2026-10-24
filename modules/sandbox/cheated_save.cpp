@@ -106,6 +106,10 @@ unsigned long long g_pendingSince = 0, g_lastPoll = 0;
 bool g_startupDone = false;
 bool g_lastOn = false;  // Sandbox on at the last poll
 bool g_armed = false;   // switched on while no save was running: applies to the next save loaded
+// The loaded save's Sandbox toggles (SaveToggle); all off for a save without the mark.
+constexpr const char* kToggleKeys[] = {kToggleInfiniteEnergy, kToggleInfiniteHealth};
+std::map<std::string, bool> g_toggles;
+unsigned g_togglesVersion = 1;
 
 struct MenuEntry {
     std::filesystem::file_time_type time{};
@@ -174,6 +178,7 @@ struct Mark {
     std::string since, save;
     unsigned long long number = 0;
     int enabled = -1;  // Sandbox on (1) / off (0) when that file was last written; -1 = not recorded (older mark)
+    std::map<std::string, bool> toggles;  // "toggles" (missing keys: off)
 };
 
 bool ReadJson(const std::filesystem::path& p, sr2::json::Value& root, std::string& err) {
@@ -208,6 +213,7 @@ bool ReadMark(const std::filesystem::path& p, Mark& m) {
     const double n = s["save_number"].asNumber(0);
     m.number = n > 0 ? static_cast<unsigned long long>(n) : 0;
     if (s["enabled"].isBool()) m.enabled = s["enabled"].asBool() ? 1 : 0;
+    for (const char* k : kToggleKeys) m.toggles[k] = s["toggles"][k].asBool(false);
     return m.cheated;
 }
 
@@ -247,6 +253,12 @@ bool WriteMark(const std::string& save, const std::string& game, unsigned long l
     mark.set("save", sr2::json::Value(save));
     mark.set("save_number", sr2::json::Value(static_cast<double>(number)));
     mark.set("enabled", sr2::json::Value(enabled));
+    sr2::json::Value toggles = sr2::json::Value::Object();
+    for (const char* k : kToggleKeys) {
+        const auto it = g_toggles.find(k);
+        toggles.set(k, sr2::json::Value(it != g_toggles.end() && it->second));
+    }
+    mark.set("toggles", std::move(toggles));
     root.set("sandbox", std::move(mark));
     std::filesystem::create_directories(path.parent_path(), ec);
     const std::string text = sr2::json::Serialize(root);
@@ -340,6 +352,19 @@ std::string NewestSave(Il2CppObject* asd, const std::string& game) {
 }
 
 // ---- session logic (main thread) ----
+// The toggles of the save being loaded (its mark), or all off (no mark, title screen).
+void LoadToggles(const Mark* m, const std::string& what) {
+    g_toggles.clear();
+    std::string on;
+    if (m)
+        for (const auto& [k, v] : m->toggles) {
+            g_toggles[k] = v;
+            if (v) on += (on.empty() ? "" : ", ") + k;
+        }
+    ++g_togglesVersion;
+    SR2_INFO("[{}] Sandbox toggles for {}: {}", kModule, what, on.empty() ? std::string("all off") : on + " on");
+}
+
 // Switches Sandbox (the module's persisted `enabled` setting, as the overlay's switch does). `now`: from the
 // poll (a frame callback), applied at once (the module manager switches the module on this thread); from a
 // detour it is posted, so no hook is switched inside another hook.
@@ -427,7 +452,10 @@ void Evaluate(Il2CppObject* asd, const std::string& game, unsigned long long num
     SR2_INFO("[{}] save game '{}' (save #{}, file '{}') is running: {}", kModule, game, number, g_s.file,
              cheated ? std::format("marked as cheated (Sandbox used since {})", found.since)
                      : std::string("no Sandbox mark"));
-    if (fresh) ApplySaveState(cheated, found.enabled, g_s.file.empty() ? game : g_s.file, /*now=*/true);
+    if (fresh) {
+        ApplySaveState(cheated, found.enabled, g_s.file.empty() ? game : g_s.file, /*now=*/true);
+        LoadToggles(cheated ? &found : nullptr, std::format("save '{}'", g_s.file.empty() ? game : g_s.file));
+    }
 }
 
 void OnBeginLoad(const void* identifier) {
@@ -452,6 +480,7 @@ void OnBeginLoad(const void* identifier) {
              cheated ? std::format("marked as cheated (Sandbox used since {}) - achievements stay blocked", m.since)
                      : std::string("no Sandbox mark"));
     ApplySaveState(cheated, cheated ? m.enabled : -1, file, /*now=*/false);  // posted: we are inside the hook
+    LoadToggles(cheated ? &m : nullptr, std::format("save '{}'", file));
 }
 
 void OnSaved(Il2CppObject* asd, Il2CppString* gameName) {
@@ -510,6 +539,7 @@ void Poll() {
             SetSaveCheated(false);
             g_armed = false;
             SetSandbox(false, std::format("left save game '{}' (each save keeps its own Sandbox switch)", left), true);
+            LoadToggles(nullptr, "the title screen");
         } else if (on && !g_lastOn) {
             g_armed = true;  // switched on (confirmed) on the title screen: for the save loaded next
             SR2_INFO("[{}] Sandbox switched on with no save loaded: it stays on for the save you load next", kModule);
@@ -536,6 +566,7 @@ void Poll() {
                 g_s.markNumber = 0;
                 SetSaveCheated(false);
                 SetSandbox(false, std::format("save '{}' has no valid Sandbox mark", g_s.file), true);
+                LoadToggles(nullptr, std::format("save '{}'", g_s.file));
             }
         } else {
             Evaluate(asd, game, number);
@@ -710,6 +741,23 @@ bool Hook(sr2::core::ModuleContext& ctx, const char* name, const MethodInfo* m, 
 }
 
 }  // namespace
+
+bool SaveToggle(const char* key) {
+    const auto it = g_toggles.find(key);
+    return it != g_toggles.end() && it->second;
+}
+
+void SetSaveToggle(const char* key, bool on) {
+    if (SaveToggle(key) == on && g_toggles.count(key)) return;
+    g_toggles[key] = on;
+    // A marked save records it now; otherwise the mark written when Sandbox marks the save (or the next
+    // game save of a marked one) takes it along.
+    if (SaveCheated() && g_s.known && !g_s.file.empty() &&
+        WriteMark(g_s.file, g_s.game, g_s.number, g_s.since, AchievementsPaused()))
+        SR2_INFO("[{}] save '{}': {} {} - kept for this save", kModule, g_s.file, key, on ? "on" : "off");
+}
+
+unsigned SaveTogglesVersion() { return g_togglesVersion; }
 
 bool SetupCheatedSave(sr2::core::ModuleContext& ctx) {
     auto& R = ctx.resolver();

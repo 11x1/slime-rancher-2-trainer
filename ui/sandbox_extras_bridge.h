@@ -17,7 +17,7 @@ namespace sr2::ui::sandbox::extras {
 
 struct State {
     unsigned long long tick = 0;    // GetTickCount64 when it was taken
-    bool infiniteHealth = false;    // session toggle (not saved)
+    bool infiniteHealth = false;    // toggle, kept per save (modules/sandbox/cheated_save.h, SaveToggle)
     bool healthHook = false;        // PlayerState.Damage is blocked too (else only the top-up)
     bool canTeleport = false;       // a map marker is set in this zone and the teleport path is available
     std::string teleportWhy;        // !canTeleport: why (tooltip)
