@@ -139,8 +139,7 @@ struct Cfg {
     int shape = 0;        // 0 circle, 1 rounded square
     int orientation = 0;  // 0 north up, 1 rotate with player
     int zoomKey = 0;
-    int arrowStyle = 1;          // 0 game marker sprite, 1 classic (procedural) arrow
-    float arrowOffset = 180.0f;  // degrees added to the arrow rotation
+    int arrowStyle = 1;  // 0 the game's player marker, 1 classic (procedural) arrow
     bool icons[kCatCount] = {true, true, true, false, true, true, true, true, true, false};
     bool respectFog = true;
     bool hideFullMap = true, hideMenus = true, hideConservatory = false;
@@ -181,14 +180,10 @@ void RegisterSettings() {
     def("orientation", "Orientation", "View", Kind::Enum, 0, 0, 1, 1, {"North up", "Rotate with player"});
     def("arrow_style", "Player arrow", "View", Kind::Enum, 1, 0, 1, 1, {"Game marker", "Classic arrow"},
         "The arrow and the map icons grow and shrink with the zoom");
-    def("arrow_rotation_offset", "Player arrow rotation offset", "View", Kind::Float, 180, -180, 180, 5, {},
-        "Added to the arrow's heading. 180 is correct for both arrow styles; change it only if the arrow points the "
-        "wrong way");
     // Units after the slider values (UI only).
     for (const char* k : {"pos_x", "pos_y", "size"}) settings::SetDisplay(kModule, k, "%");
     settings::SetDisplay(kModule, "opacity", "%", {}, 100);
     settings::SetDisplay(kModule, "zoom", "x");
-    settings::SetDisplay(kModule, "arrow_rotation_offset", "\xC2\xB0");  // degree sign
     def("show_altitude", "Show altitude label (Grey Labyrinth)", "View", Kind::Bool, 0, 0, 1, 1, {},
         "Shows the player's height (\"Alt N m\") at the bottom of the minimap in the Grey Labyrinth");
     def("icon_teleporters", "Teleporters (map markers)", "Icons", Kind::Bool, 1, 0, 1, 1, {},
@@ -239,8 +234,6 @@ Cfg LoadCfg() {
     c.icons[kPlacedTele] = settings::GetBool(kModule, "icon_placed_teleporters");
     c.icons[kPlacedDecor] = settings::GetBool(kModule, "icon_placed_decor");
     c.arrowStyle = std::clamp(settings::GetInt(kModule, "arrow_style"), 0, 1);
-    c.arrowOffset = settings::GetFloat(kModule, "arrow_rotation_offset");
-    if (!std::isfinite(c.arrowOffset)) c.arrowOffset = 180.0f;
     c.respectFog = settings::GetBool(kModule, "respect_fog");
     c.hideFullMap = settings::GetBool(kModule, "hide_full_map");
     c.hideMenus = settings::GetBool(kModule, "hide_menus");
@@ -345,6 +338,11 @@ public:
         migratePlacement_ = !settings::Saved(kModule, "pos_x") && !settings::Saved(kModule, "pos_y") &&
                             (settings::Saved(kModule, "position") || settings::Saved(kModule, "offset_x") ||
                              settings::Saved(kModule, "offset_y"));
+        // The arrow rotation offset slider is gone (fixed offsets, see UpdateArrow). Its saved value is
+        // never read; core keeps it in sr2mods.json like any unregistered key.
+        if (settings::Saved(kModule, "arrow_rotation_offset"))
+            SR2_INFO("minimap: setting arrow_rotation_offset ({}) is no longer used - the arrow rotation is fixed",
+                     settings::GetFloat(kModule, "arrow_rotation_offset"));
         RegisterSettings();
         if (!onChange_)
             onChange_ = settings::OnChange(kModule, [this](const std::string& key) {
@@ -538,6 +536,39 @@ private:
         Ref go, t, img;
         bool active = false;
     };
+    // The game's player marker (the full map's PlayerMarker prefab), read once: one entry per visible Image.
+    // Geometry is in the space of the prefab root (upright parts) or of PlayerMapMarker._arrowRect (parts
+    // that turn with the heading), so our copy can rotate the facing parts like PlayerMapMarker.Rotate does.
+    enum MarkerAnim { kAnimNone = 0, kAnimArrowPulse, kAnimCone };
+    struct MarkerPartDef {
+        Ref sprite;
+        Color color{1, 1, 1, 1};
+        int type = 0;
+        float ppu = 1;
+        bool preserveAspect = false;
+        bool facing = false;  // under _arrowRect: turns with the heading
+        bool below = false;   // under _moveBelowMarkersTransform: drawn under the map icons (the view cone)
+        Vec2 pos{}, size{}, pivot{0.5f, 0.5f};  // pivot point in the reference space, rect size, pivot
+        Vec2 up{0, 1};        // one unit of the parent's +y in the reference space (cone animation)
+        float angle = 0;
+        bool mirrored = false;
+        int anim = kAnimNone;
+        std::string name;
+    };
+    struct GameMarker {
+        std::vector<MarkerPartDef> parts;
+        Vec2 facingOrigin{};  // _arrowRect's origin in the prefab root's space
+        float rootH = 50;     // the prefab root's rect height: drawn at the arrow size
+        float rotOffset = 0;  // PlayerMapMarker._rotationOffset
+        bool ok = false;
+    };
+    struct MarkerPart {   // one of our copies of a MarkerPartDef
+        Ref t, img;
+        int anim = kAnimNone;
+        Vec2 pos{}, up{0, 1};
+        Color color{1, 1, 1, 1};
+        float sy = 1;     // -1 when mirrored
+    };
     struct View {
         Ref mapDef, prefab, mapComp, mapT;
         Vec2 scale{}, offset{};
@@ -559,6 +590,10 @@ private:
             std::string info;      // build log
         } neg;
         std::vector<Icon> icons;
+        // The game marker's view cone: in our page, after the art and before the icons, so the icons
+        // are drawn over it as in the full map (PlayerMapMarker.SetBelowMarkerLayer). Own nested Canvas.
+        Ref coneT;
+        std::vector<MarkerPart> coneParts;
         bool ok = false;
         bool hasPagePods = false, hasPageNodes = false;
     };
@@ -581,7 +616,7 @@ private:
             std::string label;
         };
         std::unordered_map<Il2CppObject*, MatInfo> materials;  // keys pinned by `pins`
-        Il2CppObject* arrowSprite = nullptr;                  // pinned by ui_.gameArrowSprite
+        std::unordered_map<Il2CppObject*, bool> markerSprites;  // the player marker's sprites (pinned by gm_)
         size_t next = 0;
         int copied = 0, skipped = 0;
         // diagnostics (one log line per build)
@@ -604,12 +639,10 @@ private:
     struct Ui {
         Ref root, rootT, group, parentT, ownCanvas;
         Ref maskImg, bg, overlay, rotator, arrowHolder, arrowImg, arrowT, frame, label;
-        Ref gameArrowSprite;          // the game's player-marker sprite (if found)
-        Vec2 gameArrowPivot{0.5f, 0.5f};
-        float gameArrowAspect = 1;    // width / height
-        float arrowRotOffset = 0;     // PlayerMapMarker._rotationOffset
-        bool arrowFromGame = false;
-        int arrowStyleApplied = -1;
+        Ref gameMarkerT, gameFacingT;      // our copy of the game's player marker (child of arrowHolder)
+        std::vector<MarkerPart> gameParts;
+        float markerK = 1;                 // game marker scale: prefab units -> minimap pixels
+        int arrowStyleApplied = -1;        // 0 game marker, 1 classic arrow
         bool visible = true;
         bool built = false;
         float size = 200;
@@ -636,6 +669,9 @@ private:
     size_t markerRR_ = 0;
     bool markerStatsLogged_ = false;
     float lastArrowZ_ = 1e9f;
+    GameMarker gm_;                                       // kept across page rebuilds while its sprites live
+    Vec2 coneP_{1e9f, 1e9f};                              // last cone placement (page space)
+    float coneZ_ = 1e9f, coneS_ = -1;
     bool fogMode_ = true;  // cfg_.respectFog the marker answers belong to
     int worldResets_ = 0;
     float buildCd_ = 0, hudWait_ = 0, time_ = 0;
@@ -744,6 +780,7 @@ private:
         ui_ = Ui{};
         view_ = View{};
         build_ = Build{};
+        gm_ = GameMarker{};
         descCache_.clear();
         gadgetCache_.clear();
         for (Ref* r : {&playerDisplay_, &playerT_, &sceneLoader_, &mapDirector_, &hud_, &mapUI_, &prefabMapping_,
@@ -945,6 +982,7 @@ private:
         TeardownStep("release view", [&] { view_ = View{}; });
         TeardownStep("release build", [&] { build_ = Build{}; });
         TeardownStep("release ui", [&] { ui_ = Ui{}; });
+        TeardownStep("release game marker", [&] { gm_ = GameMarker{}; });
         // Give the map UI scene back to the game (it unloads it again when nothing else needs it).
         if (!mapDisplayName_.empty() && sym_.udmInstance && sym_.udmReleasePreload)  // no-op if not registered
             TeardownStep("release map UI preload", [&] {
@@ -985,6 +1023,7 @@ private:
         lastS_ = -1;
         lastR_ = 1e9f;
         lastArrowZ_ = 1e9f;
+        coneS_ = -1;
         markerRR_ = 0;
         markerStatsLogged_ = false;
         fogLastRevealed_ = fogLastHidden_ = fogLastUnknown_ = -1;  // the next evaluation is logged
@@ -1784,8 +1823,8 @@ private:
                 }
             }
         }
-        ApplyArrowSprite();  // before the copy: page art showing the player marker sprite is skipped
-        b.arrowSprite = ui_.gameArrowSprite.get();
+        LoadGameMarker();  // before the copy: page art showing a player marker sprite is skipped
+        for (const MarkerPartDef& p : gm_.parts) b.markerSprites[p.sprite.get()] = true;
         if (game::Has(sym_.mapZoneMarkers)) {
             Il2CppObject* zt = F<Il2CppObject*>(mapComp, sym_.mapZoneMarkers);
             if (ugui::IsA(zt, ugui::TransformClass())) AddRoot(zt, kRootZone, 0);
@@ -1942,7 +1981,7 @@ private:
         }
         if (!ugui::BehaviourEnabled(g)) return skip(b.skipDisabled);  // disabled Image: invisible in game
         if (b.hiddenMaskGraphic.count(t)) return skip(b.skipMaskGraphic);
-        if (sprite && sprite == b.arrowSprite) return skip(b.skipMarkerArt);
+        if (sprite && b.markerSprites.count(sprite)) return skip(b.skipMarkerArt);
         color.a *= alpha;
         if (color.a <= 0.003f && !group) return skip(b.skipTransparent);
         Il2CppObject* tex = isRaw ? ugui::RawImageGetTexture(g) : nullptr;
@@ -2072,6 +2111,8 @@ private:
 
     void FinishBuild() {
         Build& b = build_;
+        Step("build: player cone");
+        BuildCone();  // after the art, before every icon: the icons are drawn over it
         Step("build: markers");
         int perCat[kCatCount] = {};
         std::map<std::string, int> histogram;
@@ -2280,11 +2321,29 @@ private:
         apply(ui_.overlay.get(), sym_.defOverlay);
     }
 
-    // The game's player arrow sprite, read from the page's marker prefab mapping
-    // (Map._markerPrefabMapping -> _playerMarkerPrefab -> PlayerMapMarker._arrowRect).
-    void ApplyArrowSprite() {
-        if (ui_.arrowFromGame && ui_.gameArrowSprite.Alive()) return;
-        ui_.arrowFromGame = false;
+    // The game's player marker, read from the page's marker prefab mapping
+    // (Map._markerPrefabMapping -> _playerMarkerPrefab, a PlayerMapMarker). In 1.3.0 (UnityPy):
+    //   PlayerMarker (50x50, pivot 0.5/0.45)
+    //     FacingFrame = _arrowRect           turned by PlayerMapMarker.Rotate
+    //       Cone = _moveBelowMarkersTransform (scale 0.7)  > Cone  Image fxPlayerMarkerCone (pulses)
+    //       FacingArrow                       Image framePlayerMarker (pulses)
+    //     BeaIcon                             Image player_face (upright)
+    // Every visible Image is copied with its rect corners (like the page art), in _arrowRect space when it
+    // turns with the heading, otherwise in the root's space.
+    bool GameMarkerAlive() const {
+        if (!gm_.ok) return false;
+        for (const MarkerPartDef& p : gm_.parts)
+            if (!p.sprite.Alive()) return false;
+        return true;
+    }
+
+    void LoadGameMarker() {
+        if (GameMarkerAlive()) return;
+        if (gm_.ok) {  // the prefab (and its sprites) was unloaded: drop our copy, read it again
+            SR2_INFO("minimap: player marker sprites unloaded - reading the marker again");
+            DestroyGameMarker();
+        }
+        gm_ = GameMarker{};
         if (!game::Has(sym_.mapMarkerMapping) || !game::Has(sym_.mpmPlayerPrefab) ||
             !game::Has(sym_.pmmArrow) || !view_.mapComp.Alive())
             return;
@@ -2296,51 +2355,244 @@ private:
         if (!ugui::IsA(pmm, sym_.playerMapMarker)) return;
         Il2CppObject* arrowRect = F<Il2CppObject*>(pmm, sym_.pmmArrow);
         if (!ugui::IsA(arrowRect, ugui::TransformClass())) return;
-        Il2CppObject* sprite = nullptr;
-        ugui::ForEachInChildren(unity::GameObjectOf(arrowRect), ugui::ImageClass(), true, [&](Il2CppObject* img) {
-            Il2CppObject* sp = ugui::ImageGetSprite(img);
-            if (!unity::IsAlive(sp)) return true;
-            sprite = sp;
-            return false;
+        Il2CppObject* below = game::Has(sym_.pmmBelow) ? F<Il2CppObject*>(pmm, sym_.pmmBelow) : nullptr;
+        if (!ugui::IsA(below, ugui::TransformClass())) below = nullptr;
+        Il2CppObject* rootT = unity::TransformOf(prefab);
+        if (!ugui::IsRectTransform(rootT)) return;
+        std::vector<Ref> pins;  // keeps the transforms used as map keys (pointer identity)
+        pins.emplace_back(arrowRect);
+        pins.emplace_back(rootT);
+        if (below) pins.emplace_back(below);
+
+        Rect rr = ugui::GetRect(rootT);
+        gm_.rootH = rr.h > 1 ? rr.h : 50.0f;
+        Vec3 fo = ugui::InverseTransformPoint(rootT, ugui::TransformPoint(arrowRect, {0, 0, 0}));
+        gm_.facingOrigin = {fo.x, fo.y};
+        gm_.rotOffset = game::Has(sym_.pmmRotOffset) ? F<float>(pmm, sym_.pmmRotOffset) : 0.0f;
+        if (!std::isfinite(gm_.rotOffset)) gm_.rotOffset = 0;
+
+        std::unordered_map<Il2CppObject*, float> groupAlpha;
+        ugui::ForEachInChildren(prefab, ugui::CanvasGroupClass(), true, [&](Il2CppObject* c) {
+            if (Il2CppObject* t = unity::TransformOf(c)) {
+                pins.emplace_back(t);
+                groupAlpha[t] = ugui::CanvasGroupGetAlpha(c);
+            }
+            return true;
         });
-        if (!sprite) return;
-        ui_.gameArrowSprite.Reset(sprite);
-        // UI images ignore the sprite pivot; we pivot the arrow on it so the
-        // marker's own centre point (e.g. a cone's apex) sits on the player.
-        Rect sr = ugui::SpriteRect(sprite);
-        Vec2 pv = ugui::SpritePivot(sprite);
-        if (sr.w > 0 && sr.h > 0) {
-            ui_.gameArrowPivot = {std::clamp(pv.x / sr.w, 0.0f, 1.0f), std::clamp(pv.y / sr.h, 0.0f, 1.0f)};
-            ui_.gameArrowAspect = std::clamp(sr.w / sr.h, 0.25f, 4.0f);
-        }
-        ui_.arrowRotOffset = game::Has(sym_.pmmRotOffset) ? F<float>(pmm, sym_.pmmRotOffset) : 0.0f;
-        if (!std::isfinite(ui_.arrowRotOffset)) ui_.arrowRotOffset = 0;
-        ui_.arrowFromGame = true;
+        std::string desc;
+        ugui::ForEachInChildren(prefab, ugui::ImageClass(), true, [&](Il2CppObject* img) {
+            Il2CppObject* t = unity::TransformOf(img);
+            if (!ugui::IsRectTransform(t) || !ugui::BehaviourEnabled(img)) return true;
+            Il2CppObject* sprite = ugui::ImageGetSprite(img);
+            if (!unity::IsAlive(sprite)) return true;
+            MarkerPartDef p;
+            bool active = true;
+            float alpha = 1;
+            for (Il2CppObject* cur = t; cur; cur = ugui::GetParent(cur)) {
+                if (!ugui::ActiveSelf(unity::GameObjectOf(cur))) active = false;
+                if (cur == arrowRect) p.facing = true;
+                if (cur == below) p.below = true;
+                if (auto a = groupAlpha.find(cur); a != groupAlpha.end()) alpha *= a->second;
+                if (cur == rootT) break;
+            }
+            p.color = ugui::GraphicGetColor(img);
+            p.color.a *= alpha;
+            if (!active || p.color.a <= 0.003f) return true;
+            Il2CppObject* ref = p.facing ? arrowRect : rootT;
+            Rect r = ugui::GetRect(t);
+            if (r.w < 0.01f || r.h < 0.01f) return true;
+            auto local = [&](Il2CppObject* from, float x, float y) {
+                Vec3 l = ugui::InverseTransformPoint(ref, ugui::TransformPoint(from, {x, y, 0}));
+                return Vec2{l.x, l.y};
+            };
+            Vec2 c0 = local(t, r.x, r.y), c1 = local(t, r.x + r.w, r.y), c2 = local(t, r.x, r.y + r.h);
+            Vec2 ex{c1.x - c0.x, c1.y - c0.y}, ey{c2.x - c0.x, c2.y - c0.y};
+            p.size = {std::hypot(ex.x, ex.y), std::hypot(ey.x, ey.y)};
+            if (p.size.x < 0.01f || p.size.y < 0.01f) return true;
+            p.pivot = {-r.x / r.w, -r.y / r.h};  // GetRect is relative to the pivot
+            p.pos = {c0.x + p.pivot.x * ex.x + p.pivot.y * ey.x, c0.y + p.pivot.x * ex.y + p.pivot.y * ey.y};
+            p.angle = std::atan2(ex.y, ex.x) * 180.0f / kPi;
+            p.mirrored = (ex.x * ey.y - ex.y * ey.x) < 0;
+            if (Il2CppObject* parent = ugui::GetParent(t)) {
+                Vec2 o = local(parent, 0, 0), u = local(parent, 0, 1);
+                p.up = {u.x - o.x, u.y - o.y};
+            }
+            p.sprite.Reset(sprite);
+            p.type = ugui::ImageGetType(img);
+            p.ppu = ugui::ImageGetPpuMultiplier(img);
+            p.preserveAspect = ugui::ImageGetPreserveAspect(img);
+            p.name = unity::GetName(unity::GameObjectOf(img));
+            // The prefab's Animator clips (decoded from the bundle, see NOTES.md): FacingArrow scale pulse,
+            // Cone (the Image object inside the cone holder) position + alpha pulse.
+            p.anim = p.name == "FacingArrow" ? kAnimArrowPulse : (p.name == "Cone" ? kAnimCone : kAnimNone);
+            desc += std::format("{}'{}' sprite '{}' {:.0f}x{:.0f} at ({:.1f},{:.1f}){}{}{}", desc.empty() ? "" : "; ",
+                                p.name, unity::GetName(sprite), p.size.x, p.size.y, p.pos.x, p.pos.y,
+                                p.facing ? " turns" : " upright", p.below ? ", under the icons" : "",
+                                p.anim ? ", pulses" : "");
+            gm_.parts.push_back(std::move(p));
+            return true;
+        });
+        gm_.ok = !gm_.parts.empty();
         ui_.arrowStyleApplied = -1;
-        SR2_INFO("minimap: player arrow sprite '{}' from the game (pivot {:.2f},{:.2f}, aspect {:.2f}, prefab rotation "
-                 "offset {}, user offset {})",
-                 unity::GetName(sprite), ui_.gameArrowPivot.x, ui_.gameArrowPivot.y, ui_.gameArrowAspect,
-                 ui_.arrowRotOffset, cfg_.arrowOffset);
+        if (!gm_.ok) {
+            SR2_WARN("minimap: the game's player marker has no visible image - using the classic arrow");
+            return;
+        }
+        SR2_INFO("minimap: player marker from the game ({} images, root {:.0f} high, facing origin ({:.1f},{:.1f}), "
+                 "prefab rotation offset {}): {}",
+                 gm_.parts.size(), gm_.rootH, gm_.facingOrigin.x, gm_.facingOrigin.y, gm_.rotOffset, desc);
         ApplyArrowStyle();
     }
 
-    bool UseGameArrow() const { return cfg_.arrowStyle == 0 && ui_.arrowFromGame && ui_.gameArrowSprite.Alive(); }
+    // One of our copies of a marker part, child of parentT.
+    MarkerPart MakeMarkerPart(Il2CppObject* parentT, const MarkerPartDef& d, int layer) {
+        MarkerPart m;
+        Il2CppObject* go = Child(parentT, d.name.c_str(), layer);
+        if (!go) return m;
+        m.t.Reset(unity::TransformOf(go));
+        Il2CppObject* img = AddImage(go);
+        m.img.Reset(img);
+        ugui::ImageSetSprite(img, d.sprite.get());
+        if (d.type != 0) {
+            ugui::ImageSetType(img, d.type);
+            ugui::ImageSetPpuMultiplier(img, d.ppu);
+        }
+        if (d.preserveAspect) ugui::ImageSetPreserveAspect(img, true);
+        ugui::GraphicSetColor(img, d.color);
+        ugui::Center(m.t.get(), d.size);
+        ugui::SetPivot(m.t.get(), d.pivot);
+        ugui::SetAnchoredPosition(m.t.get(), d.pos);
+        ugui::SetLocalEuler(m.t.get(), {0, 0, d.angle});
+        m.sy = d.mirrored ? -1.0f : 1.0f;
+        if (d.mirrored) ugui::SetLocalScale(m.t.get(), {1, -1, 1});
+        m.anim = d.anim;
+        m.pos = d.pos;
+        m.up = d.up;
+        m.color = d.color;
+        return m;
+    }
 
-    // Sprite, pivot and size of the centred player arrow.
+    // On-screen copy (child of the arrow holder): upright parts + a "Facing" container (= _arrowRect)
+    // that turns with the heading. Its own nested Canvas: the pulse animation rebuilds only this batch.
+    void BuildGameMarker() {
+        if (ui_.gameMarkerT.Alive() || !gm_.ok || !ui_.arrowHolder.Alive()) return;
+        int layer = ugui::GetLayer(ui_.root.get());
+        Il2CppObject* go = Child(ui_.arrowHolder.get(), "GameMarker", layer);
+        if (!go) return;
+        ui_.gameMarkerT.Reset(unity::TransformOf(go));
+        ugui::Center(ui_.gameMarkerT.get(), {gm_.rootH, gm_.rootH});  // origin = the player point
+        ugui::AddCanvas(go);
+        // _arrowRect comes first in the prefab, the upright face after it (draw order = sibling order).
+        Il2CppObject* f = Child(ui_.gameMarkerT.get(), "Facing", layer);
+        ui_.gameFacingT.Reset(unity::TransformOf(f));
+        ugui::Center(ui_.gameFacingT.get(), {0, 0});
+        ugui::SetAnchoredPosition(ui_.gameFacingT.get(), gm_.facingOrigin);
+        for (const MarkerPartDef& d : gm_.parts)
+            if (!d.below)
+                ui_.gameParts.push_back(MakeMarkerPart(d.facing ? ui_.gameFacingT.get() : ui_.gameMarkerT.get(), d, layer));
+        lastArrowZ_ = 1e9f;
+    }
+
+    // The view cone, inside our page (built with the page, see FinishBuild).
+    void BuildCone() {
+        if (view_.coneT || !gm_.ok || !view_.page.Alive()) return;
+        bool any = false;
+        for (const MarkerPartDef& d : gm_.parts) any |= d.below;
+        if (!any) return;
+        int layer = ugui::GetLayer(ui_.root.get());
+        Il2CppObject* go = Child(view_.page.get(), "PlayerCone", layer);
+        if (!go) return;
+        view_.coneT.Reset(unity::TransformOf(go));
+        ugui::Center(view_.coneT.get(), {0, 0});
+        ugui::AddCanvas(go);  // its pulse rebuilds only this batch, not the whole page
+        for (const MarkerPartDef& d : gm_.parts)
+            if (d.below) view_.coneParts.push_back(MakeMarkerPart(view_.coneT.get(), d, layer));
+        unity::SetActive(go, UseGameArrow());
+        coneS_ = -1;
+    }
+
+    void DestroyGameMarker() {
+        if (ui_.gameMarkerT.Alive()) ugui::Destroy(unity::GameObjectOf(ui_.gameMarkerT.get()));
+        ui_.gameMarkerT.Reset(nullptr);
+        ui_.gameFacingT.Reset(nullptr);
+        ui_.gameParts.clear();
+        if (view_.coneT.Alive()) ugui::Destroy(unity::GameObjectOf(view_.coneT.get()));
+        view_.coneT.Reset(nullptr);
+        view_.coneParts.clear();
+        ui_.arrowStyleApplied = -1;
+    }
+
+    // Cheap per-frame test: the style was applied with a loaded game marker (aliveness is checked when
+    // the page is (re)built, LoadGameMarker).
+    bool UseGameArrow() const { return cfg_.arrowStyle == 0 && gm_.ok && ui_.arrowStyleApplied == 0; }
+
+    // Which player arrow is shown, and its size.
     void ApplyArrowStyle() {
         if (!ui_.arrowImg.Alive() || !ui_.arrowT.Alive()) return;
-        bool game = UseGameArrow();
+        bool game = cfg_.arrowStyle == 0 && gm_.ok;
+        if (game) {
+            BuildGameMarker();
+            game = ui_.gameMarkerT.Alive();
+        }
         // Base size (13% of the minimap) at zoom 2.5x, proportional to the zoom, clamped to 0.4x..1.6x.
+        // Game marker: its root rect (50 units) gets this height.
         float px = std::max(10.0f, ui_.size * 0.13f * ArrowZoomFactor());
-        ugui::ImageSetSprite(ui_.arrowImg.get(), game ? ui_.gameArrowSprite.get() : sprArrow_.get());
-        Vec2 pivot = game ? ui_.gameArrowPivot : Vec2{0.5f, 0.5f};
-        float aspect = game ? ui_.gameArrowAspect : 1.0f;
-        Vec2 sz = aspect >= 1 ? Vec2{px * aspect, px} : Vec2{px, px / aspect};
-        ugui::SetPivot(ui_.arrowT.get(), pivot);
-        ugui::SetSizeDelta(ui_.arrowT.get(), sz);
-        ugui::SetAnchoredPosition(ui_.arrowT.get(), {0, 0});
+        unity::SetActive(unity::GameObjectOf(ui_.arrowT.get()), !game);
+        if (ui_.gameMarkerT.Alive()) unity::SetActive(unity::GameObjectOf(ui_.gameMarkerT.get()), game);
+        if (view_.coneT.Alive()) unity::SetActive(unity::GameObjectOf(view_.coneT.get()), game);
+        if (game) {
+            ui_.markerK = px / gm_.rootH;
+            ugui::SetLocalScale(ui_.gameMarkerT.get(), {ui_.markerK, ui_.markerK, 1});
+        } else {
+            ugui::ImageSetSprite(ui_.arrowImg.get(), sprArrow_.get());
+            ugui::SetPivot(ui_.arrowT.get(), {0.5f, 0.5f});
+            ugui::SetSizeDelta(ui_.arrowT.get(), {px, px});
+            ugui::SetAnchoredPosition(ui_.arrowT.get(), {0, 0});
+        }
         ui_.arrowStyleApplied = game ? 0 : 1;
         lastArrowZ_ = 1e9f;
+        coneS_ = -1;
+    }
+
+    // Pulse curves of the marker's Animator clips (1.3.0, decoded from the bundle: per-segment cubics, 60 Hz
+    // source, both loop every 4 s through the controller):
+    //   MapMarkerPulse      FacingArrow localScale.xy 1 -> 0.75 -> 1 -> 0.75 -> 1 at t = 0,1,2,3,4
+    //   MapMarkerPulse_Cone Cone anchoredPosition.y -16 -> -14 -> -16, Image alpha 1 -> 0.75 -> 1 at t = 0,2,4
+    // (MapMarkerPulse_Rare, picked at random instead of MapMarkerPulse, also wobbles BeaIcon's rotation once;
+    // not reproduced.)
+    static float ArrowPulse(float t) {
+        float u = std::fmod(t, 4.0f);
+        int seg = std::clamp(static_cast<int>(u), 0, 3);
+        u -= static_cast<float>(seg);
+        static const float k[4][4] = {{0.245f, -0.488f, -0.007f, 1.0f},
+                                      {-0.268f, 0.267f, 0.251f, 0.75f},
+                                      {0.233f, -0.464f, -0.019f, 1.0f},
+                                      {-0.268f, 0.267f, 0.251f, 0.75f}};
+        const float* c = k[seg];
+        return ((c[0] * u + c[1]) * u + c[2]) * u + c[3];
+    }
+    // 0 at rest .. 1 at the cone's peak (t = 2 s): smoothstep both ways (the clip's cubics are exactly that).
+    static float ConePhase(float t) {
+        float u = std::fmod(t, 4.0f) * 0.5f;
+        float x = u < 1 ? u : 2 - u;
+        return x * x * (3 - 2 * x);
+    }
+
+    void AnimateMarkerParts(std::vector<MarkerPart>& parts) {
+        for (MarkerPart& m : parts) {
+            if (m.anim == kAnimNone || !m.t) continue;
+            if (m.anim == kAnimArrowPulse) {
+                float sc = ArrowPulse(time_);
+                ugui::SetLocalScale(m.t.get(), {sc, sc * m.sy, 1});
+            } else {
+                float a = ConePhase(time_);
+                float dy = 2.0f * a;  // -16 -> -14 in the cone holder's space
+                ugui::SetAnchoredPosition(m.t.get(), {m.pos.x + m.up.x * dy, m.pos.y + m.up.y * dy});
+                Color c = m.color;
+                c.a *= 1.0f - 0.25f * a;
+                ugui::GraphicSetColor(m.img.get(), c);
+            }
+        }
     }
 
     int Classify(Il2CppObject* comp, std::string& label) {
@@ -2773,18 +3025,7 @@ private:
         float yaw = std::atan2(fx, fz) * 180.0f / kPi;
         float rot = cfg_.orientation == 1 ? yaw : 0.0f;
         if (std::fabs(rot - lastR_) > 0.05f) ugui::SetLocalEuler(ui_.rotator.get(), {0, 0, rot});
-        // GTA-style: the arrow stays centred, the page moves/rotates under it.
-        // PlayerMapMarker.Rotate: z = -(eulerY + _rotationOffset). The game's
-        // marker sprite is drawn pointing down (user test: 180 deg off), our
-        // classic arrow points up, hence its extra 180 so one user offset
-        // (default 180) is right for both. Rotate-with-player: rot == yaw, so
-        // the arrow points up.
-        float styleBase = UseGameArrow() ? -ui_.arrowRotOffset : 180.0f;
-        float arrowZ = std::remainder(rot - yaw + styleBase + cfg_.arrowOffset, 360.0f);
-        if (std::fabs(std::remainder(arrowZ - lastArrowZ_, 360.0f)) > 0.05f || lastArrowZ_ > 1e8f) {
-            ugui::SetLocalEuler(ui_.arrowT.get(), {0, 0, arrowZ});
-            lastArrowZ_ = arrowZ;
-        }
+        UpdateArrow(rot, yaw, s);
 
         bool scaleChanged = std::fabs(s - lastS_) > lastS_ * 0.005f;
         bool rotChanged = std::fabs(rot - lastR_) > 0.05f;
@@ -2796,6 +3037,44 @@ private:
             lastS_ = s;
             lastR_ = rot;
         }
+    }
+
+    // GTA-style: the arrow stays centred, the page moves/rotates under it. PlayerMapMarker.Rotate turns
+    // _arrowRect to z = -(eulerY + _rotationOffset). Fixed offsets (the old slider's values, confirmed in
+    // game): 0 for the game marker (plus the prefab's _rotationOffset, 0 in 1.3.0), 180 for the classic
+    // arrow on top of the old +180 base of its texture = 0 in total: both point like the game's marker.
+    // Rotate-with-player: rot == yaw, so the arrow points up.
+    void UpdateArrow(float rot, float yaw, float s) {
+        const bool game = UseGameArrow();
+        float arrowZ = std::remainder(rot - yaw - (game ? gm_.rotOffset : 0.0f), 360.0f);
+        Il2CppObject* turn = game ? ui_.gameFacingT.get() : ui_.arrowT.get();
+        if (std::fabs(std::remainder(arrowZ - lastArrowZ_, 360.0f)) > 0.05f || lastArrowZ_ > 1e8f) {
+            ugui::SetLocalEuler(turn, {0, 0, arrowZ});
+            lastArrowZ_ = arrowZ;
+        }
+        if (!game) return;
+        AnimateMarkerParts(ui_.gameParts);
+        if (!view_.coneT) return;
+        // The cone sits in the page (under the icons) where _arrowRect sits on screen: the player point plus
+        // the facing origin (screen space, k px per prefab unit), turned with the heading, counter-scaled.
+        float k = ui_.markerK, zc = std::remainder(arrowZ - rot, 360.0f);
+        float rr = -rot * kPi / 180.0f, cs = std::cos(rr), sn = std::sin(rr);
+        Vec2 o{gm_.facingOrigin.x * k / s, gm_.facingOrigin.y * k / s};
+        Vec2 p{playerP_.x + cs * o.x - sn * o.y, playerP_.y + sn * o.x + cs * o.y};
+        if (p.x != coneP_.x || p.y != coneP_.y || coneS_ < 0) {
+            ugui::SetLocalPosition(view_.coneT.get(), {p.x, p.y, 0});
+            coneP_ = p;
+        }
+        if (std::fabs(std::remainder(zc - coneZ_, 360.0f)) > 0.05f || coneS_ < 0) {
+            ugui::SetLocalEuler(view_.coneT.get(), {0, 0, zc});
+            coneZ_ = zc;
+        }
+        float cscale = k / s;
+        if (std::fabs(cscale - coneS_) > coneS_ * 0.002f || coneS_ < 0) {
+            ugui::SetLocalScale(view_.coneT.get(), {cscale, cscale, 1});
+            coneS_ = cscale;
+        }
+        AnimateMarkerParts(view_.coneParts);
     }
 
     // Size factor of the arrow: 1 at zoom 2.5x, proportional to the zoom, clamped to 0.4x..1.6x.

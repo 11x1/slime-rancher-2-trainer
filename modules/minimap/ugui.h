@@ -191,6 +191,7 @@ void ImageSetPpuMultiplier(Il2CppObject* img, float v);
 void GraphicSetColor(Il2CppObject* g, Color c);
 Color GraphicGetColor(Il2CppObject* g);
 int ImageGetType(Il2CppObject* img);
+bool ImageGetPreserveAspect(Il2CppObject* img);
 float ImageGetPpuMultiplier(Il2CppObject* img);
 float CanvasGroupGetAlpha(Il2CppObject* cg);
 Il2CppObject* RawImageGetTexture(Il2CppObject* ri);

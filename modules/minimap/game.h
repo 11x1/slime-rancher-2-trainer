@@ -90,6 +90,7 @@ struct Symbols {
     size_t mpmPlayerPrefab = kNoOffset;     // MapMarkerPrefabMapping._playerMarkerPrefab
     size_t pmmArrow = kNoOffset;            // PlayerMapMarker._arrowRect
     size_t pmmRotOffset = kNoOffset;        // PlayerMapMarker._rotationOffset
+    size_t pmmBelow = kNoOffset;            // PlayerMapMarker._moveBelowMarkersTransform (the view cone)
     size_t mapMarkerImage = kNoOffset;      // MapMarker._image
     size_t gordoIconImage = kNoOffset;      // GordoMarkerUI._iconImage
     size_t mapUIPrefabMapping = kNoOffset;  // MapUI._mapPrefabMapping

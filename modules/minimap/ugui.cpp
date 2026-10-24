@@ -43,7 +43,7 @@ struct State {
     Il2CppClass *tmpUgui = nullptr, *tmpText = nullptr;
     // GameObject / Object
     Fn findAll, goCtorTypes, goGetScene, findFirst, findByType, getParent;
-    Fn gfxGetColor, imgGetType, imgGetPpuMul, cgGetAlpha, riGetTex, riGetUv, riSetTex, riSetUv;
+    Fn gfxGetColor, imgGetType, imgGetPpuMul, imgGetPreserveAspect, cgGetAlpha, riGetTex, riGetUv, riSetTex, riSetUv;
     Il2CppClass* rawImage = nullptr;
     Il2CppClass* systemType = nullptr;
     Fn goCtor, addComponent, compsInChildren, compInParent, getLayer, setLayer, activeSelf, destroy, setHideFlags,
@@ -224,6 +224,7 @@ bool Resolve(std::string& err) {
     s.gfxGetColor = A(s.graphic, "get_color", 0, &req);
     s.imgGetType = A(s.image, "get_type", 0, &opt);
     s.imgGetPpuMul = A(s.image, "get_pixelsPerUnitMultiplier", 0, &opt);
+    s.imgGetPreserveAspect = A(s.image, "get_preserveAspect", 0, &opt);
     s.cgGetAlpha = A(s.canvasGroup, "get_alpha", 0, &opt);
     if (s.rawImage) {
         s.riGetTex = A(s.rawImage, "get_texture", 0, &opt);
@@ -504,6 +505,9 @@ Il2CppObject* GetParent(Il2CppObject* t) {
 
 Color GraphicGetColor(Il2CppObject* g) { return Alive(g) ? Call<Color>(S.gfxGetColor, g) : Color{1, 1, 1, 1}; }
 int ImageGetType(Il2CppObject* img) { return (Alive(img) && S.imgGetType) ? Call<int>(S.imgGetType, img) : 0; }
+bool ImageGetPreserveAspect(Il2CppObject* img) {
+    return Alive(img) && S.imgGetPreserveAspect && Call<bool>(S.imgGetPreserveAspect, img);
+}
 float ImageGetPpuMultiplier(Il2CppObject* img) {
     return (Alive(img) && S.imgGetPpuMul) ? Call<float>(S.imgGetPpuMul, img) : 1.0f;
 }

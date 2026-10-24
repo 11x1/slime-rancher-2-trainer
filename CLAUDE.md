@@ -6,7 +6,6 @@
 
 | note | about |
 |---|---|
-| `minimap-player-marker.md` | game-map player icon on the minimap, fixed arrow rotation |
 | `minimap-perf.md` | research and improve minimap performance |
 | `ideas.md` | unplanned ideas |
 
