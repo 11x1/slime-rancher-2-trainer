@@ -265,6 +265,17 @@ void DrawTile(ImDrawList* dl, ImVec2 a, ImVec2 b, const Tile& t, bool hot, bool 
         }
     }
     char buf[16];
+    if (t.mod) {
+        // Added by the mod: an "M" on a small pill in the theme's accent colour, top left (the owned count is
+        // top right). Ink as on the amount pill, so it reads in both themes.
+        ImFont* f = theme::Body();
+        const float size = theme::kSmallSize * scale * 0.72f;
+        const ImVec2 ts = f->CalcTextSizeA(size, FLT_MAX, 0.0f, "M");
+        const ImVec2 pa(a.x + 3.0f * scale, a.y + 3.0f * scale), pb(pa.x + ts.x + 6.0f * scale, pa.y + ts.y + 1.0f * scale);
+        const ImU32 pill = Dark() ? P.grab : P.accent;
+        dl->AddRectFilled(pa, pb, t.dimmed ? WithAlpha(pill, 0.6f) : pill, 3.0f * scale);
+        dl->AddText(f, size, ImVec2(pa.x + 3.0f * scale, pa.y + 0.5f * scale), Dark() ? IM_COL32(20, 20, 24, 255) : P.accentInk, "M");
+    }
     if (t.badge >= 0) {
         std::snprintf(buf, sizeof(buf), "%d", t.badge);
         Number(dl, buf, b.x - 5.0f * scale, a.y + 3.0f * scale, t.badge > 0 ? P.text : P.dim, scale);
