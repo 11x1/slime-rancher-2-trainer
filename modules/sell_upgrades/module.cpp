@@ -909,8 +909,9 @@ void SellUpgrades::SetVec(const MethodInfo* m, Il2CppObject* rt, Vec2 v, const c
 // to full width and Purchase ran under Sell). So we never size, we only place:
 //   * alone (owned card, nothing left to buy): the vanilla PURCHASED view is hidden and ours takes
 //     its anchors and centre;
-//   * pair (tier card: Purchase + Sell): both keep the vanilla anchors; the vanilla view gets
-//     pivot x 1 and ours pivot x 0, both at the old centre -/+ gap / 2, so each grows away from the
+//   * pair (tier card: Sell + Purchase): both keep the vanilla anchors; ours (Sell, left) gets
+//     pivot x 1 and the vanilla view (Purchase, right) pivot x 0, both at the old centre -/+ gap / 2,
+//     so each grows away from the
 //     middle and they can't overlap whatever their widths. CentrePair then shifts the pair so it is
 //     centred on the old centre once the layout has given them their real widths (posted, a few
 //     ticks).
@@ -939,10 +940,11 @@ bool SellUpgrades::PlaceButtons(Il2CppObject* vanillaView, Il2CppObject* ourView
         SetVec(rtSetPos_, b, Vec2{centre, pos.y}, "RectTransform.set_anchoredPosition", ok);
         if (ok) SetActive(GameObjectOf(vanillaView), false);  // ListUI destroys it on the next bind
     } else {
-        SetVec(rtSetPivot_, a, Vec2{1.0f, pivot.y}, "RectTransform.set_pivot", ok);
-        SetVec(rtSetPos_, a, Vec2{centre - kPairGap * 0.5f, pos.y}, "RectTransform.set_anchoredPosition", ok);
-        SetVec(rtSetPivot_, b, Vec2{0.0f, pivot.y}, "RectTransform.set_pivot", ok);
-        SetVec(rtSetPos_, b, Vec2{centre + kPairGap * 0.5f, pos.y}, "RectTransform.set_anchoredPosition", ok);
+        // Sell left, Purchase right (user request, "switch sell and buy button positions").
+        SetVec(rtSetPivot_, a, Vec2{0.0f, pivot.y}, "RectTransform.set_pivot", ok);
+        SetVec(rtSetPos_, a, Vec2{centre + kPairGap * 0.5f, pos.y}, "RectTransform.set_anchoredPosition", ok);
+        SetVec(rtSetPivot_, b, Vec2{1.0f, pivot.y}, "RectTransform.set_pivot", ok);
+        SetVec(rtSetPos_, b, Vec2{centre - kPairGap * 0.5f, pos.y}, "RectTransform.set_anchoredPosition", ok);
         if (ok) {
             pairVanillaHandle_ = unity::NewGCHandle(a);
             if (pairVanillaHandle_) {
@@ -957,7 +959,7 @@ bool SellUpgrades::PlaceButtons(Il2CppObject* vanillaView, Il2CppObject* ourView
         SR2_INFO("[{}] sell button layout: vanilla rect {:.0f} x {:.0f} (anchors {:.2f},{:.2f}-{:.2f},{:.2f}, pivot "
                  "{:.2f}, centre x {:.0f}) - {}{}",
                  kModule, r.width, r.height, amin.x, amin.y, amax.x, amax.y, pivot.x, centre,
-                 alone ? "Sell alone (PURCHASED hidden)" : "Purchase left, Sell right", ok ? "" : " - FAILED");
+                 alone ? "Sell alone (PURCHASED hidden)" : "Sell left, Purchase right", ok ? "" : " - FAILED");
     }
     return ok;
 }
@@ -970,7 +972,7 @@ void SellUpgrades::ScheduleCentre(unsigned gen, int ticksLeft) {
     });
 }
 
-// Shift Purchase (pivot x 1) and Sell (pivot x 0) so the pair is centred on the old centre, with the
+// Shift Sell (pivot x 1, left) and Purchase (pivot x 0, right) so the pair is centred on the old centre, with the
 // widths the game's layout has given them by now. Posted job (main thread), our pair only.
 void SellUpgrades::CentrePair() {
     Il2CppObject* a = pairVanilla_;
@@ -984,12 +986,12 @@ void SellUpgrades::CentrePair() {
     if (!ok || !rb) return;
     const float wb = reinterpret_cast<Rect*>(reinterpret_cast<char*>(rb) + 2 * sizeof(void*))->width;
     if (!std::isfinite(wa) || !std::isfinite(wb) || wa < 0.0f || wb < 0.0f || wa > 10000.0f || wb > 10000.0f) return;
-    const float shift = (wa - wb) * 0.5f;
+    const float shift = (wb - wa) * 0.5f;
     const Vec2 pa = GetVec(rtGetPos_, a, "RectTransform.get_anchoredPosition", ok);
     const Vec2 pb = GetVec(rtGetPos_, b, "RectTransform.get_anchoredPosition", ok);
     if (!ok) return;
-    const float xa = pairCentre_ - kPairGap * 0.5f + shift;
-    const float xb = pairCentre_ + kPairGap * 0.5f + shift;
+    const float xa = pairCentre_ + kPairGap * 0.5f + shift;
+    const float xb = pairCentre_ - kPairGap * 0.5f + shift;
     if (std::fabs(pa.x - xa) > 0.5f) SetVec(rtSetPos_, a, Vec2{xa, pa.y}, "RectTransform.set_anchoredPosition", ok);
     if (std::fabs(pb.x - xb) > 0.5f) SetVec(rtSetPos_, b, Vec2{xb, pb.y}, "RectTransform.set_anchoredPosition", ok);
 }
