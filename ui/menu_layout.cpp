@@ -85,7 +85,7 @@ std::vector<Category> Spec() {
     Tab general;
     general.title = "General";
     general.kind = TabKind::Cards;
-    general.columns = {{"quick_start", "free_placement"}, {"instant_build", "quick_travel", "misc_tweaks"}};
+    general.columns = {{"quick_start", "free_placement", "debug_tools"}, {"instant_build", "quick_travel", "misc_tweaks"}};
     general.cardHelp = {
         {"free_placement",
          "Gadget mode ignores its placement limits: overlap, slope, distance, jumping. The cost and stacking rules "
@@ -93,6 +93,9 @@ std::vector<Category> Spec() {
         {"misc_tweaks",
          "Small speed-ups, each off until you turn it on: instant Fabricator purchases, no upgrade animation and a "
          "faster vacpack when shooting items out."},
+        {"debug_tools",
+         "Developer tools Monomi Park left in the game, each off until you turn it on. Only what still works in the "
+         "release build is here."},
     };
     misc.tabs.push_back(general);
     Tab sandbox;

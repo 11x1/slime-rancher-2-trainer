@@ -25,6 +25,7 @@ std::unique_ptr<sr2::core::Module> CreateSlimeDj();          // modules/slime_dj
 std::unique_ptr<sr2::core::Module> CreateFreePlacement();    // modules/free_placement/module.cpp
 std::unique_ptr<sr2::core::Module> CreateDiscordRpc();       // modules/discord_rpc/module.cpp
 std::unique_ptr<sr2::core::Module> CreateMiscTweaks();       // modules/misc_tweaks/module.cpp
+std::unique_ptr<sr2::core::Module> CreateDebugTools();       // modules/debug_tools/module.cpp
 }  // namespace sr2::modules
 
 namespace sr2::core {
@@ -48,6 +49,7 @@ void RegisterBuiltinModules(ModuleManager& mm) {
     mm.Register(modules::CreateFreePlacement());
     mm.Register(modules::CreateDiscordRpc());
     mm.Register(modules::CreateMiscTweaks());
+    mm.Register(modules::CreateDebugTools());
 }
 
 }  // namespace sr2::core
