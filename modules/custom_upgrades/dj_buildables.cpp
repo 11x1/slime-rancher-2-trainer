@@ -281,6 +281,12 @@ struct Impl : variant_ext::Extension {
     ListMethods variantList, itemList;
     const void* registeredDir = nullptr;
     std::set<std::string> aliased;
+    // Per-tick save alias check (Register): the key / base ReferenceId of each definition (constant once
+    // built; used to cost a get_name + get_ReferenceId + format per definition every tick) and the
+    // _reverseIndex offset of the table's class.
+    std::unordered_map<Il2CppObject*, std::pair<std::string, std::string>> aliasKeys;
+    const void* revClass = nullptr;
+    size_t revOff = 0;
     bool loggedNoVariantEntry = false, loggedNoDefs = false;
     std::string cardState[kFamCount];  // last logged Fabricator card state per family (logged when it changes)
 
@@ -808,18 +814,28 @@ void Impl::Register() {
     Il2CppObject* srt = unity::IsAlive(asd) ? unity::Field<Il2CppObject*>(asd, offAsdTranslation) : nullptr;
     Il2CppObject* table = srt ? unity::Field<Il2CppObject*>(srt, offSrtIdentTable) : nullptr;
     if (!table) return;
-    auto rev = Resolver::Get().FieldOffset(api().il2cpp_object_get_class(table), "_reverseIndex");
-    Il2CppObject* dict = rev ? unity::Field<Il2CppObject*>(table, *rev) : nullptr;
+    if (Il2CppClass* tk = api().il2cpp_object_get_class(table); tk != revClass) {
+        revClass = tk;
+        auto rev = Resolver::Get().FieldOffset(tk, "_reverseIndex");
+        revOff = rev ? *rev : 0;
+    }
+    Il2CppObject* dict = revOff ? unity::Field<Il2CppObject*>(table, revOff) : nullptr;
     if (!dict) return;
     DictMethods& d = Dict(aliasDict, dict);
     if (!d.containsKey || !d.tryGet || !d.setItem) return;
     for (int f = 0; f < kFamCount; ++f)
         for (Il2CppObject* def : fams[f].defs) {
-            const std::string mine = std::format("GadgetDefinition.{}", unity::GetName(def));
+            auto k = aliasKeys.find(def);
+            if (k == aliasKeys.end()) {
+                std::string base = RefId(fams[f].base);
+                if (base.empty()) continue;
+                k = aliasKeys.emplace(def, std::make_pair(std::format("GadgetDefinition.{}", unity::GetName(def)), std::move(base))).first;
+            }
+            const std::string& mine = k->second.first;
             Il2CppString* key = unity::NewString(mine);
             if (Value<bool>(Call(d.containsKey, dict, {key}, "save index ContainsKey", &ok)) || !ok) continue;
             int32_t id = -1;
-            const bool found = Value<bool>(Call(d.tryGet, dict, {unity::NewString(RefId(fams[f].base)), &id}, "save index TryGetValue", &ok));
+            const bool found = Value<bool>(Call(d.tryGet, dict, {unity::NewString(k->second.second), &id}, "save index TryGetValue", &ok));
             if (!ok || !found || id < 0) continue;
             Call(d.setItem, dict, {key, &id}, "save index set_Item", &ok);
             if (ok && aliased.insert(mine).second)
