@@ -68,6 +68,8 @@ bool Placed();
 // mirroring the cloud amounts of the types `predicate` accepts), or nullptr. `program` keys a short
 // cache of the predicate's answers.
 Il2CppObject* Sources(Il2CppObject* predicate, Il2CppObject* program);
+// Any thread: `def` is the Quantum Storage Link definition (a runtime clone, never saved as itself).
+bool IsOurs(Il2CppObject* def);
 // The Quantum Storage Link gadget's icon (a Sprite) once known, else nullptr.
 Il2CppObject* SourceIcon();
 

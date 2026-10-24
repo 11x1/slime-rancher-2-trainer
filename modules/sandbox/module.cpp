@@ -47,6 +47,7 @@
 #include "core/module.h"
 #include "core/unity.h"
 #include "modules/common/legend_hint.h"
+#include "modules/custom_upgrades/api.h"
 #include "modules/custom_upgrades/sale_notify.h"
 #include "modules/minimap/ugui.h"
 #include "modules/sandbox/achievements.h"
@@ -1552,6 +1553,9 @@ Il2CppObject* Sandbox::SaveIndex() {
 // True if the save code can store `ident`: its ReferenceId is a key of the save index.
 bool Sandbox::Saveable(Il2CppObject* index, Il2CppObject* ident) {
     if (!index || !ident || !containsKey_) return false;
+    // custom_upgrades' gadget clones have a save alias in the index but must never enter the inventory
+    // (GadgetsModel.Pull would write the vanilla id twice).
+    if (custom_upgrades::IsModGadget(ident)) return false;
     bool ok = false;
     Il2CppObject* ref = Call(referenceId_, ident, {}, "IdentifiableType.ReferenceId", &ok);
     if (!ok || !ref) return false;

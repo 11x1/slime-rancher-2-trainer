@@ -27,6 +27,11 @@ inline bool IsCustomUpgrade(int32_t upgrade) { return (upgrade & kIdMask) == kId
 // Module enabled, set up and not faulted.
 bool Active();
 
+// Any thread, also while the module is off: `def` is one of our runtime GadgetDefinition clones (Quantum
+// Storage Link, Slime DJ buildables). The save stores them only as their vanilla gadget, through our
+// detours, so nothing else may add them to the inventory or the blueprints (the Sandbox crafter skips them).
+bool IsModGadget(Il2CppObject* def);
+
 // Display name ("Sell-All Button"); "custom upgrade" if unknown.
 std::string Name(int32_t upgrade);
 

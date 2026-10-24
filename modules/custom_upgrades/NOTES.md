@@ -172,7 +172,8 @@ from the sidecar`), the migration of an elder-target Hen Collector program.
 
 ## Quantum Storage Link (user request: "drones take items out of a quantum storage link and put them into acceptable inputs")
 
-`quantum_link.cpp` (gadget, visuals, cloud mirror) and `drone_source.cpp` (the source; shares the Hen /
+`quantum_link.cpp` (gadget, visuals, cloud mirror; its gadget hooks also carry the Slime DJ buildables through
+`variant_ext.h`) and `drone_source.cpp` (the source; shares the Hen /
 Elder Collector hooks). Findings with RVAs are in the header comments of both files.
 
 - **"Quantum storage" = the Quantum Cloud** (`DroneDirector.GetCloudModel()` -> `DroneCloudModel._amounts`,
@@ -248,6 +249,68 @@ glow (log lines name what was found), the source in the drone menu (after Silo, 
 drone taking from the cloud to a silo / feeder / refinery (cloud amount going down in the station's cloud menu), save
 + reload (links rebuilt, program restored), turning custom upgrades off (links plain, favourites back), a mod-free
 load of such a save.
+
+## Slime DJ buildables (user requests: "a slime DJ booth with speakers", "a speaker buildable ... rotated variants, stackable", "a radio toy that plays slime pen music")
+
+`dj_buildables.cpp` (prefab data and RVAs in its header). The Quantum Storage Link's save scheme, on its hooks:
+`variant_ext.h` is an extension interface the quantum detours ask first for definitions it owns (MinHook allows one
+hook per address, so the DJ code never hooks those methods itself). Without the Quantum Storage Link's Setup nothing
+of it is offered. Slime DJ plays the song through `slime_dj/api.h` emitters.
+
+- **DJ Booth** = a variant of the **Scientist Desk** decoration (same prefab). Dressing on the placed desk: the lab
+  clutter (glass, vials, beaker, clipboard, pens, wrench, bubble scroll) and its bubbling sound switched off, a small
+  boombox on the desk as the mixer (facing -z), two big boomboxes on the floor at x = +-1.75 as speakers (facing +z,
+  both emitters, kind Booth), and behind the desk (z -1.55) the **Flower Pillow**'s mesh, colliders and its
+  `SlimeAttachmentPoint` subtree **with its scripts** (`SlimeAttachPoint` + `Attractor`, base slimes only, as on the
+  vanilla pillow): slimes are drawn to it and sit there. Every other clone is script-free.
+- **DJ Speaker** / **DJ Speaker (tilted)** / **DJ Speaker (facing up)** = three variants of the **Boombox**
+  decoration. The placed boombox's `model_boombox` is scaled x1.25 and leans back 0 / 30 / 80 degrees
+  (`localRotation * AngleAxis(-tilt, x)`); an emitter child at 1.3 m (kind Speaker). Yaw is the game's own rotate keys
+  (free_placement's rotation step works too). **Stacking**: placed speakers get `Gadget.AllowGadgetStackingOnTop =
+  true` (instance field; the prefab says false), the Boombox prefab already has `CanStackOnStackableGadgets`, so
+  speakers (and any decoration that may stack) go on top of speakers with the game's own rule; the stack relation is
+  the vanilla `_stackedGadgetsIds`. Toggle-variant while holding cycles Boombox -> Speaker -> tilted -> up; on a placed
+  one it cycles plain -> Speaker (a kit) -> tilted -> up -> plain (kit back). The game always asks for the first
+  variant there (`ToggleVariant` indexes from the vanilla definition), so the detour picks the next kind itself; the
+  variants are offered on a placed one while a kit is left or while you aim at a listed one
+  (`GadgetDirector.TargetedGadget`).
+- **Dance**: while `slime_dj::SongPlaying()`, every boombox of ours (clones and the placed speakers) gets the
+  Boombox's own animator bool (`GadgetMusicPlayer._gadgetActive`, a static hash read once a Boombox exists) and its
+  `FX_MusicalNotes` on; a placed speaker whose own Boombox track plays (`gadgetMusicInstance`) is left alone.
+- **Slime Radio** = a vanilla **Night Light** toy actor. Fabricator card (after the DJ Speaker's) whose definition is a
+  Boombox clone that is never a variant and never enters the inventory: fabricating spends its cost and spawns the toy
+  1.8 m in front of the camera (`InstantiationHelpers.InstantiateActor`, as the sandbox spawner; posted out of the
+  Fabricator call), at most 5 per click; its actor id goes into `dj.radios`. Dressing: `model_nightlight` (mesh,
+  handle, light) off, a boombox model at 0.6 size instead, an emitter (kind Radio, 0.6x range, 80 % volume). Slimes
+  play with it like with any toy (its physics and toy scripts are the Night Light's). There is no toy shop entry: the toy
+  shop's purchase path was not researched (`ToyShopUI` itself has no members in the dump); the Fabricator card reuses
+  the hooks the DJ gadgets need anyway.
+- **Fabricator** (Decorations): DJ Booth after the Scientist Desk (cost: the desk's Newbucks x2.5, items x2), DJ
+  Speaker after the Boombox (x1.5 / x1.5), Slime Radio after the DJ Speaker (x0.5 / x0.5); Newbucks rounded to 5.
+  Unlocked with the base's blueprint (radio: the Boombox's). Owned count: kits (booth / speaker), radios in the save.
+  Fabricating a booth / speaker adds the vanilla decoration and one kit (`dj.booth_kits` / `dj.speaker_kits`),
+  never our definition. Placing the variant uses a kit (no kit: a plain decoration is placed, logged), picking one up
+  gives it back and holds the variant again; removed any other way (stored, picked up with a stack) the tick gives the
+  kit back.
+- **Sidecar**: `dj.booths` (actor ids), `dj.speakers` (`id:kind`), `dj.radios`, `dj.booth_kits`, `dj.speaker_kits`.
+- **Save**: like the Quantum Storage Link (ReferenceId alias in `_reverseIndex`, `GetPersistenceId` detour mapping
+  our definitions to the vanilla one for the favourite slots; Cleanup puts the vanilla gadget into those slots).
+- **Without the mod**: DJ Booths load as plain Scientist Desks (clutter back), DJ Speakers as plain upright Boomboxes
+  (stacked decorations stay stacked: vanilla data), Slime Radios as Night Light toys. Unused kits are gone; the desks
+  / boomboxes fabricated with them stay in the inventory. A favourite slot that held a DJ variant holds the vanilla
+  decoration.
+- **Sandbox**: our clones (and the Quantum Storage Link) are left out of the Sandbox crafter / blueprint manager
+  (`custom_upgrades::IsModGadget` in `Sandbox::Saveable`): crafting one there would put our definition into the
+  saved inventory next to its vanilla twin (`GadgetsModel.Pull` -> duplicate persistence id -> the save fails). The
+  Sandbox spawner can spawn Night Lights, but they are not radios.
+
+Not checked in game yet: the three cards (position, names, cost, icons = the vanilla ones), fabricating (kits log),
+the variants while holding a Scientist Desk / Boombox (names, gradients), placing / picking up / toggling (logs),
+the booth look (clutter gone, mixer and speaker positions, which side is "behind": the pillow is on the desk's -z
+side), a slime sitting on the pillow, the speaker tilt direction (front up, not down) and size, stacking speakers on
+speakers, the dance and notes while a song plays (log `boombox dance animator parameter hash ...`), the radio spawn
+(in front of you, not inside the Fabricator) and its look, slimes playing with the radio, the emitters playing,
+save + reload (rebuilt from the sidecar), turning custom upgrades off (plain again, favourites back), a mod-free load.
 
 ## Demolish clears the plot (user report round 4)
 
