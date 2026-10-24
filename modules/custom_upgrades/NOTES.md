@@ -49,19 +49,15 @@ findings from in-game tests that are easy to get wrong again.
   count. Sidecar `hen_collector_keep_hens` / `hen_collector_keep_roosters`; an old
   `hen_collector_keep` n reads as min(2, n) roosters and the rest hens.
 - The coop menu shows two `PlotMenuSlider`s in one row (`SliderSpec.columns`, `Create(..., rowOf)`).
-- **Select to step** (feedback round 4: "only when selected should it be focused, right now arrow
-  buttons still navigate"). Nothing selected: the arrows / d-pad / stick navigate the menu as usual,
-  the sliders ignore them. A slider is selected by a mouse press on it (`Selectable.IsPressed`, polled)
-  or by Submit (Enter / pad A: the hens slider). The selected slider's label reads `< Keep hens: 18 >`;
-  left / right (arrows, d-pad, left stick, Shift or not) step it and no move reaches the menu; up / down
-  switch the selection to the other slider. Released by Submit again, Cancel (Esc / B: the menu stays
-  open), a mouse press anywhere else (judged two frames later, EventSystem order), or, when it was
-  selected with the mouse, the mouse leaving it (not while the button is held). A press on one slider
-  releases the other. Hooks: `ListUI.Submit(InputEventData)` (0x83F450, the list menus' submit listener;
-  the owned Hen Collector card's OnAction does nothing anyway) and `BaseUI.OnCancelPressed` (0x683490,
-  `if (CanClose()) Close()`), both shared bodies with one flag check; up / down / left / right through
-  the `TryHandleAsNavigation` detour below. Without the two hooks: the old always-on keys (d-pad / left
-  stick / arrows for hens, right stick / Shift + arrows for roosters).
+- **Mouse only** (feedback round 5: "remove the icons and arrow key functionality for now, will deal
+  with gamepads later"). The sliders take mouse clicks / drags only (`SliderSpec.keys = false`: no pad
+  / keyboard polling, `Step()` refuses); the arrows / d-pad / stick navigate the menu as usual, Submit
+  and Cancel do what they do in vanilla. Removed with it: the select-to-step mode of round 4 (label
+  `< Keep hens: 18 >`, a slider selected by a mouse press or Submit) and its hooks `ListUI.Submit`
+  (0x83F450) and `BaseUI.OnCancelPressed` (0x683490), the `INavigationHandler.TryHandleAsNavigation`
+  (0x79C940) detour (see "Slider keys" below), and the "Pad: d-pad hens, right stick roostros." hint
+  in the card text. `PlotMenuSlider` keeps its pad / key support (`keys = true`, the default) for
+  drone_price_limit, which drives it through `SetPolling` / `Step` from its own navigation.
 
 ### Activate button (checklist hc3)
 
@@ -77,7 +73,9 @@ findings from in-game tests that are easy to get wrong again.
 - The button is kept only while that detour is installed (`CoopWorld::KeepHenButton`); the build line
   says `Activate button kept` / `no Activate button`.
 
-### Slider keys (fix after the test of build 506a4f60)
+### Slider keys (fix after the test of build 506a4f60; hook removed in round 5, sliders mouse only)
+
+Kept for when gamepad support comes back:
 
 - The arrows still moved the menu selection: `FocusManager.NavigateInDirection` hands a move to every
   `IMoveHandler` between the focused card and the spatial target through
@@ -187,7 +185,7 @@ showing it, selling the Hen Collector (fallback log), turning custom upgrades of
   clones' template is `Walls Upgrade`). Texts are now registered in the pre hook too.
 
 Not checked in game yet: all of the above (layout and centring, the hidden icon, that selling no longer
-buys, the label, the slider keys on keyboard and pad, the Activate button's position, prompt and
+buys, the label, the Activate button's position, prompt and
 animation).
 
 ## Sell-All receipt

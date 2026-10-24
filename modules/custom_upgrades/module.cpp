@@ -65,8 +65,8 @@
 //   Hen Collector limit sliders (plot_menu_slider.cpp, reusable): while the owned Hen Collector is
 //   selected in the coop's purchase menu, two sliders side by side, "Keep hens: N" (0..58, default
 //   18) and "Keep roostros: N" (0..20, default 2), sit in the details panel where the price row is
-//   for unowned items. Mouse on either; d-pad / left stick / arrows step the hens, right stick /
-//   Shift + arrows the roosters. Built from a PurchaseItemDetailsContentView.BindData detour (post:
+//   for unowned items. Mouse only for now (no pad / keyboard steps: the arrows / d-pad navigate the
+//   menu as usual; gamepad support comes later). Built from a PurchaseItemDetailsContentView.BindData detour (post:
 //   our item = the view model's _description is our clone's LocalizedString instance), replaced on
 //   every bind (selection change, RebuildUI after a buy / sell), removed with the menu. The values
 //   are per coop in the sidecar ("hen_collector_keep_hens" / "_roosters"; an old single
@@ -462,8 +462,7 @@ int ClampKeepRoosters(int64_t v) {
 // Short enough for the details panel (vanilla upgrade texts are 44-156 characters).
 std::string HenDescription(int hens, int roosters) {
     return std::format(
-        "Vacs up the hens and roostros over this coop's limits ({} hen{}, {} roostro{}). Chicks are safe! Pad: d-pad "
-        "hens, right stick roostros.",
+        "Vacs up the hens and roostros over this coop's limits ({} hen{}, {} roostro{}). Chicks are safe!",
         hens, hens == 1 ? "" : "s", roosters, roosters == 1 ? "" : "s");
 }
 
@@ -583,14 +582,6 @@ public:
     void DestroySliders() {
         sliderHens_.Destroy();  // the row's builder first (removes the row with both)
         sliderRoosters_.Destroy();
-    }
-    bool OnGridNavigate(Il2CppObject* evt);
-    bool OnMenuSubmit();
-    bool OnMenuCancel(Il2CppObject* ui);
-    custom_upgrades::ui::PlotMenuSlider* FocusedSlider() {
-        if (sliderHens_.Focused()) return &sliderHens_;
-        if (sliderRoosters_.Focused()) return &sliderRoosters_;
-        return nullptr;
     }
 
     // api.h
@@ -712,14 +703,6 @@ private:
     const MethodInfo* capSlotMaxMi_ = nullptr;     // AmmoSlotManager.GetSlotMaxCount(int)
     const MethodInfo* getPlotModelMi_ = nullptr;   // GameModel.GetLandPlotModel(string)
     const MethodInfo* compInChildrenMi_ = nullptr; // Component.GetComponentInChildren(Type, bool)
-    // Grid navigation (gamepad / keyboard left / right for the slider): NavigationEventData
-    Il2CppClass* navEventClass_ = nullptr;
-    const MethodInfo* navMoveDirMi_ = nullptr;  // NavigationEventData.get_MoveDirection
-    Il2CppObject* lastNavEvt_ = nullptr;        // last move the sliders took (identity only)
-    unsigned long long lastNavTick_ = ~0ull;
-    const MethodInfo* navUseMi_ = nullptr;      // NavigationEventData.Use(bool didNavigate)
-    unsigned long long sliderKeyTick_ = ~0ull;  // frame of the last Submit / Cancel the sliders took
-    bool sliderSelectKeys_ = false;             // ListUI.Submit + BaseUI.OnCancelPressed hooked: select-to-step
     Il2CppObject* menuRoot_ = nullptr;            // last updated LandPlotUIRoot (handle held)
     Il2CppGCHandle menuRootHandle_ = nullptr;
     void TrackMenuRoot(Il2CppObject* root);
@@ -852,53 +835,6 @@ void DetailsBindDetour(Il2CppObject* view, Il2CppObject* vm, const MethodInfo* m
     g_origDetailsBind(view, vm, mi);
     // Every list menu's details panel binds here: one flag check for the others.
     if (g_self && view && g_self->On()) g_detailsGuard.Run([&] { g_self->AfterDetailsBind(view, vm); });
-}
-
-// static INavigationHandler.TryHandleAsNavigation(IMoveHandler, NavigationEventData) (0x79C940): the
-// one place where FocusManager.NavigateInDirection (pad d-pad / stick, arrow keys) hands a move to the
-// handlers between the focused object and the spatial target: an INavigationHandler gets OnNavigate,
-// any other IMoveHandler (the focused card's Selectable) OnMove. Right after each call it checks the
-// event's `used` flag: used -> NotifySuccessfulNavigation and no SetFocus. A pad / arrow press for
-// the slider used to select the neighbouring card (the slider vanished with the rebind). The first
-// fix detoured UniformGridView.OnNavigate, but the focused card's own Selectable is asked first and
-// moved the selection, so that detour never ran (test of 506a4f60: no "taken from the menu's grid
-// navigation" line). While the Hen Collector sliders are shown, left / right step the slider instead
-// and the event is used; every other direction and every other menu pass through (one flag check).
-// FocusManager.NavigateInDirection itself is drone_price_limit's (one hook per address).
-using MenuNavFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
-MenuNavFn g_origMenuNav = nullptr;
-sr2::core::DetourGuard g_menuNavGuard{kModule, "INavigationHandler.TryHandleAsNavigation"};
-
-void MenuNavDetour(Il2CppObject* handler, Il2CppObject* evt, const MethodInfo* mi) {
-    bool taken = false;
-    if (g_self && evt && g_self->On() && g_self->SliderActive())
-        g_menuNavGuard.Run([&] { taken = g_self->OnGridNavigate(evt); });
-    if (!taken) g_origMenuNav(handler, evt, mi);
-}
-
-// Selecting a Hen Collector slider with keys. ListUI.Submit(InputEventData) (0x83F450) is the list
-// menus' submit listener (A / Enter: `if (the list has focus) onSubmitActionPerformed()`, i.e. the
-// card's OnAction, which does nothing for the owned Hen Collector card). While the sliders are shown,
-// Submit selects the hens slider, or releases the selected one, and the original is not run.
-// BaseUI.OnCancelPressed(InputEventData) (0x683490: `if (CanClose()) Close()`, the menus' close-input
-// listener, Esc / B): while a slider is selected, Cancel releases it instead of closing the menu.
-// Both bodies are shared by every menu: one flag check (SliderActive) / pointer compare for the others.
-using MenuInputFn = void (*)(Il2CppObject*, void*, const MethodInfo*);
-MenuInputFn g_origListSubmit = nullptr, g_origCancelPressed = nullptr;
-sr2::core::DetourGuard g_sliderKeysGuard{kModule, "Hen Collector slider select (Submit / Cancel)"};
-
-void ListSubmitDetour(Il2CppObject* self, void* data, const MethodInfo* mi) {
-    bool taken = false;
-    if (g_self && self && g_self->On() && g_self->SliderActive())
-        g_sliderKeysGuard.Run([&] { taken = g_self->OnMenuSubmit(); });
-    if (!taken) g_origListSubmit(self, data, mi);
-}
-
-void CancelPressedDetour(Il2CppObject* self, void* data, const MethodInfo* mi) {
-    bool taken = false;
-    if (g_self && self && g_self->On() && g_self->SliderActive())
-        g_sliderKeysGuard.Run([&] { taken = g_self->OnMenuCancel(self); });
-    if (!taken) g_origCancelPressed(self, data, mi);
 }
 
 bool HasUpgradeDetour(Il2CppObject* plot, int32_t upg, const MethodInfo* mi) {
@@ -2522,9 +2458,9 @@ void CustomUpgrades::AfterDetailsBind(Il2CppObject* view, Il2CppObject* vm) {
     auto it = state_.plots.find(id);
     if (it == state_.plots.end()) return;
 
-    // Two sliders side by side: hens (left, builds the row; d-pad / left stick / arrows) and roosters
-    // (right; right stick / Shift + arrows). By key (never a pointer into the map): the state may be
-    // reloaded while the menu is open.
+    // Two sliders side by side: hens (left, builds the row) and roosters (right), mouse only (user:
+    // "remove the icons and arrow key functionality for now, will deal with gamepads later"). By key
+    // (never a pointer into the map): the state may be reloaded while the menu is open.
     auto onChange = [this, id, game = state_.game](bool roosters) {
         return [this, id, game, roosters](int v) {
             if (!state_.loaded || state_.game != game) return;
@@ -2545,7 +2481,7 @@ void CustomUpgrades::AfterDetailsBind(Il2CppObject* view, Il2CppObject* vm) {
     hens.onChange = onChange(false);
     hens.column = 0;
     hens.columns = 2;
-    hens.input = custom_upgrades::ui::SliderInput::kPrimary;
+    hens.keys = false;
     custom_upgrades::ui::SliderSpec roosters = hens;
     roosters.name = "HenCollectorRoosters";
     roosters.min = custom_upgrades::world::kHenKeepRoostersMin;
@@ -2554,10 +2490,6 @@ void CustomUpgrades::AfterDetailsBind(Il2CppObject* view, Il2CppObject* vm) {
     roosters.label = [](int v) { return std::format("Keep roostros: {}", v); };
     roosters.onChange = onChange(true);
     roosters.column = 1;
-    roosters.input = custom_upgrades::ui::SliderInput::kSecondary;
-    // The keys step a slider only while it is selected (feedback round 4: the arrows also moved the
-    // menu selection). With the Submit hook: click / Submit selects; else the old always-on keys.
-    hens.selectToStep = roosters.selectToStep = sliderSelectKeys_;
     if (sliderHens_.Create(view, hens)) sliderRoosters_.Create(view, roosters, &sliderHens_);
 }
 
@@ -2565,72 +2497,6 @@ void CustomUpgrades::SliderTick(float dt) {
     if (!main_thread::IsMainThread()) return;
     sliderHens_.Tick(dt);
     sliderRoosters_.Tick(dt);
-    // One selected slider at a time: a mouse press on one releases the other.
-    if (sliderHens_.TakeFocusGained()) sliderRoosters_.SetFocused(false, "the other slider was selected");
-    if (sliderRoosters_.TakeFocusGained()) sliderHens_.SetFocused(false, "the other slider was selected");
-}
-
-bool CustomUpgrades::OnMenuSubmit() {
-    if (!main_thread::IsMainThread() || !sliderSelectKeys_) return false;
-    const unsigned long long tick = main_thread::TickCount();
-    if (tick == sliderKeyTick_) return true;  // the same press again (one toggle per frame)
-    if (sliderHens_.Blocked()) return false;  // a popup has the keys
-    sliderKeyTick_ = tick;
-    if (custom_upgrades::ui::PlotMenuSlider* f = FocusedSlider()) {
-        f->SetFocused(false, "Submit");
-        return true;
-    }
-    sliderHens_.SetFocused(true, "Submit");
-    return sliderHens_.Focused();
-}
-
-bool CustomUpgrades::OnMenuCancel(Il2CppObject* ui) {
-    if (!main_thread::IsMainThread() || !sliderSelectKeys_ || ui != menuRoot_) return false;
-    custom_upgrades::ui::PlotMenuSlider* f = FocusedSlider();
-    if (!f) return false;  // nothing selected: Cancel closes the menu as usual
-    const unsigned long long tick = main_thread::TickCount();
-    if (tick != sliderKeyTick_ && f->Blocked()) return false;
-    sliderKeyTick_ = tick;
-    f->SetFocused(false, "Cancel");
-    return true;
-}
-
-bool CustomUpgrades::OnGridNavigate(Il2CppObject* evt) {
-    if (!main_thread::IsMainThread() || !navEventClass_ || !IsA(evt, navEventClass_)) return false;
-    bool ok = false;
-    const int32_t dir = Unbox<int32_t>(Invoke(navMoveDirMi_, evt, {}, "NavigationEventData.get_MoveDirection", &ok), -1);
-    if (!ok) return false;
-    constexpr int32_t kMoveLeft = 0, kMoveUp = 1, kMoveRight = 2, kMoveDown = 3;  // EventSystems.MoveDirection
-    if (dir != kMoveLeft && dir != kMoveRight && dir != kMoveUp && dir != kMoveDown) return false;
-    // The same event again in this frame (another handler of the same move): swallowed, not stepped.
-    const unsigned long long tick = main_thread::TickCount();
-    if (evt == lastNavEvt_ && tick == lastNavTick_) return true;
-    if (sliderSelectKeys_) {
-        // Nothing selected: the menu navigates as usual. Selected: no move leaves the slider; left /
-        // right step it, up / down switch the selection to the other slider.
-        custom_upgrades::ui::PlotMenuSlider* f = FocusedSlider();
-        if (!f) return false;
-        if (dir == kMoveUp || dir == kMoveDown) {
-            if (f->Blocked()) return false;
-            custom_upgrades::ui::PlotMenuSlider* other = f == &sliderHens_ ? &sliderRoosters_ : &sliderHens_;
-            if (other->Active()) {
-                f->SetFocused(false, "Up / Down");
-                other->SetFocused(true, "Up / Down");
-            }
-        } else if (!f->Step(dir == kMoveRight ? 1 : -1)) {
-            return false;  // blocked (popup / not interactable): the game has the keys
-        }
-    } else {
-        if (dir != kMoveLeft && dir != kMoveRight) return false;
-        // Each slider takes only its own keys (Shift held: the roosters one).
-        const int step = dir == kMoveRight ? 1 : -1;
-        if (!sliderHens_.Step(step) && !sliderRoosters_.Step(step)) return false;
-    }
-    lastNavEvt_ = evt;  // identity only
-    lastNavTick_ = tick;
-    bool didNavigate = true;  // nobody else (late navigation handlers) acts on it
-    Invoke(navUseMi_, evt, {&didNavigate}, "NavigationEventData.Use", &ok);
-    return true;
 }
 
 // ---------------------------------------------------------------- buying --
@@ -3237,46 +3103,7 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
                                  reinterpret_cast<void**>(&g_origDetailsBind)))
             report += std::format(" PurchaseItemDetailsContentView.BindData@0x{:X}", Resolver::Rva(p));
         else SR2_WARN("[{}] hook PurchaseItemDetailsContentView.BindData failed ({}) - no limit slider", kModule, err);
-        // Pad / arrow left / right for the slider without moving the menu grid's selection (optional:
-        // without it the slider polls the pad / keyboard itself).
-        constexpr const char* kFocusNs = "MonomiPark.SlimeRancher.UI.Framework.Interaction.Focus";
-        Il2CppClass* navHandler = R.Class(kImage, kFocusNs, "INavigationHandler", &err);
-        navEventClass_ = R.Class(kImage, kFocusNs, "NavigationEventData", &err);
-        navMoveDirMi_ = navEventClass_ ? R.Method(navEventClass_, "get_MoveDirection", 0, &err) : nullptr;
-        navUseMi_ = navEventClass_ ? R.Method(navEventClass_, "Use", 1, &err) : nullptr;
-        const MethodInfo* navMi = navHandler ? R.Method(navHandler, "TryHandleAsNavigation", 2, &err) : nullptr;
-        void* np = (navMi && navMoveDirMi_ && navUseMi_) ? R.MethodPointer(navMi, &err) : nullptr;
-        if (np && ctx.HookAddress("INavigationHandler.TryHandleAsNavigation", np, reinterpret_cast<void*>(&MenuNavDetour),
-                                  reinterpret_cast<void**>(&g_origMenuNav))) {
-            sliderHens_.SetNavigationSteps(true);
-            sliderRoosters_.SetNavigationSteps(true);
-            report += std::format(" INavigationHandler.TryHandleAsNavigation@0x{:X}", Resolver::Rva(np));
-            // Select-to-step: Submit selects / releases a slider, Cancel releases it (optional: without
-            // both hooks the sliders keep the always-on keys).
-            std::string kerr;
-            Il2CppClass* listUi = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Adapter", "ListUI", &kerr);
-            Il2CppClass* baseUi = R.Class(kImage, "MonomiPark.SlimeRancher.UI", "BaseUI", &kerr);
-            const MethodInfo* submitMi = listUi ? R.Method(listUi, "Submit", 1, &kerr) : nullptr;
-            const MethodInfo* cancelMi = baseUi ? R.Method(baseUi, "OnCancelPressed", 1, &kerr) : nullptr;
-            void* sp = submitMi ? R.MethodPointer(submitMi, &kerr) : nullptr;
-            void* cp = cancelMi ? R.MethodPointer(cancelMi, &kerr) : nullptr;
-            if (sp && cp &&
-                ctx.HookAddress("ListUI.Submit", sp, reinterpret_cast<void*>(&ListSubmitDetour),
-                                reinterpret_cast<void**>(&g_origListSubmit)) &&
-                ctx.HookAddress("BaseUI.OnCancelPressed", cp, reinterpret_cast<void*>(&CancelPressedDetour),
-                                reinterpret_cast<void**>(&g_origCancelPressed))) {
-                sliderSelectKeys_ = true;
-                report += std::format(" ListUI.Submit@0x{:X} BaseUI.OnCancelPressed@0x{:X}", Resolver::Rva(sp),
-                                      Resolver::Rva(cp));
-            } else {
-                SR2_WARN("[{}] ListUI.Submit / BaseUI.OnCancelPressed not hooked ({}) - the Hen Collector sliders "
-                         "take the arrows without being selected", kModule, kerr.empty() ? "hook failed" : kerr);
-            }
-        } else {
-            navEventClass_ = nullptr;
-            SR2_WARN("[{}] INavigationHandler.TryHandleAsNavigation not hooked ({}) - the slider polls pad / arrows "
-                     "itself (the menu selection may also move)", kModule, err.empty() ? "not found" : err);
-        }
+        // The Hen Collector sliders are mouse only for now (no navigation / Submit / Cancel hooks).
     }
 
     // Sell-All HUD notices (optional; missing -> the world button's text says what was sold).
