@@ -74,6 +74,7 @@ void Stream::Run(std::filesystem::path path, uint64_t startFrame) {
         state_.store(State::Failed);
         return;
     }
+    beats_.Reset(rate_, startFrame);
     state_.store(State::Ready);
 
     std::vector<float> raw(static_cast<size_t>(chunkFrames_) * inCh);
@@ -100,6 +101,7 @@ void Stream::Run(std::filesystem::path path, uint64_t startFrame) {
                 c.pcm[static_cast<size_t>(i) * 2 + 1] = std::clamp(f[1] + centre, -1.0f, 1.0f);
             }
         }
+        beats_.Feed(c.pcm.data(), c.frames, channels_);
         decoded += got;
         {
             std::lock_guard lock(mu_);
