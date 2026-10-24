@@ -10,9 +10,20 @@
 //     does when the player presses Start Program, so switching programs at runtime is the same call.
 //   * What the drone does: DroneBehaviorPlexer._currBehaviour (IRanchDroneBehaviour). PickNextBehavior:
 //     Idle (at-station flourishes) -> the program plexer (gather / deposit) -> RanchDroneBehaviourDumpAmmo
-//     when its ammo is not empty (DESTROYS the cargo) -> RanchDroneBehaviourRest. So "nothing to do" =
-//     the current behaviour is Rest or Idle and RanchDrone._ammo (AmmoSlotManager).IsEmpty(). Without
-//     battery the drone rests too (RanchDrone.GetCurrentEnergy() <= 0): no switching then.
+//     when its ammo is not empty (DESTROYS the cargo) -> RanchDroneBehaviourRest. Idle comes FIRST and is
+//     picked whenever the drone is at its station and a flourish is due (random), even with work to do,
+//     so it is not "idle" (round 9: counting it switched away before the drone started the program).
+//     "Nothing to do" = the current behaviour is Rest, RanchDrone._ammo (AmmoSlotManager).IsEmpty() and
+//     DroneBehaviorPlexer.MaybeHasNextGatherBehavior() (= any source program's Relevancy(readOnly), the
+//     game's own "is there work" query that Rest uses itself) is false. Idle neither counts nor resets.
+//     OnTaskChanged deselects the current behaviour, so a new program is tried on the next FixedTick.
+//     Without battery the drone rests too (RanchDrone.GetCurrentEnergy() <= 0): no switching then.
+//   * Stuck: a dynamic source (Outside Plots / Free Range: RanchDroneSourceProgramDynamic) flies to an
+//     item it found in the cells and cone-scans for it there (Physics.SphereCastNonAlloc, layer mask
+//     0x8800, the type must match). A scan that finds nothing completes empty and the next pick flies to
+//     the same item again: the drone "keeps scanning" and never rests. A program that holds no cargo for
+//     kStuckMs while working counts as "nothing it can pick up" (logged with the behaviour class and its
+//     GetProgramStateStr, so the log says what the drone was doing).
 //   * The page: DroneProgramViewModel.RevertChangesToLastAppliedProgram (0x822E80) compares the target /
 //     source / destination sub view models with the station's current task data and resets the ones
 //     that differ (ProgramChanged event -> the menu redraws). station_dialog.cpp calls it after Run so
@@ -58,7 +69,8 @@ using sr2::il2cpp::Resolver;
 constexpr const char* kImage = "Assembly-CSharp";
 constexpr const char* kDroneNs = "MonomiPark.SlimeRancher.Drone";
 constexpr const char* kKeyPrefix = "drone_programs.station.";
-constexpr uint64_t kMinRunMs = 3000;       // a program runs at least this long before the next one
+constexpr uint64_t kMinRunMs = 5000;       // a program runs at least this long before the next one
+constexpr uint64_t kStuckMs = 90000;       // working without ever holding cargo this long = stuck
 constexpr uint64_t kAllIdleWaitMs = 20000;  // every program was idle in a row: try the next one this rarely
 constexpr int kIdleTicks = 2;              // ~1 s ticks resting with empty hands = nothing to do
 constexpr uint64_t kMenuPauseMs = 2000;    // the station menu was open this recently: no switching
@@ -91,6 +103,7 @@ struct Entry {
     int idleTicks = 0;
     int idleRound = 0;               // idle switches in a row (no cargo seen in between)
     bool cargo = false;              // the drone held something at the last look
+    uint64_t lastCargo = 0;          // last time it held something (or the program started)
     uint64_t lastLog = 0;
     int unlogged = 0;
 };
@@ -98,8 +111,9 @@ struct Entry {
 struct Impl {
     const char* module = "custom_upgrades";
     Il2CppClass* droneClass = nullptr, *restClass = nullptr, *idleClass = nullptr, *identClass = nullptr;
-    size_t offPlexer = 0, offAmmo = 0, offCurrBehaviour = 0;
-    const MethodInfo* ammoIsEmpty = nullptr, *droneEnergy = nullptr;
+    size_t offPlexer = 0, offAmmo = 0, offCurrBehaviour = 0, offProgramPlexer = 0;
+    const MethodInfo* ammoIsEmpty = nullptr, *droneEnergy = nullptr, *maybeHasGather = nullptr;
+    std::unordered_map<Il2CppClass*, const MethodInfo*> stateStr;  // GetProgramStateStr per behaviour class
 
     std::mutex mu;  // entries (the Pull detour reads them from the saving thread)
     std::unordered_map<int64_t, Entry> entries;
@@ -149,6 +163,7 @@ struct Impl {
     void Load(int64_t id, Il2CppObject* model, const ProgramData& live);
     void Rotate(int64_t id, Entry& e, uint64_t now);
     int NextValid(const Entry& e) const;
+    std::string BehaviourInfo(Il2CppObject* beh);
     Entry* Find(int64_t id) {
         auto it = entries.find(id);
         return it != entries.end() ? &it->second : nullptr;
@@ -327,10 +342,32 @@ int Impl::NextValid(const Entry& e) const {
     return e.active;
 }
 
+// "RanchDroneSourceProgramOutsidePlots (<its GetProgramStateStr>)" for the stuck log line.
+std::string Impl::BehaviourInfo(Il2CppObject* beh) {
+    const auto& a = api();
+    Il2CppClass* k = beh && a.il2cpp_object_get_class ? a.il2cpp_object_get_class(beh) : nullptr;
+    if (!k) return "?";
+    const char* cname = a.il2cpp_class_get_name ? a.il2cpp_class_get_name(k) : nullptr;
+    const std::string name = cname ? cname : "?";
+    auto it = stateStr.find(k);
+    if (it == stateStr.end()) {
+        std::string err;
+        const MethodInfo* m = nullptr;
+        for (Il2CppClass* c = k; c && !m; c = a.il2cpp_class_get_parent ? a.il2cpp_class_get_parent(c) : nullptr)
+            m = Resolver::Get().Method(c, "GetProgramStateStr", 0, &err);
+        it = stateStr.emplace(k, m).first;
+    }
+    bool ok = false;
+    Il2CppObject* r = it->second ? Call(it->second, beh, {}, "GetProgramStateStr", &ok) : nullptr;
+    const std::string st = ok && r ? unity::ToUtf8(reinterpret_cast<Il2CppString*>(r)) : std::string();
+    return st.empty() ? name : std::format("{} ({})", name, st);
+}
+
 void Impl::Rotate(int64_t id, Entry& e, uint64_t now) {
     if (e.progs.size() < 2 || !e.model) return;
     Il2CppObject* drone = drones::DroneOf(e.model);
     if (!drone || !IsA(drone, droneClass)) return;  // not loaded / not seen yet
+    if (e.lastCargo < e.lastSwitch) e.lastCargo = e.lastSwitch;
     bool ok = false;
     const float energy = Unbox<float>(Call(droneEnergy, drone, {}, "RanchDrone.GetCurrentEnergy", &ok));
     if (!ok) {
@@ -340,6 +377,7 @@ void Impl::Rotate(int64_t id, Entry& e, uint64_t now) {
     }
     if (energy <= 0.0f) {  // resting for lack of battery: every program would be "idle"
         e.idleTicks = 0;
+        e.lastCargo = now;
         return;
     }
     Il2CppObject* ammo = unity::Field<Il2CppObject*>(drone, offAmmo);
@@ -348,22 +386,41 @@ void Impl::Rotate(int64_t id, Entry& e, uint64_t now) {
         e.cargo = true;
         e.idleTicks = 0;
         e.idleRound = 0;
+        e.lastCargo = now;
         return;
     }
     const bool delivered = e.cargo;
     e.cargo = false;
     Il2CppObject* plexer = unity::Field<Il2CppObject*>(drone, offPlexer);
     Il2CppObject* beh = plexer ? unity::Field<Il2CppObject*>(plexer, offCurrBehaviour) : nullptr;
-    const bool resting = beh && (IsA(beh, restClass) || IsA(beh, idleClass));
-    e.idleTicks = resting ? e.idleTicks + 1 : 0;
+    const bool flourish = beh && IsA(beh, idleClass);  // the at-station animation: picked before any work
+    bool resting = beh && IsA(beh, restClass);
+    if (resting && unity::Field<Il2CppObject*>(plexer, offProgramPlexer)) {
+        // Resting, but does the game see something to gather for this program? (No program plexer: the
+        // task is not valid for the drone, nothing to do.)
+        const bool work =
+            Unbox<bool>(Call(maybeHasGather, plexer, {}, "DroneBehaviorPlexer.MaybeHasNextGatherBehavior", &ok));
+        if (!ok) return;
+        resting = !work;
+    }
+    if (resting) ++e.idleTicks;
+    else if (!flourish) e.idleTicks = 0;
     const uint64_t since = now - e.lastSwitch;
     const int n = static_cast<int>(e.progs.size());
     const char* why = nullptr;
+    std::string stuck;
     if (e.mode == Mode::kAfterDelivery && delivered && since >= kMinRunMs) why = "after a delivery";
     else if (e.idleTicks >= kIdleTicks && since >= (e.idleRound >= n ? kAllIdleWaitMs : kMinRunMs)) why = "nothing to do";
+    else if (beh && !resting && !flourish && now - e.lastCargo >= kStuckMs) {
+        why = "found nothing it could pick up";
+        stuck = BehaviourInfo(beh);
+    }
     if (!why) return;
     const int next = NextValid(e);
-    if (next == e.active) return;
+    if (next == e.active) {
+        e.lastCargo = now;  // nothing else to run: look again in kStuckMs
+        return;
+    }
     const int from = e.active;
     if (!drones::AssignProgram(e.model, e.progs[next], nullptr)) return;
     {
@@ -371,8 +428,15 @@ void Impl::Rotate(int64_t id, Entry& e, uint64_t now) {
         e.active = next;
     }
     e.lastSwitch = now;
+    e.lastCargo = now;
     e.idleTicks = 0;
     e.idleRound = delivered ? 0 : e.idleRound + 1;
+    if (!stuck.empty()) {  // always logged: it explains a program that never gets anything done
+        SR2_INFO("[{}] drone programs: station {}: program {} ({}) held no cargo for {} s while working, the drone was "
+                 "{} - program {} runs",
+                 module, id, from + 1, Describe(e.progs[from]), kStuckMs / 1000, stuck, next + 1);
+        return;
+    }
     if (now - e.lastLog >= kLogEveryMs || e.lastLog == 0) {
         SR2_INFO("[{}] drone programs: station {}: program {} -> {} ({}){}", module, id, from + 1, next + 1, why,
                  e.unlogged ? std::format(" [+{} switch(es) not logged]", e.unlogged) : std::string());
@@ -572,7 +636,9 @@ bool Rotation::Setup(Resolver& R, const char* module, std::string& why) {
     off(p->droneClass, "_plexer", p->offPlexer);
     off(p->droneClass, "_ammo", p->offAmmo);
     off(plexer, "_currBehaviour", p->offCurrBehaviour);
+    off(plexer, "_programPlexer", p->offProgramPlexer);
     p->ammoIsEmpty = method(ammo, "IsEmpty", 0);
+    p->maybeHasGather = method(plexer, "MaybeHasNextGatherBehavior", 0);
     p->droneEnergy = method(p->droneClass, "GetCurrentEnergy", 0);
     if (!why.empty()) {
         delete p;
