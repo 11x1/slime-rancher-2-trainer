@@ -55,6 +55,7 @@ struct Item {
     std::string family2;    // largo: its other base slime (sort key within the family)
     uintptr_t base = 0, base2 = 0;  // largo: its two base slimes (SlimeDefinition.BaseSlimes, ids as above)
     std::string area;       // crate: the zone it spawns in (ZoneDefinition._crates; its localized name)
+    bool mod = false;       // added by the mod (custom_upgrades' Slime Radio): spawned through buildables::Grant; [M] badge
 };
 
 // How items relate through slime diets (SlimeDefinition.Diet), by item id. Ids
@@ -113,8 +114,14 @@ struct Recipe {
     bool unlocked = false;  // GadgetDirector.HasBlueprint (materials: always true)
     int owned = 0;          // GadgetDirector.GetItemCount (gadget inventory; the refinery for materials)
     int perCraft = 1;       // 2 for gadgets the fabricator makes in pairs (GadgetDefinition.BuyInPairs)
-    Kind kind = Kind::Gadget;  // materials: their item kind
+    Kind kind = Kind::Gadget;  // materials: their item kind; the mod's Slime Radio: Toy
     std::vector<Variant> variants;  // the gadget's variants (game's first, then the mod's), for the right-click menu
+    // A mod buildable's own tile (custom_upgrades: Quantum Storage Link, DJ Booth, DJ Speaker, Slime Radio): in its
+    // base gadget's category right after it (`order` = the base's, `modRank` 1.. in the Fabricator's order), unlocked =
+    // its Fabricator card, owned = its kits (radio: radios in the save). Op::Craft goes to buildables::Grant; it is
+    // in no blueprint tab (the Upgrades & Blueprints card has its own Mod buildables tab).
+    bool mod = false;
+    int modRank = 0;
 };
 
 struct Snapshot {
@@ -156,7 +163,7 @@ enum class Op {
     InfiniteEnergy,  // value = 0 / 1
     SetSlotCount,    // slot, value = new count (0 empties the slot)
     PutItem,         // slot, item, value = count (replaces what the slot holds)
-    Spawn,           // item (from spawnables), value = how many (at most 60); placed in front of the player
+    Spawn,           // item (from spawnables), value = how many (at most 60; the mod's Slime Radio at most 5); placed in front of the player
     Craft,           // item (a recipe id), value = how many crafts; added to the gadget inventory at no cost
     MoveSlot,        // slot = from, value = to: moves the contents (merges into the same item, else swaps)
     UnlockSlot,      // slot: applies the vacpack upgrade levels that unlock it

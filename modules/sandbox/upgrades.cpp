@@ -42,6 +42,7 @@
 #include "core/unity.h"
 #include "modules/custom_upgrades/api.h"
 #include "modules/custom_upgrades/buildables.h"
+#include "modules/sandbox/prefab_icons.h"
 #include "ui/item_icons.h"
 #include "ui/sandbox_bridge.h"
 #include "ui/sandbox_upgrades_bridge.h"
@@ -347,7 +348,8 @@ void PublishMods(ub::State& st) {
         m.name = i.name;
         m.base = i.base;
         m.hint = i.hint;
-        if (i.icon && unity::IsAlive(i.icon)) m.icon = sr2::ui::item_icons::Register(i.icon);
+        m.icon = ModIcon(i.id);  // rendered from the dressed prefab (module.cpp RenderNextModIcon), else the base icon
+        if (!m.icon && i.icon && unity::IsAlive(i.icon)) m.icon = sr2::ui::item_icons::Register(i.icon);
         m.unlocked = i.unlocked;
         m.baseUnlocked = i.baseUnlocked;
         m.mode = static_cast<int>(i.unlock);

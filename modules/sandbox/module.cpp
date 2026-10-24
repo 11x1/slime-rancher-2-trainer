@@ -82,6 +82,7 @@ constexpr unsigned long long kRecipeStateMs = 2000;  // blueprint / owned counts
 constexpr int kMaxSpawn = 20;   // per click
 constexpr int kMaxDrop = 60;    // "Put in slots": most items dropped in front of the player per item
 constexpr int kMaxCraft = 99;   // per click
+constexpr int kMaxRadio = 5;    // Slime Radios per request (custom_upgrades buildables::Grant spawns at most 5)
 constexpr float kSpawnDist = 2.5f;  // metres in front of the camera
 constexpr int kFabricatorKey = 'G';  // in the open Fabricator: add the selected recipe's missing materials
 constexpr const char* FabricatorKeyName() { return "G"; }
@@ -348,8 +349,17 @@ private:
     int DoSpawn(const Ctx& c, uintptr_t item, int64_t count, int limit = kMaxSpawn);
     void DoStow(const Ctx& c, int sel, uintptr_t item, int64_t amount, bool replace);
     void DoCraft(uintptr_t item, int64_t count);
-    bool DoCraftMod(uintptr_t item, int64_t count);              // a mod buildable from the variant menu
-    bool MergeModVariants(std::vector<bridge::Recipe>& list);   // custom_upgrades' buildables as variants
+    // custom_upgrades' buildables (buildables.h): variants in the menu, tiles of their own, the Slime Radio in the
+    // spawn list, their icons rendered from the dressed prefabs.
+    using ModList = std::vector<sr2::modules::custom_upgrades::buildables::Info>;
+    bool DoCraftMod(uintptr_t item, int64_t count);              // a mod buildable (tile or variant menu)
+    bool DoSpawnMod(uintptr_t item, int64_t count);              // the Slime Radio from the spawner
+    bool MergeModVariants(std::vector<bridge::Recipe>& list, const ModList& mods);
+    bool MergeModRecipes(std::vector<bridge::Recipe>& list, const ModList& mods);
+    void MergeModSpawnables(const ModList& mods);
+    uint32_t ModIconFor(const sr2::modules::custom_upgrades::buildables::Info& i);
+    bool RenderNextModIcon();
+    Il2CppObject* GadgetPrefab(const char* prefabName);
     void DoAddMaterial(uintptr_t item, int64_t count);
     void DoMoveSlot(const Ctx& c, int from, int to);
     void DoUnlockSlot(const Ctx& c, int idx);
@@ -397,6 +407,8 @@ private:
     std::unordered_map<uintptr_t, CatalogEntry> renderTypes_;  // queued types, kept alive
     int rendered_ = 0, renderFailed_ = 0;
     unsigned long long renderMs_ = 0;
+    std::unordered_set<std::string> modIconTried_;  // mod buildables whose icon render was tried (once per session)
+    std::unordered_map<uintptr_t, std::pair<std::string, std::vector<bridge::CostLine>>> modCosts_;  // per mod definition
     // The game's HUD notices for spawns, crafts and refinery adds (custom_upgrades/sale_notify.h).
     sr2::modules::custom_upgrades::ui::SaleNotices notices_;
     std::vector<NoticeLine> batchNotices_;  // collected for the notices of a multi-item request
@@ -2162,10 +2174,13 @@ bool Sandbox::EnsureRecipes() {
 void Sandbox::RefreshRecipeState() {
     Il2CppObject* dir = GadgetDirector();
     if (!dir) return;
+    const ModList mods = sr2::modules::custom_upgrades::buildables::List();
+    MergeModSpawnables(mods);
     if (recipes_ && !recipes_->empty()) {
         auto next = std::make_shared<std::vector<bridge::Recipe>>(*recipes_);
         bool changed = false;
         for (bridge::Recipe& r : *next) {
+            if (r.mod) continue;  // MergeModRecipes below
             Il2CppObject* d = Lookup(recipeById_, r.id, gadgetDefClass_);
             if (!d) continue;
             bool unlocked = false;
@@ -2184,7 +2199,8 @@ void Sandbox::RefreshRecipeState() {
                 v.unlocked = vu;
             }
         }
-        changed = MergeModVariants(*next) || changed;
+        changed = MergeModVariants(*next, mods) || changed;
+        changed = MergeModRecipes(*next, mods) || changed;
         if (changed) recipes_ = std::move(next);
     }
     if (materials_ && !materials_->empty()) {
@@ -2207,22 +2223,22 @@ void Sandbox::RefreshRecipeState() {
 // (opaque; DoCraftMod matches it against List() again and grants through buildables::Grant, never AddItem).
 // The Slime Radio is a toy of its own, not a variant. Empty while custom upgrades are off or the buildables
 // are not built yet (a moment after a save is loaded). True if anything changed.
-bool Sandbox::MergeModVariants(std::vector<bridge::Recipe>& list) {
+bool Sandbox::MergeModVariants(std::vector<bridge::Recipe>& list, const ModList& modList) {
     namespace bld = sr2::modules::custom_upgrades::buildables;
     std::unordered_map<uintptr_t, std::vector<bridge::Variant>> mods;
-    for (const bld::Info& i : bld::List()) {
+    for (const bld::Info& i : modList) {
         if (!i.def || !i.baseDef || i.id == bld::kSlimeRadio) continue;
         bridge::Variant v;
         v.id = reinterpret_cast<uintptr_t>(i.def);
         v.name = i.name;
-        v.icon = ItemIcon(i.def);
-        if (!v.icon && i.icon && unity::IsAlive(i.icon)) v.icon = sr2::ui::item_icons::Register(i.icon);
+        v.icon = ModIconFor(i);
         v.unlocked = i.unlocked;
         v.mod = true;
         mods[reinterpret_cast<uintptr_t>(i.baseDef)].push_back(std::move(v));
     }
     bool changed = false;
     for (bridge::Recipe& r : list) {
+        if (r.mod) continue;
         const auto it = mods.find(r.id);
         std::vector<bridge::Variant> want;
         for (const bridge::Variant& v : r.variants)
@@ -2239,15 +2255,237 @@ bool Sandbox::MergeModVariants(std::vector<bridge::Recipe>& list) {
     return changed;
 }
 
-// A mod buildable picked in the crafter's variant menu (`item` is its definition, see MergeModVariants): given
-// through buildables::Grant (the vanilla base gadget into the inventory plus a kit in the mod's sidecar, as
-// fabricating it does). False if `item` is not one of them (then it is an ordinary recipe).
+// The mod buildables as tiles of their own (`list` is a copy of the recipes): each in its base gadget's
+// Fabricator category right after it (Recipe::order = the base's, modRank = its place in buildables::List,
+// which is the Fabricator's order: Quantum Storage Link after the Refinery Link, DJ Booth after the
+// Scientist Desk, DJ Speaker and Slime Radio after the Boombox). Locked = its Fabricator card is locked,
+// owned = its kits (radio: radios in the save). Their id is the definition, as for the variants: crafting
+// goes to DoCraftMod. Gone while custom upgrades are off. True if anything changed.
+bool Sandbox::MergeModRecipes(std::vector<bridge::Recipe>& list, const ModList& mods) {
+    std::vector<bridge::Recipe> want;
+    int rank = 0;
+    for (const auto& i : mods) {
+        ++rank;
+        if (!i.def || !unity::IsAlive(i.def)) continue;
+        const bridge::Recipe* base = nullptr;
+        for (const bridge::Recipe& r : list)
+            if (!r.mod && r.id == reinterpret_cast<uintptr_t>(i.baseDef)) base = &r;
+        bridge::Recipe r;
+        r.id = reinterpret_cast<uintptr_t>(i.def);
+        r.name = i.name;
+        r.icon = ModIconFor(i);
+        if (base) r.category = base->category, r.order = base->order;
+        else if (!want.empty()) r.category = want.back().category, r.order = want.back().order;  // after the one before
+        r.modRank = rank;
+        auto cost = modCosts_.find(r.id);
+        if (cost == modCosts_.end()) {
+            std::vector<bridge::CostLine> lines;
+            std::string text = RecipeCost(i.def, &lines);
+            cost = modCosts_.emplace(r.id, std::make_pair(std::move(text), std::move(lines))).first;
+        }
+        r.cost = cost->second.first;
+        r.costs = cost->second.second;
+        r.unlocked = i.unlocked;
+        r.owned = i.owned;
+        r.kind = i.id == sr2::modules::custom_upgrades::buildables::kSlimeRadio ? bridge::Kind::Toy : bridge::Kind::Gadget;
+        r.mod = true;
+        want.push_back(std::move(r));
+    }
+    std::vector<const bridge::Recipe*> have;
+    for (const bridge::Recipe& r : list)
+        if (r.mod) have.push_back(&r);
+    bool same = have.size() == want.size();
+    for (size_t k = 0; same && k < want.size(); ++k) {
+        const bridge::Recipe &a = *have[k], &b = want[k];
+        same = a.id == b.id && a.name == b.name && a.icon == b.icon && a.category == b.category && a.order == b.order &&
+               a.unlocked == b.unlocked && a.owned == b.owned && a.cost == b.cost;
+    }
+    if (same) return false;
+    if (have.size() != want.size()) {
+        std::string names;
+        for (const bridge::Recipe& r : want)
+            names += std::format("{}{} (category {}, after position {})", names.empty() ? "" : ", ", r.name, r.category, r.order);
+        SR2_INFO("[{}] crafter: {} mod buildable tile(s){}{}", kModule, want.size(), want.empty() ? "" : ": ", names);
+    }
+    list.erase(std::remove_if(list.begin(), list.end(), [](const bridge::Recipe& r) { return r.mod; }), list.end());
+    list.insert(list.end(), want.begin(), want.end());
+    return true;
+}
+
+// The Slime Radio (a toy, buildables.h) in the spawn list while it is available, sorted in by name.
+void Sandbox::MergeModSpawnables(const ModList& mods) {
+    namespace bld = sr2::modules::custom_upgrades::buildables;
+    if (!spawnables_) return;
+    std::vector<bridge::Item> want;
+    for (const auto& i : mods) {
+        if (i.id != bld::kSlimeRadio || !i.def || !unity::IsAlive(i.def)) continue;
+        bridge::Item it;
+        it.id = reinterpret_cast<uintptr_t>(i.def);
+        it.name = i.name;
+        it.icon = ModIconFor(i);
+        it.kind = bridge::Kind::Toy;
+        it.mod = true;
+        want.push_back(std::move(it));
+    }
+    std::vector<const bridge::Item*> have;
+    for (const bridge::Item& it : *spawnables_)
+        if (it.mod) have.push_back(&it);
+    bool same = have.size() == want.size();
+    for (size_t k = 0; same && k < want.size(); ++k)
+        same = have[k]->id == want[k].id && have[k]->name == want[k].name && have[k]->icon == want[k].icon;
+    if (same) return;
+    auto next = std::make_shared<std::vector<bridge::Item>>();
+    for (const bridge::Item& it : *spawnables_)
+        if (!it.mod) next->push_back(it);
+    for (bridge::Item& it : want) {
+        const auto at = std::lower_bound(next->begin(), next->end(), it.name,
+                                         [](const bridge::Item& x, const std::string& n) { return x.name < n; });
+        next->insert(at, std::move(it));
+    }
+    if (have.size() != want.size())
+        SR2_INFO("[{}] spawn list: {} mod item(s) {}", kModule, want.size() ? want.size() : have.size(),
+                 want.size() ? "added (Slime Radio, spawned through custom upgrades)" : "removed (custom upgrades off or not set up)");
+    spawnables_ = std::move(next);
+}
+
+// A mod buildable's icon: rendered from its dressed prefab (RenderNextModIcon), else its definition's (the
+// vanilla base gadget's) icon.
+uint32_t Sandbox::ModIconFor(const sr2::modules::custom_upgrades::buildables::Info& i) {
+    if (const uint32_t r = sandbox::ModIcon(i.id)) return r;
+    uint32_t icon = ItemIcon(i.def);
+    if (!icon && i.icon && unity::IsAlive(i.icon)) icon = sr2::ui::item_icons::Register(i.icon);
+    return icon;
+}
+
+// A gadget's prefab by its asset name (the crafter's gadgets, or the mod buildables' base gadgets); nullptr if
+// none of them has it.
+Il2CppObject* Sandbox::GadgetPrefab(const char* prefabName) {
+    static std::unordered_map<std::string, Il2CppObject*> found;  // main thread only; checked alive on use
+    if (const auto it = found.find(prefabName); it != found.end() && unity::IsAlive(it->second)) return it->second;
+    if (!offIdentPrefab_) return nullptr;
+    for (const auto& [id, e] : recipeById_) {
+        Il2CppObject* d = unity::GCHandleTarget(e.handle);
+        if (!d || d != e.obj || !unity::IsAlive(d)) continue;
+        Il2CppObject* p = unity::Field<Il2CppObject*>(d, offIdentPrefab_);
+        if (p && unity::IsAlive(p) && unity::GetName(p) == prefabName) return found[prefabName] = p;
+    }
+    return nullptr;
+}
+
+// The mod buildables' icons, rendered from the game prefabs they are made of and dressed as custom_upgrades
+// dresses them when placed (dj_buildables.cpp Build, quantum_link.cpp tint; prefab_icons.h RenderPieces):
+//   Quantum Storage Link = the Refinery Link, colours shifted to the link's purple;
+//   DJ Booth = the Scientist Desk without its lab clutter, a small boombox on it (the mixer), two big ones
+//   beside it (the speakers) and the flower pillow behind it;
+//   DJ Speaker = the Boombox with its boombox leaning back 30 degrees at 1.25x (the tilted kind);
+//   Slime Radio = the boombox model alone (the toy shows a small boombox).
+// One per refresh, each tried once per session; a failure keeps the base gadget's icon (logged).
+bool Sandbox::RenderNextModIcon() {
+    namespace bld = sr2::modules::custom_upgrades::buildables;
+    if (modIconTried_.size() >= 4 || !recipes_ || recipes_->empty()) return false;
+    const ModList mods = bld::List();
+    const bld::Info* next = nullptr;
+    for (const bld::Info& i : mods)
+        if (!next && !modIconTried_.count(i.id)) next = &i;
+    if (!next) return false;
+    modIconTried_.insert(next->id);
+    const bld::Info& i = *next;
+    if (!prefabIcons_.Ready()) {
+        SR2_INFO("[{}] mod icon: {} not rendered (no prefab renderer): the {}'s icon is used", kModule, i.name, i.base);
+        return true;
+    }
+    using Piece = sandbox::PrefabIcons::Piece;
+    auto prefabOf = [&](Il2CppObject* def) -> Il2CppObject* {
+        if (!def || !unity::IsAlive(def) || !offIdentPrefab_) return nullptr;
+        Il2CppObject* p = unity::Field<Il2CppObject*>(def, offIdentPrefab_);
+        return p && unity::IsAlive(p) ? p : nullptr;
+    };
+    Il2CppObject* basePrefab = prefabOf(i.baseDef);
+    Il2CppObject* boombox = GadgetPrefab("decorBoombox");
+    std::vector<Piece> pieces;
+    const float* tint = nullptr;
+    static constexpr float kPurple[3] = {0.50f, 0.20f, 1.00f};  // quantum_link.cpp kPurple
+    std::string what;
+    auto boomboxPiece = [&](float x, float y, float z, float yaw, float scale) {
+        Piece p;
+        p.prefab = boombox;
+        p.sub = "model_boombox";
+        p.pos[0] = x, p.pos[1] = y, p.pos[2] = z;
+        p.yaw = yaw;
+        p.scale = scale;
+        pieces.push_back(std::move(p));
+    };
+    if (i.id == bld::kQuantumLink && basePrefab) {
+        Piece p;
+        p.prefab = basePrefab;
+        pieces.push_back(std::move(p));
+        tint = kPurple;
+        what = std::format("'{}' in quantum purple", unity::GetName(basePrefab));
+    } else if (i.id == bld::kDjBooth && basePrefab && boombox) {
+        Piece desk;
+        desk.prefab = basePrefab;
+        desk.skip = {"scientistDesk_bubbleScroll", "scientistDesk_glass", "scientistDesk_glass_LOD01", "vials", "vials_LOD01",
+                     "decoLabBeaker01", "decoLabClipboard", "decoLabWrenchMonkey03_0", "pens"};
+        pieces.push_back(std::move(desk));
+        boomboxPiece(0.0f, 1.22f, 0.05f, 180.0f, 0.5f);  // the mixer
+        for (float side : {-1.0f, 1.0f}) boomboxPiece(side * 1.75f, 0.0f, 0.1f, -side * 12.0f, 1.35f);
+        Il2CppObject* pillow = GadgetPrefab("decorFlowerPillowSmall");
+        if (pillow) {
+            Piece p;
+            p.prefab = pillow;
+            p.sub = "mesh";
+            p.pos[2] = -1.55f;
+            pieces.push_back(std::move(p));
+        }
+        what = std::format("desk without its lab clutter, mixer, 2 speakers, {}", pillow ? "flower pillow" : "no pillow (prefab not found)");
+    } else if (i.id == bld::kDjSpeaker && boombox) {
+        Piece stand;
+        stand.prefab = boombox;
+        stand.skip = {"model_boombox"};
+        pieces.push_back(std::move(stand));
+        Piece box;
+        box.prefab = boombox;
+        box.sub = "model_boombox";
+        box.keepPlace = true;
+        box.tilt = 30.0f;
+        box.scale = 1.25f;
+        pieces.push_back(std::move(box));
+        what = "boombox leaning back 30 degrees, 1.25x";
+    } else if (i.id == bld::kSlimeRadio && boombox) {
+        boomboxPiece(0, 0, 0, 0, 1.0f);
+        what = "the boombox model";
+    }
+    if (pieces.empty()) {
+        SR2_INFO("[{}] mod icon: {} not rendered (prefab not found:{}{}): the {}'s icon is used", kModule, i.name,
+                 basePrefab ? "" : " the base gadget's", boombox ? "" : " decorBoombox", i.base);
+        return true;
+    }
+    const unsigned long long t0 = GetTickCount64();
+    std::string why;
+    int parts = 0;
+    Il2CppObject* spr = prefabIcons_.RenderPieces(pieces, tint, why, &parts);
+    const uint32_t icon = spr ? SpriteIcon(spr) : 0;
+    if (icon) {
+        sandbox::SetModIcon(i.id, icon);
+        lastRecipeState_ = 0;  // into the crafter / spawner lists at the next refresh
+        SR2_INFO("[{}] mod icon: {} rendered ({}; {} mesh(es), {} ms)", kModule, i.name, what, parts, GetTickCount64() - t0);
+    } else {
+        SR2_INFO("[{}] mod icon: {} not rendered ({}): the {}'s icon is used", kModule, i.name, why.empty() ? "no sprite" : why,
+                 i.base);
+    }
+    return true;
+}
+
+// A mod buildable crafted from its tile or the variant menu (`item` is its definition, see MergeModRecipes /
+// MergeModVariants): given through buildables::Grant (the vanilla base gadget into the inventory plus a kit in
+// the mod's sidecar, as fabricating it does; the Slime Radio: spawned in front of you, at most 5 at a time).
+// False if `item` is not one of them (then it is an ordinary recipe).
 bool Sandbox::DoCraftMod(uintptr_t item, int64_t count) {
     namespace bld = sr2::modules::custom_upgrades::buildables;
     if (!item || !custom_upgrades::IsModGadget(reinterpret_cast<Il2CppObject*>(item))) return false;
     for (const bld::Info& i : bld::List()) {
         if (reinterpret_cast<uintptr_t>(i.def) != item) continue;
-        const int n = static_cast<int>(std::clamp<int64_t>(count, 1, kMaxCraft));
+        const int n = static_cast<int>(std::clamp<int64_t>(count, 1, i.id == bld::kSlimeRadio ? kMaxRadio : kMaxCraft));
         std::string result;
         if (bld::Grant(i.id, n, result))
             Notify(i.def, NoticeKind::Craft, n, i.name, std::format("Crafted {} x {} for free: {}", n, i.name, result));
@@ -2256,6 +2494,28 @@ bool Sandbox::DoCraftMod(uintptr_t item, int64_t count) {
         return true;
     }
     Done(false, "Not crafted: that mod buildable is not available right now (custom upgrades off, or no save loaded)");
+    return true;
+}
+
+// The Slime Radio from the spawner (`item` is its definition, see MergeModSpawnables): spawned by
+// buildables::Grant (a Night Light toy dressed as a radio, listed in the mod's sidecar), at most 5 at a time,
+// beside each other in front of you. False if `item` is not a mod item (an ordinary spawn).
+bool Sandbox::DoSpawnMod(uintptr_t item, int64_t count) {
+    namespace bld = sr2::modules::custom_upgrades::buildables;
+    if (!item || !custom_upgrades::IsModGadget(reinterpret_cast<Il2CppObject*>(item))) return false;
+    for (const bld::Info& i : bld::List()) {
+        if (reinterpret_cast<uintptr_t>(i.def) != item) continue;
+        const int n = static_cast<int>(std::clamp<int64_t>(count, 1, kMaxRadio));
+        std::string result;
+        if (bld::Grant(i.id, n, result))
+            Notify(i.def, NoticeKind::Spawn, n, i.name,
+                   std::format("Spawned {} x {}: {}{}", n, i.name, result,
+                               count > n ? std::format(" ({} asked, at most {} at a time)", count, kMaxRadio) : std::string()));
+        else
+            Done(false, std::format("{} not spawned: {}", i.name, result));
+        return true;
+    }
+    Done(false, "Not spawned: that mod item is not available right now (custom upgrades off, or no save loaded)");
     return true;
 }
 
@@ -2384,12 +2644,13 @@ void Sandbox::Refresh() {
         if (!built && spawnables_ && !crateAreasBuilt_) EnsureCrateAreas(), built = true;
         if (!built && recipes_) built = EnsurePinnedIcon();
         if (!built) built = RenderNextIcon();
-        s.catalog = catalog_;  // icons rendered into the lists
-        s.spawnables = spawnables_;
+        if (!built) built = RenderNextModIcon();
         if ((recipes_ || materials_) && s.tick - lastRecipeState_ >= kRecipeStateMs) {
             lastRecipeState_ = s.tick;
             RefreshRecipeState();
         }
+        s.catalog = catalog_;  // icons rendered into the lists, the mod's items merged in
+        s.spawnables = spawnables_;
         s.recipes = recipes_;
         s.recipeCategories = recipeCats_;
         s.recipeCategoryIcons = recipeCatIcons_;
@@ -2596,7 +2857,9 @@ void Sandbox::Handle(const bridge::Action& a) {
         }
         case bridge::Op::SetSlotCount: DoSlotCount(c, a.slot, a.value); break;
         case bridge::Op::PutItem: DoPutItem(c, a.slot, a.item, a.value); break;
-        case bridge::Op::Spawn: DoSpawn(c, a.item, a.value, kMaxDrop); break;
+        case bridge::Op::Spawn:
+            if (!DoSpawnMod(a.item, a.value)) DoSpawn(c, a.item, a.value, kMaxDrop);
+            break;
         case bridge::Op::StowItem: DoStow(c, a.slot, a.item, a.value, a.replace); break;
         case bridge::Op::Craft:
             if (!DoCraftMod(a.item, a.value)) DoCraft(a.item, a.value);

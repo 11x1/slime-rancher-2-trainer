@@ -321,7 +321,8 @@ of it is offered. Slime DJ plays the song through `slime_dj/api.h` emitters.
 - **Sandbox**: our clones (and the Quantum Storage Link) are left out of the Sandbox crafter / blueprint manager
   (`custom_upgrades::IsModGadget` in `Sandbox::Saveable`): crafting one there would put our definition into the
   saved inventory next to its vanilla twin (`GadgetsModel.Pull` -> duplicate persistence id -> the save fails). The
-  Sandbox spawner can spawn Night Lights, but they are not radios.
+  Sandbox spawner can spawn Night Lights, but they are not radios. (Since round 9 the Sandbox lists them through
+  `buildables.h` and gives them with `Grant`, see "Mod buildables" below.)
 
 Not checked in game yet: the three cards (position, names, cost, icons = the vanilla ones), fabricating (kits log),
 the variants while holding a Scientist Desk / Boombox (names, gradients), placing / picking up / toggling (logs),
@@ -371,7 +372,9 @@ Round 7: "no DJ booth in fabricator", "cant unlock the booth / speakers", "Slime
   without the cost; radio: n spawned toys, at most 5 per call), `SetUnlock(id, Unlock, result)` (sidecar override,
   `kFollowBase` clears it). Ids `quantum_link`, `dj_booth`, `dj_speaker`, `slime_radio`. Never `AddItem` /
   `AddBlueprint` our definitions (the save would get a duplicate / unknown persistence id).
-- **Sandbox**: the Upgrades & Blueprints card has a "Mod buildables" tab (`modules/sandbox/NOTES.md`).
+- **Sandbox**: the Upgrades & Blueprints card has a "Mod buildables" tab; since round 9 the four are also tiles of
+  their own in the Sandbox crafter (after their base gadget) and the Slime Radio is in the spawner, all given through
+  `Grant`, with icons rendered from the dressed prefabs and an [M] badge (`modules/sandbox/NOTES.md`, "Mod buildables").
 
 Not checked in game yet: the four cards appearing (position, locked look with name / icon, the hint in the details
 panel), unlocking with the base blueprint (buy / find a Boombox blueprint), the Sandbox override, the page count of

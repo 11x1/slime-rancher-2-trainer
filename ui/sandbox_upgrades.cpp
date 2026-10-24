@@ -334,7 +334,7 @@ void BlueprintTab(const Helpers& h, const sbx::Snapshot& s, int cat, const std::
     std::vector<const sbx::Recipe*> list;
     if (s.recipes)
         for (const sbx::Recipe& r : *s.recipes)
-            if (r.category == cat) list.push_back(&r);
+            if (r.category == cat && !r.mod) list.push_back(&r);  // the mod's buildables: the Mod buildables tab
     std::vector<item_grid::Tile> tiles;
     std::vector<uintptr_t> locked, unlocked;
     tiles.reserve(list.size());
@@ -448,6 +448,7 @@ void ModTab(const Helpers& h, const ub::State& st) {
         t.dimmed = !on;
         t.accent = on ? theme::Colors().ok : 0;
         t.badge = m.owned > 0 ? m.owned : -1;
+        t.mod = true;
         tiles.push_back(t);
     }
     item_grid::Options o;
@@ -471,7 +472,7 @@ void ModTab(const Helpers& h, const ub::State& st) {
         const Palette& P = theme::Colors();
         Tip tip;
         tip.name = m.name;
-        tip.tag = "Mod";
+        tip.tag = "Added by the mod";
         tip.tagCol = h.gadgetAccent;
         tip.lines.push_back({ModState(m), ModUnlocked(m) ? P.ok : P.dim});
         tip.lines.push_back({m.hint, 0});
