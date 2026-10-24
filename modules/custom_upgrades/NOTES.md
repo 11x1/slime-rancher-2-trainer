@@ -49,9 +49,19 @@ findings from in-game tests that are easy to get wrong again.
   count. Sidecar `hen_collector_keep_hens` / `hen_collector_keep_roosters`; an old
   `hen_collector_keep` n reads as min(2, n) roosters and the rest hens.
 - The coop menu shows two `PlotMenuSlider`s in one row (`SliderSpec.columns`, `Create(..., rowOf)`).
-  Keys: d-pad / left stick / arrows for hens (`SliderInput::kPrimary`), right stick / Shift +
-  arrows for roosters (`kSecondary`). The grid navigation detour offers left / right to both;
-  each takes only its own (Shift held or not).
+- **Select to step** (feedback round 4: "only when selected should it be focused, right now arrow
+  buttons still navigate"). Nothing selected: the arrows / d-pad / stick navigate the menu as usual,
+  the sliders ignore them. A slider is selected by a mouse press on it (`Selectable.IsPressed`, polled)
+  or by Submit (Enter / pad A: the hens slider). The selected slider's label reads `< Keep hens: 18 >`;
+  left / right (arrows, d-pad, left stick, Shift or not) step it and no move reaches the menu; up / down
+  switch the selection to the other slider. Released by Submit again, Cancel (Esc / B: the menu stays
+  open), a mouse press anywhere else (judged two frames later, EventSystem order), or, when it was
+  selected with the mouse, the mouse leaving it (not while the button is held). A press on one slider
+  releases the other. Hooks: `ListUI.Submit(InputEventData)` (0x83F450, the list menus' submit listener;
+  the owned Hen Collector card's OnAction does nothing anyway) and `BaseUI.OnCancelPressed` (0x683490,
+  `if (CanClose()) Close()`), both shared bodies with one flag check; up / down / left / right through
+  the `TryHandleAsNavigation` detour below. Without the two hooks: the old always-on keys (d-pad / left
+  stick / arrows for hens, right stick / Shift + arrows for roosters).
 
 ### Activate button (checklist hc3)
 
