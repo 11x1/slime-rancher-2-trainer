@@ -19,6 +19,12 @@
 //   * ignore_slope: inside UpdateFootprint the metadata's two slope thresholds are set to 0
 //     (anything up to a vertical wall) and restored right after the call; IsCompletelyGrounded
 //     returns true while UpdateFootprint runs.
+//   * allow_upside_down (under ignore_slope): the thresholds become -90 (any normal) and a hit
+//     normal of exactly (0,-1,0) is nudged by one float step (RaycastHit.get_normal, scoped) so the
+//     footprint's strict "normal.y > -1" passes. The game's own footprint rotation,
+//     LookRotation(toward the player projected onto the surface, normal), already puts the
+//     gadget's up along the normal, and the placed gadget takes the placeholder's rotation.
+//   * Teleporter gadgets (GadgetTeleporterNode in the prefab) keep the vanilla slope limits.
 //   * ignore_collision: Gadget.IsOverlapping(float, LayerMask, bool) returns false while
 //     UpdateFootprint runs and the mask is the metadata's GadgetOverlapLayers (the placement
 //     overlap test; the placeholder-vs-player hiding test uses other layers).
@@ -42,6 +48,7 @@
 #include <format>
 #include <memory>
 #include <string>
+#include <unordered_map>
 
 #include "core/detour_guard.h"
 #include "core/il2cpp_api.h"
@@ -67,6 +74,7 @@ constexpr const char* kWorldNs = "MonomiPark.SlimeRancher.World";
 
 constexpr const char* kIgnoreCollision = "ignore_collision";
 constexpr const char* kIgnoreSlope = "ignore_slope";
+constexpr const char* kAllowUpsideDown = "allow_upside_down";
 constexpr const char* kIgnoreRange = "ignore_range";
 constexpr const char* kAllowAirborne = "allow_airborne";
 constexpr const char* kIgnoreZones = "ignore_zones";
@@ -76,7 +84,7 @@ constexpr auto kRepeatDelay = std::chrono::milliseconds(350);  // hold a rotate 
 constexpr auto kRepeatRate = std::chrono::milliseconds(120);   // then one step per this
 
 struct Cfg {
-    std::atomic<bool> collision{false}, slope{false}, range{false}, airborne{false}, zones{false};
+    std::atomic<bool> collision{false}, slope{false}, upside{false}, range{false}, airborne{false}, zones{false};
     std::atomic<int> step{0};
 };
 Cfg g_cfg;
@@ -107,9 +115,12 @@ public:
     size_t offMaxSlope = 0;      // GadgetItemMetadata.MaxValidPlacementSlope
     size_t offOverlapLayers = 0; // GadgetItemMetadata.GadgetOverlapLayers (LayerMask = int)
     size_t offBlocker = 0;       // PlayerItemController._gadgetModeBlocker
+    size_t offPrefab = 0;        // IdentifiableType.prefab (GadgetDefinition)
     Il2CppClass* itemClass = nullptr;
     Il2CppClass* metaClass = nullptr;
     Il2CppClass* controllerClass = nullptr;
+    Il2CppClass* teleporterClass = nullptr;      // GadgetTeleporterNode
+    const MethodInfo* compInChildren = nullptr;  // GameObject.GetComponentInChildren(Type, bool)
 
     using SetValidityFn = void (*)(Il2CppObject*, bool, const MethodInfo*);
     SetValidityFn setValidity = nullptr;
@@ -121,6 +132,9 @@ public:
     // UpdateFootprint state (main thread only).
     int depth = 0;                      // > 0 while the original UpdateFootprint runs
     int overlapMask = 0;                // metadata.GadgetOverlapLayers of the running call
+    bool slopeNow = false;              // ignore_slope applies to the running call
+    bool upsideNow = false;             // allow_upside_down applies to the running call
+    std::unordered_map<const void*, bool> teleporters;  // GadgetDefinition (identity only) -> is a teleporter
     bool lastCw = false, lastCcw = false;
     Clock::time_point nextRepeat{};
 
@@ -144,10 +158,37 @@ bool Active() { return g_self && g_self->Enabled(); }
 void LoadCfg() {
     g_cfg.collision.store(settings::GetBool(kModule, kIgnoreCollision));
     g_cfg.slope.store(settings::GetBool(kModule, kIgnoreSlope));
+    g_cfg.upside.store(settings::GetBool(kModule, kAllowUpsideDown));
     g_cfg.range.store(settings::GetBool(kModule, kIgnoreRange));
     g_cfg.airborne.store(settings::GetBool(kModule, kAllowAirborne));
     g_cfg.zones.store(settings::GetBool(kModule, kIgnoreZones));
     g_cfg.step.store(settings::GetInt(kModule, kRotationStep));
+}
+
+// Teleporter gadgets keep the vanilla slope limits: the arriving player gets the node's full
+// rotation (TeleportablePlayer.TeleportTo -> IPlayerController.set_Rotation ->
+// KinematicCharacterMotor.SetRotation), and KFCCharacterController.UpdateRotation keeps the
+// motor's up axis, so a tilted or upside-down teleporter would leave the player tilted.
+// One managed lookup per gadget definition, cached (main thread).
+bool IsTeleporter(FreePlacement& s, Il2CppObject* def) {
+    if (!def || !s.teleporterClass || !s.compInChildren) return false;
+    auto it = s.teleporters.find(def);
+    if (it != s.teleporters.end()) return it->second;
+    bool tp = false;
+    auto* prefab = unity::Field<Il2CppObject*>(def, s.offPrefab);
+    if (prefab && unity::IsAlive(prefab)) {
+        bool inactive = true;
+        void* args[2] = {unity::TypeOf(s.teleporterClass), &inactive};
+        std::string err;
+        Il2CppObject* c = sr2::il2cpp::Resolver::Get().Invoke(s.compInChildren, prefab, args, &err);
+        tp = c != nullptr && err.empty();
+        if (!err.empty()) SR2_WARN("[{}] teleporter check failed for '{}': {}", kModule, unity::GetName(def), err);
+    }
+    s.teleporters.emplace(def, tp);
+    if (tp)
+        SR2_INFO("[{}] '{}' is a teleporter: it keeps the vanilla slope limits (no walls, no upside-down)", kModule,
+                 unity::GetName(def));
+    return tp;
 }
 
 // ---------------------------------------------------------------- hooks --
@@ -158,6 +199,7 @@ sr2::core::DetourGuard g_overlapGuard{kModule, "Gadget.IsOverlapping"};
 sr2::core::DetourGuard g_linkGuard{kModule, "GadgetItem.IsInLinkedGadgetRange"};
 sr2::core::DetourGuard g_blockGuard{kModule, "PlayerItemController.BlockGadgetMode"};
 sr2::core::DetourGuard g_toggleGuard{kModule, "PlayerItemController.ToggleItem"};
+sr2::core::DetourGuard g_normalGuard{kModule, "RaycastHit.get_normal"};
 
 using FootFn = void (*)(Il2CppObject*, const MethodInfo*);
 using GroundFn = bool (*)(Il2CppObject*, float, float, const MethodInfo*);
@@ -171,6 +213,11 @@ OverlapFn g_origOverlap = nullptr;
 LinkFn g_origLink = nullptr;
 BlockFn g_origBlock = nullptr;
 ToggleFn g_origToggle = nullptr;
+struct Vec3 {
+    float x, y, z;
+};
+using NormalFn = Vec3* (*)(Vec3*, void*, const MethodInfo*);  // RaycastHit.get_normal (struct this by pointer)
+NormalFn g_origNormal = nullptr;
 
 // Metadata values swapped for the duration of one UpdateFootprint call. The destructor
 // restores them, also when a managed exception unwinds through the detour.
@@ -198,6 +245,7 @@ void FootDetour(Il2CppObject* self, const MethodInfo* mi) {
     FreePlacement& s = *g_self;
     MetaSwap swap;
     RotSave rot;
+    s.slopeNow = s.upsideNow = false;
     g_footGuard.Run([&] {
         if (!IsA(self, s.itemClass)) return;
         auto* meta = unity::Field<Il2CppObject*>(self, s.offMeta);
@@ -205,12 +253,19 @@ void FootDetour(Il2CppObject* self, const MethodInfo* mi) {
         char* m = reinterpret_cast<char*>(meta);
         s.overlapMask = unity::Field<int32_t>(m, s.offOverlapLayers);
         swap.meta = m;
-        if (g_cfg.slope.load(std::memory_order_relaxed)) {
+        if (g_cfg.slope.load(std::memory_order_relaxed) &&
+            !IsTeleporter(s, unity::Field<Il2CppObject*>(self, s.offHeld))) {
+            s.slopeNow = true;
+            s.upsideNow = g_cfg.upside.load(std::memory_order_relaxed);
             swap.visSlope = unity::Field<float>(m, s.offVisSlope);
             swap.maxSlope = unity::Field<float>(m, s.offMaxSlope);
             swap.slope = true;
-            unity::Field<float>(m, s.offVisSlope) = 0.0f;  // footprint shows for normal.y > 0
-            unity::Field<float>(m, s.offMaxSlope) = 0.0f;  // valid for normal.y >= 0
+            // 0: footprint for normal.y > 0, valid for normal.y >= 0 (up to a vertical wall).
+            // -90: sin = -1, any normal; a normal of exactly (0,-1,0) is nudged in NormalDetour
+            // so the footprint's strict "y > -1" test passes.
+            const float t = s.upsideNow ? -90.0f : 0.0f;
+            unity::Field<float>(m, s.offVisSlope) = t;
+            unity::Field<float>(m, s.offMaxSlope) = t;
         }
         if (g_cfg.range.load(std::memory_order_relaxed)) {
             swap.maxDist = unity::Field<float>(m, s.offMaxDist);
@@ -277,8 +332,7 @@ void FootDetour(Il2CppObject* self, const MethodInfo* mi) {
 
 bool GroundDetour(Il2CppObject* self, float adj, float dist, const MethodInfo* mi) {
     bool r = false;
-    if (g_self && g_self->depth > 0 && Active() && g_cfg.slope.load(std::memory_order_relaxed) &&
-        g_groundGuard.Run([&] { r = true; }))
+    if (g_self && g_self->depth > 0 && g_self->slopeNow && Active() && g_groundGuard.Run([&] { r = true; }))
         return r;
     return g_origGround(self, adj, dist, mi);
 }
@@ -289,6 +343,15 @@ bool OverlapDetour(Il2CppObject* self, float floorTol, int32_t mask, bool skipIg
         g_overlapGuard.Run([&] { skip = mask == g_self->overlapMask; });
     if (skip) return false;
     return g_origOverlap(self, floorTol, mask, skipIgnored, mi);
+}
+
+// Shared code: RaycastHit.get_normal is folded with ParticleCollisionEvent.get_normal and is
+// called all over the game; outside UpdateFootprint with allow_upside_down it only passes through.
+Vec3* NormalDetour(Vec3* ret, void* hit, const MethodInfo* mi) {
+    Vec3* r = g_origNormal(ret, hit, mi);
+    if (r && g_self && g_self->depth > 0 && g_self->upsideNow && r->y <= -1.0f && main_thread::IsMainThread())
+        g_normalGuard.Run([&] { r->y = -0.99999994f; });  // the float next to -1 (same direction)
+    return r;
 }
 
 bool LinkDetour(Il2CppObject* self, void* pos, const MethodInfo* mi) {
@@ -360,6 +423,7 @@ bool FreePlacement::Setup(sr2::core::ModuleContext& ctx) {
     metaClass = cls(kItemsNs, "GadgetItemMetadata");
     controllerClass = cls(kItemsNs, "PlayerItemController");
     Il2CppClass* gadget = cls(kWorldNs, "Gadget");
+    Il2CppClass* identType = cls("", "IdentifiableType");
     bool ok = off(itemClass, "_gadgetItemMetadata", offMeta) && off(itemClass, "_heldGadget", offHeld) &&
               off(itemClass, "_gadgetPlaceholderInstance", offPlaceholder) &&
               off(itemClass, "_rotatingClockwise", offRotCw) && off(itemClass, "_rotatingCounterClockwise", offRotCcw) &&
@@ -371,7 +435,8 @@ bool FreePlacement::Setup(sr2::core::ModuleContext& ctx) {
               off(metaClass, "MaxValidPlacementDist", offMaxDist) &&
               off(metaClass, "MaxValidPlacementSlope", offMaxSlope) &&
               off(metaClass, "GadgetOverlapLayers", offOverlapLayers) &&
-              off(controllerClass, "_gadgetModeBlocker", offBlocker) && gadget;
+              off(controllerClass, "_gadgetModeBlocker", offBlocker) && off(identType, "prefab", offPrefab) &&
+              gadget;
     if (!ok) return ctx.Fail("resolve failed: " + why);
 
     std::string err;
@@ -388,8 +453,17 @@ bool FreePlacement::Setup(sr2::core::ModuleContext& ctx) {
     rotateMi = R.MethodByParams(unity::TransformClass(), "Rotate", {"System.Single", "System.Single", "System.Single"},
                                 &err);
     rotate = reinterpret_cast<RotateFn>(ptr(rotateMi, "Transform.Rotate(float, float, float)"));
-    if (!foot || !link || !setValidity || !ground || !overlap || !block || !toggle || !rotate)
+    Il2CppClass* hitClass = R.Class("UnityEngine.PhysicsModule", "UnityEngine", "RaycastHit", &err);
+    void* normal = ptr(hitClass ? R.Method(hitClass, "get_normal", 0, &err) : nullptr, "RaycastHit.get_normal");
+    if (!foot || !link || !setValidity || !ground || !overlap || !block || !toggle || !rotate || !normal)
         return ctx.Fail("resolve failed: " + why);
+    // Teleporter exclusion (optional: without it teleporters follow the slope settings, logged).
+    teleporterClass = R.Class(kImage, "MonomiPark.SlimeRancher.World.Teleportation", "GadgetTeleporterNode", &err);
+    compInChildren = R.MethodByParams(unity::GameObjectClass(), "GetComponentInChildren",
+                                      {"System.Type", "System.Boolean"}, &err);
+    if (!teleporterClass || !compInChildren)
+        SR2_WARN("[{}] teleporter exclusion unavailable (GadgetTeleporterNode / GetComponentInChildren not found)",
+                 kModule);
 
     auto D = [](auto f) { return reinterpret_cast<void*>(f); };
     auto O = [](auto* p) { return reinterpret_cast<void**>(p); };
@@ -398,7 +472,8 @@ bool FreePlacement::Setup(sr2::core::ModuleContext& ctx) {
         !ctx.HookAddress("Gadget.IsCompletelyGrounded", ground, D(&GroundDetour), O(&g_origGround)) ||
         !ctx.HookAddress("Gadget.IsOverlapping", overlap, D(&OverlapDetour), O(&g_origOverlap)) ||
         !ctx.HookAddress("PlayerItemController.BlockGadgetMode", block, D(&BlockDetour), O(&g_origBlock)) ||
-        !ctx.HookAddress("PlayerItemController.ToggleItem", toggle, D(&ToggleDetour), O(&g_origToggle)))
+        !ctx.HookAddress("PlayerItemController.ToggleItem", toggle, D(&ToggleDetour), O(&g_origToggle)) ||
+        !ctx.HookAddress("RaycastHit.get_normal", normal, D(&NormalDetour), O(&g_origNormal)))
         return false;
 
     auto reg = [](const char* key, const char* label, const char* tip, bool def) {
@@ -421,6 +496,11 @@ bool FreePlacement::Setup(sr2::core::ModuleContext& ctx) {
         "Place on any slope up to a vertical wall, and over edges (the gadget no longer has to sit fully on the "
         "ground). The gadget tilts with the surface as usual.",
         true);
+    reg(kAllowUpsideDown, "Ignore slope: upside-down",
+        "Also place on ceilings, overhangs and the underside of things. The gadget's up follows the surface. "
+        "Teleporters keep the normal limits (you would arrive upside down).",
+        true);
+    settings::SetParent(kModule, kAllowUpsideDown, kIgnoreSlope);
     reg(kIgnoreRange, "Ignore range limits",
         "Place as far as the placement outline reaches, and place linked gadgets (pairs) at any distance from "
         "their partner.",
@@ -451,10 +531,11 @@ bool FreePlacement::Setup(sr2::core::ModuleContext& ctx) {
 
     g_self = this;
     SR2_INFO("[{}] setup ok: UpdateFootprint RVA 0x{:X}, IsOverlapping RVA 0x{:X}, IsCompletelyGrounded RVA 0x{:X}, "
-             "BlockGadgetMode RVA 0x{:X}; collision {}, slope {}, range {}, airborne {}, zones {}, step {}",
+             "BlockGadgetMode RVA 0x{:X}, RaycastHit.get_normal RVA 0x{:X}; collision {}, slope {}, upside-down {}, "
+             "range {}, airborne {}, zones {}, step {}",
              kModule, sr2::il2cpp::Resolver::Rva(foot), sr2::il2cpp::Resolver::Rva(overlap),
-             sr2::il2cpp::Resolver::Rva(ground), sr2::il2cpp::Resolver::Rva(block), g_cfg.collision.load(),
-             g_cfg.slope.load(), g_cfg.range.load(), g_cfg.airborne.load(), g_cfg.zones.load(), g_cfg.step.load());
+             sr2::il2cpp::Resolver::Rva(ground), sr2::il2cpp::Resolver::Rva(block), sr2::il2cpp::Resolver::Rva(normal),
+             g_cfg.collision.load(), g_cfg.slope.load(), g_cfg.upside.load(), g_cfg.range.load(), g_cfg.airborne.load(), g_cfg.zones.load(), g_cfg.step.load());
     return true;
 }
 
