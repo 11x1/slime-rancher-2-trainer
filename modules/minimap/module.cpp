@@ -388,6 +388,13 @@ public:
         });
     }
 
+    Il2CppObject* ApiNullWallSprite(float rgba[4]) {
+        if (frozen_ || g_dead.load() || !g_active.load() || !main_thread::IsMainThread() || !sprWall_.Alive()) return nullptr;
+        const float tint[4] = {kWallTint.r, kWallTint.g, kWallTint.b, kWallTint.a};
+        for (int i = 0; i < 4; ++i) rgba[i] = tint[i];
+        return sprWall_.get();
+    }
+
     // Read-only state for other modules (modules/minimap/api.h). Main thread; raw pointers, this frame only.
     bool ApiSnapshot(minimap::api::Snapshot& s) {
         if (frozen_ || g_dead.load() || !g_active.load() || !main_thread::IsMainThread()) return false;
@@ -3496,10 +3503,11 @@ private:
             if (!w.intact) continue;
             Vec2 p{};
             if (!nearFn(Vec3{w.x, w.y, w.z}, p)) continue;
-            items.push_back({p, icon, Color{0.88f, 0.40f, 1.0f, 1}, kNullWall});
+            items.push_back({p, icon, kWallTint, kNullWall});
             ++stats_.wallsShown;
         }
     }
+    static constexpr Color kWallTint{0.88f, 0.40f, 1.0f, 1};
     std::vector<walls::Wall> wallBuf_;
     bool wallsInactive_ = false;  // full map scan: inactive walls too (walls::Collect includeInactive)
     int pageWallsLogged_ = 0;     // last wall count logged for the full map
@@ -3883,6 +3891,9 @@ bool CollectPageIcons(const PageIconQuery& query, std::vector<PageIcon>& out, Il
     out.clear();
     if (mapDefinition) *mapDefinition = nullptr;
     return g_minimapModule && g_minimapModule->impl()->ApiCollectPageIcons(query, out, mapDefinition);
+}
+Il2CppObject* NullWallSprite(float rgba[4]) {
+    return g_minimapModule ? g_minimapModule->impl()->ApiNullWallSprite(rgba) : nullptr;
 }
 }  // namespace minimap::api
 

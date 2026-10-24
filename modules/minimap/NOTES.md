@@ -176,6 +176,7 @@ Other sources:
 
 - `Get(Snapshot&)`: root, zone, page prefab, projection (collectibles).
 - `CollectPageIcons(query, out, &mapDef)`: the full map's extra icons (`modules/map_tools`). Runs `ScanPods` / `ScanNullWalls` / `ScanPlacedGadgets` / `ScanNodes` with the caller's categories (`scanCats_`) and a 2000-icon budget (`scanMax_`) over the whole page (`OnPage`, no view radius, no fog test), and with `undiscoveredMarkers` the page markers whose `CanBeShown` is false (not discovered) but which are not done (`QueryNotDone`). `stats_` is saved / restored, so the minimap's own log lines are not affected. Same fault policy as the tick (a native fault freezes the minimap). Positions are page-local, i.e. valid inside the live page of the same MapDefinition.
+- `NullWallSprite(rgba)`: the procedural Nullifier wall sprite and its tint, for map_tools' remembered walls on the full map's other tabs (`modules/map_tools/NOTES.md`, "Nullifier walls on other tabs").
 
 ## Update rates
 
