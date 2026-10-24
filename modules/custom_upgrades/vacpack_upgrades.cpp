@@ -605,8 +605,9 @@ bool CreateDefs(Il2CppObject* items) {
             std::string desc;
             if (s.kind == Kind::kShadowCatcher) {
                 desc = "A shadow-tuned vac nozzle. Shadow slimes no longer notice you sneaking up, your vacpack can "
-                       "hold them, and on your ranch they stay for good and eat fruit, veggies and meat, making "
-                       "shadow plorts.";
+                       "hold them, and on your ranch they stay and eat fruit, veggies and meat, making shadow plorts. "
+                       "Beware: shadow slimes can't stand the sun. Left out in daylight they soon fade away, so keep "
+                       "them in a corral with a Solar Shield.";
             } else if (s.kind == Kind::kDroneBattery) {
                 const float f = s.level[k].value;
                 desc = std::format("Quantum power cells for your ranch drones: every drone station's drone uses {}% of its "

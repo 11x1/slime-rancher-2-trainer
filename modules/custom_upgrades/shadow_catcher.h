@@ -21,6 +21,13 @@
 //     SlimeEat gets KeepEatingWhenFull (it eats whatever reaches it, but vanilla FinishChomp makes no
 //     plort while it is not hungry), one meal empties its hunger, and its hunger comes back at the vanilla
 //     rate (Shadow's own rate is 0). The face shows the Ringtail's mischievous look while it is full.
+//     On the ranch a hit makes no plort (ProducePlortsOnHit.ProducePlort skipped), so plorts come only
+//     from meals while hungry;
+//   * the Phosphor rule: in daylight (outside the Phosphor's DestroyOutsideHoursOfDay window) a kept slime
+//     outside every active CaveTrigger (the corral Solar Shield, natural caves) gets the scared face and a
+//     fade clock (the Phosphor's endure hours, at least 0.25-0.5 game h); when it runs out it is alerted
+//     on purpose and the vanilla scatter makes it vanish. Shade or night stops the clock;
+//   * the English Slimepedia "Rancher Risks" text of the shadow slime gets a sunlight note (in memory).
 //
 // Save: a shadow slime on the ranch is a plain actor of type Shadow. The save code stores every actor
 // except GameModel.ignoreOnLoad ("SceneObjectGroup" = the player) and Shadow has a persistence id, so

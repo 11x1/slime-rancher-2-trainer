@@ -38,13 +38,28 @@
 //     again at SlimeEmotions._changeRate[0] = ComputeHungerChangePerHour (0x88AE10): _hungerRecoveryRate
 //     (the SlimeEmotionConfig.HungerRate property; Shadow's defaultPropertyValues make it 0) scaled by the
 //     recovery factor (+ day / night extra), times _hungerDirection (Awake: RecoversTowardOne ? 1 : -1).
+//   * ProducePlortsOnHit.ProcessCollisionEnter (0x8859F0): an object of a ProducePlortGroups type hitting
+//     faster than _speedThresholdToProducePlort -> ProducePlort, then IFleeBehavior.StartFleeing. That is
+//     the only caller of ProducePlort, so skipping it stops hit plorts (thrown food included).
+//   * The Phosphor rule: Phosphor slimes carry DestroyOutsideHoursOfDay (StartHour / EndHour = the hours
+//     they live in, Min/MaxEndureHoursOutsideWindow, CavesPreventShutdown). Update (0xAB3AB0) kills and
+//     destroys the slime once TimeDirector.HasReached(_shutdownAt); StartShutdownClock (0xAB3960) sets it
+//     to the next EndHour + Random(endure) game h; OnCaveEnter (0xAB3860) sets it to infinity while any
+//     CaveTrigger holds the slime (CaveTrigger.OnTriggerEnter 0x511D60 calls IListener.OnCaveEnter on the
+//     entering collider's components). The corral's Solar Shield is such a CaveTrigger: "Base / High
+//     SolarShield" children of the CORRAL prefab, inactive until bought, each with a "Cave Trigger" child
+//     (BoxCollider, layer 22, 10 x 5 x 10 / 10 x 8 x 10). Kept shadow slimes follow the same rule with our
+//     own clock (a component added at runtime would miss the trigger-enter of a slime already inside).
 
 #include "modules/custom_upgrades/shadow_catcher.h"
 
 #include <windows.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
+#include <cstdlib>
 #include <format>
 #include <initializer_list>
 #include <string>
@@ -75,6 +90,19 @@ constexpr int kFindRetryTicks = 10;  // FindObjectsOfTypeAll(SlimeDefinition) at
 constexpr double kNeverDestroy = 1e300;
 constexpr float kDrivePerMeal = 1.0f;  // one meal empties the hunger: the meals after it make no plort
 constexpr int kFullLogBudget = 12;     // "full" / "hungry again" lines per minute (all slimes together)
+constexpr int kCaveRescanTicks = 10;   // FindObjectsOfTypeAll(CaveTrigger) at most every ~10 s
+constexpr int kTimeDirRetryTicks = 10;
+constexpr int kPediaRetryTicks = 10;   // FindObjectsOfTypeAll(StringTable) at most every ~10 s until patched
+// Sunlight rule (the Phosphor's DestroyOutsideHoursOfDay values when found, else these): shadow slimes are
+// safe from LiveStart to LiveEnd (wrapping midnight) and fade after Random(endure) game hours in the sun.
+constexpr float kLiveStart = 18.0f, kLiveEnd = 6.0f;
+constexpr float kEndureMin = 0.25f, kEndureMax = 0.5f;  // also the floor: time to get them into the shade
+constexpr const char* kPediaTable = "PediaPage_en";
+constexpr const char* kPediaKey = "m.risks.shadow_slime";
+constexpr const char* kPediaNote =
+    "\n\nRanchers who keep shadow slimes should know they can't stand the sun. A shadow slime left out in "
+    "daylight will soon fade away, so give its corral a Solar Shield or keep it somewhere perpetually dark, "
+    "like a cave.";
 
 using IsAllowedFn = bool (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
 using RelevancyFn = float (*)(Il2CppObject*, bool, const MethodInfo*);
@@ -89,6 +117,9 @@ struct Tracked {
     bool eating = false;              // Ringtail rule on: keeps eating when full, hunger comes back
     bool full = false;                // last seen not hungry (its meals make no plort)
     bool fullKnown = false;
+    bool exposed = false;  // kept, in daylight and not in the shade: its fade clock runs
+    bool fading = false;   // the sun got it: alerted on purpose, vanilla scatter makes it vanish
+    double fadeAt = 0.0;   // world time it fades at while exposed
     // Vanilla values of its SlimeEat / SlimeEmotions, put back when it stops being kept.
     float origRate = 0.0f, origDir = 0.0f, origDrivePerEat = 0.0f;
 };
@@ -124,6 +155,28 @@ struct State {
 
     const MethodInfo* isOnRanch = nullptr;  // CellDirector.IsOnRanch(RegionMember), static
     const MethodInfo* initFood = nullptr;   // SlimeEat.InitFood()
+    const MethodInfo* doAlertMi = nullptr;  // ShadowSlimeScatter.DoAlert (for the fade)
+
+    // Sunlight rule (optional)
+    bool sunOk = false;
+    Il2CppClass* caveClass = nullptr;      // CaveTrigger
+    Il2CppClass* colliderClass = nullptr;  // UnityEngine.Collider
+    Il2CppClass* timeDirClass = nullptr;   // TimeDirector
+    Il2CppClass* dohClass = nullptr;       // DestroyOutsideHoursOfDay (Phosphor values, optional)
+    const MethodInfo* colBounds = nullptr;   // Collider.get_bounds
+    const MethodInfo* colEnabled = nullptr;  // Collider.get_enabled
+    const MethodInfo* trPosition = nullptr;  // Transform.get_position
+    const MethodInfo* currHour = nullptr;    // TimeDirector.CurrHour
+    const MethodInfo* worldTime = nullptr;   // TimeDirector.WorldTime
+    size_t offPrefab = 0, offModules = 0;    // IdentifiableType.prefab, SlimeDefinition.SlimeModules
+    size_t offDohStart = 0, offDohEnd = 0, offDohMin = 0, offDohMax = 0;
+
+    // Slimepedia note (optional)
+    bool pediaOk = false;
+    Il2CppClass* stringTableClass = nullptr;
+    const MethodInfo* getEntry = nullptr;  // StringTable.GetEntry(string)
+    const MethodInfo* getValue = nullptr;  // StringTableEntry.get_Value
+    const MethodInfo* setValue = nullptr;  // StringTableEntry.set_Value
 
     IsAllowedFn origIsAllowed = nullptr;
     RelevancyFn origRelevancy = nullptr;
@@ -149,6 +202,18 @@ struct State {
     float hungerRate = -1.0f;  // vanilla default hunger rate per game hour (< 0 = not read yet)
     int logTokens = kFullLogBudget, logRefill = 0;
     bool loggedMuted = false;
+    // sunlight
+    bool sunConfig = false;  // live window / endure read (from the Phosphor or the defaults)
+    float liveStart = kLiveStart, liveEnd = kLiveEnd, endureMin = kEndureMin, endureMax = kEndureMax;
+    Il2CppGCHandle timeDirHandle = nullptr;
+    int timeDirTimer = kTimeDirRetryTicks;
+    std::vector<Il2CppGCHandle> caves;  // CaveTrigger colliders (scene objects and prefab assets alike)
+    int caveTimer = kCaveRescanTicks;
+    bool wasDay = false, dayKnown = false;
+    // pedia
+    Il2CppGCHandle pediaTable = nullptr;  // the English PediaPage StringTable we patched
+    int pediaTimer = kPediaRetryTicks;
+    bool loggedPedia = false;
 };
 
 State g;
@@ -256,6 +321,8 @@ Tracked* Find(Il2CppObject* scatter) {
     auto it = g.tracked.find(scatter);
     return it == g.tracked.end() ? nullptr : &it->second;
 }
+// Kept and not fading: its scatter does nothing. A fading slime runs the vanilla scatter (and vanishes).
+bool Calm(const Tracked* t) { return t && t->kept && !t->fading; }
 
 // ---------------------------------------------------------------- detours --
 
@@ -277,7 +344,7 @@ float RelevancyDetour(Il2CppObject* self, bool grounded, const MethodInfo* mi) {
         bool calm = false;
         g_scatterGuard.Run([&] {
             Tracked* t = Track(self);
-            calm = (t && t->kept) || !Alerted(self);
+            calm = t && t->fading ? false : Calm(t) || !Alerted(self);
         });
         if (calm) return 0.0f;
     }
@@ -297,8 +364,7 @@ void DoAlertDetour(Il2CppObject* self, Il2CppObject* alertObj, const MethodInfo*
     if (self && g_owned.load(std::memory_order_relaxed) && main_thread::IsMainThread()) {
         bool skip = false;
         g_scatterGuard.Run([&] {
-            Tracked* t = Find(self);
-            skip = t && t->kept;
+            skip = Calm(Find(self));
         });
         if (skip) return;
     }
@@ -310,8 +376,7 @@ void ActionDetour(Il2CppObject* self, const MethodInfo* mi) {
     if (self && g_owned.load(std::memory_order_relaxed) && main_thread::IsMainThread()) {
         bool skip = false;
         g_scatterGuard.Run([&] {
-            Tracked* t = Find(self);
-            if (!t || !t->kept) return;
+            if (!Calm(Find(self))) return;
             ClearAlert(self);
             skip = true;
         });
@@ -320,15 +385,25 @@ void ActionDetour(Il2CppObject* self, const MethodInfo* mi) {
     g.origAction(self, mi);
 }
 
-// A shadow slime on the ranch never reaches the "despawn after N hit plorts" limit.
+// On the ranch a hit makes no plort (thrown food, shots, anything): kept shadow slimes make plorts only by
+// eating while hungry (the Ringtail rule), so a full one can't be farmed by pelting it. In the wilds the
+// vanilla hit plorts stay. The skipped call never counts towards the "despawn after N hit plorts" limit.
 void ProducePlortDetour(Il2CppObject* self, const MethodInfo* mi) {
     if (self && g_owned.load(std::memory_order_relaxed) && main_thread::IsMainThread()) {
+        bool skip = false;
         g_plortGuard.Run([&] {
             Il2CppObject* plort = g_shadowPlort.load(std::memory_order_relaxed);
             if (!plort || unity::Field<Il2CppObject*>(self, g.offPlortType) != plort) return;  // a Gold slime
-            int32_t& count = unity::Field<int32_t>(self, g.offPlortCount);
-            if (count > 0 && OnRanch(unity::Field<Il2CppObject*>(self, g.offPlortMember))) count = 0;
+            if (!OnRanch(unity::Field<Il2CppObject*>(self, g.offPlortMember))) return;
+            unity::Field<int32_t>(self, g.offPlortCount) = 0;
+            skip = true;
+            static bool logged = false;
+            if (!logged)
+                SR2_INFO("[{}] shadow catcher: a hit on a shadow slime on the ranch made no plort (on the ranch only "
+                         "a meal while hungry makes one; logged once)", kModule);
+            logged = true;
         });
+        if (skip) return;
     }
     g.origProducePlort(self, mi);
 }
@@ -573,10 +648,212 @@ void WatchHunger(Il2CppObject* scatter, Tracked& t) {
                  "plort", kModule, where, first ? "" : "again ", hunger, minDrive);
 }
 
+// ---- sunlight (the Phosphor rule) ----
+
+struct Vec3 {
+    float x, y, z;
+};
+struct Bounds {
+    Vec3 center, extents;
+};
+
+// The Phosphor's DestroyOutsideHoursOfDay values (its prefab or one of its modules), once per session.
+void ReadSunConfig() {
+    if (g.sunConfig) return;
+    g.sunConfig = true;
+    Il2CppObject* doh = nullptr;
+    Il2CppObject* phosphor = nullptr;
+    if (g.dohClass && g.offPrefab) {
+        for (Il2CppObject* o : unity::FindObjectsOfTypeAll(g.slimeDefClass))
+            if (IsA(o, g.slimeDefClass) && unity::IsAlive(o) && unity::GetName(o) == "Phosphor") phosphor = o;
+        if (phosphor) {
+            Il2CppObject* prefab = unity::Field<Il2CppObject*>(phosphor, g.offPrefab);
+            if (unity::IsAlive(prefab)) doh = unity::GetComponent(prefab, g.dohClass);
+            void* mods = g.offModules ? unity::Field<void*>(phosphor, g.offModules) : nullptr;
+            for (size_t i = 0, n = unity::ArrayLength(mods); !doh && i < n; ++i) {
+                auto* m = static_cast<Il2CppObject*>(unity::ArrayAt(mods, i));
+                if (unity::IsAlive(m)) doh = unity::GetComponent(m, g.dohClass);
+            }
+        }
+    }
+    std::string from = "defaults";
+    if (doh && unity::IsAlive(doh)) {
+        const float s = unity::Field<float>(doh, g.offDohStart), e = unity::Field<float>(doh, g.offDohEnd);
+        const float mn = unity::Field<float>(doh, g.offDohMin), mx = unity::Field<float>(doh, g.offDohMax);
+        if (s >= 0.0f && s <= 24.0f && e >= 0.0f && e <= 24.0f && s != e) {
+            g.liveStart = s;
+            g.liveEnd = e;
+            from = std::format("the Phosphor's '{}'", unity::GetName(unity::GameObjectOf(doh)));
+        }
+        if (mn >= 0.0f && mx >= mn && mx < 24.0f) {
+            g.endureMin = std::max(mn, kEndureMin);
+            g.endureMax = std::max(mx, kEndureMax);
+            from += std::format(" (Phosphor endures {:.2f}-{:.2f} game h)", mn, mx);
+        }
+    }
+    SR2_INFO("[{}] shadow catcher: sunlight rule from {}: kept shadow slimes are safe {:.1f}:00-{:.1f}:00, in the sun "
+             "they fade after {:.2f}-{:.2f} game h unless shaded (Solar Shield / cave)", kModule, from, g.liveStart,
+             g.liveEnd, g.endureMin, g.endureMax);
+}
+
+Il2CppObject* TimeDir() {
+    Il2CppObject* td = g.timeDirHandle ? unity::GCHandleTarget(g.timeDirHandle) : nullptr;
+    if (td && unity::IsAlive(td)) return td;
+    if (g.timeDirHandle) {
+        unity::FreeGCHandle(g.timeDirHandle);
+        g.timeDirHandle = nullptr;
+    }
+    if (++g.timeDirTimer < kTimeDirRetryTicks) return nullptr;
+    g.timeDirTimer = 0;
+    td = unity::FindObjectOfType(g.timeDirClass);
+    if (!td || !unity::IsAlive(td)) return nullptr;
+    g.timeDirHandle = unity::NewGCHandle(td);
+    return td;
+}
+
+bool InLiveWindow(float h) {
+    return g.liveStart < g.liveEnd ? h >= g.liveStart && h < g.liveEnd : h >= g.liveStart || h < g.liveEnd;
+}
+
+// The shade: every enabled, active CaveTrigger collider (natural caves and the corral Solar Shield, whose
+// trigger is active only while the upgrade is bought). Rescanned every ~10 s; prefab assets have no
+// world bounds and drop out at the bounds check.
+void RescanCaves() {
+    if (++g.caveTimer < kCaveRescanTicks) return;
+    g.caveTimer = 0;
+    for (Il2CppGCHandle h : g.caves) unity::FreeGCHandle(h);
+    g.caves.clear();
+    for (Il2CppObject* c : unity::FindObjectsOfTypeAll(g.caveClass)) {
+        if (!IsA(c, g.caveClass) || !unity::IsAlive(c)) continue;
+        Il2CppObject* col = unity::GetComponent(c, g.colliderClass);
+        if (!col || !unity::IsAlive(col)) continue;
+        if (Il2CppGCHandle h = unity::NewGCHandle(col)) g.caves.push_back(h);
+        if (g.caves.size() >= 512) break;
+    }
+}
+
+std::vector<Bounds> ActiveShade() {
+    std::vector<Bounds> out;
+    for (Il2CppGCHandle h : g.caves) {
+        Il2CppObject* col = unity::GCHandleTarget(h);
+        if (!col || !unity::IsAlive(col) || !unity::ActiveInHierarchy(unity::GameObjectOf(col))) continue;
+        bool ok = false;
+        Il2CppObject* en = Invoke(g.colEnabled, col, {}, "Collider.get_enabled", &ok);
+        if (!ok || !Unbox<bool>(en)) continue;
+        Il2CppObject* b = Invoke(g.colBounds, col, {}, "Collider.get_bounds", &ok);
+        if (!ok || !b) continue;
+        const Bounds bb = Unbox<Bounds>(b);
+        if (std::isfinite(bb.center.x) && bb.extents.x > 0.01f && bb.extents.y > 0.01f && bb.extents.z > 0.01f)
+            out.push_back(bb);
+    }
+    return out;
+}
+
+bool Shaded(Il2CppObject* scatter, const std::vector<Bounds>& shade) {
+    Il2CppObject* tr = unity::TransformOf(scatter);
+    if (!tr) return true;  // unknown: never punish
+    bool ok = false;
+    Il2CppObject* p = Invoke(g.trPosition, tr, {}, "Transform.get_position", &ok);
+    if (!ok || !p) return true;
+    const Vec3 v = Unbox<Vec3>(p);
+    for (const Bounds& b : shade)
+        if (std::fabs(v.x - b.center.x) <= b.extents.x && std::fabs(v.y - b.center.y) <= b.extents.y &&
+            std::fabs(v.z - b.center.z) <= b.extents.z)
+            return true;
+    return false;
+}
+
+void SetScaredFace(Il2CppObject* scatter, bool on) {
+    if (!g.offFaceFleeing) return;
+    if (Il2CppObject* face = unity::Field<Il2CppObject*>(scatter, g.offFace); face && unity::IsAlive(face))
+        unity::Field<bool>(face, g.offFaceFleeing) = on;
+}
+
+// The sun gets it: alert it on purpose (vanilla DoAlert, not our detour), the vanilla scatter then makes it
+// hop about and vanish with its DisappearFX 10-15 s later (Action -> Destroyer.DestroyActor).
+void Fade(Il2CppObject* scatter, Tracked& t) {
+    t.fading = true;
+    t.exposed = false;
+    Il2CppObject* go = unity::GameObjectOf(scatter);
+    SR2_INFO("[{}] shadow catcher: shadow slime '{}' fades away in the sunlight (no Solar Shield or cave over it)", kModule,
+             go ? unity::GetName(go) : std::string("?"));
+    if (go && g.origDoAlert) g.origDoAlert(scatter, go, g.doAlertMi);
+}
+
+// Kept slime: in daylight and outside every shade the fade clock runs (Random(endure) game hours, like the
+// Phosphor's shutdown clock); shade or night stops it. The scared face shows while the clock runs.
+void WatchSun(Il2CppObject* scatter, Tracked& t, bool day, double now, const std::vector<Bounds>* shade) {
+    if (t.fading) return;
+    const bool exposed = day && shade && !Shaded(scatter, *shade);
+    if (exposed == t.exposed) {
+        if (exposed && now >= t.fadeAt) Fade(scatter, t);
+        else if (exposed) SetScaredFace(scatter, true);
+        return;
+    }
+    t.exposed = exposed;
+    SetScaredFace(scatter, exposed);
+    const std::string where = unity::GetName(unity::GameObjectOf(scatter));
+    if (exposed) {
+        const float r = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
+        const float hours = g.endureMin + (g.endureMax - g.endureMin) * r;
+        t.fadeAt = now + hours * 3600.0;
+        SR2_INFO("[{}] shadow catcher: shadow slime '{}' is out in the sun: it fades in ~{:.2f} game h unless it gets "
+                 "into the shade (Solar Shield / cave)", kModule, where, hours);
+    } else {
+        SR2_INFO("[{}] shadow catcher: shadow slime '{}' is safe again ({})", kModule, where,
+                 day ? "in the shade" : "night");
+    }
+}
+
+// ---- Slimepedia note ----
+
+// The English shadow slime "Rancher Risks" text gets the sunlight note while the upgrade is owned. In memory
+// only (the StringTable asset); other languages keep the vanilla text.
+void PatchPedia(bool on) {
+    if (!g.pediaOk) return;
+    Il2CppObject* table = g.pediaTable ? unity::GCHandleTarget(g.pediaTable) : nullptr;
+    if (table && !unity::IsAlive(table)) table = nullptr;
+    if (!table) {
+        if (g.pediaTable) {
+            unity::FreeGCHandle(g.pediaTable);
+            g.pediaTable = nullptr;
+        }
+        if (!on || ++g.pediaTimer < kPediaRetryTicks) return;
+        g.pediaTimer = 0;
+        for (Il2CppObject* o : unity::FindObjectsOfTypeAll(g.stringTableClass))
+            if (IsA(o, g.stringTableClass) && unity::IsAlive(o) && unity::GetName(o) == kPediaTable) table = o;
+        if (!table) return;  // not loaded yet (the Slimepedia loads it)
+        g.pediaTable = unity::NewGCHandle(table);
+    }
+    bool ok = false;
+    Il2CppObject* entry = Invoke(g.getEntry, table, {unity::NewString(kPediaKey)}, "StringTable.GetEntry", &ok);
+    if (!ok || !entry) {
+        if (!g.loggedPedia) SR2_WARN("[{}] shadow catcher: no '{}' entry in '{}' - no Slimepedia note", kModule, kPediaKey, kPediaTable);
+        g.loggedPedia = true;
+        return;
+    }
+    const std::string cur = unity::ToUtf8(reinterpret_cast<Il2CppString*>(Invoke(g.getValue, entry, {}, "StringTableEntry.get_Value", &ok)));
+    if (!ok) return;
+    const bool has = cur.find(kPediaNote) != std::string::npos;
+    if (on && !has) {
+        Invoke(g.setValue, entry, {unity::NewString(cur + kPediaNote)}, "StringTableEntry.set_Value", &ok);
+        if (ok && !g.loggedPedia) SR2_INFO("[{}] shadow catcher: Slimepedia shadow slime risks got the sunlight note", kModule);
+        g.loggedPedia = true;
+    } else if (!on && has) {
+        std::string back = cur;
+        back.erase(back.find(kPediaNote), std::string_view(kPediaNote).size());
+        Invoke(g.setValue, entry, {unity::NewString(back)}, "StringTableEntry.set_Value", &ok);
+        g.loggedPedia = false;
+    }
+}
+
 void Forget(bool revert) {
     for (auto& [scatter, t] : g.tracked) {
         Il2CppObject* live = t.handle ? unity::GCHandleTarget(t.handle) : nullptr;
-        if (revert && live && unity::IsAlive(live)) SetEating(live, t, false);
+        if (revert && live && unity::IsAlive(live)) {
+            SetEating(live, t, false);
+            if (t.exposed) SetScaredFace(live, false);
+        }
         if (t.handle) unity::FreeGCHandle(t.handle);
     }
     g.tracked.clear();
@@ -606,6 +883,8 @@ void ShadowCatcher::Tick() {
             if (g.wasOwned) {
                 Forget(true);
                 RemoveDiet();
+                PatchPedia(false);
+                g.dayKnown = false;
                 SR2_INFO("[{}] shadow catcher: not owned - shadow slimes behave as in vanilla", kModule);
             }
             g.wasOwned = false;
@@ -614,10 +893,40 @@ void ShadowCatcher::Tick() {
         if (!g.wasOwned) SR2_INFO("[{}] shadow catcher: owned - the vacpack holds shadow slimes, they stay on the ranch", kModule);
         g.wasOwned = true;
         const bool dietNew = EnsureDiet();
+        PatchPedia(true);
         if (++g.logRefill >= 60) {  // ~1 minute of ticks
             g.logRefill = 0;
             g.logTokens = kFullLogBudget;
             g.loggedMuted = false;
+        }
+        // Sunlight: is it day, and where is the shade (only looked up while it is day and slimes are kept).
+        bool day = false;
+        double worldNow = 0.0;
+        std::vector<Bounds> shade;
+        bool shadeKnown = false;
+        bool anyKept = false;
+        for (const auto& [s, t] : g.tracked) anyKept = anyKept || t.kept;
+        if (g.sunOk && g.shadowDef && anyKept) {
+            ReadSunConfig();
+            if (Il2CppObject* td = TimeDir()) {
+                bool ok1 = false, ok2 = false;
+                const float hour = Unbox<float>(Invoke(g.currHour, td, {}, "TimeDirector.CurrHour", &ok1));
+                worldNow = Unbox<double>(Invoke(g.worldTime, td, {}, "TimeDirector.WorldTime", &ok2));
+                if (ok1 && ok2 && std::isfinite(hour)) {
+                    day = !InLiveWindow(hour);
+                    if (!g.dayKnown || day != g.wasDay)
+                        SR2_INFO("[{}] shadow catcher: {} (hour {:.1f}): kept shadow slimes {}", kModule,
+                                 day ? "daylight" : "night", hour,
+                                 day ? "need shade (Solar Shield / cave)" : "are safe anywhere on the ranch");
+                    g.dayKnown = true;
+                    g.wasDay = day;
+                    if (day) {
+                        RescanCaves();
+                        shade = ActiveShade();
+                        shadeKnown = true;
+                    }
+                }
+            }
         }
         size_t kept = 0;
         for (auto it = g.tracked.begin(); it != g.tracked.end();) {
@@ -633,16 +942,22 @@ void ShadowCatcher::Tick() {
                 t.kept = now;
                 const std::string where = unity::GetName(unity::GameObjectOf(scatter));
                 SR2_INFO("[{}] shadow catcher: shadow slime '{}' {}", kModule, where,
-                         now ? "is on the ranch: kept (no scatter, no despawn), eats" : "left the ranch: scatters as in vanilla");
+                         now ? "is on the ranch: kept (no scatter, no despawn; needs shade by day), eats"
+                             : "left the ranch: scatters as in vanilla");
             }
-            if (t.kept) {
+            if (t.kept && t.fading) {
+                // the vanilla scatter is making it vanish; nothing else to do
+            } else if (t.kept) {
                 if (Alerted(scatter)) ClearAlert(scatter);
                 if (dietNew) SetEating(scatter, t, false);  // recompute its eats with the new entries
                 SetEating(scatter, t, !g.entries.empty());
                 WatchHunger(scatter, t);
+                if (g.sunOk) WatchSun(scatter, t, day, worldNow, shadeKnown ? &shade : nullptr);
                 ++kept;
             } else {
                 SetEating(scatter, t, false);
+                if (t.exposed) SetScaredFace(scatter, false);
+                t.exposed = false;
             }
             ++it;
         }
@@ -662,6 +977,11 @@ void ShadowCatcher::Cleanup(const char* why) {
         const bool any = !g.tracked.empty() || g.dietList;
         Forget(true);
         RemoveDiet();
+        PatchPedia(false);
+        for (Il2CppGCHandle h : g.caves) unity::FreeGCHandle(h);
+        g.caves.clear();
+        g.caveTimer = kCaveRescanTicks;
+        g.dayKnown = false;
         g.wasOwned = false;
         if (any) SR2_INFO("[{}] {}: shadow catcher off (shadow slimes behave as in vanilla)", kModule, why);
     });
@@ -717,6 +1037,7 @@ bool ShadowCatcher::Setup(sr2::core::ModuleContext& ctx, std::string& why, std::
     const MethodInfo* alertMi = method(scatter, "DoAlert", 1);
     const MethodInfo* actionMi = method(scatter, "Action", 0);
     if (!why.empty()) return false;
+    g.doAlertMi = alertMi;
     {
         std::string err;
         if (Il2CppClass* face = R.Class(kImage, "", "SlimeFaceAnimator", &err))
@@ -794,7 +1115,9 @@ bool ShadowCatcher::Setup(sr2::core::ModuleContext& ctx, std::string& why, std::
     if (g.offKeepEating) {
         std::string err;
         Il2CppClass* emo = R.Class(kImage, "MonomiPark.SlimeRancher.Slime", "SlimeEmotions", &err);
-        Il2CppClass* cfg = emo ? R.Class(kImage, "", "SlimeEmotionConfig", &err) : nullptr;
+        // SlimeEmotionConfig lives in MonomiPark.SlimeRancher.Slime (the global-namespace lookup failed in the
+        // round-8 build: "no hunger rhythm", so a kept slime made plorts until it was full once).
+        Il2CppClass* cfg = emo ? R.Class(kImage, "MonomiPark.SlimeRancher.Slime", "SlimeEmotionConfig", &err) : nullptr;
         Il2CppClass* prop = cfg ? R.Class(kImage, "MonomiPark.UnitPropertySystem", "PropertyDefinition", &err) : nullptr;
         Il2CppClass* face = prop ? R.Class(kImage, "", "SlimeFaceAnimator", &err) : nullptr;
         bool ok = face != nullptr;
@@ -820,6 +1143,48 @@ bool ShadowCatcher::Setup(sr2::core::ModuleContext& ctx, std::string& why, std::
         if (!g.hungerOk)
             SR2_WARN("[{}] shadow catcher: no hunger rhythm ({}) - kept shadow slimes make plorts only until they are "
                      "full once", kModule, err);
+    }
+    // Optional: the sunlight rule (kept shadow slimes need shade by day, like Phosphors).
+    {
+        std::string err;
+        g.caveClass = R.Class(kImage, "", "CaveTrigger", &err);
+        g.colliderClass = g.caveClass ? R.Class("UnityEngine.PhysicsModule", "UnityEngine", "Collider", &err) : nullptr;
+        g.timeDirClass = g.colliderClass ? R.Class(kImage, "", "TimeDirector", &err) : nullptr;
+        Il2CppClass* tr = g.timeDirClass ? R.Class("UnityEngine.CoreModule", "UnityEngine", "Transform", &err) : nullptr;
+        g.colBounds = tr ? R.Method(g.colliderClass, "get_bounds", 0, &err) : nullptr;
+        g.colEnabled = g.colBounds ? R.Method(g.colliderClass, "get_enabled", 0, &err) : nullptr;
+        g.trPosition = g.colEnabled ? R.Method(tr, "get_position", 0, &err) : nullptr;
+        g.currHour = g.trPosition ? R.Method(g.timeDirClass, "CurrHour", 0, &err) : nullptr;
+        g.worldTime = g.currHour ? R.Method(g.timeDirClass, "WorldTime", 0, &err) : nullptr;
+        g.sunOk = g.worldTime && g.doAlertMi;
+        if (!g.sunOk)
+            SR2_WARN("[{}] shadow catcher: no sunlight rule ({}) - kept shadow slimes are safe in daylight too", kModule, err);
+        // The Phosphor's own values (optional; defaults otherwise).
+        std::string e2;
+        g.dohClass = g.sunOk ? R.Class(kImage, "", "DestroyOutsideHoursOfDay", &e2) : nullptr;
+        auto o = [&](Il2CppClass* k, const char* name, size_t& out) {
+            auto v = k ? R.FieldOffset(k, name, &e2) : std::nullopt;
+            out = v ? *v : 0;
+            return v.has_value();
+        };
+        if (!(o(g.dohClass, "StartHour", g.offDohStart) && o(g.dohClass, "EndHour", g.offDohEnd) &&
+              o(g.dohClass, "MinEndureHoursOutsideWindow", g.offDohMin) &&
+              o(g.dohClass, "MaxEndureHoursOutsideWindow", g.offDohMax) && o(ident, "prefab", g.offPrefab)))
+            g.dohClass = nullptr;
+        o(g.slimeDefClass, "SlimeModules", g.offModules);
+    }
+    // Optional: the Slimepedia note (English "Rancher Risks" of the shadow slime).
+    {
+        std::string err;
+        g.stringTableClass = R.Class("Unity.Localization", "UnityEngine.Localization.Tables", "StringTable", &err);
+        Il2CppClass* entry = g.stringTableClass
+                                 ? R.Class("Unity.Localization", "UnityEngine.Localization.Tables", "StringTableEntry", &err)
+                                 : nullptr;
+        g.getEntry = entry ? R.MethodByParams(g.stringTableClass, "GetEntry", {"System.String"}, &err) : nullptr;
+        g.getValue = g.getEntry ? R.Method(entry, "get_Value", 0, &err) : nullptr;
+        g.setValue = g.getValue ? R.Method(entry, "set_Value", 1, &err) : nullptr;
+        g.pediaOk = g.setValue != nullptr;
+        if (!g.pediaOk) SR2_WARN("[{}] shadow catcher: no Slimepedia note ({})", kModule, err);
     }
     ready_ = true;
     return true;
