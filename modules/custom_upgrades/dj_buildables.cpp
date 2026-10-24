@@ -35,13 +35,39 @@
 //     persistence id, like the Quantum Storage Link.
 //   * Fabricator cards after the vanilla card (booth after the Scientist Desk, speaker and radio after the
 //     Boombox). Unlocked with the base's blueprint (the radio with the Boombox's).
-//   * Dressing a listed, loaded actor: booth = clutter hidden, a small boombox on the desk (mixer), two
-//     boombox speakers on the floor beside it (emitters), a flower pillow with the game's slime attachment
-//     point behind it; speaker = its boombox tilted / scaled, stacking allowed on top, an emitter; radio =
-//     the night light hidden, a small boombox instead, an emitter. Every clone is script-free except the
-//     pillow's attachment point. While a song plays the boomboxes dance and show their notes.
-//   * Plain placed Boomboxes (not DJ Speakers) are left as they are but play the song too: an emitter
-//     on their model_boombox, and the same dance (SyncPlain).
+//   * Dressing a listed, loaded actor: booth = clutter hidden, a boombox lying face up on the desk (the
+//     deck), two small ones on the front corners, two big boomboxes on the floor beside it (emitters), a
+//     bench with the flower pillow and the game's slime attachment point behind it (largos allowed), E on
+//     the desk root; speaker = bench and boombox hidden, a stack of two boomboxes (the top one tilted by the
+//     variant) with one box collider, stacking allowed on top, an emitter; radio = the night light hidden,
+//     a small boombox instead, upright and box-shaped, an emitter. Every clone is script-free except the
+//     pillow's attachment point. The boomboxes dance and show their notes only while they play.
+//   * Plain placed Boomboxes (not DJ Speakers) are left as they are but play the song too when switched
+//     on: an emitter on their model_boombox, and the same dance (SyncPlain).
+//
+// Round 8 (user feedback on the placed look and the music):
+//   * Prefab data (UnityPy, 1.3.0): decorBoombox root = Gadget + GadgetMusicPlayer + GadgetUIInteractable
+//     (gadgetMusic "BoomboxMusic", timeBetweenActivations 3, _blockInteractInGadgetMode 1); "Collision" =
+//     a sphere collider r 0.5 at y 1.08 (layer 27); the bench (layer 27) has a mesh + box collider.
+//     decorScientistDesk: "model" box collider on layer 27; scientistDesk_misc01 (+_LOD01) = the tubes
+//     between the flasks (were left over). toyNightLight: root sphere collider r 0.47 + a small box at the
+//     bottom, Rigidbody 0.5 kg without constraints (the radio rolled like a ball). The pillow's
+//     SlimeAttachPoint: _allowLargo 0, trigger sphere r 1.
+//   * UIDetector.Update (0x6AD6B0): sphere cast, then GetComponents + GetComponentsInParent<IUIInteractable>
+//     on every hit collider. GadgetUIInteractable.Awake (0x763FA0) takes GetComponentInParent<IGadgetInteractor>;
+//     its prompt is _deactivateInteractionPrompt when IGadgetInteractor.ShowDeactivatePrompt() is true.
+//   * GadgetMusicPlayer.OnInteract (0x747930): when it is GadgetDirector.CurrentGadgetMusicPlayer, it stops
+//     (Dequeue, OnStopPlaying); otherwise it queues gadgetMusic on the MusicController (one global track, the
+//     previous player stops), sets the animator bool and the notes FX; then the 3 s cooldown.
+//     ShowDeactivatePrompt (0x748180) = "Current == this". Awake (0x747680) caches the MusicController,
+//     GadgetDirector and GetComponentInParent<Gadget>, nothing else.
+//   * SlimeAttachPoint.OnTriggerEnter (0x753480): a largo needs _allowLargo; FixedUpdate keeps _isJointActive /
+//     _slime while a slime sits.
+//   So: GadgetMusicPlayer.OnInteract / ShowDeactivatePrompt are hooked for the players of our records only
+//   (vanilla Boomboxes nobody listed and every other gadget run the original). E switches a record on / off
+//   (sidecar "dj.on"); on = the Slime DJ song from its emitters when a song is loaded (booth: and a slime sits
+//   behind it), else the Boombox's own track as filler (the original OnInteract). The booth gets a
+//   GadgetMusicPlayer + GadgetUIInteractable added to its root (fields copied from the Boombox prefab).
 
 #include "modules/custom_upgrades/dj_buildables.h"
 
@@ -89,6 +115,8 @@ constexpr const char* kBoomboxPrefab = "decorBoombox";
 constexpr const char* kPillowPrefab = "decorFlowerPillowSmall";
 constexpr const char* kToyPrefab = "toyNightLight";
 constexpr const char* kRadiosKey = "dj.radios";
+constexpr const char* kOnKey = "dj.on";  // actor ids of the booths / speakers / Boomboxes switched on with E
+constexpr int kLayerGadgetCollision = 27;  // the Boombox's "Collision" / bench layer (also the desk's)
 constexpr int kStaleTicks = 5;
 constexpr int kStaleTicksEmpty = 60;
 constexpr int kMaxRadioSpawn = 5;
@@ -131,25 +159,26 @@ struct VariantSpec {
     const char* defName;
     const char* title;
     const char* desc;
-    float tilt;  // speakers: degrees the boombox leans back (0 = upright)
+    float tilt;  // speakers: degrees the top boombox leans back (0 = upright)
 };
 constexpr VariantSpec kBoothSpec[] = {
     {"SlimeDJBooth", "Slime DJ Booth",
-     "A DJ table with a mixer and two speakers that play your Slime DJ song; a slime can sit on the pillow behind "
-     "it. To place one: fabricate it, hold a Scientist Desk in gadget mode, press the Variant key until it shows "
-     "Slime DJ Booth, then place it. Needs the Scientist Desk blueprint.",
+     "A DJ table with a deck, monitor speakers and two big speakers. Interact with it to switch it on: it plays your "
+     "Slime DJ song while a slime (largos too) sits on the pillow behind it, the Boombox's music otherwise. To place "
+     "one: fabricate it, hold a Scientist Desk in gadget mode, press the Variant key until it shows Slime DJ Booth, "
+     "then place it. Needs the Scientist Desk blueprint.",
      0.0f},
 };
 constexpr VariantSpec kSpeakerSpec[] = {
     {"SlimeDJSpeaker", "DJ Speaker",
-     "A big speaker that plays your Slime DJ song. Stack decorations or more speakers on top. To place one: "
-     "fabricate it, hold a Boombox in gadget mode, press the Variant key until it shows DJ Speaker (again for tilted "
-     "or facing up), then place it. Needs the Boombox blueprint.",
+     "A speaker stack that plays your Slime DJ song while it is switched on (interact with it, like a Boombox). Stack "
+     "decorations or more speakers on top. To place one: fabricate it, hold a Boombox in gadget mode, press the "
+     "Variant key until it shows DJ Speaker (again for tilted or facing up), then place it. Needs the Boombox blueprint.",
      0.0f},
     {"SlimeDJSpeakerTilted", "DJ Speaker (tilted)",
-     "A DJ Speaker leaning back, for stacks and stages. Plays your Slime DJ song.", 30.0f},
+     "A DJ Speaker whose top speaker leans back, for stacks and stages. Plays your Slime DJ song when switched on.", 30.0f},
     {"SlimeDJSpeakerUp", "DJ Speaker (facing up)",
-     "A DJ Speaker facing the sky. Plays your Slime DJ song.", 80.0f},
+     "A DJ Speaker whose top speaker faces the sky. Plays your Slime DJ song when switched on.", 80.0f},
 };
 constexpr VariantSpec kRadioSpec = {
     "SlimeDJRadio", "Slime Radio",
@@ -191,6 +220,7 @@ struct Impl : variant_ext::Extension {
     Il2CppClass* gadgetClass = nullptr, *gadgetModelClass = nullptr, *actorModelClass = nullptr, *gadgetItemClass = nullptr;
     Il2CppClass* fabItemClass = nullptr, *gameObjectClass = nullptr, *monoClass = nullptr, *colliderClass = nullptr;
     Il2CppClass* rigidbodyClass = nullptr, *jointClass = nullptr, *animatorClass = nullptr, *musicPlayerClass = nullptr;
+    Il2CppClass* uiClass = nullptr, *attachClass = nullptr, *boxColliderClass = nullptr, *sphereColliderClass = nullptr;
     // offsets
     size_t offLocName = 0, offPrefab = 0, offIcon = 0, offRefId = 0, offHashInit = 0, offDesc = 0, offCosts = 0, offVariantOf = 0;
     size_t offGrad1 = 0, offGrad2 = 0, offLinked = 0, offPcCurrency = 0, offPcIdent = 0, offCostAmount = 0;
@@ -200,6 +230,9 @@ struct Impl : variant_ext::Extension {
     size_t offScGame = 0, offScGadgetDir = 0, offScSpendable = 0, offScRegions = 0, offGcAutoSave = 0;
     size_t offAsdTranslation = 0, offSrtIdentTable = 0, offByIdent = 0, offGadgets = 0, offToys = 0;
     size_t offMembers = 0, offSubGroups = 0;
+    size_t offGmpMusic = 0, offGmpCue = 0, offGmpCooldown = 0, offGmpNext = 0, offGdCurrentPlayer = 0;
+    size_t offUiPrompt = 0, offUiInput = 0, offUiBlock = 0, offUiDeactivate = 0;
+    size_t offApAllowLargo = 0, offApSlime = 0, offApJointActive = 0;
     // methods
     const MethodInfo* sceneInst = nullptr, *gameCtxInst = nullptr, *getRefId = nullptr, *setHideFlags = nullptr;
     const MethodInfo* objDestroy = nullptr, *objDestroyImmediate = nullptr;
@@ -212,6 +245,11 @@ struct Impl : variant_ext::Extension {
     const MethodInfo* fabItemCtor = nullptr, *fabCheck = nullptr, *spend = nullptr, *addItem = nullptr;
     const MethodInfo* setFavorite = nullptr, *setHeld = nullptr, *instantiateActor = nullptr, *currentGroup = nullptr;
     const MethodInfo* actorIdOf = nullptr, *hasBp = nullptr;
+    const MethodInfo* goAddComponent = nullptr, *goSetLayer = nullptr, *colSetEnabled = nullptr;
+    const MethodInfo* boxGetCenter = nullptr, *boxSetCenter = nullptr, *boxGetSize = nullptr, *boxSetSize = nullptr;
+    const MethodInfo* sphereGetRadius = nullptr, *sphereSetRadius = nullptr, *rbGetConstraints = nullptr, *rbSetConstraints = nullptr;
+    const MethodInfo* trGetEuler = nullptr, *trSetEuler = nullptr;
+    const MethodInfo* onInteractMi = nullptr, *showDeactMi = nullptr;
     FieldInfo* animHashField = nullptr;
     using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
     using WBarrierFn = void (*)(Il2CppObject*, void**, void*);
@@ -247,23 +285,33 @@ struct Impl : variant_ext::Extension {
     std::string cardState[kFamCount];  // last logged Fabricator card state per family (logged when it changes)
 
     // dressed actors
+    // What a record plays (Apply): nothing, the Slime DJ song from its emitters, the Boombox's own track.
+    enum Mode : int { kModeOff = 0, kModeSong = 1, kModeFiller = 2 };
     struct Rec {
         int fam = 0, kind = 0;
+        int64_t id = 0;
         Il2CppObject* root = nullptr;
         Il2CppObject* holder = nullptr;
         std::vector<Il2CppObject*> hidden;     // vanilla GameObjects we switched off
-        Il2CppObject* model = nullptr;         // speaker: the vanilla boombox model we turned / scaled
-        Quat modelRot{0, 0, 0, 1};
-        Vec3 modelScale{1, 1, 1};
         Il2CppObject* gadget = nullptr;        // speaker: its Gadget (stacking flag)
         bool stackWas = false;
-        Il2CppObject* player = nullptr;        // speaker: its GadgetMusicPlayer (its own track wins)
+        Il2CppObject* player = nullptr;        // the GadgetMusicPlayer E talks to (booth: the one we added)
+        Il2CppObject* addedUi = nullptr;       // booth: the GadgetUIInteractable we added to the desk root
+        bool addedPlayer = false;              // booth: `player` is ours (destroyed on undress)
+        Il2CppObject* attach = nullptr;        // booth: the pillow's SlimeAttachPoint
+        bool seated = false;                   // booth: a slime sat there at the last Apply
+        Il2CppObject* rb = nullptr;            // radio: the toy's Rigidbody (rotation frozen)
+        int32_t rbWas = 0;
+        Il2CppObject* sphere = nullptr;        // radio: the toy's ball collider (off)
+        Il2CppObject* box = nullptr;           // radio: the toy's box collider (made the radio's size)
+        Vec3 boxCenterWas{}, boxSizeWas{};
         std::vector<Il2CppObject*> emitters;
+        float vol = -1.0f;                     // emitter volume scale registered (-1 = none yet)
         std::vector<Il2CppObject*> animators;
         std::vector<Il2CppObject*> fx;
-        std::vector<bool> fxWas;
         int anim = -1;                         // dance state applied (-1 = none yet)
-        bool own = false;                      // boombox: its own track plays (our song muted on it)
+        bool on = false;                       // switched on with E (sidecar "dj.on")
+        int mode = -1;                         // Mode applied (-1 = none yet)
         std::vector<Il2CppGCHandle> handles;
     };
     std::map<int64_t, Rec> recs;
@@ -276,6 +324,7 @@ struct Impl : variant_ext::Extension {
 
     // pickup hand-over (BeforePickup -> AfterPickup)
     int pickupFam = -1, pickupKind = 0;
+    ULONGLONG lastToggle = 0;  // E debounce
 
     // ---- helpers ----
     Il2CppObject* Call(const MethodInfo* m, void* obj, std::initializer_list<void*> args, const char* what,
@@ -533,12 +582,32 @@ struct Impl : variant_ext::Extension {
     void ReadAnimHash();
     void Strip(Il2CppObject* root);
     Il2CppObject* NewHolder(Il2CppObject* root);
-    Il2CppObject* CloneBoombox(Rec& rec, Il2CppObject* parent, Vec3 pos, float yaw, float scale);
+    Il2CppObject* CloneBoombox(Rec& rec, Il2CppObject* parent, Vec3 pos, Quat rot, float scale);
+    Il2CppObject* NewChild(Il2CppObject* parent, const char* name);
+    Il2CppObject* AddComponent(Il2CppObject* go, Il2CppClass* k, const char* what);
     void HideVanilla(Rec& rec, std::initializer_list<const char*> paths);
+    void BuildBooth(Rec& rec, std::string& what);
+    void BuildSpeaker(Rec& rec, std::string& what);
+    void BuildRadio(Rec& rec, std::string& what);
+    void AddBoothInteraction(Rec& rec);
     bool Build(int64_t id, Il2CppObject* root, Rec& rec);
     void Undress(Rec& rec, bool restore);
     void DropRec(int64_t id, bool restore);
-    void AnimateRec(Rec& rec, int want);
+    // E / music state
+    std::set<int64_t> OnIds();
+    void SetOn(int64_t id, bool on);
+    const char* Label(const Rec& rec) const { return rec.kind < 0 ? "Boombox" : fams[rec.fam].label; }
+    sdj::EmitterKind KindOf(const Rec& rec) const {
+        return rec.fam == kBooth ? sdj::EmitterKind::kBooth : rec.fam == kRadio ? sdj::EmitterKind::kRadio : sdj::EmitterKind::kSpeaker;
+    }
+    Rec* RecOfPlayer(Il2CppObject* player);
+    bool Seated(const Rec& rec);
+    bool VanillaPlaying(Il2CppObject* player);
+    void ToggleVanilla(Il2CppObject* player);
+    void SetVolume(Rec& rec, float vol);
+    void Dance(Rec& rec, bool on);
+    void Apply(Rec& rec);
+    bool Interact(Il2CppObject* player);
     void Animate();
     void SyncPlain(const std::unordered_map<int64_t, Il2CppObject*>& present, const std::map<int64_t, int>& listed);
     void Scan();
@@ -564,6 +633,10 @@ struct Impl : variant_ext::Extension {
 
 Impl* g = nullptr;
 sr2::core::DetourGuard g_guard{"custom_upgrades", "dj buildables"};
+using OnInteractFn = void (*)(Il2CppObject*, const MethodInfo*);
+using ShowDeactFn = bool (*)(Il2CppObject*, const MethodInfo*);
+OnInteractFn g_origInteract = nullptr;  // GadgetMusicPlayer.OnInteract (trampoline: never our detour)
+ShowDeactFn g_origShowDeact = nullptr;  // GadgetMusicPlayer.ShowDeactivatePrompt
 
 // ---------------------------------------------------------------- definitions --
 
@@ -897,6 +970,7 @@ bool Impl::BeforePickup(Il2CppObject*, Il2CppObject* gadget) {
     if (f < 0 || f == kRadio) return false;
     Unlist(f, id);
     SetKits(f, Kits(f) + 1);
+    SetOn(id, false);
     DropRec(id, false);  // its GameObject goes with the pickup
     pickupFam = f;
     pickupKind = kind;
@@ -977,14 +1051,14 @@ Il2CppObject* Impl::NewHolder(Il2CppObject* root) {
     return holder;
 }
 
-// A script-free copy of the Boombox's "model_boombox" (Animator kept: it dances while a song plays).
-Il2CppObject* Impl::CloneBoombox(Rec& rec, Il2CppObject* parent, Vec3 pos, float yaw, float scale) {
+// A script-free copy of the Boombox's "model_boombox" (Animator kept: it dances while it plays).
+Il2CppObject* Impl::CloneBoombox(Rec& rec, Il2CppObject* parent, Vec3 pos, Quat rot, float scale) {
     Il2CppObject* src = boomboxPrefab ? Find(boomboxPrefab, "model_boombox") : nullptr;
     if (!src) return nullptr;
     Il2CppObject* c = unity::Instantiate(src, unity::TransformOf(parent));
     if (!unity::IsAlive(c)) return nullptr;
     Strip(c);
-    Place(c, pos, AxisY(yaw), {scale, scale, scale});
+    Place(c, pos, rot, {scale, scale, scale});
     unity::SetActive(c, true);
     if (Il2CppObject* a = InChildren(c, animatorClass)) {
         rec.animators.push_back(a);
@@ -993,11 +1067,27 @@ Il2CppObject* Impl::CloneBoombox(Rec& rec, Il2CppObject* parent, Vec3 pos, float
     if (Il2CppObject* fx = Find(c, "bbox_base_jnt/bbox_head_jnt/FX_MusicalNotes")) {
         unity::SetActive(fx, false);
         rec.fx.push_back(fx);
-        rec.fxWas.push_back(false);
         Keep(rec, fx);
     }
     Keep(rec, c);
     return c;
+}
+
+Il2CppObject* Impl::NewChild(Il2CppObject* parent, const char* name) {
+    Il2CppObject* go = objectNew(gameObjectClass);
+    bool ok = false;
+    if (go) Call(goCtor, go, {unity::NewString(name)}, "GameObject..ctor", &ok);
+    if (!ok || !unity::IsAlive(go)) return nullptr;
+    bool stays = false;
+    Call(trSetParent, unity::TransformOf(go), {unity::TransformOf(parent), &stays}, "Transform.SetParent", &ok);
+    Place(go, {0, 0, 0}, {0, 0, 0, 1}, {1, 1, 1});
+    return ok ? go : nullptr;
+}
+
+Il2CppObject* Impl::AddComponent(Il2CppObject* go, Il2CppClass* k, const char* what) {
+    bool ok = false;
+    Il2CppObject* c = go && k ? Call(goAddComponent, go, {unity::TypeOf(k)}, what, &ok) : nullptr;
+    return ok && unity::IsAlive(c) ? c : nullptr;
 }
 
 void Impl::HideVanilla(Rec& rec, std::initializer_list<const char*> paths) {
@@ -1010,6 +1100,184 @@ void Impl::HideVanilla(Rec& rec, std::initializer_list<const char*> paths) {
     }
 }
 
+// The booth faces +z (the big speakers look there); the DJ sits behind it (-z).
+void Impl::BuildBooth(Rec& rec, std::string& what) {
+    Il2CppObject* holder = rec.holder;
+    HideVanilla(rec, {"model/scientistDesk_bubbleScroll", "model/scientistDesk_glass", "model/scientistDesk_glass_LOD01",
+                      "model/scientistDesk_misc01", "model/scientistDesk_misc01_LOD01", "model/vials", "model/vials_LOD01",
+                      "model/decoLabBeaker01", "model/decoLabClipboard", "model/decoLabWrenchMonkey03_0", "model/pens",
+                      "Point Light (1)", "SoundScientistDesk"});
+    constexpr float kTop = 1.22f;  // desk top
+    // Big speakers on the floor beside the desk; they carry the song.
+    for (float side : {-1.0f, 1.0f})
+        if (Il2CppObject* spk = CloneBoombox(rec, holder, {side * 1.75f, 0.0f, 0.1f}, AxisY(-side * 12.0f), 1.35f))
+            rec.emitters.push_back(spk);
+    // Small monitor speakers on the front corners of the desk, facing the same way.
+    int parts = 0;
+    for (float side : {-1.0f, 1.0f})
+        parts += CloneBoombox(rec, holder, {side * 0.8f, kTop, 0.3f}, AxisY(-side * 12.0f), 0.4f) ? 1 : 0;
+    // The DJ's deck: a boombox lying face up in the middle (its two speaker cones are the turntables),
+    // its handle towards the audience. Lying back turns its height towards -z (yaw 180: +z) and its depth
+    // downwards, so it is lifted by its half depth and starts 0.2 m behind the middle.
+    constexpr float kDeck = 0.45f;
+    parts += CloneBoombox(rec, holder, {0.0f, kTop + 0.3f * kDeck, -0.2f}, Mul(AxisY(180.0f), AxisX(-90.0f)), kDeck) ? 1 : 0;
+    // The DJ's seat: the Boombox's bench (its colliders kept) with the Flower Pillow on top - mesh,
+    // colliders and the game's slime attachment point with its scripts - so the slime sits high enough to
+    // be seen over the desk. Largos allowed (larger trigger), far enough back not to clip into the desk.
+    constexpr Vec3 kSeat{0.0f, 0.0f, -1.8f};
+    constexpr float kSeatTop = 0.72f;  // the bench at its own size
+    if (Il2CppObject* src = boomboxPrefab ? Find(boomboxPrefab, "ranchHouseBench") : nullptr) {
+        Il2CppObject* bench = unity::Instantiate(src, unity::TransformOf(holder));
+        if (unity::IsAlive(bench)) {
+            Place(bench, kSeat, {0, 0, 0, 1}, {0.46f, 0.66f, 0.66f});
+            unity::SetActive(bench, true);
+            Keep(rec, bench);
+            ++parts;
+        }
+    }
+    int spot = 0;
+    if (pillowPrefab) {
+        for (const char* part : {"mesh", "COL", "SlimeAttachmentPoint"}) {
+            Il2CppObject* src = Find(pillowPrefab, part);
+            Il2CppObject* c = src ? unity::Instantiate(src, unity::TransformOf(holder)) : nullptr;
+            if (!unity::IsAlive(c)) continue;
+            const std::string_view p(part);
+            if (p == "mesh") Strip(c);  // the colliders and the attachment point keep theirs
+            const float y = p == "SlimeAttachmentPoint" ? 1.30f : p == "COL" ? 0.05f : 0.0f;
+            Place(c, {kSeat.x, kSeatTop + y, kSeat.z}, {0, 0, 0, 1}, {1, 1, 1});
+            if (p == "SlimeAttachmentPoint") {
+                if (Il2CppObject* ap = unity::GetComponent(c, attachClass)) {
+                    unity::Field<bool>(ap, offApAllowLargo) = true;  // still inactive: set before its Awake
+                    rec.attach = ap;
+                    Keep(rec, ap);
+                }
+                if (Il2CppObject* sc = unity::GetComponent(c, sphereColliderClass)) {
+                    bool ok = false;
+                    const float r = Value<float>(Call(sphereGetRadius, sc, {}, "SphereCollider.get_radius", &ok), 1.0f);
+                    float big = (ok && r > 0.0f ? r : 1.0f) * 1.5f;
+                    Call(sphereSetRadius, sc, {&big}, "SphereCollider.set_radius");
+                }
+            }
+            unity::SetActive(c, true);
+            Keep(rec, c);
+            ++spot;
+        }
+    }
+    AddBoothInteraction(rec);
+    what = std::format("{} part(s) hidden, 2 floor speakers, {} desk / seat part(s), slime seat {}{}, interact {}", rec.hidden.size(),
+                       parts, spot == 3 ? "ready" : "missing", rec.attach ? " (largos allowed)" : "",
+                       rec.addedUi ? "on" : "NOT available");
+}
+
+// E on the booth: a GadgetMusicPlayer (the filler track; our hooks decide) and a GadgetUIInteractable (the
+// interact prompt) on the desk root, their fields copied from the Boombox prefab. UIDetector finds the
+// interactable through the desk's own collider ("model", layer 27 as the Boombox's).
+void Impl::AddBoothInteraction(Rec& rec) {
+    Il2CppObject* srcPlayer = boomboxPrefab ? unity::GetComponent(boomboxPrefab, musicPlayerClass) : nullptr;
+    Il2CppObject* srcUi = boomboxPrefab ? unity::GetComponent(boomboxPrefab, uiClass) : nullptr;
+    if (!srcPlayer || !srcUi) {
+        SR2_WARN("[{}] dj buildables: the Boombox prefab has no {} - the DJ Booth can't be switched with E", module,
+                 !srcPlayer ? "GadgetMusicPlayer" : "GadgetUIInteractable");
+        return;
+    }
+    // The player first: the interactable's Awake looks for it (GetComponentInParent<IGadgetInteractor>).
+    Il2CppObject* player = AddComponent(rec.root, musicPlayerClass, "AddComponent(GadgetMusicPlayer)");
+    if (!player) return;
+    SetRef(player, offGmpMusic, unity::Field<Il2CppObject*>(srcPlayer, offGmpMusic));
+    SetRef(player, offGmpCue, unity::Field<Il2CppObject*>(srcPlayer, offGmpCue));
+    unity::Field<float>(player, offGmpCooldown) = unity::Field<float>(srcPlayer, offGmpCooldown);
+    rec.player = player;
+    rec.addedPlayer = true;
+    Keep(rec, player);
+    Il2CppObject* ui = AddComponent(rec.root, uiClass, "AddComponent(GadgetUIInteractable)");
+    if (!ui) return;
+    for (size_t off : {offUiPrompt, offUiInput, offUiDeactivate}) SetRef(ui, off, unity::Field<Il2CppObject*>(srcUi, off));
+    unity::Field<bool>(ui, offUiBlock) = unity::Field<bool>(srcUi, offUiBlock);
+    rec.addedUi = ui;
+    Keep(rec, ui);
+}
+
+// A speaker stack instead of the boombox on its bench: a big boombox on the floor and a smaller one on top;
+// the variant tilts the top one back (0 / 30 / 80 degrees). The bench, the vanilla boombox and its ball
+// collider are switched off and one box collider covers the stack. E is the Boombox's own interaction.
+void Impl::BuildSpeaker(Rec& rec, std::string& what) {
+    static constexpr float kTilts[] = {kSpeakerSpec[0].tilt, kSpeakerSpec[1].tilt, kSpeakerSpec[2].tilt};
+    const float tilt = kTilts[std::clamp(rec.kind, 0, 2)];
+    HideVanilla(rec, {"ranchHouseBench", "model_boombox", "Collision"});
+    constexpr float kX = 0.18f, kZ = 0.03f, kBase = 1.3f, kTopScale = 0.85f;  // the Boombox's bounds centre
+    Il2CppObject* base = CloneBoombox(rec, rec.holder, {kX, 0.0f, kZ}, {0, 0, 0, 1}, kBase);
+    const float lift = 0.26f * kTopScale * std::sin(tilt * 3.14159265f / 180.0f);  // its back must not sink into the base
+    Il2CppObject* top = CloneBoombox(rec, rec.holder, {kX, 1.0f + lift, kZ}, AxisX(-tilt), kTopScale);
+    if (base) rec.emitters.push_back(base);
+    bool body = false;
+    if (Il2CppObject* go = NewChild(rec.holder, "sr2dj_body")) {
+        int32_t layer = kLayerGadgetCollision;
+        Call(goSetLayer, go, {&layer}, "GameObject.set_layer");
+        if (Il2CppObject* bc = AddComponent(go, boxColliderClass, "AddComponent(BoxCollider)")) {
+            Vec3 c{kX, 0.85f, kZ - 0.05f}, s{1.2f, 1.7f, 0.9f};
+            Call(boxSetCenter, bc, {&c}, "BoxCollider.set_center");
+            Call(boxSetSize, bc, {&s}, "BoxCollider.set_size");
+            body = true;
+        }
+        Keep(rec, go);
+    }
+    rec.gadget = unity::GetComponent(rec.root, gadgetClass);
+    if (rec.gadget) {
+        Keep(rec, rec.gadget);
+        rec.stackWas = unity::Field<bool>(rec.gadget, offStackTop);
+        unity::Field<bool>(rec.gadget, offStackTop) = true;  // speakers (and decorations) stack on it
+    }
+    rec.player = unity::GetComponent(rec.root, musicPlayerClass);
+    if (rec.player) Keep(rec, rec.player);
+    what = std::format("stack of {} boombox(es), top tilted {} deg, box collider {}, stacking on top {}", (base ? 1 : 0) + (top ? 1 : 0),
+                       tilt, body ? "on" : "MISSING", rec.gadget ? "on" : "unknown (no Gadget)");
+}
+
+// The Night Light toy dressed as a small boombox, upright and box-shaped (its ball collider made it roll).
+void Impl::BuildRadio(Rec& rec, std::string& what) {
+    HideVanilla(rec, {"model_nightlight"});
+    Il2CppObject* radio = CloneBoombox(rec, rec.holder, {0.0f, -0.5f, 0.0f}, {0, 0, 0, 1}, 0.6f);
+    if (radio) rec.emitters.push_back(radio);
+    bool ok = false;
+    if ((rec.rb = unity::GetComponent(rec.root, rigidbodyClass)) != nullptr) {
+        rec.rbWas = Value<int32_t>(Call(rbGetConstraints, rec.rb, {}, "Rigidbody.get_constraints", &ok));
+        if (ok) {
+            Il2CppObject* tr = unity::TransformOf(rec.root);
+            bool got = false;
+            Vec3 e = Value<Vec3>(Call(trGetEuler, tr, {}, "Transform.get_eulerAngles", &got));
+            if (got) {
+                e.x = 0.0f, e.z = 0.0f;  // stand it up, keep its heading
+                Call(trSetEuler, tr, {&e}, "Transform.set_eulerAngles");
+            }
+            int32_t frozen = rec.rbWas | 16 | 64;  // RigidbodyConstraints.FreezeRotationX | FreezeRotationZ
+            Call(rbSetConstraints, rec.rb, {&frozen}, "Rigidbody.set_constraints", &ok);
+        }
+        if (ok) Keep(rec, rec.rb);
+        else rec.rb = nullptr;
+    }
+    if ((rec.box = unity::GetComponent(rec.root, boxColliderClass)) != nullptr) {
+        bool a = false, b = false;
+        rec.boxCenterWas = Value<Vec3>(Call(boxGetCenter, rec.box, {}, "BoxCollider.get_center", &a));
+        rec.boxSizeWas = Value<Vec3>(Call(boxGetSize, rec.box, {}, "BoxCollider.get_size", &b));
+        if (a && b) {
+            Vec3 c{0.0f, -0.27f, 0.0f}, s{0.62f, 0.46f, 0.4f};  // the 0.6 boombox (toy units; the toy is scaled 1.75)
+            Call(boxSetCenter, rec.box, {&c}, "BoxCollider.set_center");
+            Call(boxSetSize, rec.box, {&s}, "BoxCollider.set_size");
+            Keep(rec, rec.box);
+        } else {
+            rec.box = nullptr;
+        }
+    }
+    if (rec.box && (rec.sphere = unity::GetComponent(rec.root, sphereColliderClass)) != nullptr) {
+        bool off = false;
+        Call(colSetEnabled, rec.sphere, {&off}, "Collider.set_enabled", &ok);
+        if (ok) Keep(rec, rec.sphere);
+        else rec.sphere = nullptr;
+    }
+    what = std::format("night light {}, radio {}, upright {}, box collider {}", rec.hidden.empty() ? "not found" : "hidden",
+                       radio ? "built" : "missing", rec.rb ? "yes" : "no", rec.sphere ? "yes" : "no");
+}
+
 bool Impl::Build(int64_t id, Il2CppObject* root, Rec& rec) {
     ReadAnimHash();
     Il2CppObject* rootTr = unity::TransformOf(root);
@@ -1020,103 +1288,26 @@ bool Impl::Build(int64_t id, Il2CppObject* root, Rec& rec) {
     rec = Rec{};
     rec.fam = fam;
     rec.kind = kind;
+    rec.id = id;
     rec.root = root;
+    rec.on = fam != kRadio && OnIds().count(id) > 0;
     Keep(rec, root);
     Il2CppObject* holder = NewHolder(root);
     if (!holder) return false;
     rec.holder = holder;
     Keep(rec, holder);
     std::string what;
-    if (fam == kBooth) {
-        HideVanilla(rec, {"model/scientistDesk_bubbleScroll", "model/scientistDesk_glass", "model/scientistDesk_glass_LOD01",
-                          "model/vials", "model/vials_LOD01", "model/decoLabBeaker01", "model/decoLabClipboard",
-                          "model/decoLabWrenchMonkey03_0", "model/pens", "SoundScientistDesk"});
-        CloneBoombox(rec, holder, {0.0f, 1.22f, 0.05f}, 180.0f, 0.5f);  // the mixer, facing the DJ (-z)
-        for (float side : {-1.0f, 1.0f}) {
-            Il2CppObject* spk = CloneBoombox(rec, holder, {side * 1.75f, 0.0f, 0.1f}, -side * 12.0f, 1.35f);
-            if (spk) rec.emitters.push_back(spk);
-        }
-        // The DJ's spot: the flower pillow with the game's own slime attachment point, behind the desk.
-        int spot = 0;
-        if (pillowPrefab) {
-            const Vec3 at{0.0f, 0.0f, -1.55f};
-            for (const char* part : {"mesh", "COL", "SlimeAttachmentPoint"}) {
-                Il2CppObject* src = Find(pillowPrefab, part);
-                Il2CppObject* c = src ? unity::Instantiate(src, unity::TransformOf(holder)) : nullptr;
-                if (!unity::IsAlive(c)) continue;
-                if (std::string_view(part) == "mesh") Strip(c);  // the colliders and the attachment point keep theirs
-                const Vec3 off = std::string_view(part) == "SlimeAttachmentPoint" ? Vec3{0.0f, 1.30f, 0.0f}
-                                 : std::string_view(part) == "COL"                ? Vec3{0.0f, 0.05f, 0.0f}
-                                                                                   : Vec3{0.0f, 0.0f, 0.0f};
-                Place(c, {at.x + off.x, at.y + off.y, at.z + off.z}, {0, 0, 0, 1}, {1, 1, 1});
-                unity::SetActive(c, true);
-                Keep(rec, c);
-                ++spot;
-            }
-        }
-        what = std::format("{} part(s) hidden, mixer + 2 speakers, slime spot {}", rec.hidden.size(), spot == 3 ? "ready" : "missing");
-    } else if (fam == kSpeaker) {
-        static constexpr float kTilts[] = {kSpeakerSpec[0].tilt, kSpeakerSpec[1].tilt, kSpeakerSpec[2].tilt};
-        const float tilt = kTilts[std::clamp(kind, 0, 2)];
-        rec.model = Find(root, "model_boombox");
-        if (rec.model) {
-            Keep(rec, rec.model);
-            Il2CppObject* tr = unity::TransformOf(rec.model);
-            bool ok = false, ok2 = false;
-            rec.modelRot = Value<Quat>(Call(trGetLocalRot, tr, {}, "Transform.get_localRotation", &ok), Quat{0, 0, 0, 1});
-            rec.modelScale = Value<Vec3>(Call(trGetLocalScale, tr, {}, "Transform.get_localScale", &ok2), Vec3{1, 1, 1});
-            if (ok && ok2) {
-                Quat r = Mul(rec.modelRot, AxisX(-tilt));  // lean back: the front (+z) turns upwards
-                Vec3 s{rec.modelScale.x * 1.25f, rec.modelScale.y * 1.25f, rec.modelScale.z * 1.25f};
-                Call(trSetLocalRot, tr, {&r}, "Transform.set_localRotation");
-                Call(trSetLocalScale, tr, {&s}, "Transform.set_localScale");
-            } else {
-                rec.model = nullptr;
-            }
-            if (Il2CppObject* a = InChildren(root, animatorClass)) {
-                rec.animators.push_back(a);
-                Keep(rec, a);
-            }
-            if (Il2CppObject* fx = Find(root, "model_boombox/bbox_base_jnt/bbox_head_jnt/FX_MusicalNotes")) {
-                rec.fx.push_back(fx);
-                rec.fxWas.push_back(ActiveSelf(fx));
-                Keep(rec, fx);
-            }
-        }
-        rec.gadget = unity::GetComponent(root, gadgetClass);
-        if (rec.gadget) {
-            Keep(rec, rec.gadget);
-            rec.stackWas = unity::Field<bool>(rec.gadget, offStackTop);
-            unity::Field<bool>(rec.gadget, offStackTop) = true;  // speakers (and decorations) stack on it
-        }
-        rec.player = unity::GetComponent(root, musicPlayerClass);
-        if (rec.player) Keep(rec, rec.player);
-        // The emitter sits on a child at the boombox's head.
-        Il2CppObject* em = objectNew(gameObjectClass);
-        bool ok = false;
-        if (em) Call(goCtor, em, {unity::NewString("sr2dj_emitter")}, "GameObject..ctor", &ok);
-        if (em && ok && unity::IsAlive(em)) {
-            bool stays = false;
-            Call(trSetParent, unity::TransformOf(em), {unity::TransformOf(holder), &stays}, "Transform.SetParent", &ok);
-            Place(em, {0.0f, 1.3f, 0.0f}, {0, 0, 0, 1}, {1, 1, 1});
-            rec.emitters.push_back(em);
-            Keep(rec, em);
-        }
-        what = std::format("tilt {} deg, stacking on top {}", tilt, rec.gadget ? "on" : "unknown (no Gadget)");
-    } else {
-        HideVanilla(rec, {"model_nightlight"});
-        Il2CppObject* radio = CloneBoombox(rec, holder, {0.0f, -0.5f, 0.0f}, 0.0f, 0.6f);
-        if (radio) rec.emitters.push_back(radio);
-        what = std::format("night light {}, radio {}", rec.hidden.empty() ? "not found" : "hidden", radio ? "built" : "missing");
-    }
+    if (fam == kBooth) BuildBooth(rec, what);
+    else if (fam == kSpeaker) BuildSpeaker(rec, what);
+    else BuildRadio(rec, what);
     if (Faulted()) return false;
     unity::SetActive(holder, true);
-    const sdj::EmitterKind ek = fam == kBooth ? sdj::EmitterKind::kBooth : fam == kSpeaker ? sdj::EmitterKind::kSpeaker
-                                                                                         : sdj::EmitterKind::kRadio;
+    // Booths and speakers stay silent until they are switched on (Apply sets the volume); radios always play.
+    rec.vol = fam == kRadio ? 0.8f : 0.0f;
     int registered = 0;
-    for (Il2CppObject* e : rec.emitters)
-        registered += sdj::RegisterEmitter(e, ek, fam == kRadio ? 0.6f : 1.0f, fam == kRadio ? 0.8f : 1.0f) ? 1 : 0;
-    SR2_INFO("[{}] dj buildables: {} actor {} dressed ({}; {} emitter(s))", module, fams[fam].label, id, what, registered);
+    for (Il2CppObject* e : rec.emitters) registered += sdj::RegisterEmitter(e, KindOf(rec), fam == kRadio ? 0.6f : 1.0f, rec.vol) ? 1 : 0;
+    SR2_INFO("[{}] dj buildables: {} actor {} dressed ({}; {} emitter(s){})", module, fams[fam].label, id, what, registered,
+             fam == kRadio ? "" : rec.on ? "; switched on" : "; switched off");
     return true;
 }
 
@@ -1125,24 +1316,28 @@ void Impl::Undress(Rec& rec, bool restore) {
     for (Il2CppObject* e : rec.emitters) sdj::UnregisterEmitter(e);
     if (restore && unity::IsAlive(rec.root)) {
         bool ok = false;
+        if (rec.addedPlayer && VanillaPlaying(rec.player)) ToggleVanilla(rec.player);  // the booth's filler stops with it
+        if (rec.addedUi) DestroyNow(rec.addedUi);  // now, not at the end of the frame: a new dressing may add them again
+        if (rec.addedPlayer) DestroyNow(rec.player);
         for (Il2CppObject* go : rec.hidden)
             if (unity::IsAlive(go)) unity::SetActive(go, true);
-        if (unity::IsAlive(rec.model)) {
-            Il2CppObject* tr = unity::TransformOf(rec.model);
-            Call(trSetLocalRot, tr, {&rec.modelRot}, "Transform.set_localRotation", &ok);
-            Call(trSetLocalScale, tr, {&rec.modelScale}, "Transform.set_localScale", &ok);
-        }
         if (unity::IsAlive(rec.gadget)) unity::Field<bool>(rec.gadget, offStackTop) = rec.stackWas;
-        if (rec.fam == kSpeaker && rec.anim == 1) {  // the vanilla boombox stops dancing (unless its own track plays)
-            const bool own = rec.player && unity::IsAlive(rec.player) && unity::Field<Il2CppObject*>(rec.player, offMusicInstance);
-            if (!own) {
-                int32_t h = animHash;
-                bool off = false;
-                for (Il2CppObject* a : rec.animators)
-                    if (unity::IsAlive(a) && h) Call(animSetBool, a, {&h, &off}, "Animator.SetBool", &ok);
-                for (size_t i = 0; i < rec.fx.size(); ++i)
-                    if (unity::IsAlive(rec.fx[i])) unity::SetActive(rec.fx[i], rec.fxWas[i]);
-            }
+        if (unity::IsAlive(rec.rb)) Call(rbSetConstraints, rec.rb, {&rec.rbWas}, "Rigidbody.set_constraints", &ok);
+        if (unity::IsAlive(rec.box)) {
+            Call(boxSetCenter, rec.box, {&rec.boxCenterWas}, "BoxCollider.set_center", &ok);
+            Call(boxSetSize, rec.box, {&rec.boxSizeWas}, "BoxCollider.set_size", &ok);
+        }
+        if (unity::IsAlive(rec.sphere)) {
+            bool on = true;
+            Call(colSetEnabled, rec.sphere, {&on}, "Collider.set_enabled", &ok);
+        }
+        if (rec.kind < 0 && rec.anim == 1 && !VanillaPlaying(rec.player)) {  // a plain Boombox stops dancing
+            int32_t h = animHash;
+            bool off = false;
+            for (Il2CppObject* a : rec.animators)
+                if (unity::IsAlive(a) && h) Call(animSetBool, a, {&h, &off}, "Animator.SetBool", &ok);
+            for (Il2CppObject* fx : rec.fx)
+                if (unity::IsAlive(fx)) unity::SetActive(fx, false);
         }
         Destroy(rec.holder);
     }
@@ -1157,26 +1352,139 @@ void Impl::DropRec(int64_t id, bool restore) {
     recs.erase(it);
 }
 
-// Boomboxes dance and show their notes while a Slime DJ song plays. A Boombox playing its own track
-// (interacted with) keeps its animation and our song goes silent on it until the track ends.
-void Impl::AnimateRec(Rec& rec, int want) {
-    const bool own = rec.player && unity::IsAlive(rec.player) && unity::Field<Il2CppObject*>(rec.player, offMusicInstance);
-    if (own != rec.own) {
-        rec.own = own;
-        const sdj::EmitterKind ek = rec.fam == kBooth ? sdj::EmitterKind::kBooth : sdj::EmitterKind::kSpeaker;
-        for (Il2CppObject* e : rec.emitters)  // registering again only changes the scales
-            sdj::RegisterEmitter(e, ek, 1.0f, own ? 0.0f : 1.0f);
-        if (!own) rec.anim = -1;  // its track ended: apply the song's dance state again
-    }
-    if (rec.anim == want) return;
-    rec.anim = want;
-    if (own) return;  // the Boombox plays its own track: leave its animation alone
-    bool on = want != 0, ok = false;
+// ---------------------------------------------------------------- E / music --
+
+std::set<int64_t> Impl::OnIds() {
+    std::set<int64_t> out;
+    std::stringstream ss(host.value(kOnKey));
+    std::string part;
+    while (std::getline(ss, part, ','))
+        try {
+            if (!part.empty()) out.insert(std::stoll(part));
+        } catch (...) {
+        }
+    return out;
+}
+
+void Impl::SetOn(int64_t id, bool on) {
+    if (!id) return;
+    std::set<int64_t> ids = OnIds();
+    if (on ? !ids.insert(id).second : ids.erase(id) == 0) return;
+    std::string s;
+    for (int64_t i : ids) s += (s.empty() ? "" : ",") + std::to_string(i);
+    host.setValue(kOnKey, s);
+}
+
+Impl::Rec* Impl::RecOfPlayer(Il2CppObject* player) {
+    if (!player) return nullptr;
+    for (auto* m : {&recs, &plain})
+        for (auto& [id, rec] : *m)
+            if (rec.player == player) return &rec;
+    return nullptr;
+}
+
+bool Impl::Seated(const Rec& rec) {
+    if (!rec.attach || !unity::IsAlive(rec.attach)) return false;
+    Il2CppObject* slime = unity::Field<Il2CppObject*>(rec.attach, offApSlime);
+    return unity::Field<bool>(rec.attach, offApJointActive) && slime && unity::IsAlive(slime);
+}
+
+// The Boombox's own track plays from this player (GadgetDirector.CurrentGadgetMusicPlayer, its instance set).
+bool Impl::VanillaPlaying(Il2CppObject* player) {
+    if (!player || !unity::IsAlive(player)) return false;
+    Il2CppObject* gd = SceneField(offScGadgetDir);
+    return unity::IsAlive(gd) && unity::Field<Il2CppObject*>(gd, offGdCurrentPlayer) == player &&
+           unity::Field<Il2CppObject*>(player, offMusicInstance) != nullptr;
+}
+
+// The original OnInteract: starts the track (stopping any other Boombox's) or stops it. Past the cooldown.
+void Impl::ToggleVanilla(Il2CppObject* player) {
+    if (!g_origInteract || !player || !unity::IsAlive(player)) return;
+    unity::Field<double>(player, offGmpNext) = 0.0;
+    g_origInteract(player, onInteractMi);
+}
+
+void Impl::SetVolume(Rec& rec, float vol) {
+    if (rec.vol == vol) return;
+    rec.vol = vol;
+    for (Il2CppObject* e : rec.emitters)  // registering again only changes the scales
+        sdj::RegisterEmitter(e, KindOf(rec), 1.0f, vol);
+}
+
+// The boomboxes dance and show their notes only while something plays from them.
+void Impl::Dance(Rec& rec, bool on) {
+    if (rec.anim == (on ? 1 : 0)) return;
+    rec.anim = on ? 1 : 0;
     int32_t h = animHash;
+    bool b = on, ok = false;
     for (Il2CppObject* a : rec.animators)
-        if (unity::IsAlive(a) && h) Call(animSetBool, a, {&h, &on}, "Animator.SetBool", &ok);
-    for (size_t i = 0; i < rec.fx.size(); ++i)
-        if (unity::IsAlive(rec.fx[i])) unity::SetActive(rec.fx[i], on || rec.fxWas[i]);
+        if (unity::IsAlive(a) && h) Call(animSetBool, a, {&h, &b}, "Animator.SetBool", &ok);
+    for (Il2CppObject* fx : rec.fx)
+        if (unity::IsAlive(fx)) unity::SetActive(fx, on);
+}
+
+// Switched off: silent. On: the Slime DJ song from the record's emitters while a song is loaded (booth: and
+// a slime sits behind the desk), else the Boombox's own track as filler.
+void Impl::Apply(Rec& rec) {
+    if (rec.fam == kRadio || !rec.player || !unity::IsAlive(rec.player)) {
+        if (rec.rb && unity::IsAlive(rec.rb)) {  // the vacuum may have reset the constraints
+            bool ok = false;
+            int32_t c = Value<int32_t>(Call(rbGetConstraints, rec.rb, {}, "Rigidbody.get_constraints", &ok));
+            if (ok && (c & (16 | 64)) != (16 | 64)) {
+                c |= 16 | 64;
+                Call(rbSetConstraints, rec.rb, {&c}, "Rigidbody.set_constraints");
+            }
+        }
+        Dance(rec, sdj::SongPlaying());  // the radio plays whenever a song does
+        return;
+    }
+    const bool song = !sdj::SongName().empty();
+    const bool seated = rec.fam != kBooth || Seated(rec);
+    if (rec.fam == kBooth && seated != rec.seated) {
+        rec.seated = seated;
+        SR2_INFO("[{}] dj buildables: DJ Booth actor {}: {}", module, rec.id,
+                 seated ? "a slime sits behind the desk" : "nobody behind the desk any more");
+    }
+    bool vanilla = VanillaPlaying(rec.player);
+    int want = !rec.on ? kModeOff : song && seated ? kModeSong : kModeFiller;
+    const char* why = "";
+    if (want == kModeFiller && !vanilla) {
+        if (rec.mode == kModeFiller) {  // the game stopped it: another Boombox started, or other music took over
+            rec.on = false;
+            SetOn(rec.id, false);
+            want = kModeOff;
+            why = " (its track was stopped by the game: another Boombox or other music)";
+        } else {
+            ToggleVanilla(rec.player);
+            vanilla = VanillaPlaying(rec.player);
+        }
+    } else if (want != kModeFiller && vanilla) {
+        ToggleVanilla(rec.player);
+        vanilla = VanillaPlaying(rec.player);
+    }
+    if (want == kModeFiller) why = !song ? " (no Slime DJ song loaded)" : " (no slime behind the desk)";
+    SetVolume(rec, want == kModeSong ? 1.0f : 0.0f);
+    Dance(rec, (want == kModeSong && sdj::SongPlaying()) || (want == kModeFiller && vanilla));
+    if (want != rec.mode) {
+        static constexpr const char* kNames[] = {"nothing", "the Slime DJ song", "the Boombox's own track"};
+        if (rec.mode >= 0 || want != kModeOff)
+            SR2_INFO("[{}] dj buildables: {} actor {} plays {}{}", module, Label(rec), rec.id, kNames[want], why);
+        rec.mode = want;
+    }
+}
+
+// E on one of our players (GadgetMusicPlayer.OnInteract detour). False: not ours, the original runs.
+bool Impl::Interact(Il2CppObject* player) {
+    Rec* rec = RecOfPlayer(player);
+    if (!rec) return false;
+    const ULONGLONG now = GetTickCount64();
+    if (now - lastToggle < 400) return true;  // one press, one toggle
+    lastToggle = now;
+    rec->on = !rec->on;
+    SetOn(rec->id, rec->on);
+    SR2_INFO("[{}] dj buildables: {} actor {} switched {} (interact)", module, Label(*rec), rec->id, rec->on ? "on" : "off");
+    Apply(*rec);
+    return true;
 }
 
 void Impl::Animate() {
@@ -1186,17 +1494,16 @@ void Impl::Animate() {
             for (auto* m : {&recs, &plain})
                 for (auto& [id, rec] : *m) rec.anim = -1;
     }
-    const int want = sdj::SongPlaying() ? 1 : 0;
     for (auto* m : {&recs, &plain})
         for (auto& [id, rec] : *m) {
-            AnimateRec(rec, want);
+            Apply(rec);
             if (Faulted()) return;
         }
 }
 
-// Every loaded Boombox that is not a DJ Speaker gets a plain record: the Slime DJ song plays from its
-// head (model_boombox, 0.72 m up) and it dances while a song plays. Users expected "boomboxes play the
-// DJ music"; the round-7 log had a placed plain Boombox, no DJ Speaker, and nothing played there.
+// Every loaded Boombox that is not a DJ Speaker gets a plain record: switched on with E it plays the
+// Slime DJ song from its head (model_boombox, 0.72 m up) and dances (Apply). Users expected "boomboxes
+// play the DJ music"; the round-7 log had a placed plain Boombox, no DJ Speaker, and nothing played there.
 void Impl::SyncPlain(const std::unordered_map<int64_t, Il2CppObject*>& present, const std::map<int64_t, int>& listed) {
     constexpr size_t kMaxPlain = 40;  // slime_dj gives 48 emitters a speaker
     int added = 0, dropped = 0, registered = 0;
@@ -1207,18 +1514,24 @@ void Impl::SyncPlain(const std::unordered_map<int64_t, Il2CppObject*>& present, 
             ++it;
             continue;
         }
+        if (p == present.end()) SetOn(it->first, false);  // gone from the save (picked up)
         Undress(it->second, same);  // still there (turned into a DJ Speaker): stops dancing
         it = plain.erase(it);
         ++dropped;
     }
+    std::set<int64_t> on;
+    bool onRead = false;
     for (const auto& [id, go] : present) {
         if (!go || listed.count(id) || plain.count(id)) continue;
+        if (!onRead) on = OnIds(), onRead = true;
         if (plain.size() >= kMaxPlain) break;
         if (!animHash) ReadAnimHash();
         Rec rec;
         rec.fam = kSpeaker;
         rec.kind = -1;
+        rec.id = id;
         rec.root = go;
+        rec.on = on.count(id) > 0;
         Keep(rec, go);
         Il2CppObject* model = Find(go, "model_boombox");
         if (Il2CppObject* a = InChildren(go, animatorClass)) {
@@ -1227,7 +1540,6 @@ void Impl::SyncPlain(const std::unordered_map<int64_t, Il2CppObject*>& present, 
         }
         if (Il2CppObject* fx = Find(go, "model_boombox/bbox_base_jnt/bbox_head_jnt/FX_MusicalNotes")) {
             rec.fx.push_back(fx);
-            rec.fxWas.push_back(ActiveSelf(fx));
             Keep(rec, fx);
         }
         rec.player = unity::GetComponent(go, musicPlayerClass);
@@ -1235,13 +1547,14 @@ void Impl::SyncPlain(const std::unordered_map<int64_t, Il2CppObject*>& present, 
         Il2CppObject* em = model ? model : go;
         rec.emitters.push_back(em);
         Keep(rec, em);
-        registered += sdj::RegisterEmitter(em, sdj::EmitterKind::kSpeaker) ? 1 : 0;
+        rec.vol = 0.0f;  // silent until switched on (Apply)
+        registered += sdj::RegisterEmitter(em, sdj::EmitterKind::kSpeaker, 1.0f, rec.vol) ? 1 : 0;
         plain[id] = std::move(rec);
         ++added;
         if (Faulted()) return;
     }
     if (added || dropped)
-        SR2_INFO("[{}] dj buildables: {} plain Boombox(es) play the Slime DJ song ({} added, {} emitter(s) registered; {} dropped)",
+        SR2_INFO("[{}] dj buildables: {} plain Boombox(es) play the Slime DJ song when switched on ({} added, {} emitter(s) registered; {} dropped)",
                  module, plain.size(), added, registered, dropped);
 }
 
@@ -1304,6 +1617,7 @@ void Impl::Scan() {
                 continue;
             }
             DropRec(id, false);
+            SetOn(id, false);
             if (f != kRadio) ++kits;
             SR2_INFO("[{}] dj buildables: {} actor {} {}{}", module, fams[f].label, id,
                      seen ? "was removed" : "is not in this save any more", f != kRadio ? std::format(" - kit back ({} now)", kits) : "");
@@ -1382,6 +1696,31 @@ std::string MethodBySuffixName(Il2CppClass* k, std::string_view suffix, uint32_t
     return std::format("method *{} not found", suffix);
 }
 
+// ---------------------------------------------------------------- hooks --
+
+// GadgetMusicPlayer.OnInteract: E on one of our records switches it (Impl::Interact); everything else runs
+// the original.
+void OnInteractDetour(Il2CppObject* self, const MethodInfo* mi) {
+    if (g && self && main_thread::IsMainThread() && !g->Faulted()) {
+        bool handled = false;
+        if (g_guard.Run([&] { handled = g->Interact(self); }) && handled) return;
+    }
+    g_origInteract(self, mi);
+}
+
+// GadgetMusicPlayer.ShowDeactivatePrompt: our records show "deactivate" while switched on.
+bool ShowDeactivateDetour(Il2CppObject* self, const MethodInfo* mi) {
+    if (g && self && main_thread::IsMainThread() && !g->Faulted()) {
+        int r = -1;
+        if (g_guard.Run([&] {
+                if (Impl::Rec* rec = g->RecOfPlayer(self)) r = rec->on ? 1 : 0;
+            }) &&
+            r >= 0)
+            return r == 1;
+    }
+    return g_origShowDeact(self, mi);
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------- setup --
@@ -1448,6 +1787,11 @@ bool DjBuildables::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& 
     p->jointClass = cls(kPhysics, "UnityEngine", "Joint");
     p->animatorClass = cls("UnityEngine.AnimationModule", "UnityEngine", "Animator");
     p->musicPlayerClass = cls(kImage, "", "GadgetMusicPlayer");
+    p->uiClass = cls(kImage, "MonomiPark.SlimeRancher.UI.Gadget", "GadgetUIInteractable");
+    p->attachClass = cls(kImage, "", "SlimeAttachPoint");
+    p->boxColliderClass = cls(kPhysics, "UnityEngine", "BoxCollider");
+    p->sphereColliderClass = cls(kPhysics, "UnityEngine", "SphereCollider");
+    Il2CppClass* baseUi = cls(kImage, "MonomiPark.SlimeRancher.UI", "BaseUIInteractable");
     Il2CppClass* fabCategory = cls(kImage, kFab, "GadgetFabricateCategory");
     Il2CppClass* gadgetDir = cls(kImage, "", "GadgetDirector");
     Il2CppClass* gadgetsModel = cls(kImage, kModel, "GadgetsModel");
@@ -1509,6 +1853,18 @@ bool DjBuildables::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& 
     off(lookup, "_toyDefinitions", p->offToys);
     off(p->groupClass, "_memberTypes", p->offMembers);
     off(p->groupClass, "_memberGroups", p->offSubGroups);
+    off(p->musicPlayerClass, "gadgetMusic", p->offGmpMusic);
+    off(p->musicPlayerClass, "onInteractCue", p->offGmpCue);
+    off(p->musicPlayerClass, "timeBetweenActivations", p->offGmpCooldown);
+    off(p->musicPlayerClass, "nextAllowedActivationTime", p->offGmpNext);
+    off(gadgetDir, "<CurrentGadgetMusicPlayer>k__BackingField", p->offGdCurrentPlayer);
+    off(baseUi, "defaultInteractionPrompt", p->offUiPrompt);
+    off(baseUi, "interactionInput", p->offUiInput);
+    off(p->uiClass, "_blockInteractInGadgetMode", p->offUiBlock);
+    off(p->uiClass, "_deactivateInteractionPrompt", p->offUiDeactivate);
+    off(p->attachClass, "_allowLargo", p->offApAllowLargo);
+    off(p->attachClass, "_slime", p->offApSlime);
+    off(p->attachClass, "_isJointActive", p->offApJointActive);
     if (!why.empty()) return fail();
     for (size_t* o : {&p->offPcCurrency, &p->offPcIdent})  // value-type field offsets include the object header
         *o = *o >= 2 * sizeof(void*) ? *o - 2 * sizeof(void*) : *o;
@@ -1554,8 +1910,34 @@ bool DjBuildables::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& 
     p->instantiateActor = method(helpers, "InstantiateActor", 10);
     p->currentGroup = method(regions, "get_CurrentSceneGroup", 0);
     p->actorIdOf = byParams(identifiable, "GetActorId", {"UnityEngine.GameObject"});
+    p->goAddComponent = byParams(p->gameObjectClass, "AddComponent", {"System.Type"});
+    p->goSetLayer = method(p->gameObjectClass, "set_layer", 1);
+    p->colSetEnabled = method(p->colliderClass, "set_enabled", 1);
+    p->boxGetCenter = method(p->boxColliderClass, "get_center", 0);
+    p->boxSetCenter = method(p->boxColliderClass, "set_center", 1);
+    p->boxGetSize = method(p->boxColliderClass, "get_size", 0);
+    p->boxSetSize = method(p->boxColliderClass, "set_size", 1);
+    p->sphereGetRadius = method(p->sphereColliderClass, "get_radius", 0);
+    p->sphereSetRadius = method(p->sphereColliderClass, "set_radius", 1);
+    p->rbGetConstraints = method(p->rigidbodyClass, "get_constraints", 0);
+    p->rbSetConstraints = method(p->rigidbodyClass, "set_constraints", 1);
+    p->trGetEuler = method(transform, "get_eulerAngles", 0);
+    p->trSetEuler = method(transform, "set_eulerAngles", 1);
+    p->onInteractMi = method(p->musicPlayerClass, "OnInteract", 0);
+    p->showDeactMi = method(p->musicPlayerClass, "ShowDeactivatePrompt", 0);
     if (!p->lsCtor || !p->fabItemCtor) why = "constructors not found";
     if (!why.empty()) return fail();
+    // E on our booths / speakers / Boomboxes (GadgetMusicPlayer is hooked nowhere else).
+    void* interact = R.MethodPointer(p->onInteractMi, &why);
+    void* showDeact = interact ? R.MethodPointer(p->showDeactMi, &why) : nullptr;
+    if (!interact || !showDeact) return fail();
+    if (!ctx.HookAddress("dj.GadgetMusicPlayer.OnInteract", interact, reinterpret_cast<void*>(&OnInteractDetour),
+                         reinterpret_cast<void**>(&g_origInteract)) ||
+        !ctx.HookAddress("dj.GadgetMusicPlayer.ShowDeactivatePrompt", showDeact, reinterpret_cast<void*>(&ShowDeactivateDetour),
+                         reinterpret_cast<void**>(&g_origShowDeact))) {
+        why = ctx.failure();
+        return fail();
+    }
     g = p;
     variant_ext::Set(p);  // the Quantum Storage Link's detours ask us from now on
     ready_ = true;
