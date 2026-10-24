@@ -1,6 +1,5 @@
 # Ideas (not planned yet)
 
-- Several programs per automation bee.
 - Scratch-like block editor for drone programs, unlocked by a refinery upgrade.
 
 Still open from the 2026-10-24 extension list (the rest is built):
