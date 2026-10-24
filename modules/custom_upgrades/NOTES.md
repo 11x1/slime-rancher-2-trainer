@@ -49,19 +49,15 @@ findings from in-game tests that are easy to get wrong again.
   count. Sidecar `hen_collector_keep_hens` / `hen_collector_keep_roosters`; an old
   `hen_collector_keep` n reads as min(2, n) roosters and the rest hens.
 - The coop menu shows two `PlotMenuSlider`s in one row (`SliderSpec.columns`, `Create(..., rowOf)`).
-- **Select to step** (feedback round 4: "only when selected should it be focused, right now arrow
-  buttons still navigate"). Nothing selected: the arrows / d-pad / stick navigate the menu as usual,
-  the sliders ignore them. A slider is selected by a mouse press on it (`Selectable.IsPressed`, polled)
-  or by Submit (Enter / pad A: the hens slider). The selected slider's label reads `< Keep hens: 18 >`;
-  left / right (arrows, d-pad, left stick, Shift or not) step it and no move reaches the menu; up / down
-  switch the selection to the other slider. Released by Submit again, Cancel (Esc / B: the menu stays
-  open), a mouse press anywhere else (judged two frames later, EventSystem order), or, when it was
-  selected with the mouse, the mouse leaving it (not while the button is held). A press on one slider
-  releases the other. Hooks: `ListUI.Submit(InputEventData)` (0x83F450, the list menus' submit listener;
-  the owned Hen Collector card's OnAction does nothing anyway) and `BaseUI.OnCancelPressed` (0x683490,
-  `if (CanClose()) Close()`), both shared bodies with one flag check; up / down / left / right through
-  the `TryHandleAsNavigation` detour below. Without the two hooks: the old always-on keys (d-pad / left
-  stick / arrows for hens, right stick / Shift + arrows for roosters).
+- **Mouse only** (feedback round 5: "remove the icons and arrow key functionality for now, will deal
+  with gamepads later"). The sliders take mouse clicks / drags only (`SliderSpec.keys = false`: no pad
+  / keyboard polling, `Step()` refuses); the arrows / d-pad / stick navigate the menu as usual, Submit
+  and Cancel do what they do in vanilla. Removed with it: the select-to-step mode of round 4 (label
+  `< Keep hens: 18 >`, a slider selected by a mouse press or Submit) and its hooks `ListUI.Submit`
+  (0x83F450) and `BaseUI.OnCancelPressed` (0x683490), the `INavigationHandler.TryHandleAsNavigation`
+  (0x79C940) detour (see "Slider keys" below), and the "Pad: d-pad hens, right stick roostros." hint
+  in the card text. `PlotMenuSlider` keeps its pad / key support (`keys = true`, the default) for
+  drone_price_limit, which drives it through `SetPolling` / `Step` from its own navigation.
 
 ### Activate button (checklist hc3)
 
@@ -77,7 +73,9 @@ findings from in-game tests that are easy to get wrong again.
 - The button is kept only while that detour is installed (`CoopWorld::KeepHenButton`); the build line
   says `Activate button kept` / `no Activate button`.
 
-### Slider keys (fix after the test of build 506a4f60)
+### Slider keys (fix after the test of build 506a4f60; hook removed in round 5, sliders mouse only)
+
+Kept for when gamepad support comes back:
 
 - The arrows still moved the menu selection: `FocusManager.NavigateInDirection` hands a move to every
   `IMoveHandler` between the focused card and the spatial target through
@@ -187,7 +185,7 @@ showing it, selling the Hen Collector (fallback log), turning custom upgrades of
   clones' template is `Walls Upgrade`). Texts are now registered in the pre hook too.
 
 Not checked in game yet: all of the above (layout and centring, the hidden icon, that selling no longer
-buys, the label, the slider keys on keyboard and pad, the Activate button's position, prompt and
+buys, the label, the Activate button's position, prompt and
 animation).
 
 ## Sell-All receipt
@@ -213,11 +211,22 @@ dialog.
   under "Icon Background" bound to the popup's positive / negative InputEvent). On the clone the
   InputEventButton is disabled (it would perform that InputEvent on pointer down / up), the label's
   LocalizeStringEvent is disabled and the TMP text set to "Cancel" / "Sell"; a polled Toggle on its
-  root takes the click (Button.onClick is empty in the prefab). The keyboard / pad focus is a teal
+  root was meant to take the click (Button.onClick is empty in the prefab). The keyboard / pad focus is a teal
   (Cancel) / pink (Sell) ring behind the focused button, fitted to its self-sized rect for 30 frames
   after a build; disabled Sell = `Selectable.interactable` false (the prefab's disabled colours).
   Fallback when any piece is missing: our own SDF buttons with "(Esc / B)" / "(Enter / A)" in the
   label. Log: `silo receipt: buttons cloned from the game's popup, rows fit|scroll (N px, canvas H high)`.
+- **Regression after feature/polish-4 ("Sell menu didn't show up").** The receipt never opened: log
+  `silo receipt: not opened: panel failed`, then `the receipt could not be opened - selling at once`;
+  Player.log `Can't add 'Toggle' to Cancel because a 'Button' is already added to the game object!`.
+  `Selectable` is `[DisallowMultipleComponent]` (inherited), so a Toggle can't go on the cloned button
+  and the build stopped. Now the game button's click is polled from its own Button:
+  `Selectable.IsPressed()` (protected) true last frame, false now, `get_isPointerInside` (private) true.
+  IsPressed is false while the Selectable is not interactable, so a disabled Sell can't be clicked. The
+  button keeps its hover animation (no overlay on top). If a build still fails, the failing step is
+  logged (`panel build failed at: ...`) and the panel is built again with our own buttons (game buttons
+  off for the rest of the session, `retrying with our own buttons`); a failed clone logs `game button
+  not cloned (...)` once.
 
 - **Input lock = the game's own.** The dialog root carries the game's `UIInputLocker` component, as
   menu prefabs do: `OnEnable` -> `TimeDirector.Pause` (timeScale 0, ref-counted) ->
@@ -285,7 +294,21 @@ Storage per silo slot: 100 -> 200 (vanilla) -> 300 -> 400 -> 500 (ours).
 - **Not sellable**, like the vanilla silo storage upgrades: `CanSell` gives the same permanent reason
   ("silo storage"), so sell_upgrades shows no Sell button and no alt-action prompt.
 
-Not checked in game yet: the card chain (vanilla card -> II -> III -> IV), the slot displays showing
+- **Visuals** (feedback round 5: "I don't see any visual upgrades for tiers II, III and IV"). The
+  vanilla capacity upgrade shows one `techSiloCapacity` tank per owned storage section, high on the
+  silo's diagonals (`Capacity Addon 0..3`, plot-local about (-1.6, 3.3, -1.8) for section 0, each next
+  section turned 90 degrees and ~0.8 m higher). Our tiers add the same tank (0.8 size) standing on the
+  ground on a diagonal at (+-2.9, +-2.9): II (+x, +z), III also (-x, +z), IV also (+x, -z), each turned
+  like the vanilla tank on that diagonal (19.6 + k * 90 degrees). The (-x, -z) diagonal stays free (plot
+  menu terminal outside it, section 0's low pipes). Clearances: silo wall r 2.1, vanilla pipe elbows /
+  caps r <= 3.05 (>= 1.37 m from a tank centre), depositors in the middle of each side, corner posts at
+  4.75, the Sell-All button outside the (+x, -z) corner. Built by `plot_props` (holders
+  `sr2props_SiloTankII..IV#<gen>`), gone when the tier is not owned / the module is off, rebuilt
+  after a load from the sidecar. The tank's `ApplyPalette` is stripped, so it keeps the prefab's
+  default colours, not the silo's palette.
+
+Not checked in game yet: the tanks (position on the ground, no overlap with the silo, pipes or
+depositors at every storage level, colours), the card chain (vanilla card -> II -> III -> IV), the slot displays showing
 the new maximum, drones / silo input filling to 500, and the log lines after a load (200 -> 500 within
 a second).
 
@@ -319,6 +342,7 @@ coop_world's scan would destroy), stripped of colliders, joints, rigidbodies and
 | Fast Growth II | a fourth head in the middle of the -x side, turned 180 degrees | same |
 | Music Box II | a second speaker on the (-x, -z) corner post (above the plot menu terminal), leaning inwards | corral prefab `Music Box/techCorralMusicBox/MusicBox/Music` (the vanilla speaker sits on the (-x, +z) post) |
 | Ash Booster (u11) | glow + embers in the fire, embers rising out of the opening | incinerator prefab `.../meshIncinerator/FireTest/Glow` and `/Embers` (inactive in vanilla, switched on), decoration `decorFireFlower`: `FX Fireflower` |
+| Silo Capacity II / III / IV | one capacity tank per tier standing on the ground beside the silo: II (+x, +z), III adds (-x, +z), IV adds (+x, -z) | silo prefab `Silo Upgrade 0/Addition 0/Capacity Addon 0/techSiloCapacity` (the vanilla Storage Capacity Upgrade's tank, with its pipe-connector foot) at 0.8 size |
 
 Gadget / toy prefabs are found by prefab name in `LookupDirector._gadgetDefinitions` /
 `_toyDefinitions` (member types, then sub-groups). A missing model is logged once
@@ -341,6 +365,17 @@ stayed correctly. `LandPlotUIRoot.Upgrade` has one caller, `<PromptForUpgrade>b_
 `PromptForUpgrade` always opens the popup, so a purchase popup was confirmed in the click of the
 sale. sell_upgrades now refuses that confirm in the sale's frame and the next (log `purchase of
 ... right after a sale refused`). Removal itself (CoopNests, IncineratorGlow) logged fine.
+
+Feedback round 5, Ash Trough sold part-filled and bought back: "I see nothing visually added". The
+trough model is vanilla (`patchIncinerator/AshTrough`: floor, four low walls, child `Ash Level` =
+FillableAshSource); the sale hides it, vanilla `AshTroughUpgrader.Apply` (0x983930: `SetActive(true)`
+for ASH_TROUGH) shows it again on the purchase (`LandPlot.AddUpgrade` -> `ApplyUpgrades`), and on
+load. The log of that test had `Ash Trough bought back ...: trough not found, vanilla fill kept`:
+sell_upgrades looked for the FillableAshSource on `AshTrough` itself, so the remembered ash was never
+restored (the trough came back full, as vanilla). Fixed in sell_upgrades (GetComponentInChildren);
+after every Ash Trough purchase it now also checks the trough model and switches it on if it is still
+hidden (log `trough model shown` / `was still hidden - shown now`), so the next test tells which case it
+was.
 
 Not checked in game yet: the Music Box II speaker (its Animator runs without the game's music box
 script; it may stand still or play its idle), the scattered coop layout, the -x sprinkler head,

@@ -29,6 +29,11 @@
 //   * decorFireFlower (decoration gadget): child "FX Fireflower" (two ember particle systems,
 //     "Embers_01" / "Embers_02" at y 2.59 / 1.17 above the flower), set so they rise out of
 //     the incinerator's opening.
+//   * silo prefab "patchSilo": "Silo Upgrade N/Addition N/Capacity Addon N/techSiloCapacity" = the
+//     vanilla Storage Capacity Upgrade's tanks, one per storage section, high on the silo's diagonals
+//     (plot-local about (-1.6, 3.3, -1.8) for section 0, the others turned 90 deg each and higher).
+//     Their ApplyPalette script is stripped like every game script, so our tanks keep the prefab's
+//     default colours (not the silo's palette).
 //
 // Placement (plot-local, plot root = the plot prefab root). Kept away from the corners: coop
 // corners hold the plot menu terminal (-x, -z), the vitamizer (-x, +z), the vanilla elder
@@ -92,7 +97,11 @@ constexpr const char* kPhysics = "UnityEngine.PhysicsModule";
 constexpr int32_t kPlotCorral = 2;
 constexpr int32_t kPlotCoop = 3;
 constexpr int32_t kPlotGarden = 4;
+constexpr int32_t kPlotSilo = 5;
 constexpr int32_t kPlotIncinerator = 7;
+// The vanilla Storage Capacity Upgrade's tank of the first silo section (inactive in the prefab;
+// Transform.Find finds inactive children, the clone goes under our holder and is shown with it).
+constexpr const char* kSiloTankPath = "Silo Upgrade 0/Addition 0/Capacity Addon 0/techSiloCapacity";
 constexpr std::string_view kPrefix = "sr2props_";
 
 struct Vec3 {
@@ -178,6 +187,22 @@ const Part kGlow[] = {
     {Src::kGadget, 0, "decorFireFlower", "FX Fireflower", {0.0f, 2.4f, 0.0f}, kId, S(1.0f), false},
 };
 
+// Silo tanks: the vanilla capacity tank ("Capacity Addon 0/techSiloCapacity": mesh 2.4 x 2.7 x 2.4
+// centred on its origin, child objPipeConnectorWall01 1.59 m below as a foot plate) at 0.8 size,
+// standing on the ground on the silo's diagonals at 2.9 / 2.9 (r 4.1: clear of the silo wall at 2.1,
+// the vanilla pipes and caps at r <= 3.05, the depositors in the middle of each side and the corner
+// posts at 4.75). Yaw = the vanilla tank's yaw on that diagonal (19.6 deg + 90 per quarter turn).
+// The (-x, -z) diagonal stays free (plot menu terminal, section 0's ground pipes).
+const Part kSiloTank2[] = {
+    {Src::kPlot, kPlotSilo, nullptr, kSiloTankPath, {2.9f, 1.42f, 2.9f}, YawQ(0.98480775f, -0.17364818f), S(0.8f), false},
+};
+const Part kSiloTank3[] = {
+    {Src::kPlot, kPlotSilo, nullptr, kSiloTankPath, {-2.9f, 1.42f, 2.9f}, YawQ(0.81915204f, 0.57357644f), S(0.8f), false},
+};
+const Part kSiloTank4[] = {
+    {Src::kPlot, kPlotSilo, nullptr, kSiloTankPath, {2.9f, 1.42f, -2.9f}, YawQ(0.57357644f, -0.81915204f), S(0.8f), false},
+};
+
 struct KindDef {
     PropKind kind;
     const char* name;  // holder name part
@@ -192,6 +217,9 @@ const KindDef kKinds[] = {
     {kPropGardenSprinkler2, "GardenSprinklerII", kPlotGarden, kSprinkler2, std::size(kSprinkler2)},
     {kPropIncinGlow, "IncineratorGlow", kPlotIncinerator, kGlow, std::size(kGlow)},
     {kPropCorralMusic, "CorralMusicII", kPlotCorral, kMusic, std::size(kMusic)},
+    {kPropSiloTank2, "SiloTankII", kPlotSilo, kSiloTank2, std::size(kSiloTank2)},
+    {kPropSiloTank3, "SiloTankIII", kPlotSilo, kSiloTank3, std::size(kSiloTank3)},
+    {kPropSiloTank4, "SiloTankIV", kPlotSilo, kSiloTank4, std::size(kSiloTank4)},
 };
 
 // ---------------------------------------------------------------- coop layout --
