@@ -17,8 +17,9 @@
 //   Silo Capacity IV     silo         Silo Capacity III     6500    500 items per silo slot
 //
 //   Not plot upgrades: the Fabricator vacpack upgrades Tank Booster IX-XII (+25 per slot per level,
-//   up to 200) and Extra Tank III-IV (a 7th / 8th slot), in vacpack_upgrades.cpp (own hooks, levels and
-//   extra slot contents in this module's sidecar as per-save values).
+//   up to 200), Extra Tank III-IV (a 7th / 8th slot) and Drone Battery Saver I-IV (every drone station
+//   uses 1/1.25 .. 1/2 of the battery; effect in drone_battery.cpp), in vacpack_upgrades.cpp (own
+//   hooks, levels and extra slot contents in this module's sidecar as per-save values).
 //
 //   Silo capacity (vanilla, prefab + disassembly): the silo's SiloStorage has 12 slot definitions
 //   ("SiloNonSlimes", _maxAmount 100); STORAGE2/3/4 only swap slot GameObjects, the one vanilla
@@ -225,6 +226,7 @@
 #include "core/unity.h"
 #include "modules/custom_upgrades/api.h"
 #include "modules/custom_upgrades/coop_world.h"
+#include "modules/custom_upgrades/drone_battery.h"
 #include "modules/custom_upgrades/drone_source.h"
 #include "modules/custom_upgrades/plot_menu_slider.h"
 #include "modules/custom_upgrades/plot_props.h"
@@ -601,6 +603,7 @@ public:
     bool SetPlotValueOf(Il2CppObject* plot, const std::string& key, const std::string& value);
     std::string SaveValueOf(const std::string& key);
     bool SetSaveValueOf(const std::string& key, const std::string& value);
+    std::vector<std::pair<std::string, std::string>> SaveValuesWithPrefix(const std::string& prefix);
 
 private:
     struct TierEntry {
@@ -682,6 +685,7 @@ private:
     custom_upgrades::world::SiloButtons silo_;  // Sell-All Button world button
     custom_upgrades::world::PlotProps props_;   // decorative props of owned tiers (plot_props.h)
     custom_upgrades::vacpack::VacpackUpgrades vacpack_;  // Fabricator vacpack upgrades (vacpack_upgrades.h)
+    custom_upgrades::drones::BatterySaver battery_;      // Drone Battery Saver effect (drone_battery.h)
     std::vector<custom_upgrades::world::PropRequest> WantedProps() const;
     custom_upgrades::ui::PlotMenuSlider sliderHens_;      // Hen Collector limits, side by side (one pair
     custom_upgrades::ui::PlotMenuSlider sliderRoosters_;  // at a time; the hens slider builds the row)
@@ -806,6 +810,7 @@ sr2::core::DetourGuard g_saveGuard{kModule, "AutoSaveDirector.SaveGameImpl"};
 sr2::core::DetourGuard g_loadGuard{kModule, "AutoSaveDirector.Load/StartNewGame"};
 sr2::core::DetourGuard g_worldGuard{kModule, "custom_upgrades.CoopWorld"};
 sr2::core::DetourGuard g_gateGuard{kModule, "custom_upgrades.Gate"};
+sr2::core::DetourGuard g_batteryGuard{kModule, "custom_upgrades.DroneBatterySaver"};
 sr2::core::DetourGuard g_siloGuard{kModule, "PlortCollectorActivator.Activate"};
 using ActivateFn = void (*)(Il2CppObject*, const MethodInfo*);
 ActivateFn g_origActivate = nullptr;
@@ -2028,6 +2033,10 @@ void CustomUpgrades::FrameCheck(float dt) {
     if (On() && silo_.Ready()) g_siloGuard.Run([&] { silo_.Frame(); });  // button message (cheap when none)
     if (On() && notices_.Ready()) g_siloGuard.Run([&] { notices_.Frame(dt); });  // queued sale notices
     if (On() && receipt_.IsOpen()) g_siloGuard.Run([&] { ReceiptTick(dt); });   // Sell-All receipt input
+    if (battery_.Ready()) {  // drone battery refunds (every ~2 s); off: forget the last looks
+        if (On()) g_batteryGuard.Run([&] { battery_.Tick(dt); });
+        else battery_.Reset();
+    }
     if (!On() || (!world_.Ready() && !silo_.Ready() && !props_.Ready() && !capacityOk_ && !vacpack_.Ready())) return;
     if (std::isfinite(dt) && dt > 0.0f) worldAccum_ += std::min(dt, 1.0f);
     if (worldAccum_ < kWorldTickSeconds) return;
@@ -2946,6 +2955,14 @@ bool CustomUpgrades::SetSaveValueOf(const std::string& key, const std::string& v
     return true;
 }
 
+std::vector<std::pair<std::string, std::string>> CustomUpgrades::SaveValuesWithPrefix(const std::string& prefix) {
+    std::vector<std::pair<std::string, std::string>> out;
+    if (prefix.empty() || !EnsureLoaded()) return out;
+    for (const auto& [k, v] : state_.values)
+        if (k.compare(0, prefix.size(), prefix) == 0) out.emplace_back(k, v);
+    return out;
+}
+
 // ---------------------------------------------------------------- tiers --
 
 float CustomUpgrades::TierMultiplier(Il2CppObject* obj, int family) {
@@ -3342,6 +3359,13 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
                      "file", kModule, serr);
     }
 
+    // Drone Battery Saver effect (optional; missing -> the Fabricator card works but changes nothing,
+    // logged). Its level is the vacpack upgrade's.
+    {
+        std::string berr;
+        if (!battery_.Setup(R, kModule, [this] { return vacpack_.DroneBatteryLevel(); }, berr))
+            SR2_WARN("[{}] drone battery saver unavailable ({}) - owning the upgrade changes nothing", kModule, berr);
+    }
     // Vacpack upgrades in the Fabricator (optional; missing -> not offered, nothing else changes).
     {
         custom_upgrades::vacpack::Host host;
@@ -3350,10 +3374,15 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         host.value = [this](const std::string& k) { return SaveValueOf(k); };
         host.setValue = [this](const std::string& k, const std::string& v) { return SetSaveValueOf(k, v); };
         host.lookup = [this] { return LookupDirector(); };
+        host.valuesWithPrefix = [this](const std::string& p) { return SaveValuesWithPrefix(p); };
+        if (battery_.Ready()) {
+            host.droneStation = [this] { return battery_.StationDefinition(); };
+            host.droneBlueprint = [this] { return battery_.HasStationBlueprint(); };
+        }
         std::string verr, vreport;
         if (vacpack_.Setup(ctx, std::move(host), verr, vreport)) report += vreport;
-        else SR2_WARN("[{}] vacpack upgrades unavailable ({}) - Tank Booster IX-XII and Extra Tank III-IV are not offered",
-                      kModule, verr);
+        else SR2_WARN("[{}] vacpack upgrades unavailable ({}) - Tank Booster IX-XII, Extra Tank III-IV and Drone Battery "
+                      "Saver I-IV are not offered", kModule, verr);
     }
 
     main_thread::AddFrameCallback(kModule, [](float dt) {

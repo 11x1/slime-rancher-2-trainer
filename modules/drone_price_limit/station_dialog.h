@@ -4,9 +4,6 @@
 // the selected destination is the Plort Market; it (or the C key / right stick click) opens a
 // game-styled dialog: limit mode (minimum price / minimum fraction of the base price), a slider for
 // the value (0 = no limit) and a base-price cheat sheet of every plort in the market terminal's order.
-// A "Battery Saver" action (B key / left stick click) sits after the drone's status indicators
-// (charge / mode / location) while custom upgrades are on; its dialog buys and sells this station's
-// Battery Saver tiers (battery.h).
 // Built at runtime from uGUI parts and clones of the menu's own prompt; no managed code of ours.
 // Findings and layout: see station_dialog.cpp and modules/drone_price_limit/NOTES.md.
 //
@@ -47,12 +44,6 @@ struct DialogHost {
     std::function<void(int64_t station, const StationLimit&)> set;
     std::function<bool()> persistent;                     // limits go into the per-save sidecar
     std::function<float(Il2CppObject* ident)> baseValue;  // plort base price, 0 = unknown
-    // Battery Saver (battery.h); without these the station shows no battery action.
-    std::function<bool()> batteryAvailable;                      // custom_upgrades on with a save loaded
-    std::function<int(int64_t station)> batteryTier;             // owned tier, 0..kBatteryTiers
-    std::function<std::string(int64_t station)> batteryBuy;      // "" = bought, else the reason
-    std::function<std::string(int64_t station)> batterySell;     // "" = sold, else the reason
-    std::function<int()> newbucks;                               // -1 = unknown
 };
 
 class StationUi {
