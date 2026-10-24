@@ -1405,9 +1405,9 @@ void SandboxConfirm(const ModuleView& mv) {
         ImGui::TextUnformatted("Sandbox edits change your save directly. Enable?");
         ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.warn),
                            "This marks the loaded save (or, on the title screen, the next save you load) as cheated: "
-                           "Steam achievements are disabled in it for good, also after you turn Sandbox off.");
+                           "Steam achievements are disabled in it for good, and Sandbox can't be turned off in it again.");
         DimText("Each save keeps its own Sandbox switch: saves without the mark load with Sandbox off, a marked save "
-                "loads with Sandbox on or off as you left it.");
+                "always loads with Sandbox on.");
         ImGui::PopTextWrapPos();
         DimText("Every edit goes through the game's own functions and is kept when the game next saves. "
                 "There is no undo, so back up your save if you want to keep it as it is.");
