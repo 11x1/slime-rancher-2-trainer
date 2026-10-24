@@ -29,6 +29,8 @@ Every change goes through the game's own methods, the ones it uses for pickups, 
 
 ### Only saveable items
 
+custom_upgrades' runtime gadget clones (Quantum Storage Link, DJ Booth, DJ Speakers, Slime Radio card) are never saveable here (`custom_upgrades::IsModGadget`): they have a save alias in the index below, but crafting one would put the clone into the saved inventory next to its vanilla twin and the save would fail on the duplicate id. They are bought at the game's Fabricator only.
+
 Fixed (2026-10-24): a Glitch Tarr from the spawner made **every** save fail. `Player.log`: `KeyNotFoundException: The given key 'SlimeDefinition.GlitchTarr' was not present in the dictionary` at `GameModelPullHelpers.BuildActorData` <- `PullActors` <- `PullGame` <- `AutoSaveDirector.SaveGameImpl`. The save aborts before writing, so the files were safe, but nothing saved while the Tarr existed.
 
 The dictionary (1.3.0): `GameContext.AutoSaveDirector._saveReferenceTranslation` (`SaveReferenceTranslation`, AutoSaveDirector +0x40) -> `_identifiableTypeToPersistenceId` (`PersistenceIdLookupTable<IdentifiableType>`, +0x20) -> `_reverseIndex` (`Dictionary<string, int>`, keyed by `IdentifiableType.ReferenceId`, e.g. `SlimeDefinition.GlitchTarr`). `SaveReferenceTranslation.GetPersistenceId(IdentifiableType)` does `_reverseIndex[ReferenceId]` with no fallback. It is built by `SaveReferenceTranslation.OnIdentifiableTypesListChanged` (from `AutoSaveDirector.Awake` and `OnAdditionalContentAdded`) from `AutoSaveDirector._configuration._identifiableTypes.GetAllMembers()` (an `IdentifiableTypeGroup` asset), non-null entries only. A type outside that group exists as an asset (so `FindObjectsOfTypeAll` sees it) but can never be saved.

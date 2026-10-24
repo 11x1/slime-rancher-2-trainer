@@ -65,7 +65,9 @@ full volume (Unity clamps `AudioSource.volume` to 1, so Volume x the game's musi
 under 100 %); the range part always works, which with linear rolloff also makes it louder at
 any given distance.
 
-**Emitters (`api.h`, stable API for other modules).** Any GameObject can play the song:
+**Emitters (`api.h`, stable API for other modules).** Any GameObject can play the song. Users: the
+Music Box II prop (custom_upgrades `plot_props`) and the buildable DJ Booth (2 emitters), DJ Speakers and Slime
+Radio (custom_upgrades `dj_buildables.cpp`, NOTES "Slime DJ buildables"):
 
 ```cpp
 #include "modules/slime_dj/api.h"

@@ -83,6 +83,7 @@
 //     (withdrawals in the station menu, uploads) and frees slots unused for 30 s.
 
 #include "modules/custom_upgrades/quantum_link.h"
+#include "modules/custom_upgrades/variant_ext.h"
 
 #include <windows.h>
 
@@ -195,6 +196,9 @@ DecFn g_origDec = nullptr;
 // Read by the GetPersistenceId detour (any thread; set once on the main thread, never cleared).
 std::atomic<Il2CppObject*> g_ours{nullptr};
 std::atomic<Il2CppObject*> g_base{nullptr};
+// More variants on these hooks (variant_ext.h); set before the hooks are enabled.
+std::atomic<variant_ext::Extension*> g_ext{nullptr};
+variant_ext::Extension* Ext() { return g_ext.load(std::memory_order_acquire); }
 
 struct Impl {
     Host host;
@@ -539,12 +543,21 @@ sr2::core::DetourGuard g_guard{"custom_upgrades", "quantum storage link"};
 // Pure pointer work (no game calls, no fault check): our definition is saved as the Refinery Link.
 int32_t PersistDetour(Il2CppObject* self, Il2CppObject* type, const MethodInfo* mi) {
     Il2CppObject* ours = g_ours.load(std::memory_order_acquire);
-    if (ours && type == ours)
+    if (ours && type == ours) {
         if (Il2CppObject* base = g_base.load(std::memory_order_acquire)) type = base;
+    } else if (variant_ext::Extension* e = Ext()) {
+        if (Il2CppObject* base = e->SaveAs(type)) type = base;
+    }
     return g_origPersist(self, type, mi);
 }
 
 bool HasBlueprintDetour(Il2CppObject* self, Il2CppObject* def, const MethodInfo* mi) {
+    if (variant_ext::Extension* e = Ext(); e && g && g->armed && def && e->Owns(def)) {
+        if (!main_thread::IsMainThread() || g->Faulted()) return false;
+        bool r = false;
+        g_guard.Run([&] { r = e->HasBlueprint(def, [&](Il2CppObject* d) { return g_origHasBp(self, d, mi); }); });
+        return r;
+    }
     if (!g || !g->armed || !def || def != g->ours) return g_origHasBp(self, def, mi);
     if (!main_thread::IsMainThread() || g->Faulted()) return false;
     int kits = 0;
@@ -553,12 +566,24 @@ bool HasBlueprintDetour(Il2CppObject* self, Il2CppObject* def, const MethodInfo*
 }
 
 bool HelperBlueprintDetour(Il2CppObject* self, Il2CppObject* def, const MethodInfo* mi) {
+    if (variant_ext::Extension* e = Ext(); e && g && g->armed && def && e->Owns(def)) {
+        if (!main_thread::IsMainThread() || g->Faulted()) return false;
+        bool r = false;
+        g_guard.Run([&] { r = e->HelperBlueprint(def, [&](Il2CppObject* d) { return g_origHelperBp(self, d, mi); }); });
+        return r;
+    }
     if (g && g->armed && def && def == g->ours && g->base) return g_origHelperBp(self, g->base, mi);
     return g_origHelperBp(self, def, mi);
 }
 
 int32_t ItemCountDetour(Il2CppObject* self, Il2CppObject* def, const MethodInfo* mi) {
     const int32_t n = g_origCount(self, def, mi);
+    if (variant_ext::Extension* e = Ext(); e && g && g->armed && def && main_thread::IsMainThread() && !g->Faulted() &&
+                                           e->Owns(def)) {
+        int32_t r = n;
+        g_guard.Run([&] { r = e->ItemCount(def, n); });
+        return r;
+    }
     if (!g || !g->armed || !def || def != g->ours || !main_thread::IsMainThread() || g->Faulted()) return n;
     int kits = n;
     g_guard.Run([&] { kits = g->Kits(); });
@@ -567,13 +592,22 @@ int32_t ItemCountDetour(Il2CppObject* self, Il2CppObject* def, const MethodInfo*
 
 Il2CppObject* GetItemsDetour(Il2CppObject* self, Il2CppObject* helper, Il2CppObject* factory, const MethodInfo* mi) {
     Il2CppObject* list = g_origItems(self, helper, factory, mi);
-    if (!list || !g || !g->armed || !g->ours || !main_thread::IsMainThread() || g->Faulted()) return list;
-    g_guard.Run([&] { g->InsertItem(self, list, helper, factory); });
+    if (!list || !g || !g->armed || !main_thread::IsMainThread() || g->Faulted()) return list;
+    if (g->ours) g_guard.Run([&] { g->InsertItem(self, list, helper, factory); });
+    if (variant_ext::Extension* e = Ext()) g_guard.Run([&] { e->InsertCards(self, list, helper, factory); });
     return list;
 }
 
 // Our card never runs the vanilla body (it would AddItem our definition into the saved inventory).
 int32_t FabricateDetour(Il2CppObject* self, int32_t count, const MethodInfo* mi) {
+    if (variant_ext::Extension* e = Ext(); e && g && g->armed && self) {
+        Il2CppObject* def = unity::Field<Il2CppObject*>(self, g->offFabDef);
+        if (def && e->Owns(def)) {
+            int32_t r = 7;  // FabricationBlockedReason.OPERATION_FAILED
+            if (main_thread::IsMainThread() && !g->Faulted()) g_guard.Run([&] { r = e->Fabricate(self, def, count); });
+            return r;
+        }
+    }
     if (!g || !g->armed || !g->ours || !self || unity::Field<Il2CppObject*>(self, g->offFabDef) != g->ours)
         return g_origFab(self, count, mi);
     int32_t r = 7;  // FabricationBlockedReason.OPERATION_FAILED
@@ -582,6 +616,20 @@ int32_t FabricateDetour(Il2CppObject* self, int32_t count, const MethodInfo* mi)
 }
 
 void PlaceDetour(Il2CppObject* self, void* data, const MethodInfo* mi) {
+    if (variant_ext::Extension* e = Ext(); e && g && g->armed && main_thread::IsMainThread() && !g->Faulted()) {
+        variant_ext::PlaceCtx ctx;
+        bool owned = false;
+        g_guard.Run([&] {
+            Il2CppObject* held = unity::Field<Il2CppObject*>(self, g->offHeld);
+            owned = held && e->Owns(held);
+            if (owned) e->BeforePlace(self, held, ctx);
+        });
+        if (owned) {
+            g_origPlace(self, data, mi);
+            if (ctx.ours) g_guard.Run([&] { e->AfterPlace(self, ctx); });
+            return;
+        }
+    }
     if (!g || !g->armed || !g->ours || !main_thread::IsMainThread() || g->Faulted()) return g_origPlace(self, data, mi);
     Il2CppObject* before = nullptr;
     bool ours = false, fallback = false;
@@ -610,6 +658,15 @@ void PlaceDetour(Il2CppObject* self, void* data, const MethodInfo* mi) {
 }
 
 void PickupDetour(Il2CppObject* self, Il2CppObject* gadget, const MethodInfo* mi) {
+    if (variant_ext::Extension* e = Ext(); e && g && g->armed && main_thread::IsMainThread() && !g->Faulted()) {
+        bool mine = false;
+        g_guard.Run([&] { mine = e->BeforePickup(self, gadget); });
+        if (mine) {
+            g_origPickup(self, gadget, mi);
+            g_guard.Run([&] { e->AfterPickup(self); });
+            return;
+        }
+    }
     if (!g || !g->armed || !g->ours || !main_thread::IsMainThread() || g->Faulted()) return g_origPickup(self, gadget, mi);
     bool was = false;
     g_guard.Run([&] {
@@ -632,6 +689,11 @@ void PickupDetour(Il2CppObject* self, Il2CppObject* gadget, const MethodInfo* mi
 
 // The toggle-variant key on a placed Refinery Link asked for our variant: flip quantum on / off in place.
 void ChangeVariantDetour(Il2CppObject* self, Il2CppObject* variant, Il2CppObject* regions, const MethodInfo* mi) {
+    if (variant_ext::Extension* e = Ext(); e && g && g->armed && variant && main_thread::IsMainThread() && !g->Faulted() &&
+                                           e->Owns(variant)) {
+        g_guard.Run([&] { e->ChangeVariant(self, variant); });
+        return;
+    }
     if (!g || !g->armed || !g->ours || variant != g->ours || !main_thread::IsMainThread() || g->Faulted())
         return g_origVariant(self, variant, regions, mi);
     g_guard.Run([&] {
@@ -1796,6 +1858,8 @@ Il2CppObject* Sources(Il2CppObject* predicate, Il2CppObject* program) {
     return g->Sources(predicate, program);
 }
 
+bool IsOurs(Il2CppObject* def) { return def && def == g_ours.load(std::memory_order_acquire); }
+
 Il2CppObject* SourceIcon() {
     if (!g || !g->base) return nullptr;
     Il2CppObject* icon = unity::Field<Il2CppObject*>(g->base, g->offIcon);
@@ -1803,3 +1867,8 @@ Il2CppObject* SourceIcon() {
 }
 
 }  // namespace sr2::modules::custom_upgrades::quantum
+
+namespace sr2::modules::custom_upgrades::variant_ext {
+void Set(Extension* ext) { quantum::g_ext.store(ext, std::memory_order_release); }
+Extension* Get() { return quantum::Ext(); }
+}  // namespace sr2::modules::custom_upgrades::variant_ext

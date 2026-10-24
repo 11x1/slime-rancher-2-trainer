@@ -234,6 +234,7 @@
 #include "modules/custom_upgrades/plot_menu_slider.h"
 #include "modules/custom_upgrades/plot_props.h"
 #include "modules/custom_upgrades/quantum_link.h"
+#include "modules/custom_upgrades/dj_buildables.h"
 #include "modules/custom_upgrades/sale_notify.h"
 #include "modules/custom_upgrades/silo_receipt.h"
 #include "modules/custom_upgrades/silo_world.h"
@@ -690,6 +691,7 @@ private:
     custom_upgrades::world::CoopWorld world_;
     custom_upgrades::drones::HenSource drones_;          // drone sources Hen / Elder Collector, Quantum Storage Link
     custom_upgrades::quantum::QuantumLink quantum_;      // Quantum Storage Link gadget (quantum_link.h)
+    custom_upgrades::dj::DjBuildables dj_;               // Slime DJ booth / speakers / radio (dj_buildables.h)
     custom_upgrades::world::SiloButtons silo_;  // Sell-All Button world button
     custom_upgrades::world::PlotProps props_;   // decorative props of owned tiers (plot_props.h)
     custom_upgrades::vacpack::VacpackUpgrades vacpack_;  // Fabricator vacpack upgrades (vacpack_upgrades.h)
@@ -1051,6 +1053,7 @@ void CustomUpgrades::ResetState(const char* why) {
     tierCache_.clear();
     world_.Reset();  // clones of the previous game are destroyed (never read) at the next tick
     quantum_.Reset();  // links of the previous game go with its scene; the loaded save's are built at the next tick
+    dj_.Reset();       // the same for the Slime DJ buildables
     drones_.ResetSeen();  // the loaded save's Hen Collector programs are mapped back at the next tick
     silo_.Reset();
     props_.Reset();
@@ -2086,6 +2089,7 @@ void CustomUpgrades::Cleanup(const char* why) {
     // Quantum Storage Links back to plain-looking Refinery Links, our variant out of the favourite slots
     // and the variant list (also after a fault: the favourites are saved).
     quantum_.Cleanup(why);
+    dj_.Cleanup(why);  // Slime DJ buildables undressed, our variants out of the favourites and variant lists
     RestoreCapacities(why);  // silos back to their vanilla capacity per slot (contents stay)
     vacpack_.Cleanup(why);   // vacpack upgrade levels off, our definitions out of the game's lists
     int removed = 0, restored = 0;
@@ -2267,6 +2271,7 @@ void CustomUpgrades::WorldTick() {
         world_.Tick([&](Il2CppObject* plot, custom_upgrades::world::CoopRequest& req) { return WorldQuery(plot, req); },
                     [&]() { return LookupDirector(); });
     if (quantum_.Ready() && !sr2::core::ModuleFaulted(kModule)) quantum_.Tick();
+    if (dj_.Ready() && !sr2::core::ModuleFaulted(kModule)) dj_.Tick();
     if (drones_.Ready() && !sr2::core::ModuleFaulted(kModule))
         drones_.Tick(world_.Ready() ? world_.HenStorages() : std::vector<Il2CppObject*>{}, custom_upgrades::quantum::Available(),
                      custom_upgrades::quantum::Placed());
@@ -3187,6 +3192,20 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         if (quantum_.Setup(ctx, std::move(qhost), qerr, qreport)) SR2_INFO("[{}] Quantum Storage Link ready:{}", kModule, qreport);
         else SR2_WARN("[{}] Quantum Storage Link unavailable ({}) - not offered", kModule, qerr);
     }
+    // Slime DJ buildables (DJ Booth, DJ Speakers, Slime Radio): on the Quantum Storage Link's hooks
+    // (variant_ext.h), so only with it.
+    if (quantum_.Ready()) {
+        custom_upgrades::dj::Host dhost;
+        dhost.saveReady = [this] { return InGame() && EnsureLoaded(); };
+        dhost.value = [this](const std::string& k) { return SaveValueOf(k); };
+        dhost.setValue = [this](const std::string& k, const std::string& v) { return SetSaveValueOf(k, v); };
+        dhost.lookup = [this] { return LookupDirector(); };
+        std::string derr;
+        if (dj_.Setup(ctx, std::move(dhost), derr)) SR2_INFO("[{}] Slime DJ buildables ready", kModule);
+        else SR2_WARN("[{}] Slime DJ buildables unavailable ({}) - not offered", kModule, derr);
+    } else {
+        SR2_WARN("[{}] Slime DJ buildables unavailable (they need the Quantum Storage Link's hooks) - not offered", kModule);
+    }
     // Drone program sources "Hen Collector" / "Elder Collector" / "Quantum Storage Link" (optional;
     // missing -> only the vanilla sources).
     {
@@ -3428,6 +3447,8 @@ std::unique_ptr<sr2::core::Module> CreateCustomUpgrades() { return std::make_uni
 namespace custom_upgrades {
 
 bool Active() { return g_self && g_self->On(); }
+
+bool IsModGadget(Il2CppObject* def) { return quantum::IsOurs(def) || dj::Owns(def); }
 
 std::string Name(int32_t upgrade) {
     const UpgradeDef* d = FindDef(upgrade);
