@@ -18,8 +18,9 @@
 //     (MapUI.TryFindZoneAt, ZoneDetectionArea._zoneMapData) or a zone of the player's scene group: the shared
 //     ground teleport (ground_teleport.h: far spots are streamed out, so their regions are loaded in place while
 //     the player stays put, then he lands on a safe floor; TeleportablePlayer.TeleportTo, the game's in-scene
-//     teleport; never while knocked out). In another discovered zone (any zone but the Sanctuary with "Reveal
-//     everything" on): the game's zone-to-zone travel
+//     teleport; never while knocked out). With Reveal off, spots under the page's fog are refused (FogMapElement.
+//     ShouldBeRevealed per fog area). In another discovered zone (any zone, the Labyrinth and the Sanctuary
+//     included, with "Reveal everything" on; that switch also lists every map tab): the game's zone-to-zone travel
 //     TeleportNetwork.TeleportToDestinationImpl into a node of the static teleport network that arrives in one
 //     of the zone's scene groups (ZoneSceneGroupMapping._mappings), then the same ground teleport. The map closes
 //     (UIDisplayManager.CloseDisplayByObjectInHierarchy). A refused click plays the map's "failed to place
@@ -156,7 +157,9 @@ void RegisterSettings() {
         settings::Register(x);
     };
     def("reveal_all", "Reveal the whole map", "Fog of war", Kind::Bool, 0, 0, 1, 1,
-        "Shows the full map without fog. Display only: nothing counts as discovered.");
+        "Shows the full map without fog, with every map tab. Display only: nothing counts as discovered. With "
+        "right-click teleport, every zone can be reached, the Grey Labyrinth and The Sanctuary too (may skip parts "
+        "of the story).");
     for (const IconKind& k : kKinds) {
         def(k.key, k.label, "Icons", Kind::Bool, k.def, 0, 1, 1, k.tip);
         def(k.sizeKey, (std::string(k.label) + ": size").c_str(), "Icons", Kind::Float, k.size, 12, 64, 1,
@@ -170,7 +173,7 @@ void RegisterSettings() {
         "Unexplored areas hide the icons in them. Off: icons show on top of the fog.");
     def("rmb_teleport", "Right-click to teleport", "Teleport", Kind::Bool, 0, 0, 1, 1,
         "Right-click a spot on the open map to teleport there. Other zones you have visited work too, after a "
-        "loading screen.");
+        "loading screen. Spots under the map's fog are refused unless Reveal the whole map is on.");
 }
 
 Cfg LoadCfg() {
@@ -227,6 +230,15 @@ struct Sym {
     // KeyboardMouseIcon._control ("<Mouse>/rightButton") / ._buttonSprite
     Il2CppClass* kmIconSet = nullptr;
     size_t kmItems = kNoOff, kmControl = kNoOff, kmSprite = kNoOff;
+    // the key bar's Place Waypoint hint: InputHint._configuration (InputHintConfiguration).InputEvent, _labelText
+    size_t hintConfig = kNoOff, hcEvent = kNoOff, hintLabelText = kNoOff;
+    ugui::Fn tmpGetText;  // TMP_Text.get_text
+    // the real fog (teleport refused under fog with Reveal off): FogMapElement.ShouldBeRevealed(EventDirector),
+    // MapUIFogReveal._eventDirector, FogMapElement._canvasGroup (fallback: its alpha)
+    ugui::Fn fogShouldReveal;
+    size_t frDirector = kNoOff, fogCanvasGroup = kNoOff;
+    // map tabs with Reveal on: MapListConfiguration.<>c__DisplayClass1_0.<GetAvailableMaps>b__0(MapDefinition)
+    void* mapAvailable = nullptr;
 };
 
 struct ResolveCtx {
@@ -280,12 +292,14 @@ std::atomic<bool> g_reveal{false}, g_teleport{false};
 std::atomic<Il2CppObject*> g_mapUI{nullptr};
 std::atomic<uint32_t> g_lateCount{0};
 std::atomic<bool> g_rightClick{false};
+std::atomic<int> g_forcedMaps{0};  // map pages listed only because of Reveal everything (counted by the hook)
 size_t g_offButton = kNoOff, g_offDragging = kNoOff;  // set in Setup, read by the click detour
 
 sr2::core::DetourGuard g_guardLate{"map_tools", "MapUI.LateUpdate"};
 sr2::core::DetourGuard g_guardReveal{"map_tools", "FogMapElement.SetRevealState"};
 sr2::core::DetourGuard g_guardHidden{"map_tools", "MapDirector.IsZoneHidden"};
 sr2::core::DetourGuard g_guardClick{"map_tools", "MapClickPlaceMarker.OnPointerClick"};
+sr2::core::DetourGuard g_guardAvail{"map_tools", "MapListConfiguration.GetAvailableMaps filter"};
 
 bool Live() { return !g_dead.load() && g_active.load(); }
 
@@ -293,10 +307,12 @@ using VoidFn = void (*)(Il2CppObject*, const MethodInfo*);
 using SetRevealFn = void (*)(Il2CppObject*, bool, const MethodInfo*);
 using IsHiddenFn = bool (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
 using ClickFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+using AvailFn = bool (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
 VoidFn g_origLate = nullptr;
 SetRevealFn g_origSetReveal = nullptr;
 IsHiddenFn g_origIsHidden = nullptr;
 ClickFn g_origClick = nullptr;
+AvailFn g_origAvail = nullptr;
 
 void LateUpdateDetour(Il2CppObject* self, const MethodInfo* mi) {
     g_origLate(self, mi);
@@ -326,6 +342,21 @@ void ClickDetour(Il2CppObject* self, Il2CppObject* eventData, const MethodInfo* 
         if (F<int>(eventData, g_offButton) == 1 && !(Has(g_offDragging) && F<bool>(self, g_offDragging)))
             g_rightClick.store(true);
     });
+}
+
+// The filter of MapListConfiguration.GetAvailableMaps (MapDefinition.MapAvailableCondition satisfied), called
+// once per map page when the full map's MapViewModel is built (its only caller): the map tabs. With Reveal
+// everything on, every page is listed (the Grey Labyrinth's tab on a save that has not reached it yet).
+bool MapAvailableDetour(Il2CppObject* self, Il2CppObject* map, const MethodInfo* mi) {
+    bool available = g_origAvail(self, map, mi);
+    if (!available && Live())
+        g_guardAvail.Run([&] {
+            if (g_reveal.load()) {
+                available = true;
+                g_forcedMaps.fetch_add(1);
+            }
+        });
+    return available;
 }
 
 // =============================================================== module ======
@@ -401,6 +432,20 @@ public:
         s_.kmControl = c.Field(kmIcon, "_control");
         s_.kmSprite = c.Field(kmIcon, "_buttonSprite");
         s_.lse = c.Class("Unity.Localization", "UnityEngine.Localization.Components", "LocalizeStringEvent");
+        s_.hintConfig = c.Field(s_.hint, "_configuration");
+        s_.hintLabelText = c.Field(s_.hint, "_labelText");
+        s_.hcEvent = c.Field(c.Class(nsCtl, "InputHintConfiguration"), "InputEvent");
+        s_.tmpGetText = c.Bind(c.Class("Unity.TextMeshPro", "TMPro", "TMP_Text"), "get_text", 0);
+        // the real fog under a click
+        s_.fogShouldReveal = c.Bind(s_.fogElement, "ShouldBeRevealed", 1);
+        s_.frDirector = c.Field(s_.fogReveal, "_eventDirector");
+        s_.fogCanvasGroup = c.Field(s_.fogElement, "_canvasGroup");
+        // map tabs (Reveal everything)
+        if (Il2CppClass* mlc = c.Class("MonomiPark.SlimeRancher.Map", "MapListConfiguration")) {
+            Il2CppClass* dc = ugui::NestedClass(mlc, "<>c__DisplayClass1_0");
+            if (dc) s_.mapAvailable = c.Target(dc, "<GetAvailableMaps>b__0", 1);
+            else c.missing.push_back("class MapListConfiguration.<>c__DisplayClass1_0");
+        }
         s_.selectable = c.Class("UnityEngine.UI", "UnityEngine.UI", "Selectable");
 
         // teleport
@@ -482,16 +527,20 @@ public:
                            reinterpret_cast<void**>(&g_origSetReveal));
         hookHidden_ = hook("MapDirector.IsZoneHidden", s_.isZoneHidden, reinterpret_cast<void*>(&IsZoneHiddenDetour),
                            reinterpret_cast<void**>(&g_origIsHidden));
+        hookAvail_ = hook("MapListConfiguration.GetAvailableMaps filter", s_.mapAvailable,
+                          reinterpret_cast<void*>(&MapAvailableDetour), reinterpret_cast<void**>(&g_origAvail));
         hookClick_ = Has(s_.peButton) &&
                      hook("MapClickPlaceMarker.OnPointerClick", s_.onPointerClick, reinterpret_cast<void*>(&ClickDetour),
                           reinterpret_cast<void**>(&g_origClick));
 
         RegisterSettings();
         if (!onChange_) onChange_ = settings::OnChange(kModule, [this](const std::string&) { cfgDirty_.store(true); });
-        SR2_INFO("map_tools: resolved (reveal {}, zone names {}, static fog {}, icons {}, teleport {}, cross-zone {}, "
-                 "legend hint {}, notices {}, {} optional symbols missing)",
-                 hookReveal_ ? "yes" : "no", hookHidden_ ? "yes" : "no", s_.behSetEnabled ? "yes" : "no",
-                 s_.setSiblingIndex ? "yes" : "no", TeleportResolved() ? "yes" : "no", TravelResolved() ? "yes" : "no",
+        SR2_INFO("map_tools: resolved (reveal {}, zone names {}, map tabs {}, static fog {}, icons {}, teleport {}, "
+                 "cross-zone {}, fog check {}, legend hint {}, notices {}, {} optional symbols missing)",
+                 hookReveal_ ? "yes" : "no", hookHidden_ ? "yes" : "no", hookAvail_ ? "yes" : "no",
+                 s_.behSetEnabled ? "yes" : "no", s_.setSiblingIndex ? "yes" : "no", TeleportResolved() ? "yes" : "no",
+                 TravelResolved() ? "yes" : "no",
+                 s_.fogShouldReveal && Has(s_.frDirector) ? "yes" : Has(s_.fogCanvasGroup) ? "alpha only" : "no",
                  LegendResolved() ? "yes" : "no", notices_.TextReady() ? "yes" : "no", c.missing.size());
         return true;
     }
@@ -530,7 +579,8 @@ private:
     Cfg cfg_;
     std::atomic<bool> cfgDirty_{true};
     int frameCb_ = 0, onChange_ = 0;
-    bool hookReveal_ = false, hookHidden_ = false, hookClick_ = false;
+    bool hookReveal_ = false, hookHidden_ = false, hookClick_ = false, hookAvail_ = false;
+    int forcedLogged_ = 0;  // g_forcedMaps last logged
     bool frozen_ = false;
     const char* step_ = "";
 
@@ -573,6 +623,10 @@ private:
     bool hintFailLogged_ = false, hintLogged_ = false;
     float hintSince_ = -1;  // first try of this map open (diagnostics after kHintDiagDelay)
     bool hintDiagLogged_ = false;
+    Ref hintLegend_;           // the InputLegend the hint was cloned into
+    bool hintPlaced_ = false;  // moved next to the Place Waypoint hint
+    bool hintPlaceLogged_ = false;
+    float hintPlaceAt_ = 0;
     Ref mouseGlyph_;           // the game's right mouse button sprite (or the left one, drawn mirrored)
     bool mouseGlyphMirror_ = false, mouseGlyphSearched_ = false;
 
@@ -652,7 +706,7 @@ private:
         g_active.store(false);
         SR2_ERROR("map_tools: {} - map tools disabled for the rest of this session", why);
         core::MarkModuleFaulted(kModule, why);
-        for (Ref* r : {&mapUI_, &map_, &mapT_, &container_, &canvasT_, &hintGo_, &hintLabel_, &hintKey_, &mouseGlyph_, &player_, &net_,
+        for (Ref* r : {&mapUI_, &map_, &mapT_, &container_, &canvasT_, &hintGo_, &hintLabel_, &hintKey_, &hintLegend_, &mouseGlyph_, &player_, &net_,
                        &zoneMap_, &sceneLoader_, &travel_.group, &travel_.origin, &travel_.zoneDef})
             r->Abandon();
         for (auto& [z, groups] : zoneGroups_)
@@ -726,6 +780,11 @@ private:
 
         Step("reveal");
         UpdateReveal(cfgChanged);
+        if (int forced = g_forcedMaps.load(); forced != forcedLogged_) {
+            SR2_INFO("map_tools: reveal: {} map tab(s) listed that the save has not unlocked yet ({} so far this session)",
+                     forced - forcedLogged_, forced);
+            forcedLogged_ = forced;
+        }
         Step("icons");
         iconAcc_ += dt;
         if (iconAcc_ >= kIconRefresh) {
@@ -1172,6 +1231,80 @@ private:
         hintLabel_.Reset(nullptr);
         hintKey_.Reset(nullptr);
         hintIcons_.clear();
+        hintLegend_.Reset(nullptr);
+        hintPlaced_ = false;
+    }
+
+    // The key bar lays its hints out left to right in sibling order (the clone, last, showed on the far right).
+    // "[RMB] Teleport" goes right before the Place Waypoint hint: the legend's InputHint whose input event
+    // (InputHint._configuration.InputEvent) or label names a waypoint / marker. Logged once per session.
+    void PlaceHint() {
+        if (!hintGo_.Alive() || !hintLegend_.Alive() || !s_.setSiblingIndex || !s_.getSiblingIndex) {
+            hintPlaced_ = true;  // nothing to do
+            return;
+        }
+        auto* hints = F<Il2CppArray*>(hintLegend_.get(), s_.legendHints);
+        if (!ugui::PlausiblePointer(hints)) return;
+        Il2CppObject* tr = unity::TransformOf(hintGo_.get());
+        Il2CppObject* parent = ugui::GetParent(tr);
+        Il2CppObject *target = nullptr, *fallback = nullptr;
+        std::string seen, targetDesc, fallbackDesc;
+        for (size_t i = 0, n = std::min<size_t>(ugui::ArrayCount(hints), 32); i < n && !target; ++i) {
+            Il2CppObject* h = ugui::ArrayItem(hints, i);
+            if (!ugui::IsA(h, s_.hint) || !unity::ActiveInHierarchy(unity::GameObjectOf(h))) continue;
+            std::string ev, label;
+            Il2CppObject* cfg = Has(s_.hintConfig) ? F<Il2CppObject*>(h, s_.hintConfig) : nullptr;
+            Il2CppObject* e = ugui::PlausiblePointer(cfg) && Has(s_.hcEvent) ? F<Il2CppObject*>(cfg, s_.hcEvent) : nullptr;
+            if (ugui::PlausiblePointer(e) && unity::IsAlive(e)) ev = unity::GetName(e);
+            Il2CppObject* lt = Has(s_.hintLabelText) ? F<Il2CppObject*>(h, s_.hintLabelText) : nullptr;
+            if (s_.tmpGetText && ugui::PlausiblePointer(lt) && unity::IsAlive(lt)) {
+                Il2CppString* str = nullptr;
+                Managed([&] { str = ugui::Call<Il2CppString*>(s_.tmpGetText, lt); });
+                label = unity::ToUtf8(str);
+            }
+            std::string desc = std::format("'{}' (event '{}')", label, ev);
+            seen += (seen.empty() ? "" : ", ") + desc;
+            std::string key = ev + " " + label;
+            for (char& ch : key) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            bool waypoint = key.find("waypoint") != std::string::npos;
+            if (!waypoint && (fallback || key.find("marker") == std::string::npos)) continue;
+            Il2CppObject* ht = unity::TransformOf(unity::GameObjectOf(h));
+            if (ugui::GetParent(ht) != parent) continue;
+            if (waypoint) {
+                target = ht;
+                targetDesc = desc;
+            } else {
+                fallback = ht;  // "marker": only when no hint says "waypoint"
+                fallbackDesc = desc;
+            }
+        }
+        if (!target && fallback) {
+            target = fallback;
+            targetDesc = fallbackDesc;
+        }
+        if (!target) {
+            if (!hintPlaceLogged_ && time_ - hintSince_ >= kHintDiagDelay) {
+                hintPlaceLogged_ = true;
+                SR2_INFO("map_tools: [RMB] Teleport hint: no Place Waypoint hint in the key bar (active hints: {}) - kept on "
+                         "the right",
+                         seen.empty() ? "none" : seen);
+            }
+            return;
+        }
+        int idx = -1, mine = -1;
+        Managed([&] {
+            idx = ugui::Call<int>(s_.getSiblingIndex, target);
+            mine = ugui::Call<int>(s_.getSiblingIndex, tr);
+        });
+        if (idx < 0) return;
+        if (mine >= 0 && mine < idx) --idx;  // our own slot frees up when we move
+        Managed([&] { ugui::Call<void>(s_.setSiblingIndex, tr, idx); });
+        hintPlaced_ = true;
+        if (!hintPlaceLogged_) {
+            hintPlaceLogged_ = true;
+            SR2_INFO("map_tools: [RMB] Teleport hint placed left of the key bar's {} (sibling index {}; active hints: {})",
+                     targetDesc, idx, seen);
+        }
     }
 
     static bool IsUnder(Il2CppObject* t, Il2CppObject* ancestor) {
@@ -1189,6 +1322,10 @@ private:
             if (hintReapply_ > 0) {
                 --hintReapply_;
                 ApplyHintLook();
+            }
+            if (!hintPlaced_ && time_ >= hintPlaceAt_) {  // the Place Waypoint hint may show up later
+                hintPlaceAt_ = time_ + 0.5f;
+                PlaceHint();
             }
             return;
         }
@@ -1282,6 +1419,9 @@ private:
         unity::SetName(go, "SR2Mods.TeleportHint");
         Il2CppObject* tr = unity::TransformOf(go);
         ugui::SetAsLastSibling(tr);
+        hintLegend_.Reset(legend);
+        hintPlaced_ = false;
+        hintPlaceAt_ = 0;
         // Behaviour off: the hint would configure itself from the template's input event and fire it on click.
         if (Il2CppObject* h = unity::GetComponent(go, s_.hint)) ugui::Destroy(h);
         if (s_.invokeOnClick)
@@ -1452,13 +1592,13 @@ private:
         return ugui::PlausiblePointer(zmd) ? zmd : nullptr;
     }
 
-    // The Sanctuary: reached only at the end of the Grey Labyrinth's story (its arrivals are the scripted
-    // TeleporterSanctuaryDestination / the boat ride), so arriving early could skip or break the story. Matched by
-    // the zone's asset or display name.
+    // The Sanctuary (reached only at the end of the Grey Labyrinth's story: the scripted
+    // TeleporterSanctuaryDestination / the boat ride) and the Labyrinth itself: arriving early may skip parts of the
+    // story. Only logged; allowed with Reveal everything. Matched by the zone's asset or display name.
     bool StoryZone(Il2CppObject* zone) {
         if (!zone) return false;
         for (const std::string& n : {unity::GetName(zone), ZoneName(zone)})
-            if (n.find("Sanctuary") != std::string::npos) return true;
+            if (n.find("Sanctuary") != std::string::npos || n.find("Labyrinth") != std::string::npos) return true;
         return false;
     }
 
@@ -1758,6 +1898,116 @@ private:
         });
     }
 
+    // Is the page point `pm` under the map's fog on the live page? 1 yes (`area` names it), 0 no, -1 cannot tell.
+    // Fog areas: every FogMapElement of the page with its real state, FogMapElement.ShouldBeRevealed(
+    // MapUIFogReveal._eventDirector) (what RevealKnownZones shows; fallback: its CanvasGroup alpha); its shape =
+    // the rect of each of its Graphics (page-space parallelograms, as the minimap's fog test), else its own rect.
+    // Static fog (fog-shader art outside every FogMapElement, except the outside-of-the-island negative mask)
+    // counts as fog too: the game never reveals it. A point in a revealed area is clear even when a neighbouring
+    // fogged area's rect also covers it (the rects are larger than the cloud shapes).
+    int FogAt(Vec2 pm, std::string& area) {
+        if (!s_.fogElement || !map_.Alive() || !mapT_.Alive()) return -1;
+        Il2CppObject* director = nullptr;
+        if (s_.fogShouldReveal && Has(s_.frDirector) && Has(s_.uiFogReveal)) {
+            Il2CppObject* fr = F<Il2CppObject*>(mapUI_.get(), s_.uiFogReveal);
+            Il2CppObject* d = ugui::IsA(fr, s_.fogReveal) ? F<Il2CppObject*>(fr, s_.frDirector) : nullptr;
+            if (ugui::PlausiblePointer(d) && unity::IsAlive(d)) director = d;
+        }
+        Il2CppObject* mapGo = unity::GameObjectOf(map_.get());
+        std::vector<Ref> elems;
+        ugui::ForEachInChildren(mapGo, s_.fogElement, true, [&](Il2CppObject* f) {
+            elems.emplace_back(f);
+            return true;
+        });
+        auto inside = [&](Il2CppObject* t) {
+            if (!ugui::IsRectTransform(t)) return false;
+            Rect r = ugui::GetRect(t);
+            const float xs[4] = {r.x, r.x + r.w, r.x + r.w, r.x}, ys[4] = {r.y, r.y, r.y + r.h, r.y + r.h};
+            Vec2 q[4];
+            for (int i = 0; i < 4; ++i) {
+                Vec3 l = ugui::InverseTransformPoint(mapT_.get(), ugui::TransformPoint(t, {xs[i], ys[i], 0}));
+                q[i] = {l.x, l.y};
+            }
+            int sign = 0;
+            for (int i = 0; i < 4; ++i) {
+                Vec2 a = q[i], b = q[(i + 1) % 4];
+                float c = (b.x - a.x) * (pm.y - a.y) - (b.y - a.y) * (pm.x - a.x);
+                int sg = c > 0 ? 1 : (c < 0 ? -1 : 0);
+                if (!sg) continue;
+                if (!sign) sign = sg;
+                else if (sg != sign) return false;
+            }
+            return sign != 0;
+        };
+        auto contains = [&](Il2CppObject* root) {
+            bool any = false, hit = false;
+            ugui::ForEachInChildren(unity::GameObjectOf(root), ugui::GraphicClass(), false, [&](Il2CppObject* g) {
+                any = true;
+                hit = inside(unity::TransformOf(g));
+                return !hit;
+            });
+            return any ? hit : inside(unity::TransformOf(root));
+        };
+        int fogged = 0, revealed = 0, unknown = 0, byAlpha = 0;
+        bool inFog = false, inClear = false;
+        for (Ref& e : elems) {
+            Il2CppObject* f = e.get();
+            if (!unity::IsAlive(f)) continue;
+            int state = -1;  // 1 revealed, 0 fogged
+            if (director) {
+                bool rev = false;
+                if (Managed([&] { rev = ugui::Call<bool>(s_.fogShouldReveal, f, director); })) state = rev ? 1 : 0;
+            }
+            if (state < 0 && Has(s_.fogCanvasGroup)) {
+                Il2CppObject* cg = F<Il2CppObject*>(f, s_.fogCanvasGroup);
+                if (ugui::PlausiblePointer(cg) && unity::IsAlive(cg)) {
+                    state = ugui::CanvasGroupGetAlpha(cg) < 0.5f ? 1 : 0;
+                    ++byAlpha;
+                }
+            }
+            if (state < 0) {
+                ++unknown;
+                continue;
+            }
+            ++(state ? revealed : fogged);
+            if (state ? inClear : inFog) continue;
+            if (!contains(f)) continue;
+            if (state) {
+                inClear = true;
+            } else {
+                inFog = true;
+                area = "fog area '" + unity::GetName(unity::GameObjectOf(f)) + "'";
+            }
+        }
+        if (!inFog && !inClear) {  // static fog
+            std::vector<Il2CppObject*> roots;
+            for (Ref& e : elems)
+                if (e.Alive()) roots.push_back(unity::TransformOf(e.get()));
+            ugui::ForEachInChildren(mapGo, ugui::GraphicClass(), false, [&](Il2CppObject* g) {
+                Il2CppObject* mat = ugui::GraphicGetMaterial(g);
+                std::string shader = mat ? ugui::MaterialShaderName(mat) : std::string();
+                if (!IsFogShader(shader) || shader.find("Negative") != std::string::npos || !ugui::BehaviourEnabled(g))
+                    return true;
+                for (Il2CppObject* t = unity::TransformOf(g); t && t != mapT_.get(); t = ugui::GetParent(t))
+                    if (std::find(roots.begin(), roots.end(), t) != roots.end()) return true;
+                if (!inside(unity::TransformOf(g))) return true;
+                inFog = true;
+                area = "static fog '" + unity::GetName(unity::GameObjectOf(g)) + "'";
+                return false;
+            });
+        }
+        int result = inFog && !inClear ? 1 : 0;
+        SR2_INFO("map_tools: fog at map point ({:.0f}, {:.0f}): {}; {} fog area(s): {} fogged, {} revealed, {} unknown (state from "
+                 "{})",
+                 pm.x, pm.y,
+                 result      ? "under " + area
+                 : inClear   ? std::string("in a revealed area")
+                             : std::string("outside every fog area"),
+                 elems.size(), fogged, revealed, unknown,
+                 byAlpha ? std::format("the CanvasGroup alpha for {}", byAlpha) : std::string("ShouldBeRevealed"));
+        return elems.empty() && !inFog ? -1 : result;
+    }
+
     void Teleport() {
         if (!clickLogged_) {
             clickLogged_ = true;
@@ -1789,6 +2039,14 @@ private:
         float wx = wr.x + (pm.x - mr.x) * wr.w / mr.w;
         float wz = wr.y + (pm.y - mr.y) * wr.h / mr.h;
         if (!std::isfinite(wx) || !std::isfinite(wz)) return Refuse("bad map position", "bad position");
+        // Reveal off: no target under the map's fog (the player's real map, not the zone-visited flag).
+        if (!cfg_.reveal) {
+            std::string area;
+            if (FogAt(pm, area) == 1)
+                return Refuse(std::format("({:.0f}, {:.0f}) is under the map's fog ({}); turn on Reveal everything to go there",
+                                          wx, wz, area),
+                              "that spot is not on your map yet");
+        }
 
         Il2CppObject* player = Player();
         if (!player) return Refuse("no player", "no player");
@@ -1824,16 +2082,13 @@ private:
         if (!sameZone) {
             if (!zTarget) return Refuse("the click is outside every zone of this map", "outside every zone");
             if (!ZoneDiscovered(zTarget)) {
-                // "Reveal everything" also opens the undiscovered zones, except the one the story leads into.
+                // "Reveal everything" also opens the undiscovered zones, the story zones included (the Grey
+                // Labyrinth, The Sanctuary: the user accepts that arriving early may skip parts of the story).
                 if (!cfg_.reveal)
                     return Refuse(std::format("'{}' is not discovered yet (enter it once first)", zoneName),
                                   zoneName + " not discovered yet");
-                if (StoryZone(targetZone))
-                    return Refuse(std::format("'{}' is not discovered yet and is only reached through the story (also with "
-                                              "Reveal everything on)",
-                                              zoneName),
-                                  zoneName + " not reached yet");
-                SR2_INFO("map_tools: '{}' is not discovered yet - allowed, Reveal everything is on", zoneName);
+                SR2_INFO("map_tools: '{}' is not discovered yet - allowed, Reveal everything is on{}", zoneName,
+                         StoryZone(targetZone) ? " (a story zone: arriving early may skip parts of the story)" : "");
             }
             std::string why;
             if (!TravelResolved())
