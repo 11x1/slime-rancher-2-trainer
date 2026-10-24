@@ -3425,8 +3425,7 @@ void DjSongs(const djb::Snapshot& s, float w, float listH) {
     ImGui::SameLine(0, gap);
     if (ImGui::Button("Open folder", ImVec2(folderW, 0))) djb::OpenFolder(s.folder);
     HoverTip("Opens " + s.folder + "\nPut .ogg, .mp3 or .wav files there (subfolders work too), then Rescan.");
-    ImGui::SetNextItemWidth(-FLT_MIN);
-    ImGui::InputTextWithHint("##djsearch", "Search songs...", g_djSearch, sizeof(g_djSearch));
+    item_grid::SearchBox("##djsearch", "Search songs...", g_djSearch, sizeof(g_djSearch), 0.0f, g_scale);
     const std::string needle = g_djSearch;
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
