@@ -213,11 +213,22 @@ dialog.
   under "Icon Background" bound to the popup's positive / negative InputEvent). On the clone the
   InputEventButton is disabled (it would perform that InputEvent on pointer down / up), the label's
   LocalizeStringEvent is disabled and the TMP text set to "Cancel" / "Sell"; a polled Toggle on its
-  root takes the click (Button.onClick is empty in the prefab). The keyboard / pad focus is a teal
+  root was meant to take the click (Button.onClick is empty in the prefab). The keyboard / pad focus is a teal
   (Cancel) / pink (Sell) ring behind the focused button, fitted to its self-sized rect for 30 frames
   after a build; disabled Sell = `Selectable.interactable` false (the prefab's disabled colours).
   Fallback when any piece is missing: our own SDF buttons with "(Esc / B)" / "(Enter / A)" in the
   label. Log: `silo receipt: buttons cloned from the game's popup, rows fit|scroll (N px, canvas H high)`.
+- **Regression after feature/polish-4 ("Sell menu didn't show up").** The receipt never opened: log
+  `silo receipt: not opened: panel failed`, then `the receipt could not be opened - selling at once`;
+  Player.log `Can't add 'Toggle' to Cancel because a 'Button' is already added to the game object!`.
+  `Selectable` is `[DisallowMultipleComponent]` (inherited), so a Toggle can't go on the cloned button
+  and the build stopped. Now the game button's click is polled from its own Button:
+  `Selectable.IsPressed()` (protected) true last frame, false now, `get_isPointerInside` (private) true.
+  IsPressed is false while the Selectable is not interactable, so a disabled Sell can't be clicked. The
+  button keeps its hover animation (no overlay on top). If a build still fails, the failing step is
+  logged (`panel build failed at: ...`) and the panel is built again with our own buttons (game buttons
+  off for the rest of the session, `retrying with our own buttons`); a failed clone logs `game button
+  not cloned (...)` once.
 
 - **Input lock = the game's own.** The dialog root carries the game's `UIInputLocker` component, as
   menu prefabs do: `OnEnable` -> `TimeDirector.Pause` (timeScale 0, ref-counted) ->

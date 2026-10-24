@@ -155,6 +155,10 @@ struct SiloReceipt::Impl {
     // optional: the game's popup buttons
     const MethodInfo* gcGetTemplates = nullptr, *rtGetRect = nullptr, *behSetEnabled = nullptr,
                     *selSetInteractable = nullptr;
+    // The clone already has a Button (a Selectable: DisallowMultipleComponent), so no Toggle can go on it
+    // (Player.log: "Can't add 'Toggle' to Cancel because a 'Button' is already added"). Its click is
+    // polled from the Button's own state: Selectable.IsPressed() (protected), get_isPointerInside (private).
+    const MethodInfo* selIsPressed = nullptr, *selPointerInside = nullptr;
     Il2CppClass* popupClass = nullptr, *ieButtonClass = nullptr, *moreViewClass = nullptr, *uiButtonClass = nullptr;
     size_t offTplPopup = 0, offPopupPositive = 0, offPopupNegative = 0, offMoreLabel = 0;
     bool gameButtonsOk = false;
@@ -173,12 +177,13 @@ struct SiloReceipt::Impl {
     Il2CppObject* btnBg[2] = {}, *btnText[2] = {}, *btnToggle[2] = {};
     Il2CppObject* btnGame[2] = {};  // the cloned game button's root (nullptr: our own button)
     Il2CppObject* btnRing[2] = {};  // focus ring behind a game button (its SDF graphic)
+    bool btnWasPressed[2] = {};     // a game button's IsPressed() in the last frame
     Vec2 btnCentre[2] = {};         // centre of a game button inside the panel (y down)
     int ringFrames = 0;             // frames left to fit the rings to the buttons' self-sized rects
     Il2CppObject* scrollRect = nullptr;
     float scrollStep = 0.0f;        // one row in normalized scroll units (0 = no scrolling)
     Il2CppObject* font = nullptr;  // TMP_FontAsset of a HUD text (this open only)
-    bool loggedOpen = false, loggedFail = false, loggedButtons = false;
+    bool loggedOpen = false, loggedFail = false, loggedButtons = false, loggedButtonMiss = false;
 
     // ---- helpers ----
     bool Faulted() const { return sr2::core::ModuleFaulted(module); }
@@ -338,6 +343,16 @@ struct SiloReceipt::Impl {
         Call(tglSetOnQuiet, t, {&off}, "Toggle.SetIsOnWithoutNotify");
         return t;
     }
+    // A game button's click: pressed in the last frame, released now with the pointer still on it.
+    bool GameClicked(int i) {
+        if (!btnGame[i] || !unity::IsAlive(btnBg[i])) return false;
+        bool ok = false, ok2 = false;
+        const bool pressed = Unbox<bool>(Call(selIsPressed, btnBg[i], {}, "Selectable.IsPressed", &ok)) && ok;
+        const bool inside = Unbox<bool>(Call(selPointerInside, btnBg[i], {}, "Selectable.get_isPointerInside", &ok2)) && ok2;
+        const bool click = btnWasPressed[i] && !pressed && inside;
+        btnWasPressed[i] = pressed;
+        return click;
+    }
     bool Clicked(Il2CppObject* toggle) {  // true once per click
         if (!unity::IsAlive(toggle)) return false;
         bool ok = false;
@@ -387,6 +402,13 @@ struct SiloReceipt::Impl {
     void FitRings();
     void ScrollBy(int rows);
     bool BuildPanel(const Receipt& r, const std::string& note);
+    bool Build(const Receipt& r, const std::string& note);
+    void ClearPanel();
+    std::string buildFail;  // the step BuildPanel stopped at (logged)
+    bool BuildFail(const char* what) {
+        if (buildFail.empty()) buildFail = what;
+        return false;
+    }
     void StyleButtons();
     void Teardown();
 };
@@ -611,8 +633,11 @@ bool SiloReceipt::Setup(Resolver& R, const char* module, std::string& why) {
         p->rtGetRect = opt(p->rtClass, "get_rect", 0);
         p->behSetEnabled = opt(behaviour, "set_enabled", 1);
         p->selSetInteractable = opt(selectable, "set_interactable", 1);
+        p->selIsPressed = opt(selectable, "IsPressed", 0);
+        p->selPointerInside = opt(selectable, "get_isPointerInside", 0);
         p->gameButtonsOk = p->gcInstance && templates && p->popupClass && p->ieButtonClass && p->moreViewClass &&
                            p->uiButtonClass && p->gcGetTemplates && p->rtGetRect && p->behSetEnabled &&
+                           p->selIsPressed && p->selPointerInside &&
                            optOff(templates, "popupPrompt", p->offTplPopup) &&
                            optOff(p->popupClass, "_positiveActionButton", p->offPopupPositive) &&
                            optOff(p->popupClass, "_negativeActionButton", p->offPopupNegative) &&
@@ -644,18 +669,28 @@ float SiloReceipt::Impl::CanvasHeight() {
 // `label`; its centre is set by the caller. nullptr: not available (the caller builds its own).
 Il2CppObject* SiloReceipt::Impl::GameButton(Il2CppObject* parentRt, bool positive, const char* label) {
     if (!gameButtonsOk) return nullptr;
+    auto miss = [&](const char* what) -> Il2CppObject* {
+        if (!loggedButtonMiss) SR2_WARN("[{}] silo receipt: game button not cloned ({}) - own buttons", module, what);
+        loggedButtonMiss = true;
+        return nullptr;
+    };
     bool ok = false;
     Il2CppObject* gc = Call(gcInstance, nullptr, {}, "GameContext.Instance", &ok);
-    if (!ok || !unity::IsAlive(gc)) return nullptr;
+    if (!ok || !unity::IsAlive(gc)) return miss("no GameContext");
     Il2CppObject* tpl = Call(gcGetTemplates, gc, {}, "GameContext.get_UITemplates", &ok);
-    if (!ok || !unity::IsAlive(tpl)) return nullptr;
+    if (!ok || !unity::IsAlive(tpl)) return miss("no UITemplates");
     Il2CppObject* popupGo = unity::Field<Il2CppObject*>(tpl, offTplPopup);
     Il2CppObject* popup = unity::IsAlive(popupGo) ? unity::GetComponent(popupGo, popupClass) : nullptr;
-    if (!unity::IsAlive(popup)) return nullptr;
+    if (!unity::IsAlive(popup)) return miss("no PopupPrompt template");
     Il2CppObject* src = unity::Field<Il2CppObject*>(popup, positive ? offPopupPositive : offPopupNegative);
-    if (!unity::IsAlive(src) || !IsA(src, goClass)) return nullptr;
+    if (!unity::IsAlive(src) || !IsA(src, goClass)) return miss("popup button is not a GameObject");
     Il2CppObject* go = unity::Instantiate(src, parentRt);
-    if (!unity::IsAlive(go)) return nullptr;
+    if (!unity::IsAlive(go)) return miss("Instantiate failed");
+    // The click is polled from its Button (GameClicked): without one there is nothing to poll.
+    if (!unity::IsAlive(unity::GetComponent(go, uiButtonClass))) {
+        Destroy(go);
+        return miss("no Button on the clone");
+    }
     unity::SetName(go, positive ? "Sell" : "Cancel");
     // Its pointer down / up would perform the popup's InputEvent (a menu submit / cancel elsewhere).
     if (Il2CppObject* ieb = unity::GetComponent(go, ieButtonClass); unity::IsAlive(ieb)) {
@@ -673,7 +708,7 @@ Il2CppObject* SiloReceipt::Impl::GameButton(Il2CppObject* parentRt, bool positiv
     }
     if (!unity::IsAlive(tmp)) {
         Destroy(go);
-        return nullptr;
+        return miss("no label text on the clone");
     }
     SetText(tmp, label);
     Keep(panelHandles, go);
@@ -734,7 +769,7 @@ bool SiloReceipt::Impl::BuildPanel(const Receipt& r, const std::string& note) {
     const float nameW = 380.0f, colW = 120.0f, totalW = 140.0f, coin = 28.0f;
 
     Il2CppObject* p = NewUi("Panel", rootRt);
-    if (!p) return false;
+    if (!p) return BuildFail("panel object");
     panel = p;
     Keep(panelHandles, p);
     Il2CppObject* prt = unity::TransformOf(p);
@@ -863,18 +898,17 @@ bool SiloReceipt::Impl::BuildPanel(const Receipt& r, const std::string& note) {
             btnGame[i] = game;
             btnRing[i] = ringGo ? (sdfRectClass ? unity::GetComponent(ringGo, sdfRectClass) : unity::GetComponent(ringGo, imageClass))
                                 : nullptr;
-            btnToggle[i] = Clickable(game);
-            btnBg[i] = unity::GetComponent(game, uiButtonClass);  // its Selectable (interactable = Sell enabled)
+            btnBg[i] = unity::GetComponent(game, uiButtonClass);  // its Selectable: the click, interactable
+            btnToggle[i] = nullptr;
+            btnWasPressed[i] = false;
             Keep(panelHandles, btnRing[i]);
-            Keep(panelHandles, btnToggle[i]);
             Keep(panelHandles, btnBg[i]);
-            if (!btnToggle[i]) return false;
             continue;
         }
         if (ringGo) Destroy(ringGo);
         const char* labels[2] = {"Cancel  (Esc / B)", "Sell  (Enter / A)"};
         Il2CppObject* b = NewUi(i == 0 ? "Cancel" : "Sell", prt);
-        if (!b) return false;
+        if (!b) return BuildFail("own button object");
         At(unity::TransformOf(b), bx[i], btnY, kButtonW, kButtonH);
         btnBg[i] = Shape(b, kBacker, 32.0f, 4.0f, kLavender);
         SetRaycast(btnBg[i], true);
@@ -883,7 +917,7 @@ bool SiloReceipt::Impl::BuildPanel(const Receipt& r, const std::string& note) {
         Keep(panelHandles, btnBg[i]);
         Keep(panelHandles, btnText[i]);
         Keep(panelHandles, btnToggle[i]);
-        if (!btnBg[i] || !btnToggle[i]) return false;
+        if (!btnBg[i] || !btnToggle[i]) return BuildFail(!btnBg[i] ? "own button shape" : "own button Toggle");
     }
     ringFrames = 30;
     if (!loggedButtons) {
@@ -893,7 +927,35 @@ bool SiloReceipt::Impl::BuildPanel(const Receipt& r, const std::string& note) {
                  scrolls ? "scroll" : "fit", static_cast<int>(rowH), CanvasHeight());
     }
     StyleButtons();
-    return !Faulted();
+    return Faulted() ? BuildFail("module faulted") : true;
+}
+
+// BuildPanel; when it fails with the game's buttons, once more with our own (and own buttons from then on).
+bool SiloReceipt::Impl::Build(const Receipt& r, const std::string& note) {
+    buildFail.clear();
+    if (BuildPanel(r, note)) return true;
+    SR2_WARN("[{}] silo receipt: panel build failed at: {}", module, buildFail);
+    if (Faulted() || !gameButtonsOk) return false;
+    ClearPanel();
+    gameButtonsOk = false;
+    loggedButtons = false;
+    SR2_WARN("[{}] silo receipt: retrying with our own buttons (game buttons off for this session)", module);
+    buildFail.clear();
+    if (BuildPanel(r, note)) return true;
+    SR2_WARN("[{}] silo receipt: panel build failed again at: {}", module, buildFail);
+    return false;
+}
+
+void SiloReceipt::Impl::ClearPanel() {
+    if (unity::IsAlive(panel)) Destroy(panel);
+    panel = nullptr;
+    for (int i = 0; i < 2; ++i) {
+        btnBg[i] = btnText[i] = btnToggle[i] = btnGame[i] = btnRing[i] = nullptr;
+        btnWasPressed[i] = false;
+    }
+    scrollRect = nullptr;
+    scrollStep = 0.0f;
+    FreeLater(panelHandles);
 }
 
 void SiloReceipt::Impl::StyleButtons() {
@@ -987,7 +1049,7 @@ bool SiloReceipt::Open(const Receipt& r) {
     }
     p.canSell = r.marketAvailable && !r.marketClosed && !r.lines.empty();
     p.focus = p.canSell ? 1 : 0;
-    if (!p.BuildPanel(r, "")) return failOpen("panel failed");
+    if (!p.Build(r, "")) return failOpen("panel failed");
     // The game's own lock: pauses time, swaps to the UI action map, frees the cursor.
     if (!p.AddComponent(go, p.lockerClass, "AddComponent(UIInputLocker)")) return failOpen("UIInputLocker failed");
     if (p.Faulted()) return failOpen("module faulted");
@@ -1005,14 +1067,9 @@ bool SiloReceipt::Open(const Receipt& r) {
 void SiloReceipt::Refresh(const Receipt& r, const std::string& note, bool canSell) {
     if (!ready_ || !impl_ || !impl_->open) return;
     Impl& p = *impl_;
-    if (unity::IsAlive(p.panel)) p.Destroy(p.panel);
-    p.panel = nullptr;
-    for (int i = 0; i < 2; ++i) p.btnBg[i] = p.btnText[i] = p.btnToggle[i] = p.btnGame[i] = p.btnRing[i] = nullptr;
-    p.scrollRect = nullptr;
-    p.scrollStep = 0.0f;
-    Impl::FreeLater(p.panelHandles);
+    p.ClearPanel();
     p.canSell = canSell;
-    if (!p.BuildPanel(r, note)) {
+    if (!p.Build(r, note)) {
         SR2_WARN("[{}] silo receipt: refresh failed - closed", p.module);
         p.Teardown();
     }
@@ -1030,8 +1087,8 @@ SiloReceipt::Result SiloReceipt::Tick(float unscaledDt) {
     }
     // Clicks first (reset every frame, also during the grace time).
     const bool clickBackdrop = p.Clicked(p.backdropToggle);
-    const bool clickCancel = p.Clicked(p.btnToggle[0]);
-    const bool clickSell = p.Clicked(p.btnToggle[1]);
+    const bool clickCancel = p.btnGame[0] ? p.GameClicked(0) : p.Clicked(p.btnToggle[0]);
+    const bool clickSell = p.btnGame[1] ? p.GameClicked(1) : p.Clicked(p.btnToggle[1]);
     if (p.ringFrames > 0) {
         --p.ringFrames;
         p.FitRings();
