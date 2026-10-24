@@ -266,10 +266,16 @@ bool HasConsoleName(const std::string& text) {
     return false;
 }
 
+// Minimum tooltip widths (design px): plain text tips, and the Sandbox item / rich tips, which
+// are as wide as their key rows when they have some and were narrow without (a name and a tag).
+constexpr float kTipMinW = 160, kRichTipMinW = 230;
+
 void Tooltip(const std::string& text) {
     if (text.empty()) return;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(12), U(9)));
     PushFloatingStyle();
+    // A minimum width: a tooltip of a few words (a tile's name) looked squeezed.
+    ImGui::SetNextWindowSizeConstraints(ImVec2(U(kTipMinW), 0), ImVec2(FLT_MAX, FLT_MAX));
     if (ImGui::BeginTooltip()) {
         FloatingSurface(false);
         {
@@ -1780,8 +1786,8 @@ void ItemTooltip(const sbx::Snapshot& s, const std::string& name, sbx::Kind kind
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(14), U(10)));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(6), U(4)));
     PushFloatingStyle();
-    // A sensible minimum width: a name with only its tag (no favourites) looked squashed.
-    ImGui::SetNextWindowSizeConstraints(ImVec2(U(190), 0), ImVec2(FLT_MAX, FLT_MAX));
+    // A sensible minimum width: a name with only its tag (no favourites, no key rows) looked squashed.
+    ImGui::SetNextWindowSizeConstraints(ImVec2(U(kRichTipMinW), 0), ImVec2(FLT_MAX, FLT_MAX));
     if (ImGui::BeginTooltip()) {
         FloatingSurface(false);
         {
@@ -1844,7 +1850,7 @@ void RichTooltip(const sandbox_upgrades::Tip& t) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(14), U(10)));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(6), U(4)));
     PushFloatingStyle();
-    ImGui::SetNextWindowSizeConstraints(ImVec2(U(190), 0), ImVec2(FLT_MAX, FLT_MAX));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(U(kRichTipMinW), 0), ImVec2(FLT_MAX, FLT_MAX));
     if (ImGui::BeginTooltip()) {
         FloatingSurface(false);
         {
@@ -1918,15 +1924,15 @@ void SubTabs(const char* id, const std::vector<std::string>& labels, int& sel) {
 void SandboxHintBar(ImDrawList* dl, ImVec2 a, ImVec2 b) {
     const Palette& P = theme::Colors();
     static const KeyRow kSlots[] = {{"LMB", "select"}, {"Shift+Wheel", "\u00b11"}, {"Ctrl+Wheel", "\u00b110"},
-                                    {"Drag", "move / swap"}, {"RMB", "menu"}};
+                                    {"Drag", "move / swap"}, {"RMB", "context menu"}};
     static const KeyRow kPicker[] = {{"LMB", "put in a slot"},    {"Ctrl+LMB", "select"}, {"Shift+Wheel", "\u00b11"},
-                                     {"Ctrl+Wheel", "\u00b110"}, {"Drag", "to a slot"},  {"RMB", "menu / clear"}};
+                                     {"Ctrl+Wheel", "\u00b110"}, {"Drag", "to a slot"},  {"RMB", "context menu / clear"}};
     static const KeyRow kSpawner[] = {{"LMB", "spawn"},            {"Ctrl+LMB", "select"}, {"Shift+Wheel", "\u00b11"},
-                                      {"Ctrl+Wheel", "\u00b110"}, {"RMB", "menu / clear"}};
+                                      {"Ctrl+Wheel", "\u00b110"}, {"RMB", "context menu / clear"}};
     static const KeyRow kCrafter[] = {{"LMB", "select"}, {"Shift+Wheel", "\u00b11"}, {"Ctrl+Wheel", "\u00b110"},
                                       {"RMB", "clear"}};
-    static const KeyRow kUpgrades[] = {{"Shift+Wheel", "\u00b11 level"}, {"Ctrl+Wheel", "max / none"}, {"RMB", "menu"}};
-    static const KeyRow kBlueprints[] = {{"LMB", "unlock / lock"}, {"RMB", "menu"}};
+    static const KeyRow kUpgrades[] = {{"Shift+Wheel", "\u00b11 level"}, {"Ctrl+Wheel", "max / none"}, {"RMB", "context menu"}};
+    static const KeyRow kBlueprints[] = {{"LMB", "unlock / lock"}, {"RMB", "context menu"}};
     const KeyRow* hints = nullptr;
     size_t count = 0;
     switch (g_sbxHover) {
@@ -2417,7 +2423,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
                 else tip.lines.push_back({"No vacpack upgrade for it was found.", P.dim}), tip.keys = {{"RMB", "Extra Tank tier"}};
                 RichTooltip(tip);
             } else if (sl.item) {
-                ItemTooltip(s, sl.name, sl.kind, sl.item, nullptr, nullptr, {{"LMB", "select"}, {"RMB", "menu"}});
+                ItemTooltip(s, sl.name, sl.kind, sl.item, nullptr, nullptr, {{"LMB", "select"}, {"RMB", "context menu"}});
             } else {
                 tip.tag = "Empty";
                 tip.tagCol = P.dim;
@@ -2539,7 +2545,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
                 "in front of you.");
     if (r.hovered >= 0 && !ImGui::GetDragDropPayload() && !ImGui::IsPopupOpen(kSbxCtx)) {
         const sbx::Item& it = *src[static_cast<size_t>(r.hovered)];
-        ItemTooltip(s, it.name, it.kind, it.id, nullptr, nullptr, {{"LMB", "put in a slot"}, {"RMB", "menu"}}, it.mod);
+        ItemTooltip(s, it.name, it.kind, it.id, nullptr, nullptr, {{"LMB", "put in a slot"}, {"RMB", "context menu"}}, it.mod);
     }
     if (r.dropped && r.dropped->DataSize == sizeof(int)) {
         const int from = *static_cast<const int*>(r.dropped->Data);
@@ -2699,7 +2705,7 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
         const char* info = it.tarr && s.tarrsOff ? "Tarrs are disabled in this save's game settings."
                            : it.mod ? "Spawned through the mod (kept in the mod's file): at most 5 at a time."
                                     : nullptr;
-        ItemTooltip(s, it.name, it.kind, it.id, info, nullptr, {{"LMB", "spawn"}, {"RMB", "menu"}}, it.mod);
+        ItemTooltip(s, it.name, it.kind, it.id, info, nullptr, {{"LMB", "spawn"}, {"RMB", "context menu"}}, it.mod);
     }
     if (r.wheelStep != 0 && r.hovered >= 0) {
         const sbx::Item& it = *src[static_cast<size_t>(r.hovered)];
@@ -3030,7 +3036,7 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
         if (!mat && !rc.variants.empty()) info += std::format(" {} variant{}: right-click.", rc.variants.size(),
                                                               rc.variants.size() == 1 ? "" : "s");
         std::vector<KeyRow> keys{{"LMB", g_craftPick.count(rc.id) ? "deselect" : "select"}, {"Shift+Wheel", "amount"}};
-        if (!mat) keys.push_back({"RMB", rc.variants.empty() ? "craft menu" : "variants"});
+        if (!mat) keys.push_back({"RMB", rc.variants.empty() ? "context menu" : "variants"});
         if (!ImGui::IsPopupOpen(kCraftCtx))
             ItemTooltip(s, rc.name, mat || rc.mod ? rc.kind : sbx::Kind::Gadget, mat ? rc.id : 0, info.c_str(), mat ? nullptr : &rc.costs,
                         keys, rc.mod);
