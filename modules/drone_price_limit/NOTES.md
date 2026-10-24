@@ -5,6 +5,9 @@ price is at or above **their station's** limit. Below it they keep the plort (th
 or a drone already carrying it waits at its station instead of dumping it) and sell once the price
 recovers. Also applies while sleeping / away (fast forward).
 
+The module also sells the per-station **Battery Saver** tiers (section below): it owns the station
+menu hooks, and MinHook allows one hook per address.
+
 Status: built, not yet tested in game.
 
 ## Where the limit lives
@@ -60,6 +63,40 @@ the CanDroneDeposit detour reads `program._drone._stationModel.actorId`. The dum
 The rest of the findings (sink programs, fast forward, the dump trap) are in the header of
 `module.cpp` and `re/custom-upgrades.md` section 2.3.
 
+## Battery Saver (battery.cpp, station_dialog.cpp)
+
+A tier chain per drone station: Battery Saver I / II / III / IV, the drone uses 1/1.25, 1/1.5, 1/1.75,
+1/2 of the normal battery (80 / 67 / 57 / 50 %, lasts 1.25x .. 2x as long). Only the top owned tier
+counts. Shown and applied only while custom_upgrades is on (its gate); stored in the per-save sidecar
+`values`: `"drone_battery.station.<actor id>": "2"`. Sell gives back half the top tier's price.
+
+- **Where it is bought.** The drone station has no purchase menu, and the fabricator's upgrades are
+  vacpack `UpgradeDefinition`s paid in craft materials and saved in the vanilla `PlayerUpgrades`
+  model (a custom entry there is not save-safe). So the station menu gets a `[B] Battery Saver` pill
+  (same clone of the Change prompt as the price limit) right after the drone's status indicators
+  (DetailsPanel > DescriptionArea > StatusRow: Charge / Mode / Location, `DroneProgramMenu._batteryWidget`
+  / `_modeWidget` / `_locationWidget`), with the status row's layout kept off it (`SkipLayout`). B, the
+  pad's left stick click or a click opens a dialog: the four tiers (effect, price, Owned / Next), the
+  player's Newbucks, Buy next / Sell top / Close (Left / Right + Enter, or the mouse; B / Esc / a click
+  on the backdrop close). Payment: `PlayerState.SpendCurrency(CurrencyUtility.DefaultCurrency, price)`
+  after a `GetCurrency` check; refund `AddCurrency`. Input is ignored for 0.3 s after opening.
+- **Prices: 1500 / 3000 / 5000 / 7500** per station (17,000 for IV). In line with the other tier chains
+  (Faster Hens 2000 / 4000, Silo Capacity 3000 / 4500 / 6500, Sell-All 10,000), each tier costing more
+  than the last; drone stations are a late-game gadget, so a full set costs about as much as a fully
+  upgraded silo. Less fuel is the only gain (the drones work the same, just longer per refill).
+- **How the battery is changed** (header of battery.h): the battery is one saved number, the station
+  model's `_energyDepleteTime`; energy = time left x `DroneDirector.EnergyDepletedPerHour`, pure world
+  time. Every ~2 s the saver gives back what the station drained beyond its tier since its last look,
+  through the game's own `AddEnergy` (stations from `GameModel.identifiablesByIdent[DroneDirector.
+  _droneStationType]`, so unloaded ones too). The battery stays a plain vanilla value: saves load the
+  same without the mod, and turning the tier / module / custom_upgrades off just stops the refunds.
+- Approximation: across a sleep (one big time jump) the game's fast-forward runs the drones on the
+  vanilla battery first and the refund comes after; a drone that ran empty during the night stopped
+  working early, its battery afterwards is right.
+- Log: `battery saver ready`, `station <id>: bought Battery Saver II for 3000 Newbucks`, `station <id>:
+  Battery Saver II active (battery drain x0.67)`, `battery dialog opened / closed`, `battery saver action
+  cloned ...`.
+
 ## To check in game
 
 1. Log: `[drone_price_limit] setup ok: ...` with `<GetSinks>.MoveNext`, and `station ui ready: ...`
@@ -76,3 +113,12 @@ The rest of the findings (sink programs, fast forward, the dump trap) are in the
 5. Two stations with different limits behave independently.
 6. Save, reload: the limit is still there (sidecar `values`). Load an older save: its own limits.
 7. Disable custom_upgrades: limits still work for the session, the dialog shows the "Not saved" note.
+8. Battery Saver (custom_upgrades on): the `[B] Battery Saver` pill sits right of the Location
+   indicator under the drone description (position, size; log `battery saver action cloned ...`).
+   Hidden with custom_upgrades off.
+9. B / left stick click / a click opens the battery dialog; buy I (Newbucks go down by 1500, the pill
+   reads "Battery Saver I"), buy up to IV, sell back (half refund); not enough Newbucks shows the
+   orange note; B / Esc / backdrop close it; Enter / A press the focused button.
+10. With a tier owned the station's battery lasts longer: compare the charge indicator over a few game
+   hours with a station without a tier (log `Battery Saver N active (battery drain x...)`). Save and
+   reload: the tier is still there; the battery value is the same with the mod off.
