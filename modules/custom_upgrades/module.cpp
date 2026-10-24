@@ -239,7 +239,6 @@
 #include "modules/custom_upgrades/gadget_look.h"
 #include "modules/custom_upgrades/quantum_link.h"
 #include "modules/custom_upgrades/dj_buildables.h"
-#include "modules/custom_upgrades/placement_look.h"
 #include "modules/custom_upgrades/radio_shop.h"
 #include "modules/custom_upgrades/sale_notify.h"
 #include "modules/custom_upgrades/silo_receipt.h"
@@ -3298,13 +3297,6 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         else SR2_WARN("[{}] Slime DJ buildables unavailable ({}) - not offered", kModule, derr);
     } else {
         SR2_WARN("[{}] Slime DJ buildables unavailable (they need the Quantum Storage Link's hooks) - not offered", kModule);
-    }
-    // Gadget mode: the mod buildables' name and dressed ghost (placement_look.h; providers registered by their
-    // Setup above). Optional: without it the vanilla label and ghost show.
-    if (dj_.Ready()) {
-        std::string lerr;
-        if (custom_upgrades::placement_look::Setup(ctx, lerr)) SR2_INFO("[{}] gadget mode label / preview of mod buildables ready", kModule);
-        else SR2_WARN("[{}] gadget mode label / preview of mod buildables unavailable ({}) - the vanilla ones show", kModule, lerr);
     }
     // The Slime Radio in the shop's Daily Deals (optional; missing -> the radio is only fabricated).
     if (dj_.Ready()) {

@@ -94,7 +94,7 @@
 #include "core/resolver.h"
 #include "core/text_override.h"
 #include "core/unity.h"
-#include "modules/custom_upgrades/placement_look.h"
+#include "modules/custom_upgrades/gadget_look.h"
 #include "modules/custom_upgrades/variant_ext.h"
 #include "modules/slime_dj/api.h"
 
@@ -218,7 +218,7 @@ int TableIndex(Il2CppObject* def) {
     return -1;
 }
 
-struct Impl : variant_ext::Extension, placement_look::Provider {
+struct Impl : variant_ext::Extension {
     Host host;
     const char* module = "custom_upgrades";
 
@@ -304,7 +304,8 @@ struct Impl : variant_ext::Extension, placement_look::Provider {
     const void* revClass = nullptr;
     size_t revOff = 0;
     bool loggedNoVariantEntry = false, loggedNoDefs = false;
-    std::string cardState[kFamCount];  // last logged Fabricator card state per family (logged when it changes)
+    std::string cardState[kFamCount];
+    bool loggedPreview[kFamCount] = {};  // last logged Fabricator card state per family (logged when it changes)
 
     // dressed actors
     // What a record plays (Apply): nothing, the Slime DJ song from its emitters, the Boombox's own track.
@@ -666,11 +667,12 @@ struct Impl : variant_ext::Extension, placement_look::Provider {
     void AfterPickup(Il2CppObject* gadgetItem) override;
     void ChangeVariant(Il2CppObject* gadget, Il2CppObject* variant) override;
 
-    // ---- placement_look::Provider (gadget mode: the ghost and the label) ----
-    bool Wants(Il2CppObject* def) const override { return TableIndex(def) >= 0; }
-    void DressPreview(Il2CppObject* def, Il2CppObject* placeholder) override;
-    Il2CppObject* Label(Il2CppObject* def) override;
-    Il2CppObject* TargetLabel(Il2CppObject* gadget) override;
+    // ---- gadget mode (gadget_look.h): the ghost and the label ----
+    void RegisterLooks();
+    void DressPreview(Il2CppObject* def, Il2CppObject* placeholder);
+    void SetLayerRecursive(Il2CppObject* goOrComp, int layer);
+    Il2CppObject* Label(Il2CppObject* def);
+    Il2CppObject* TargetLabel(Il2CppObject* gadget);
 };
 
 Impl* g = nullptr;
@@ -803,6 +805,7 @@ bool Impl::EnsureDefinitions() {
         return false;
     }
     defsBuilt = true;
+    RegisterLooks();
     SR2_INFO("[{}] dj buildables: DJ Booth on '{}', {} DJ Speaker variant(s) on '{}', Slime Radio {} (pillow {})", module,
              unity::GetName(desk), fams[kSpeaker].defs.size(), unity::GetName(boombox),
              fams[kRadio].defs.empty() ? std::string("off") : std::format("on toy '{}'", unity::GetName(toyDef)),
@@ -1152,15 +1155,48 @@ void Impl::HideVanilla(Rec& rec, std::initializer_list<const char*> paths) {
     }
 }
 
-// The placement ghost (placement_look.h): the dressed look without scripts, colliders, emitters or interaction, on
-// the overlay layer. Round 9: "the preview is also default" / "change the preview to match the stacked speakers".
+// Gadget mode (gadget_look.h owns the hooks): our name while held (label), our description on the Fabricator card
+// and the dressed placement ghost. Round 9: "custom buildables (mod ones) use the default label and the preview is
+// also default". Called once the definitions are built (main thread).
+void Impl::RegisterLooks() {
+    if (!gadget_look::Ready()) {
+        SR2_INFO("[{}] dj buildables: no gadget looks (gadget_look unavailable) - the vanilla label and preview show", module);
+        return;
+    }
+    int n = 0;
+    for (int f : {kBooth, kSpeaker})
+        for (Il2CppObject* def : fams[f].defs) {
+            gadget_look::Look look;
+            look.name = Label(def);
+            Il2CppObject* desc = unity::Field<Il2CppObject*>(def, offDesc);
+            look.description = desc != unity::Field<Il2CppObject*>(fams[f].base, offDesc) && IsA(desc, lsClass) ? desc : nullptr;
+            look.dressPreview = [this, def](Il2CppObject* placeholder) { DressPreview(def, placeholder); };
+            gadget_look::Register(def, std::move(look));
+            ++n;
+        }
+    SR2_INFO("[{}] dj buildables: gadget looks registered for {} definition(s) (label, card text, dressed preview)", module, n);
+}
+
+// GameObject.layer of `goOrComp` and everything under it.
+void Impl::SetLayerRecursive(Il2CppObject* goOrComp, int layer) {
+    std::vector<Il2CppObject*> todo{unity::TransformOf(goOrComp)};
+    for (size_t i = 0; i < todo.size() && i < 1024; ++i) {
+        if (!todo[i] || !unity::IsAlive(todo[i])) continue;
+        int32_t l = layer;
+        Call(goSetLayer, unity::GameObjectOf(todo[i]), {&l}, "GameObject.set_layer");
+        for (Il2CppObject* c : ChildTransforms(todo[i])) todo.push_back(c);
+    }
+}
+
+// The placement ghost: the dressed look without scripts, colliders, emitters or interaction, on the gadget overlay
+// layer (26, GadgetItem.SetGadgetLayerRecursively). "change the preview to match the stacked speakers".
 void Impl::DressPreview(Il2CppObject* def, Il2CppObject* placeholder) {
     int kind = 0;
     const int f = FamOf(def, &kind);
     if (f != kBooth && f != kSpeaker) return;
     Rec tmp;
     tmp.root = placeholder;
-    Il2CppObject* holder = NewChild(placeholder, placement_look::kPreviewChild);
+    Il2CppObject* holder = NewChild(placeholder, "sr2look");
     if (!holder) return;
     int parts = 0;
     if (f == kSpeaker) {
@@ -1194,7 +1230,9 @@ void Impl::DressPreview(Il2CppObject* def, Il2CppObject* placeholder) {
             }
         }
     }
-    placement_look::SetLayerRecursive(holder, placement_look::kPreviewLayer);
+    SetLayerRecursive(holder, 26);
+    if (!loggedPreview[f]) SR2_INFO("[{}] dj buildables: {} placement preview dressed ({} part(s))", module, fams[f].label, parts);
+    loggedPreview[f] = true;
     FreeLater(std::move(tmp.handles));  // the objects live and die with the placeholder
     if (parts == 0) SR2_WARN("[{}] dj buildables: {} preview: nothing could be built", module, fams[f].label);
 }
@@ -2219,7 +2257,13 @@ bool DjBuildables::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& 
     }
     g = p;
     variant_ext::Set(p);  // the Quantum Storage Link's detours ask us from now on
-    placement_look::Add(p);  // gadget mode: our ghost and label (hooked by placement_look::Setup, module.cpp)
+    // The gadget-mode label of an aimed-at placed booth / speaker stack (a vanilla desk / Boombox to the game).
+    gadget_look::AddPlacedLabel([](Il2CppObject* gadget, Il2CppObject*) -> Il2CppObject* {
+        if (!g || !g->defsBuilt || g->Faulted()) return nullptr;
+        Il2CppObject* r = nullptr;
+        g_guard.Run([&] { r = g->TargetLabel(gadget); });
+        return r;
+    });
     ready_ = true;
     return true;
 }
