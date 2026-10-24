@@ -36,7 +36,6 @@
 #include "menu.h"
 #include "momentum_hud.h"
 #include "quick_start_hint.h"
-#include "sandbox_bridge.h"
 #include "settings_view.h"
 #include "slime_icons.h"
 #include "theme.h"
@@ -624,8 +623,7 @@ void RenderFrame() {
 
     const bool menuHint = !open && HintVisible();
     const quick_start_hint::View quick = open ? quick_start_hint::View{} : quick_start_hint::Get();
-    const int fabKey = open ? 0 : sandbox::FabricatorHintKey();  // Sandbox: the game's Fabricator is open
-    const bool hint = menuHint || quick.phase != quick_start_hint::Phase::Hidden || fabKey != 0;
+    const bool hint = menuHint || quick.phase != quick_start_hint::Phase::Hidden;
     const bool hudMarkers = hud::HasContent();  // world markers published by modules (wall_markers)
     const bool momentum = momentum_hud::HasContent();  // hl2_movement speed readout
     if (!open && !editing && !hint && !hudMarkers && !momentum) {
@@ -687,7 +685,6 @@ void RenderFrame() {
             h.menuHint = menuHint;
             h.quickHint = static_cast<int>(quick.phase);  // Hidden 0, Pending 1, Staying 2
             h.quickSeconds = quick.secondsLeft;
-            h.sandboxFabKey = fabKey;
             menu::DrawHint(h);
         }
         ImGui::Render();

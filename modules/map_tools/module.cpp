@@ -53,6 +53,7 @@
 #include "core/settings.h"
 #include "core/unity.h"
 #include "modules/common/discordant_walls.h"
+#include "modules/common/legend_hint.h"
 #include "modules/custom_upgrades/api.h"
 #include "modules/custom_upgrades/sale_notify.h"
 #include "modules/map_tools/ground_teleport.h"
@@ -68,6 +69,7 @@ namespace main_thread = sr2::core::main_thread;
 namespace ugui = sr2::modules::minimap::ugui;
 namespace mapi = sr2::modules::minimap::api;
 namespace ground_teleport = sr2::modules::ground_teleport;
+namespace legend_hint = sr2::modules::legend_hint;
 using il2cpp::Resolver;
 using ugui::Color;
 using ugui::Rect;
@@ -81,7 +83,6 @@ constexpr size_t kNoOff = static_cast<size_t>(-1);
 inline bool Has(size_t off) { return off != kNoOff; }
 constexpr float kIconRefresh = 2.0f;   // full map icons re-collected this often while the map is open
 constexpr int kClosedTicks = 3;        // no MapUI.LateUpdate for this many frames = map closed
-constexpr int kReapplyFrames = 4;      // re-assert the cloned legend hint's key / label for a few frames
 constexpr float kHintDiagDelay = 3.0f; // no hint this long after the map opened: log why (once per session)
 constexpr float kTravelTimeout = 90.0f;  // zone change: give up if the player is not in the new zone by then
 constexpr float kTravelPoll = 0.5f;      // zone change: arrival checked this often
@@ -196,8 +197,6 @@ Cfg LoadCfg() {
 struct Sym {
     Il2CppClass *mapUI = nullptr, *map = nullptr, *viewModel = nullptr, *fogReveal = nullptr, *fogElement = nullptr;
     Il2CppClass *mapDirector = nullptr, *zoneArea = nullptr, *clickMarker = nullptr, *pointerEvent = nullptr;
-    Il2CppClass *legend = nullptr, *hint = nullptr, *inputIcon = nullptr, *eventDisplay = nullptr, *invokeOnClick = nullptr;
-    Il2CppClass *componentIface = nullptr, *lse = nullptr, *selectable = nullptr, *registrar = nullptr;
     Il2CppClass *teleportable = nullptr, *displayManager = nullptr;
     // hook targets
     void *lateUpdate = nullptr, *setRevealState = nullptr, *isZoneHidden = nullptr, *onPointerClick = nullptr;
@@ -222,10 +221,6 @@ struct Sym {
            vmFullRect = kNoOff;
     size_t areaZoneData = kNoOff;
     size_t clickDragging = kNoOff, peButton = kNoOff;
-    // legend
-    size_t ciObject = kNoOff, legendHints = kNoOff, regPassThrough = kNoOff;
-    size_t iconButton = kNoOff, iconKey = kNoOff, iconKeyText = kNoOff, iconKeyImage = kNoOff, iconKeyLse = kNoOff,
-           iconDouble = kNoOff, iconButtonImage = kNoOff;
     // the game's mouse button glyphs: KeyboardMouseIconSet (InputIconSet<KeyboardMouseIcon>._items),
     // KeyboardMouseIcon._control ("<Mouse>/rightButton") / ._buttonSprite
     Il2CppClass* kmIconSet = nullptr;
@@ -407,33 +402,21 @@ public:
         s_.pointerEvent = c.Class("UnityEngine.UI", "UnityEngine.EventSystems", "PointerEventData");
         s_.peButton = c.Field(s_.pointerEvent, "<button>k__BackingField");
 
-        // input legend ("[RMB] Teleport")
-        s_.componentIface = c.Class("MonomiPark.SlimeRancher.UI.Framework", "ComponentInterfaceBase");
-        s_.ciObject = c.Field(s_.componentIface, "_object");
-        s_.legend = c.Class(nsCtl, "InputLegend");
-        s_.legendHints = c.Field(s_.legend, "_hints");
-        // MapUI._inputLegend may hold an InputLegendFocusRegistrar that forwards (_passThrough) to the real legend
-        s_.registrar = c.Class(nsCtl, "InputLegendFocusRegistrar");
-        s_.regPassThrough = c.Field(s_.registrar, "_passThrough");
-        s_.hint = c.Class(nsCtl, "InputHint");
-        s_.inputIcon = c.Class(nsCtl, "InputIcon");
-        s_.eventDisplay = c.Class(nsCtl, "InputEventDisplay");
-        s_.invokeOnClick = c.Class(nsCtl, "InvokeInputEventOnPointerClick");
-        s_.iconButton = c.Field(s_.inputIcon, "_buttonRoot");
-        s_.iconKey = c.Field(s_.inputIcon, "_keyRoot");
-        s_.iconKeyText = c.Field(s_.inputIcon, "_keyText");
-        s_.iconKeyImage = c.Field(s_.inputIcon, "_keyImage");
-        s_.iconKeyLse = c.Field(s_.inputIcon, "_keyLocalizeStringEvent");
-        s_.iconDouble = c.Field(s_.inputIcon, "_doubleTapRoot");
-        s_.iconButtonImage = c.Field(s_.inputIcon, "_buttonImage");
+        // input legend ("[RMB] Teleport"): the clone is modules/common/legend_hint.h
+        {
+            std::string lerr;
+            if (!legend_hint::Resolve(lerr)) c.missing.push_back("key bar hint: " + lerr);
+        }
         s_.kmIconSet = c.Class("MonomiPark.SlimeRancher.Input", "KeyboardMouseIconSet");
         s_.kmItems = c.Field(s_.kmIconSet, "_items");
         Il2CppClass* kmIcon = c.Class("MonomiPark.SlimeRancher.Input", "KeyboardMouseIcon");
         s_.kmControl = c.Field(kmIcon, "_control");
         s_.kmSprite = c.Field(kmIcon, "_buttonSprite");
-        s_.lse = c.Class("Unity.Localization", "UnityEngine.Localization.Components", "LocalizeStringEvent");
-        s_.hintConfig = c.Field(s_.hint, "_configuration");
-        s_.hintLabelText = c.Field(s_.hint, "_labelText");
+        {
+            Il2CppClass* inputHint = c.Class(nsCtl, "InputHint");
+            s_.hintConfig = c.Field(inputHint, "_configuration");
+            s_.hintLabelText = c.Field(inputHint, "_labelText");
+        }
         s_.hcEvent = c.Field(c.Class(nsCtl, "InputHintConfiguration"), "InputEvent");
         s_.tmpGetText = c.Bind(c.Class("Unity.TextMeshPro", "TMPro", "TMP_Text"), "get_text", 0);
         // the real fog under a click
@@ -446,7 +429,6 @@ public:
             if (dc) s_.mapAvailable = c.Target(dc, "<GetAvailableMaps>b__0", 1);
             else c.missing.push_back("class MapListConfiguration.<>c__DisplayClass1_0");
         }
-        s_.selectable = c.Class("UnityEngine.UI", "UnityEngine.UI", "Selectable");
 
         // teleport
         s_.teleportable = c.Class("", "TeleportablePlayer");
@@ -616,9 +598,7 @@ private:
     std::vector<mapi::PageIcon> buf_;
 
     // legend
-    Ref hintGo_, hintLabel_, hintKey_;
-    std::vector<Ref> hintIcons_;
-    int hintReapply_ = 0;
+    legend_hint::Clone hint_;
     float hintRetryAt_ = 0;
     bool hintFailLogged_ = false, hintLogged_ = false;
     float hintSince_ = -1;  // first try of this map open (diagnostics after kHintDiagDelay)
@@ -661,10 +641,7 @@ private:
                Has(s_.listItems) && Has(s_.tsdDestinations) && Has(s_.tddNode) && Has(s_.tddGroup) &&
                Has(s_.zmdPrimary) && s_.zoneSgMapping;
     }
-    bool LegendResolved() const {
-        return Has(s_.uiLegend) && Has(s_.ciObject) && Has(s_.legendHints) && s_.hint && s_.inputIcon &&
-               Has(s_.iconKey) && Has(s_.iconKeyText) && s_.behSetEnabled;
-    }
+    bool LegendResolved() const { return Has(s_.uiLegend) && legend_hint::Resolved(); }
 
     void Step(const char* s) { step_ = s; }
 
@@ -706,7 +683,7 @@ private:
         g_active.store(false);
         SR2_ERROR("map_tools: {} - map tools disabled for the rest of this session", why);
         core::MarkModuleFaulted(kModule, why);
-        for (Ref* r : {&mapUI_, &map_, &mapT_, &container_, &canvasT_, &hintGo_, &hintLabel_, &hintKey_, &hintLegend_, &mouseGlyph_, &player_, &net_,
+        for (Ref* r : {&mapUI_, &map_, &mapT_, &container_, &canvasT_, &hintLegend_, &mouseGlyph_, &player_, &net_,
                        &zoneMap_, &sceneLoader_, &travel_.group, &travel_.origin, &travel_.zoneDef})
             r->Abandon();
         for (auto& [z, groups] : zoneGroups_)
@@ -719,10 +696,9 @@ private:
         for (Icon& i : icons_)
             for (Ref* r : {&i.go, &i.t, &i.img}) r->Abandon();
         for (Ref& r : hiddenStatic_) r.Abandon();
-        for (Ref& r : hintIcons_) r.Abandon();
+        hint_.Abandon();
         icons_.clear();
         hiddenStatic_.clear();
-        hintIcons_.clear();
         if (frameCb_) main_thread::RemoveFrameCallback(frameCb_);
         frameCb_ = 0;
     }
@@ -1226,11 +1202,7 @@ private:
 
     // -------------------------------------------------------------- legend ---
     void DestroyHint() {
-        if (hintGo_.Alive()) ugui::Destroy(hintGo_.get());
-        hintGo_.Reset(nullptr);
-        hintLabel_.Reset(nullptr);
-        hintKey_.Reset(nullptr);
-        hintIcons_.clear();
+        hint_.Destroy();
         hintLegend_.Reset(nullptr);
         hintPlaced_ = false;
     }
@@ -1239,19 +1211,16 @@ private:
     // "[RMB] Teleport" goes right before the Place Waypoint hint: the legend's InputHint whose input event
     // (InputHint._configuration.InputEvent) or label names a waypoint / marker. Logged once per session.
     void PlaceHint() {
-        if (!hintGo_.Alive() || !hintLegend_.Alive() || !s_.setSiblingIndex || !s_.getSiblingIndex) {
+        if (!hint_.Alive() || !hintLegend_.Alive() || !s_.setSiblingIndex || !s_.getSiblingIndex) {
             hintPlaced_ = true;  // nothing to do
             return;
         }
-        auto* hints = F<Il2CppArray*>(hintLegend_.get(), s_.legendHints);
-        if (!ugui::PlausiblePointer(hints)) return;
-        Il2CppObject* tr = unity::TransformOf(hintGo_.get());
+        Il2CppObject* tr = unity::TransformOf(hint_.GameObject());
         Il2CppObject* parent = ugui::GetParent(tr);
         Il2CppObject *target = nullptr, *fallback = nullptr;
         std::string seen, targetDesc, fallbackDesc;
-        for (size_t i = 0, n = std::min<size_t>(ugui::ArrayCount(hints), 32); i < n && !target; ++i) {
-            Il2CppObject* h = ugui::ArrayItem(hints, i);
-            if (!ugui::IsA(h, s_.hint) || !unity::ActiveInHierarchy(unity::GameObjectOf(h))) continue;
+        for (Il2CppObject* h : legend_hint::Hints(hintLegend_.get(), true)) {
+            if (target) break;
             std::string ev, label;
             Il2CppObject* cfg = Has(s_.hintConfig) ? F<Il2CppObject*>(h, s_.hintConfig) : nullptr;
             Il2CppObject* e = ugui::PlausiblePointer(cfg) && Has(s_.hcEvent) ? F<Il2CppObject*>(cfg, s_.hcEvent) : nullptr;
@@ -1291,14 +1260,9 @@ private:
             }
             return;
         }
-        int idx = -1, mine = -1;
-        Managed([&] {
-            idx = ugui::Call<int>(s_.getSiblingIndex, target);
-            mine = ugui::Call<int>(s_.getSiblingIndex, tr);
-        });
-        if (idx < 0) return;
-        if (mine >= 0 && mine < idx) --idx;  // our own slot frees up when we move
-        Managed([&] { ugui::Call<void>(s_.setSiblingIndex, tr, idx); });
+        hint_.PlaceBefore(target);
+        int idx = -1;
+        Managed([&] { idx = ugui::Call<int>(s_.getSiblingIndex, tr); });
         hintPlaced_ = true;
         if (!hintPlaceLogged_) {
             hintPlaceLogged_ = true;
@@ -1307,29 +1271,20 @@ private:
         }
     }
 
-    static bool IsUnder(Il2CppObject* t, Il2CppObject* ancestor) {
-        for (int guard = 0; t && guard < 64; ++guard, t = ugui::GetParent(t))
-            if (t == ancestor) return true;
-        return false;
-    }
-
     void UpdateLegend() {
         if (!cfg_.teleport || !TeleportResolved() || !LegendResolved()) {
-            if (hintGo_) DestroyHint();
+            if (hint_.Exists()) DestroyHint();
             return;
         }
-        if (hintGo_.Alive()) {
-            if (hintReapply_ > 0) {
-                --hintReapply_;
-                ApplyHintLook();
-            }
+        if (hint_.Alive()) {
+            hint_.Tick();
             if (!hintPlaced_ && time_ >= hintPlaceAt_) {  // the Place Waypoint hint may show up later
                 hintPlaceAt_ = time_ + 0.5f;
                 PlaceHint();
             }
             return;
         }
-        if (hintGo_) DestroyHint();  // died with the legend
+        if (hint_.Exists()) DestroyHint();  // died with the legend
         if (time_ < hintRetryAt_) return;
         hintRetryAt_ = time_ + 0.5f;  // the legend may not show its hints yet
         if (hintSince_ < 0) hintSince_ = time_;
@@ -1339,132 +1294,38 @@ private:
         SR2_INFO("map_tools: no [RMB] Teleport hint {:.0f} s after the map opened: {}", kHintDiagDelay, why);
     }
 
-    // The map's key bar: MapUI._inputLegend (ComponentInterface<IInputLegend>)._object. That can be an
-    // InputLegendFocusRegistrar, which forwards to another IInputLegend through its own _passThrough
-    // (ComponentInterface<IInputLegend>), possibly several hops; the chain ends at the InputLegend. Fallback: the
-    // first active InputLegend under the last component of the chain, then under the MapUI.
-    Il2CppObject* FindLegend(std::string& chain) {
-        auto under = [&](Il2CppObject* comp) -> Il2CppObject* {
-            if (!comp || !unity::IsAlive(comp)) return nullptr;
-            Il2CppObject* found = nullptr;
-            ugui::ForEachInChildren(unity::GameObjectOf(comp), s_.legend, false, [&](Il2CppObject* l) {
-                found = l;
-                return false;
-            });
-            return found;
-        };
-        Il2CppObject* iface = F<Il2CppObject*>(mapUI_.get(), s_.uiLegend);
-        Il2CppObject* obj = ugui::PlausiblePointer(iface) ? F<Il2CppObject*>(iface, s_.ciObject) : nullptr;
-        Il2CppObject* last = nullptr;
-        chain = "MapUI._inputLegend";
-        for (int hop = 0; hop < 8; ++hop) {
-            if (!ugui::PlausiblePointer(obj)) {
-                chain += " -> null";
-                break;
-            }
-            chain += " -> " + unity::ClassName(obj);
-            if (ugui::IsA(obj, s_.legend)) return obj;
-            if (!ugui::IsA(obj, unity::ComponentClass()) || !unity::IsAlive(obj)) break;
-            last = obj;
-            if (!s_.registrar || !Has(s_.regPassThrough) || !ugui::IsA(obj, s_.registrar)) break;
-            Il2CppObject* ci = F<Il2CppObject*>(obj, s_.regPassThrough);
-            obj = ugui::PlausiblePointer(ci) ? F<Il2CppObject*>(ci, s_.ciObject) : nullptr;
-        }
-        if (Il2CppObject* l = under(last)) {
-            chain += " (InputLegend found under '" + unity::GetName(unity::GameObjectOf(last)) + "')";
-            return l;
-        }
-        if (Il2CppObject* l = under(mapUI_.get())) {
-            chain += " (InputLegend found under the MapUI)";
-            return l;
-        }
-        return nullptr;
-    }
-
-    // "[RMB] Teleport": a clone of one of the legend's own hints with its behaviour removed (no input event,
-    // no localisation, no clicks), our key text and label. A child of the same layout, so it lines up.
+    // "[RMB] Teleport": a clone of one of the map key bar's hints (modules/common/legend_hint.h). The bar:
+    // MapUI._inputLegend (ComponentInterface<IInputLegend>), possibly through InputLegendFocusRegistrars;
+    // fallback: the first active InputLegend under the chain's last component, then under the MapUI.
     bool EnsureHint(std::string& why) {
         std::string chain;
-        Il2CppObject* legend = FindLegend(chain);
+        Il2CppObject* legend =
+            legend_hint::FollowLegend(F<Il2CppObject*>(mapUI_.get(), s_.uiLegend), mapUI_.get(), "MapUI._inputLegend", chain);
         if (!legend) {
             why = "no InputLegend (" + chain + ")";
             return false;
         }
-        auto* hints = F<Il2CppArray*>(legend, s_.legendHints);
-        if (!ugui::PlausiblePointer(hints)) {
-            why = "the legend has no _hints array (" + chain + ")";
-            return false;
-        }
-        Il2CppObject* tmpl = nullptr;
-        size_t count = std::min<size_t>(ugui::ArrayCount(hints), 32);
-        for (size_t i = 0; i < count && !tmpl; ++i) {
-            Il2CppObject* h = ugui::ArrayItem(hints, i);
-            if (ugui::IsA(h, s_.hint) && unity::ActiveInHierarchy(unity::GameObjectOf(h))) tmpl = h;
-        }
+        Il2CppObject* tmpl = legend_hint::Template(legend);
         if (!tmpl) {  // the legend has not shown its hints yet
-            why = std::format("none of the legend's {} hints is active ({})", count, chain);
+            why = std::format("none of the legend's {} hints is active ({})", legend_hint::Hints(legend, false).size(), chain);
             return false;
         }
-        Il2CppObject* tmplGo = unity::GameObjectOf(tmpl);
-        Il2CppObject* parent = ugui::GetParent(unity::TransformOf(tmplGo));
-        Il2CppObject* clone = unity::Instantiate(tmplGo, parent);
-        if (!unity::IsAlive(clone)) {
-            if (!hintFailLogged_) SR2_WARN("map_tools: cloning a legend hint failed - no [RMB] Teleport hint");
+        std::string cerr;
+        if (!hint_.Create(tmpl, "SR2Mods.TeleportHint", cerr)) {
+            if (!hintFailLogged_) SR2_WARN("map_tools: cloning a legend hint failed ({}) - no [RMB] Teleport hint", cerr);
             hintFailLogged_ = true;
-            why = "Object.Instantiate failed";
+            why = cerr;
             return false;
         }
-        Il2CppObject* go = ugui::IsA(clone, unity::GameObjectClass()) ? clone : unity::GameObjectOf(clone);
-        hintGo_.Reset(go);
-        unity::SetName(go, "SR2Mods.TeleportHint");
-        Il2CppObject* tr = unity::TransformOf(go);
-        ugui::SetAsLastSibling(tr);
         hintLegend_.Reset(legend);
         hintPlaced_ = false;
         hintPlaceAt_ = 0;
-        // Behaviour off: the hint would configure itself from the template's input event and fire it on click.
-        if (Il2CppObject* h = unity::GetComponent(go, s_.hint)) ugui::Destroy(h);
-        if (s_.invokeOnClick)
-            ugui::ForEachInChildren(go, s_.invokeOnClick, true, [&](Il2CppObject* c) {
-                ugui::Destroy(c);
-                return true;
-            });
-        for (Il2CppClass* k : {s_.eventDisplay, s_.lse, s_.selectable}) {
-            if (!k) continue;
-            ugui::ForEachInChildren(go, k, true, [&](Il2CppObject* c) {
-                SetEnabled(c, false);
-                return true;
-            });
-        }
-        ugui::ForEachInChildren(go, ugui::GraphicClass(), true, [&](Il2CppObject* g) {
-            ugui::GraphicSetRaycastTarget(g, false);
-            return true;
-        });
-        // InputHint fades its CanvasGroup with a spring: the clone keeps the template's alpha of this frame
-        if (Il2CppClass* cgk = ugui::CanvasGroupClass())
-            if (Il2CppObject* cg = unity::GetComponent(go, cgk)) ugui::CanvasGroupSetAlpha(cg, 1.0f);
-        // key icons and the label (the TMP text outside every icon)
-        std::vector<Il2CppObject*> iconTs;
-        ugui::ForEachInChildren(go, s_.inputIcon, true, [&](Il2CppObject* ic) {
-            hintIcons_.emplace_back(ic);
-            iconTs.push_back(unity::TransformOf(ic));
-            return true;
-        });
-        if (Il2CppClass* tmp = ugui::TmpTextClass())
-            ugui::ForEachInChildren(go, tmp, true, [&](Il2CppObject* t) {
-                Il2CppObject* tt = unity::TransformOf(t);
-                for (Il2CppObject* it : iconTs)
-                    if (IsUnder(tt, it)) return true;
-                hintLabel_.Reset(t);
-                return false;
-            });
         FindMouseGlyph();
-        hintReapply_ = kReapplyFrames;
-        ApplyHintLook();
+        hint_.SetLook("RMB", "Teleport", mouseGlyph_.Alive() ? mouseGlyph_.get() : nullptr, mouseGlyphMirror_);
         if (!hintLogged_) {
             hintLogged_ = true;
             SR2_INFO("map_tools: [RMB] Teleport hint cloned from the map legend's '{}' ({} key icon(s), label {}, icon {}; {})",
-                     unity::GetName(tmplGo), hintIcons_.size(), hintLabel_ ? "ok" : "MISSING",
+                     unity::GetName(unity::GameObjectOf(tmpl)), hint_.IconCount(), hint_.HasLabel() ? "ok" : "MISSING",
                      !mouseGlyph_.Alive()      ? "key cap \"RMB\" (no mouse glyph)"
                      : mouseGlyphMirror_ ? "the game's left mouse button glyph, mirrored"
                                          : "the game's right mouse button glyph",
@@ -1478,8 +1339,7 @@ private:
     // button ("<Mouse>/rightButton") with a sprite; else the left button's, drawn mirrored. One asset scan per map
     // open until found.
     void FindMouseGlyph() {
-        if (mouseGlyph_.Alive() || !s_.kmIconSet || !Has(s_.kmItems) || !Has(s_.kmControl) || !Has(s_.kmSprite) ||
-            !Has(s_.iconButtonImage))
+        if (mouseGlyph_.Alive() || !s_.kmIconSet || !Has(s_.kmItems) || !Has(s_.kmControl) || !Has(s_.kmSprite))
             return;
         Il2CppObject *right = nullptr, *left = nullptr;
         std::string rightCtl, leftCtl;
@@ -1518,47 +1378,6 @@ private:
                      mouseGlyph_ ? (mouseGlyphMirror_ ? " - the hint uses the left one mirrored" : "")
                                  : " - the hint keeps the \"RMB\" key cap");
         }
-    }
-
-    // InputIcon.SetKey by hand (see modules/drone_price_limit/station_dialog.cpp): the first icon shows the
-    // key cap with our text, the others are hidden.
-    void ApplyHintLook() {
-        for (size_t i = 0; i < hintIcons_.size(); ++i) {
-            Il2CppObject* icon = hintIcons_[i].get();
-            if (!unity::IsAlive(icon)) continue;
-            Il2CppObject* go = unity::GameObjectOf(icon);
-            if (i > 0) {
-                unity::SetActive(go, false);
-                continue;
-            }
-            unity::SetActive(go, true);
-            auto obj = [&](size_t off) -> Il2CppObject* {
-                if (!Has(off)) return nullptr;
-                Il2CppObject* o = F<Il2CppObject*>(icon, off);
-                return unity::IsAlive(o) ? o : nullptr;
-            };
-            if (Il2CppObject* d = obj(s_.iconDouble)) unity::SetActive(d, false);
-            // The game's mouse glyph, as InputIcon.SetButtonImage: _buttonRoot on, _keyRoot off, _buttonImage.sprite.
-            Il2CppObject* glyph = mouseGlyph_.Alive() ? mouseGlyph_.get() : nullptr;
-            Il2CppObject *button = obj(s_.iconButton), *image = obj(s_.iconButtonImage);
-            if (glyph && button && image) {
-                unity::SetActive(button, true);
-                if (Il2CppObject* k = obj(s_.iconKey)) unity::SetActive(k, false);
-                SetEnabled(image, true);
-                ugui::ImageSetSprite(image, glyph);
-                ugui::SetLocalScale(unity::TransformOf(image), {mouseGlyphMirror_ ? -1.0f : 1.0f, 1, 1});
-                continue;
-            }
-            if (button) unity::SetActive(button, false);
-            if (Il2CppObject* k = obj(s_.iconKey)) unity::SetActive(k, true);
-            SetEnabled(obj(s_.iconKeyImage), false);
-            SetEnabled(obj(s_.iconKeyLse), false);
-            if (Il2CppObject* text = obj(s_.iconKeyText)) {
-                SetEnabled(text, true);
-                ugui::TmpSetText(text, "RMB");
-            }
-        }
-        if (hintLabel_.Alive()) ugui::TmpSetText(hintLabel_.get(), "Teleport");
     }
 
     // ------------------------------------------------------------ teleport ---
