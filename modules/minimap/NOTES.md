@@ -144,6 +144,11 @@ Other sources:
 - Placed gadgets (all, incl. teleporters and drone ports): `GameModel.identifiablesByIdent` (replaces the old `MapDirector.Markers` teleporter-gadget scan, which only held `DisplayOnMap` gadgets). Background: `GadgetModel.SetupMapMarker` (0xA915A0) registers a gadget when `GadgetDefinition.DisplayOnMap` (+0x10A); the source is the `DroneStationGadgetModel` itself (class check). The full map's `DroneStationMapMarker.UpdateIcon` (0x704740) sets `_image` to `DroneTypeDisplayConfiguration.PickDroneTypeSprite(_type)` (0x8247E0: 0 -> +0x18 rancher, 1 -> +0x28 explorer).
 - Treasure pod icon: `MapDirector._counters` (`List<ZoneToCounterMapping>`) → `MapTreasurePodCounterDefinition.Icon`.
 
+## API for other modules (`api.h`)
+
+- `Get(Snapshot&)`: root, zone, page prefab, projection (collectibles).
+- `CollectPageIcons(query, out, &mapDef)`: the full map's extra icons (`modules/map_tools`). Runs `ScanPods` / `ScanNullWalls` / `ScanPlacedGadgets` / `ScanNodes` with the caller's categories (`scanCats_`) and a 2000-icon budget (`scanMax_`) over the whole page (`OnPage`, no view radius, no fog test), and with `undiscoveredMarkers` the page markers whose `CanBeShown` is false (not discovered) but which are not done (`QueryNotDone`). `stats_` is saved / restored, so the minimap's own log lines are not affected. Same fault policy as the tick (a native fault freezes the minimap). Positions are page-local, i.e. valid inside the live page of the same MapDefinition.
+
 ## Update rates
 
 | What | Rate / rule |

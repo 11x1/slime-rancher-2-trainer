@@ -409,7 +409,80 @@ public:
         return true;
     }
 
+    // Every icon of the current page for the full map (modules/minimap/api.h): the minimap's own scanners over
+    // the whole page instead of its view, without the fog test (the full map draws its fog over them), plus the
+    // page markers the full map does not show yet if asked. Same fault policy as the tick.
+    bool ApiCollectPageIcons(const minimap::api::PageIconQuery& q, std::vector<minimap::api::PageIcon>& out,
+                             Il2CppObject** mapDef) {
+        out.clear();
+        if (mapDef) *mapDef = nullptr;
+        if (frozen_ || g_dead.load() || !g_active.load() || !main_thread::IsMainThread()) return false;
+        if (!view_.ok || build_.active || wasLoading_ || !view_.mapDef.Alive() || !view_.page.Alive()) return false;
+        if (mapDef) *mapDef = view_.mapDef.get();
+        const char* prevStep = step_;
+        std::string err, fault;
+        bool native = false;
+        bool ok = core::Try([&] {
+            if (!ugui::GuardNative([&] { CollectPageIconsImpl(q, out); }, &fault)) native = true;
+        }, &err);
+        scanCats_ = cfg_.icons;
+        scanMax_ = kMaxIcons;
+        if (ok && !native) {
+            step_ = prevStep;
+            return true;
+        }
+        out.clear();
+        if (mapDef) *mapDef = nullptr;
+        Die(std::format("step '{}' (full map icons): {}", step_, native ? fault : err));
+        return false;
+    }
+
 private:
+    static constexpr size_t kMaxPageIcons = 2000;  // full map: the whole page
+
+    void CollectPageIconsImpl(const minimap::api::PageIconQuery& q, std::vector<minimap::api::PageIcon>& out) {
+        static_assert(int{minimap::api::kIconCatCount} == int{kCatCount} &&
+                      int{minimap::api::kIconPlacedDecor} == int{kPlacedDecor} &&
+                      int{minimap::api::kIconNullWall} == int{kNullWall});
+        Step("full map icons: world scan");
+        bool cats[kCatCount];
+        for (int c = 0; c < kCatCount; ++c) cats[c] = q.cats[c];
+        const IconStats saved = stats_;
+        std::vector<IconItem> items;
+        scanCats_ = cats;
+        scanMax_ = kMaxPageIcons;
+        auto onPage = [&](Vec3 wp, Vec2& p) {
+            p = ProjectPage(wp, false);
+            return OnPage(p);
+        };
+        bool ignoreFog = false;
+        if (cats[kTreasurePod] && !view_.hasPagePods && sym_.treasurePod && sym_.podGetState) ScanPods(items, onPage);
+        if (cats[kNullWall] && walls::Resolved()) ScanNullWalls(items, onPage);
+        if (cats[kPlaced] && sym_.tryGetGameModel && sym_.gameModel && sym_.gadgetModel &&
+            game::Has(sym_.gmIdentsByIdent) && game::Has(sym_.imLastPos) && game::Has(sym_.imIdent))
+            ScanPlacedGadgets(items, onPage, ignoreFog);
+        if (cats[kResource] && !view_.hasPageNodes && sym_.allNodeDirectors && game::Has(sym_.dirSpawners) &&
+            game::Has(sym_.spawnerModel) && game::Has(sym_.modelNodeState))
+            ScanNodes(items, onPage);
+        stats_ = saved;
+        scanCats_ = cfg_.icons;
+        scanMax_ = kMaxIcons;
+        out.reserve(items.size());
+        for (const IconItem& it : items)
+            if (it.sprite) out.push_back({it.cat, it.pos.x, it.pos.y, it.sprite, it.tint.r, it.tint.g, it.tint.b, it.tint.a});
+        if (!q.undiscoveredMarkers) return;
+        Step("full map icons: undiscovered markers");
+        for (Marker& m : view_.markers) {
+            // no CanBeShown bound: the full map always shows it, nothing to add
+            if (!m.go || !cats[m.cat] || m.broken || !m.canBeShown || !m.sprite.Alive() || !m.comp.Alive()) continue;
+            bool shown = true;
+            if (!Managed([&] { shown = ugui::Call<bool>(m.canBeShown, m.comp.get()); }) || shown) continue;
+            bool notDone = false;
+            if (!QueryNotDone(m, notDone) || !notDone) continue;
+            out.push_back({m.cat, m.pos.x, m.pos.y, m.sprite.get(), m.tint.r, m.tint.g, m.tint.b, m.tint.a});
+        }
+    }
+
     // ---------------------------------------------------------------- state --
     struct Marker {      // baked page marker (from the prefab) -> our icon
         Ref comp;        // prefab component (queries only)
@@ -2884,7 +2957,12 @@ private:
         Vec2 pos;
         Il2CppObject* sprite;
         Color tint;
+        int cat = kOther;
     };
+    // What the scanners collect: the minimap's own settings and icon budget, or a caller's
+    // (CollectPageIcons, the full map's icons through api.h).
+    const bool* scanCats_ = nullptr;
+    size_t scanMax_ = kMaxIcons;
 
     Il2CppObject* PodIcon() {
         if (sprPod_.Alive()) return sprPod_.get();
@@ -2913,6 +2991,8 @@ private:
                        game::Has(sym_.gmIdentsByIdent) && game::Has(sym_.imLastPos) && game::Has(sym_.imIdent);
         bool nullWalls = cfg_.icons[kNullWall] && walls::Resolved();
         std::vector<IconItem> items;
+        scanCats_ = cfg_.icons;
+        scanMax_ = kMaxIcons;
         float vr = ViewRadiusPage() * 1.5f;
         stats_ = IconStats{};
         bool ignoreFog = false;  // placed gadgets: the player put them there
@@ -2975,14 +3055,15 @@ private:
         }
         Il2CppObject* icon = PodIcon();
         for (auto& [pod, h] : g_pods) {
-            if (items.size() >= kMaxIcons) break;
+            if (items.size() >= scanMax_) break;
             if (!ugui::IsA(pod, sym_.treasurePod) || !unity::ActiveInHierarchy(pod)) continue;
             Vec2 p{};
             if (!nearFn(ugui::GetPosition(unity::TransformOf(pod)), p)) continue;
             int state = 1;
             if (!Managed([&] { state = ugui::Call<int>(sym_.podGetState, pod); }) || state != 0 /* LOCKED */) continue;
             ++stats_.podsShown;  // opened pods never show, whatever the fog setting
-            items.push_back({p, icon ? icon : sprDot_.get(), icon ? Color{1, 1, 1, 1} : Color{1.0f, 0.78f, 0.25f, 1}});
+            items.push_back({p, icon ? icon : sprDot_.get(), icon ? Color{1, 1, 1, 1} : Color{1.0f, 0.78f, 0.25f, 1},
+                             kTreasurePod});
         }
     }
 
@@ -3003,11 +3084,11 @@ private:
         stats_.wallsIntact = st.intact;
         Il2CppObject* icon = sprWall_.Alive() ? sprWall_.get() : sprDot_.get();
         for (const walls::Wall& w : wallBuf_) {
-            if (items.size() >= kMaxIcons) break;
+            if (items.size() >= scanMax_) break;
             if (!w.intact) continue;
             Vec2 p{};
             if (!nearFn(Vec3{w.x, w.y, w.z}, p)) continue;
-            items.push_back({p, icon, Color{0.88f, 0.40f, 1.0f, 1}});
+            items.push_back({p, icon, Color{0.88f, 0.40f, 1.0f, 1}, kNullWall});
             ++stats_.wallsShown;
         }
     }
@@ -3023,7 +3104,7 @@ private:
             auto* dir = static_cast<Il2CppObject*>(unity::ListAt(directors, d));
             if (!ugui::IsA(dir, sym_.nodeDirector)) continue;
             Il2CppObject* spawners = F<Il2CppObject*>(dir, sym_.dirSpawners);
-            for (size_t i = 0, ns = unity::ListCount(spawners); i < ns && items.size() < kMaxIcons; ++i) {
+            for (size_t i = 0, ns = unity::ListCount(spawners); i < ns && items.size() < scanMax_; ++i) {
                 auto* sp = static_cast<Il2CppObject*>(unity::ListAt(spawners, i));
                 if (!ugui::IsA(sp, sym_.nodeSpawner)) continue;
                 Il2CppObject* model = F<Il2CppObject*>(sp, sym_.spawnerModel);
@@ -3052,7 +3133,8 @@ private:
                     if (ugui::IsA(ident, sym_.identType)) icon = F<Il2CppObject*>(ident, sym_.identIcon);
                     if (!ugui::IsA(icon, ugui::SpriteClass())) icon = nullptr;
                 }
-                items.push_back({p, icon ? icon : sprDot_.get(), icon ? Color{1, 1, 1, 1} : Color{0.45f, 0.85f, 1.0f, 1}});
+                items.push_back({p, icon ? icon : sprDot_.get(), icon ? Color{1, 1, 1, 1} : Color{0.45f, 0.85f, 1.0f, 1},
+                                 kResource});
                 ++stats_.nodesShown;
             }
         }
@@ -3235,7 +3317,7 @@ private:
                     default: ++stats_.gOther; break;
                 }
                 if (pre) ++stats_.gPre;
-                if (group != kPlaced && !cfg_.icons[group]) continue;
+                if (group != kPlaced && !scanCats_[group]) continue;
                 if (playerScene && game::Has(sym_.imSceneGroup) && F<Il2CppObject*>(model, sym_.imSceneGroup) != playerScene)
                     continue;
                 Vec3 wp = F<Vec3>(model, sym_.imLastPos);
@@ -3261,13 +3343,13 @@ private:
                     tint = group == kPlacedTele ? Color{0.70f, 0.55f, 1.0f, 1} : Color{0.95f, 0.80f, 0.45f, 1};
                 }
                 int b = (group == kDronePort || group == kPlacedTele) ? 0 : group == kPlacedDecor ? 2 : 1;
-                if (bucket[b].size() < kMaxIcons) bucket[b].push_back({p, icon, tint});
+                if (bucket[b].size() < scanMax_) bucket[b].push_back({p, icon, tint, group});
             }
             return true;
         });
         for (auto& bk : bucket)
             for (const IconItem& it : bk) {
-                if (items.size() >= kMaxIcons) break;
+                if (items.size() >= scanMax_) break;
                 items.push_back(it);
                 ++stats_.gShown;
             }
@@ -3362,6 +3444,11 @@ namespace minimap::api {
 bool Get(Snapshot& out) {
     out = {};
     return g_minimapModule && g_minimapModule->impl()->ApiSnapshot(out);
+}
+bool CollectPageIcons(const PageIconQuery& query, std::vector<PageIcon>& out, Il2CppObject** mapDefinition) {
+    out.clear();
+    if (mapDefinition) *mapDefinition = nullptr;
+    return g_minimapModule && g_minimapModule->impl()->ApiCollectPageIcons(query, out, mapDefinition);
 }
 }  // namespace minimap::api
 
