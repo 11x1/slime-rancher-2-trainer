@@ -29,6 +29,15 @@
 //       eating when full, so it also goes for food. EatMapEntry ctor: FavoriteProductionCount 2,
 //       ProductionCount 1; NumToProduce = IsFavorite ? FavoriteProductionCount : ProductionCount.
 //       SlimeDefinitions.RefreshDefinitions rebuilds every EatMap (new lists): the tick re-adds ours.
+//   * The Ringtail rule (Ringtails carry the KeepEatingWhenFull component, which only sets SlimeEat.
+//     _keepEatingWhenFull and shows the face's _isMischievous while !IsHungryForNonPlorts): SlimeEat.
+//     FinishChomp (0xBB6780) passes skipProduction = _keepEatingWhenFull && !IsHungryFor(id) to
+//     EatAndProduce, so a full slime still eats but makes no plort. IsHungryFor (0xBB7380) = !isSleeping &&
+//     drive >= MinDriveToEat; drive = EmotionDriveCalculator.Drive (0xAB3D70) = max(hunger, entry.MinDrive) +
+//     entry.ExtraDrive. InvokeOnEat (0xBB7190) lowers the hunger by DrivePerEat after every meal; it rises
+//     again at SlimeEmotions._changeRate[0] = ComputeHungerChangePerHour (0x88AE10): _hungerRecoveryRate
+//     (the SlimeEmotionConfig.HungerRate property; Shadow's defaultPropertyValues make it 0) scaled by the
+//     recovery factor (+ day / night extra), times _hungerDirection (Awake: RecoversTowardOne ? 1 : -1).
 
 #include "modules/custom_upgrades/shadow_catcher.h"
 
@@ -64,6 +73,8 @@ constexpr size_t kMaxSlots = 16;
 constexpr size_t kMaxTracked = 256;
 constexpr int kFindRetryTicks = 10;  // FindObjectsOfTypeAll(SlimeDefinition) at most every ~10 s until found
 constexpr double kNeverDestroy = 1e300;
+constexpr float kDrivePerMeal = 1.0f;  // one meal empties the hunger: the meals after it make no plort
+constexpr int kFullLogBudget = 12;     // "full" / "hungry again" lines per minute (all slimes together)
 
 using IsAllowedFn = bool (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
 using RelevancyFn = float (*)(Il2CppObject*, bool, const MethodInfo*);
@@ -75,7 +86,11 @@ using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
 struct Tracked {
     Il2CppGCHandle handle = nullptr;  // the ShadowSlimeScatter (strong: its wrapper stays valid after a destroy)
     bool kept = false;                // on the ranch while the upgrade is owned
-    bool eating = false;              // its SlimeEat keeps eating when full
+    bool eating = false;              // Ringtail rule on: keeps eating when full, hunger comes back
+    bool full = false;                // last seen not hungry (its meals make no plort)
+    bool fullKnown = false;
+    // Vanilla values of its SlimeEat / SlimeEmotions, put back when it stops being kept.
+    float origRate = 0.0f, origDir = 0.0f, origDrivePerEat = 0.0f;
 };
 
 struct State {
@@ -100,6 +115,12 @@ struct State {
     bool emResolved = false;
     // SlimeEat
     size_t offKeepEating = 0;
+    // Hunger rhythm (optional): SlimeEat, SlimeEmotions, SlimeEmotionConfig, PropertyDefinition, face
+    size_t offDrivePerEat = 0, offMinDriveToEat = 0, offEatEmotions = 0, offEatFace = 0;
+    size_t offHungerRate = 0, offHungerDir = 0, offEmoConfig = 0, offEmoValues = 0;
+    size_t offCfgHungerRate = 0, offPropDefault = 0, offMischief = 0;
+    const MethodInfo* computeHunger = nullptr;  // SlimeEmotions.ComputeHungerChangePerHour()
+    bool hungerOk = false;
 
     const MethodInfo* isOnRanch = nullptr;  // CellDirector.IsOnRanch(RegionMember), static
     const MethodInfo* initFood = nullptr;   // SlimeEat.InitFood()
@@ -124,6 +145,10 @@ struct State {
     Il2CppObject* dietList = nullptr;  // the EatMap list our entries are in (identity only)
     bool dietFailed = false;
     bool wasOwned = false;
+    // hunger rhythm
+    float hungerRate = -1.0f;  // vanilla default hunger rate per game hour (< 0 = not read yet)
+    int logTokens = kFullLogBudget, logRefill = 0;
+    bool loggedMuted = false;
 };
 
 State g;
@@ -385,8 +410,9 @@ bool BuildEntries() {
         SetRef(c, g.offEmProduces, plort);
         SetRef(c, g.offEmBecomes, nullptr);
         unity::Field<int32_t>(c, g.offEmDriver) = unity::Field<int32_t>(e, g.offEmDriver);
-        unity::Field<float>(c, g.offEmExtra) = unity::Field<float>(e, g.offEmExtra);
-        unity::Field<float>(c, g.offEmMin) = unity::Field<float>(e, g.offEmMin);
+        // Drive = the hunger itself (no floor, no bonus): "hungry" = hunger >= MinDriveToEat exactly.
+        unity::Field<float>(c, g.offEmExtra) = 0.0f;
+        unity::Field<float>(c, g.offEmMin) = 0.0f;
         Il2CppGCHandle h = unity::NewGCHandle(c);
         if (!h) continue;
         g.entries.push_back(c);
@@ -451,14 +477,100 @@ void RemoveDiet() {
     if (removed) SR2_INFO("[{}] shadow catcher: Shadow diet back to vanilla ({} food entries removed)", kModule, removed);
 }
 
-// A kept slime eats whenever food is offered (Shadow never gets hungry) and goes for food it sees.
+bool LogToken() {
+    if (g.logTokens > 0) {
+        --g.logTokens;
+        return true;
+    }
+    if (!g.loggedMuted) SR2_INFO("[{}] shadow catcher: more full / hungry changes this minute (not logged)", kModule);
+    g.loggedMuted = true;
+    return false;
+}
+
+Il2CppObject* EmotionsOf(Il2CppObject* eat) {
+    Il2CppObject* emo = g.hungerOk ? unity::Field<Il2CppObject*>(eat, g.offEatEmotions) : nullptr;
+    return emo && unity::IsAlive(emo) ? emo : nullptr;
+}
+
+// The hunger rate every slime without an override gets (the SlimeEmotionConfig.HungerRate property's
+// default; Shadow's override is 0).
+float DefaultHungerRate(Il2CppObject* emo) {
+    if (g.hungerRate >= 0.0f) return g.hungerRate;
+    Il2CppObject* cfg = unity::Field<Il2CppObject*>(emo, g.offEmoConfig);
+    Il2CppObject* prop = cfg && unity::IsAlive(cfg) ? unity::Field<Il2CppObject*>(cfg, g.offCfgHungerRate) : nullptr;
+    if (!prop || !unity::IsAlive(prop)) return 0.0f;
+    const float rate = unity::Field<float>(prop, g.offPropDefault);
+    g.hungerRate = rate > 0.0f && rate < 100.0f ? rate : 0.0f;
+    SR2_INFO("[{}] shadow catcher: kept shadow slimes get the vanilla hunger rate {:.4f}/game h (property '{}'){}",
+             kModule, rate, unity::GetName(prop), g.hungerRate > 0.0f ? "" : " - not usable, their hunger won't come back");
+    return g.hungerRate;
+}
+
+// The Ringtail rule, on / off for one slime: _keepEatingWhenFull (it eats whatever reaches it and goes for
+// food), one meal empties its hunger (DrivePerEat), and the hunger comes back at the vanilla rate. While
+// it is not hungry, FinishChomp skips the plort. All in memory: none of these fields is saved (the hunger
+// value itself is, in SlimeModel.Emotions, as for every slime).
 void SetEating(Il2CppObject* scatter, Tracked& t, bool on) {
     if (t.eating == on || !g.slimeEatClass || !g.offKeepEating) return;
     Il2CppObject* eat = unity::GetComponent(scatter, g.slimeEatClass);
     if (!eat || !unity::IsAlive(eat)) return;
     unity::Field<bool>(eat, g.offKeepEating) = on;
     Invoke(g.initFood, eat, {}, "SlimeEat.InitFood");  // eats from the current diet
+    if (Il2CppObject* emo = EmotionsOf(eat)) {
+        float& rate = unity::Field<float>(emo, g.offHungerRate);
+        float& dir = unity::Field<float>(emo, g.offHungerDir);
+        float& perEat = unity::Field<float>(eat, g.offDrivePerEat);
+        if (on) {
+            t.origRate = rate;
+            t.origDir = dir;
+            t.origDrivePerEat = perEat;
+            rate = DefaultHungerRate(emo);
+            dir = 1.0f;
+            if (perEat < kDrivePerMeal) perEat = kDrivePerMeal;
+        } else {
+            rate = t.origRate;
+            dir = t.origDir;
+            perEat = t.origDrivePerEat;
+            if (Il2CppObject* face = unity::Field<Il2CppObject*>(eat, g.offEatFace); face && unity::IsAlive(face))
+                unity::Field<bool>(face, g.offMischief) = false;
+        }
+        Invoke(g.computeHunger, emo, {}, "SlimeEmotions.ComputeHungerChangePerHour");
+    }
     t.eating = on;
+    t.fullKnown = false;
+}
+
+// Kept and eating: keep our rate (a property change would put Shadow's 0 back), show the Ringtail's
+// mischievous face while full, log "full" / "hungry again" (rate-limited).
+void WatchHunger(Il2CppObject* scatter, Tracked& t) {
+    if (!t.eating || !g.hungerOk) return;
+    Il2CppObject* eat = unity::GetComponent(scatter, g.slimeEatClass);
+    Il2CppObject* emo = eat && unity::IsAlive(eat) ? EmotionsOf(eat) : nullptr;
+    if (!emo) return;
+    const float want = DefaultHungerRate(emo);
+    if (unity::Field<float>(emo, g.offHungerRate) != want || unity::Field<float>(emo, g.offHungerDir) != 1.0f) {
+        unity::Field<float>(emo, g.offHungerRate) = want;
+        unity::Field<float>(emo, g.offHungerDir) = 1.0f;
+        Invoke(g.computeHunger, emo, {}, "SlimeEmotions.ComputeHungerChangePerHour");
+    }
+    const float hunger = unity::Field<float>(emo, g.offEmoValues);  // float4 _emotions, [0] = HUNGER
+    const float minDrive = unity::Field<float>(eat, g.offMinDriveToEat);
+    const bool full = !(hunger >= minDrive);  // IsHungryFor with our entries' drive (= the hunger)
+    if (Il2CppObject* face = unity::Field<Il2CppObject*>(eat, g.offEatFace); face && unity::IsAlive(face))
+        unity::Field<bool>(face, g.offMischief) = full;
+    if (t.fullKnown && full == t.full) return;
+    const bool first = !t.fullKnown;
+    t.full = full;
+    t.fullKnown = true;
+    if (!LogToken()) return;
+    const std::string where = unity::GetName(unity::GameObjectOf(scatter));
+    if (full)
+        SR2_INFO("[{}] shadow catcher: shadow slime '{}' {} (hunger {:.2f} < {:.2f}): it eats but makes no plort, "
+                 "hungry again in ~{:.1f} game h", kModule, where, first ? "is full" : "ate and is full", hunger, minDrive,
+                 g.hungerRate > 0.0f ? (minDrive - hunger) / g.hungerRate : 0.0f);
+    else
+        SR2_INFO("[{}] shadow catcher: shadow slime '{}' is {}hungry (hunger {:.2f} >= {:.2f}): its next meal makes a "
+                 "plort", kModule, where, first ? "" : "again ", hunger, minDrive);
 }
 
 void Forget(bool revert) {
@@ -502,6 +614,11 @@ void ShadowCatcher::Tick() {
         if (!g.wasOwned) SR2_INFO("[{}] shadow catcher: owned - the vacpack holds shadow slimes, they stay on the ranch", kModule);
         g.wasOwned = true;
         const bool dietNew = EnsureDiet();
+        if (++g.logRefill >= 60) {  // ~1 minute of ticks
+            g.logRefill = 0;
+            g.logTokens = kFullLogBudget;
+            g.loggedMuted = false;
+        }
         size_t kept = 0;
         for (auto it = g.tracked.begin(); it != g.tracked.end();) {
             Tracked& t = it->second;
@@ -520,8 +637,9 @@ void ShadowCatcher::Tick() {
             }
             if (t.kept) {
                 if (Alerted(scatter)) ClearAlert(scatter);
-                if (dietNew) t.eating = false;  // recompute its eats with the new entries
+                if (dietNew) SetEating(scatter, t, false);  // recompute its eats with the new entries
                 SetEating(scatter, t, !g.entries.empty());
+                WatchHunger(scatter, t);
                 ++kept;
             } else {
                 SetEating(scatter, t, false);
@@ -670,6 +788,38 @@ bool ShadowCatcher::Setup(sr2::core::ModuleContext& ctx, std::string& why, std::
         g.initFood = g.slimeEatClass ? R.Method(g.slimeEatClass, "InitFood", 0, &err) : nullptr;
         if (o && g.initFood && g.objectNew) g.offKeepEating = *o;
         else SR2_WARN("[{}] shadow catcher: kept shadow slimes won't eat ({})", kModule, err.empty() ? "il2cpp_object_new" : err);
+    }
+    // Optional: the hunger rhythm (Ringtail rule). Without it a kept slime still keeps eating when full, but
+    // its hunger never comes back (Shadow's rate is 0), so it makes plorts only until it is full once.
+    if (g.offKeepEating) {
+        std::string err;
+        Il2CppClass* emo = R.Class(kImage, "MonomiPark.SlimeRancher.Slime", "SlimeEmotions", &err);
+        Il2CppClass* cfg = emo ? R.Class(kImage, "", "SlimeEmotionConfig", &err) : nullptr;
+        Il2CppClass* prop = cfg ? R.Class(kImage, "MonomiPark.UnitPropertySystem", "PropertyDefinition", &err) : nullptr;
+        Il2CppClass* face = prop ? R.Class(kImage, "", "SlimeFaceAnimator", &err) : nullptr;
+        bool ok = face != nullptr;
+        auto f = [&](Il2CppClass* k, const char* name, size_t& out) {
+            if (!ok) return;
+            auto o = R.FieldOffset(k, name, &err);
+            if (o) out = *o;
+            else ok = false;
+        };
+        f(g.slimeEatClass, "DrivePerEat", g.offDrivePerEat);
+        f(g.slimeEatClass, "MinDriveToEat", g.offMinDriveToEat);
+        f(g.slimeEatClass, "_emotions", g.offEatEmotions);
+        f(g.slimeEatClass, "_faceAnim", g.offEatFace);
+        f(emo, "_hungerRecoveryRate", g.offHungerRate);
+        f(emo, "_hungerDirection", g.offHungerDir);
+        f(emo, "_emotionConfig", g.offEmoConfig);
+        f(emo, "_emotions", g.offEmoValues);
+        f(cfg, "HungerRate", g.offCfgHungerRate);
+        f(prop, "DefaultValue", g.offPropDefault);
+        f(face, "_isMischievous", g.offMischief);
+        g.computeHunger = ok ? R.Method(emo, "ComputeHungerChangePerHour", 0, &err) : nullptr;
+        g.hungerOk = ok && g.computeHunger;
+        if (!g.hungerOk)
+            SR2_WARN("[{}] shadow catcher: no hunger rhythm ({}) - kept shadow slimes make plorts only until they are "
+                     "full once", kModule, err);
     }
     ready_ = true;
     return true;

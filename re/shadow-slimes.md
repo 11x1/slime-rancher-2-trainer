@@ -117,6 +117,20 @@ decompiled, **[inferred]** = not checked. RVAs for reference only.
   prefab's `SlimeEat` has `MinDriveToEat` 0.333 like the Pink slime's **[data]**, but its hunger never rises.
   `GotoConsumable.Relevancy` uses `KeepEatingWhenFullDrive` (0.9-1) for a slime that keeps eating when full.
   `SlimeDefinitions.RefreshDefinitions` rebuilds every `EatMap` (new lists).
+- Plort gate when full (the Ringtail rule) **[code]**: `SlimeEat.FinishChomp` (0xBB6780) eats with
+  `skipProduction = _keepEatingWhenFull && !IsHungryFor(id)`. `IsHungryFor` (0xBB7380): `!SlimeModel.isSleeping`
+  and `EmotionDriveCalculator.Drive` (0xAB3D70, `max(emotion, MinDrive) + ExtraDrive`, clamped >= 0) >=
+  `MinDriveToEat`. `InvokeOnEat` (0xBB7190): hunger -= `DrivePerEat`, agitation -= `AgitationPer(Fav)Eat`.
+  `CanEat` / `WantsToEat` / `IsHungryFor` all say no while `SlimeModel.isSleeping` (saved field, set by
+  `SlimeEmotions.SetAsleep` from daze / ignite / vortex / explode, not by Ringtails). Ringtails have the
+  `KeepEatingWhenFull` component (Awake sets the flag; UpdateInstance sets `SlimeFaceAnimator._isMischievous` =
+  `!IsHungryForNonPlorts` when `_showMischievousFace`). Their stone form is `TurnToStoneInDaylight.BecomeStatue`
+  (0xBDCB60): sets `SlimeModel.isStatue`, instantiates the `RingtailStatue` actor and destroys the slime.
+- Hunger rate **[code]**: `SlimeEmotions.SetModel` (0x88B980) subscribes `_hungerRecoveryRate` to the
+  `SlimeEmotionConfig.HungerRate` property of the actor's property tracker (Shadow's override: 0);
+  `ComputeHungerChangePerHour` (0x88AE10) = rate scaled by `_hungerRecoveryFactor` (+ day / night extra), times
+  `_hungerDirection` (Awake: `_hungerConfig.RecoversTowardOne ? 1 : -1`); `UpdateToTime` (0x88C040) integrates
+  `_changeRate` per game hour into `_emotions` and copies them to `SlimeModel.Emotions` (saved).
 
 ### What the Shadow Catcher does (all only while it is owned)
 
@@ -124,10 +138,10 @@ decompiled, **[inferred]** = not checked. RVAs for reference only.
 |---|---|
 | (a) vac them | `AmmoSlotDefinition.IsAllowed` detour: true for the Shadow `SlimeDefinition` on the player's regular slot definitions (same type group as `AmmoSlot1`, so the six vanilla slots and Extra Tank III / IV; not the water slot, silos, drones, feeders). Shadow slimes don't notice the player any more (`ScatterIfPlayerNear` skipped, `Relevancy` 0 unless alerted), so you can walk up to them; a hit still alerts them as in vanilla. |
 | (b) stay on the ranch | on the ranch (`CellDirector.IsOnRanch(scatter._member)`): `DoAlert` skipped, an old alert cleared (`_latestAlertObject` null, `_destroyTime` 1e300, face `_isFleeing` false), `Action` skipped, `Relevancy` 0; `ProducePlort` resets the hit-plort counter. They save as normal actors. |
-| (c) eat | the Shadow diet's `EatMap` gets copies of the Pink slime's food entries (no plorts, no transformations) producing Shadow plorts; each kept slime gets `_keepEatingWhenFull` and `InitFood`. |
+| (c) eat | the Shadow diet's `EatMap` gets copies of the Pink slime's food entries (no plorts, no transformations, `MinDrive` / `ExtraDrive` 0) producing Shadow plorts; each kept slime gets `_keepEatingWhenFull` and `InitFood`, plus the Ringtail rhythm: `DrivePerEat` >= 1, the vanilla default hunger rate, mischievous face while full (in memory). |
 | save of the vacpack | `AmmoModel.Pull` (player): an empty `AmmoSlot` replaces each slot holding Shadow slimes in the save's copy; `custom_upgrades.vacpack.shadow_slots` = `v=count;...` (vanilla slot index). The tick puts them back after a load. |
 
 Not done / limits: no new food item (an existing diet copied instead); the diet change is global, so a
 feral wild shadow slime could eat too (non-feral wild ones never get hungry and don't keep eating); kept
-slimes eat whenever food reaches them (no hunger rhythm), so they can empty a garden corral; emotions of a
+slimes eat whenever food reaches them like Ringtails, but only a meal while hungry makes a plort; emotions of a
 vacuumed shadow slime are lost (only type and count are stored, like the extra slots).
