@@ -29,6 +29,11 @@
 //     (pause menu), while the player pauses, while buffering and while no box is nearby.
 //   * Queue: the tab's right column. When it runs dry the next song is a random one while
 //     `shuffle` is on (default), otherwise playback stops.
+//   * Corral Radio (custom_upgrades plot upgrade): a corral that owns it plays its own playlist
+//     (a Channel of its own: stream, clip ring, clock, speakers) instead of the global queue. At
+//     most kMaxRadioStreams radios decode at once; the others wait for a free slot (nearest first).
+//   * Muffle (setting muffle_walls): every speaker in a corral gets an AudioLowPassFilter and a
+//     volume drop while the listener is outside a corral with High Walls (more with the Air Net).
 //   * Walls dance to the music (setting dance_walls, off by default): the decoder thread analyses
 //     the song (beat.cpp: bass level + onsets per 10 ms); every frame the energy walls and the Air
 //     Net of the corrals whose box plays and that are within hearing range pulse with it
@@ -64,6 +69,7 @@
 #include "core/resolver.h"
 #include "core/settings.h"
 #include "core/unity.h"
+#include "modules/custom_upgrades/api.h"
 #include "modules/slime_dj/emitters.h"
 #include "modules/slime_dj/library.h"
 #include "modules/slime_dj/stream.h"
@@ -78,6 +84,7 @@ namespace unity = sr2::core::unity;
 namespace main_thread = sr2::core::main_thread;
 namespace bridge = sr2::ui::slime_dj;
 namespace dj = sr2::modules::slime_dj;
+namespace cu = sr2::modules::custom_upgrades;
 using il2cpp::api;
 using il2cpp::Resolver;
 
@@ -107,6 +114,24 @@ constexpr double kDriftSeconds = 0.03;
 // Walls dance: the analysis is read this far behind the play head (AudioSource.timeSamples runs
 // ahead of what is heard by about the output buffer).
 constexpr double kDanceLagSeconds = 0.04;
+// Corral Radio: decoder streams that may run at once (the global queue not counted), radios kept.
+constexpr size_t kMaxRadioStreams = 4;
+constexpr size_t kMaxRadios = 32;
+constexpr const char* kRadioValue = "slime_dj.radio";  // custom_upgrades per-plot value (the playlist)
+constexpr size_t kMaxPlaylist = 500;
+// Corral footprint (patchCorral barriers 9.5 x 9.5 m around the plot root): the listener counts as
+// inside within kCorralHalf of the centre (x / z, plot axes) and kInsideBelow / kInsideAbove of its
+// height; an emitter (the Music Box II prop on a corner post, a placed speaker) belongs to a corral
+// within kEmitterHalf.
+constexpr float kCorralHalf = 4.9f, kEmitterHalf = 5.5f, kInsideBelow = 3.0f, kInsideAbove = 8.0f;
+// Muffle: low-pass cutoff (Hz) and volume heard from outside. kOpenCutoff = no filter (the component
+// is switched off). Smoothed over kMuffleTau seconds (log cutoff, linear volume).
+constexpr float kOpenCutoff = 22000.0f;
+constexpr float kMuffleNetCut = 6500.0f, kMuffleNetVol = 0.92f;   // Air Net only
+constexpr float kMuffleHighCut = 2000.0f, kMuffleHighVol = 0.8f;  // High Walls
+constexpr float kMuffleBothCut = 750.0f, kMuffleBothVol = 0.6f;   // High Walls + Air Net
+constexpr float kMuffleTau = 0.35f;
+constexpr int kWallsHigh = 1, kWallsNet = 2;
 
 struct Vec3 {
     float x, y, z;
@@ -127,7 +152,10 @@ struct Cfg {
     bool amplify = false;
     bool danceWalls = false;
     float danceIntensity = 1.0f;
+    bool muffle = true;
 };
+
+struct Channel;
 
 // A vanilla audio source under a music box that we silenced.
 struct Vanilla {
@@ -156,6 +184,13 @@ struct Speaker {
     // is off waits (no clock, no join) and rejoins when it is on again.
     bool live = true;
     int age = 0;           // box scans since it (re)joined the song
+    // What it plays: the global queue or a Corral Radio (set every box scan by AssignSpeakers).
+    Channel* ch = nullptr;
+    int corral = -1;       // index into corrals_ of the last box scan (-1 = not in a corral)
+    // Muffle: our AudioLowPassFilter (null = none), cutoff and volume factor now, cutoff last set.
+    Il2CppGCHandle lpf = nullptr;
+    float lpCut = kOpenCutoff, lpVol = 1.0f, lpSet = -1.0f;
+    bool lpOn = false;
 };
 
 struct Current {
@@ -180,6 +215,38 @@ struct Current {
 
 struct QueueItem {
     uint64_t uid = 0, song = 0;
+};
+
+// One song source: the global queue (key "") or a corral that owns the Corral Radio (key = its
+// plot key, custom_upgrades PlotKey). Each has its own stream, clip ring and clock; a speaker
+// plays the channel it is assigned to.
+struct Channel {
+    std::string key;
+    std::unique_ptr<Current> cur;
+    uint64_t lastSong = 0;
+    int failures = 0;  // songs in a row that failed
+    // radio only (kept in the plot's sidecar value kRadioValue)
+    std::vector<std::string> playlist;  // song files relative to the music folder, in play order
+    int index = -1;                     // playlist entry playing / played last
+    bool on = false, shuffle = false;
+    // radio, runtime
+    bool slot = false;              // holds one of the kMaxRadioStreams decoder slots
+    bool seen = false;              // its corral was found in this box scan
+    Il2CppGCHandle plot = nullptr;  // its LandPlot (for the sidecar value)
+    Vec3 pos{};
+    bool posOk = false;
+    float dist = 1e9f;              // from the camera at the last box scan
+    bool Radio() const { return !key.empty(); }
+};
+
+// A corral behind a music box found in this box scan (raw pointers: valid for this scan only).
+struct Corral {
+    Il2CppObject* box = nullptr;   // MusicBox GameObject
+    Il2CppObject* plot = nullptr;  // its LandPlot (nullptr = unknown)
+    Vec3 pos{}, right{1, 0, 0}, fwd{0, 0, 1};  // plot root position and axes
+    bool posOk = false;
+    int walls = 0;                 // kWallsHigh | kWallsNet
+    std::string radio;             // plot key when it owns the Corral Radio
 };
 
 // Box scan timing, logged once a minute while scans ran (QueryPerformanceCounter ticks).
@@ -390,6 +457,30 @@ private:
         // optional: speaker positions for Amplify
         if (!Bind(trGetPosition_, method(transform, "get_position", 0, false)))
             SR2_WARN("slime_dj: Transform.get_position not found; Amplify does nothing");
+        Bind(trGetRight_, method(transform, "get_right", 0, false));
+        Bind(trGetForward_, method(transform, "get_forward", 0, false));
+        // optional: Muffle (AudioLowPassFilter is in this build: managed class with set_cutoffFrequency,
+        // native icalls in UnityPlayer.dll; its setter writes a one-key curve, so no distance curve
+        // overrides it) and the corral's walls / net / plot
+        lowPassClass_ = cls(kAudio, "UnityEngine", "AudioLowPassFilter", false);
+        if (lowPassClass_ && !Bind(lpSetCutoff_, method(lowPassClass_, "set_cutoffFrequency", 1, false))) lowPassClass_ = nullptr;
+        if (Il2CppClass* behaviour = cls(kCore, "UnityEngine", "Behaviour", false))
+            Bind(behSetEnabled_, method(behaviour, "set_enabled", 1, false));
+        wallUpClass_ = cls(kImage, "", "WallUpgrader", false);
+        if (wallUpClass_ && !off(wallUpClass_, "UpgradeWalls", offUpgradeWalls_, false)) wallUpClass_ = nullptr;
+        airNetUpClass_ = cls(kImage, "", "AirNetUpgrader", false);
+        if (airNetUpClass_ && !off(airNetUpClass_, "AirNets", offAirNets_, false)) airNetUpClass_ = nullptr;
+        landPlotClass_ = cls(kImage, "", "LandPlot", false);
+        {
+            std::string err;
+            compInParent_ = R.MethodByParams(component, "GetComponentInParent", {"System.Type", "System.Boolean"}, &err);
+        }
+        if (!lowPassClass_ || !trGetPosition_ || !wallUpClass_ || !airNetUpClass_)
+            SR2_WARN("slime_dj: 'Muffle behind High Walls' unavailable (AudioLowPassFilter {}, position {}, WallUpgrader {}, "
+                     "AirNetUpgrader {})",
+                     lowPassClass_ ? "ok" : "missing", trGetPosition_ ? "ok" : "missing", wallUpClass_ ? "ok" : "missing",
+                     airNetUpClass_ ? "ok" : "missing");
+        if (!landPlotClass_ || !compInParent_) SR2_WARN("slime_dj: Corral Radio unavailable (LandPlot / GetComponentInParent missing)");
 
         bind(clipCreate_,
              byParams(audioClipClass_, "Create", {"System.String", "System.Int32", "System.Int32", "System.Int32", "System.Boolean"}),
@@ -454,6 +545,9 @@ private:
             "The energy walls of a corral whose music box plays ripple round the corral on every beat (like a "
             "shot through the wall), and they and the Air Net, if bought, glow and change colour with the song. Only corrals within hearing range. Everything goes back to "
             "normal when the song stops or pauses.");
+        def("muffle_walls", "Muffle behind High Walls", Kind::Bool, 1, 0, 1, 1,
+            "From outside a corral with High Walls its music sounds muffled and a bit quieter, more so with "
+            "the Air Net on top (the Air Net alone muffles a little). Step inside and it is clear again.");
         {
             settings::Def x;
             x.module = kModule;
@@ -484,6 +578,7 @@ private:
         c.danceWalls = settings::GetBool(kModule, "dance_walls");
         c.danceIntensity = std::clamp(settings::GetFloat(kModule, "dance_intensity"), 0.0f, 2.0f);
         if (!std::isfinite(c.danceIntensity)) c.danceIntensity = 1.0f;
+        c.muffle = settings::GetBool(kModule, "muffle_walls");
         return c;
     }
 
@@ -515,7 +610,9 @@ private:
         bridge::SetHandler(nullptr);
         if (frameCb_) main_thread::RemoveFrameCallback(frameCb_);
         frameCb_ = 0;
-        if (cur_ && cur_->stream) cur_->stream->Stop();
+        if (global_.cur && global_.cur->stream) global_.cur->stream->Stop();
+        for (auto& r : radios_)
+            if (r->cur && r->cur->stream) r->cur->stream->Stop();
         SR2_ERROR("slime_dj: {} - Slime DJ disabled for the rest of this session", why);
         bridge::SetStatus("Slime DJ stopped after an error (see sr2mods.log).", true);
         core::MarkModuleFaulted(kModule, why);
@@ -577,9 +674,19 @@ private:
         songsGen_ = gen;
         songs_ = library_.Songs();
         songIndex_.clear();
+        fileIndex_.clear();
         if (songs_)
-            for (size_t i = 0; i < songs_->size(); ++i) songIndex_.emplace((*songs_)[i].id, i);
+            for (size_t i = 0; i < songs_->size(); ++i) {
+                songIndex_.emplace((*songs_)[i].id, i);
+                fileIndex_.emplace((*songs_)[i].file, i);
+            }
         uiSongs_.reset();
+    }
+    // Radio playlists keep the file (relative to the music folder): song ids hash the full path.
+    const dj::SongInfo* FindSongByFile(const std::string& file) {
+        RefreshSongIndex();
+        auto it = fileIndex_.find(file);
+        return it == fileIndex_.end() ? nullptr : &(*songs_)[it->second];
     }
 
     // -------------------------------------------------------------- buses ----
@@ -786,6 +893,19 @@ private:
         srcSetDoppler_.fn(src, 0.0f, srcSetDoppler_.mi);
         srcSetPriority_.fn(src, 32, srcSetPriority_.mi);  // 0 = most important, 128 = Unity's default
         srcSetVolume_.fn(src, 0.0f, srcSetVolume_.mi);
+        // Muffle: an AudioLowPassFilter on the same object, switched off until it is needed.
+        if (lowPassClass_) {
+            bool lok = false;
+            Il2CppObject* lpf = Call(addComponent_, go, {unity::TypeOf(lowPassClass_)}, "AddComponent(AudioLowPassFilter)", &lok);
+            if (lok && unity::IsAlive(lpf) && IsA(lpf, lowPassClass_)) {
+                lpSetCutoff_.fn(lpf, kOpenCutoff, lpSetCutoff_.mi);
+                if (behSetEnabled_) behSetEnabled_.fn(lpf, false, behSetEnabled_.mi);
+                sp.lpf = unity::NewGCHandle(lpf);
+            } else if (!lowPassFailLogged_) {
+                lowPassFailLogged_ = true;
+                SR2_WARN("slime_dj: AudioLowPassFilter could not be added; Muffle only lowers the volume");
+            }
+        }
         sp.box = unity::NewGCHandle(box);
         sp.go = unity::NewGCHandle(go);
         sp.src = unity::NewGCHandle(src);
@@ -849,6 +969,7 @@ private:
         Free(sp.box);
         Free(sp.go);
         Free(sp.src);
+        Free(sp.lpf);
         for (Vanilla& v : sp.vanilla) Free(v.h);
         sp.vanilla.clear();
     }
@@ -885,6 +1006,7 @@ private:
         }
         auto add = [&](Il2CppObject* obj, const dj::emitters::Entry* e) {
             Speaker sp;
+            sp.ch = &global_;
             if (CreateSpeaker(obj, sp, e)) {
                 speakers_.push_back(std::move(sp));
             } else {
@@ -935,7 +1057,8 @@ private:
                 continue;
             }
             // (age: Play() of this frame may not report isPlaying yet; check from the next scan on)
-            if (cur_ && cur_->started && sp.clipGen == cur_->clipGen && !sp.paused && sp.age++ > 0 &&
+            const Current* cc = sp.ch ? sp.ch->cur.get() : nullptr;
+            if (cc && cc->started && sp.clipGen == cc->clipGen && !sp.paused && sp.age++ > 0 &&
                 !srcIsPlaying_.fn(src, srcIsPlaying_.mi)) {
                 sp.clipGen = 0;
                 sp.drift = 0;
@@ -976,17 +1099,19 @@ private:
         }
     }
 
-    // Keeps every speaker on the clock speaker's sample position. Play() starts at the next audio
-    // update, so a speaker that joined later can trail by a mix buffer; one that is off by more than
-    // kDriftSeconds on two box scans in a row is moved back (all readings come from the same audio
-    // update, so they compare directly).
-    void Resync(Il2CppObject* master) {
-        if (!cur_ || !master || !cur_->started || cur_->ring == 0) return;
-        const Current& c = *cur_;
+    // Keeps every speaker of a channel on its clock speaker's sample position. Play() starts at the
+    // next audio update, so a speaker that joined later can trail by a mix buffer; one that is off by
+    // more than kDriftSeconds on two box scans in a row is moved back (all readings come from the same
+    // audio update, so they compare directly).
+    void Resync(Channel& ch) {
+        Il2CppObject* master = Master(ch);
+        if (!ch.cur || !master || !ch.cur->started || ch.cur->ring == 0) return;
+        const Current& c = *ch.cur;
         const int32_t ref = srcGetTimeSamples_.fn(master, srcGetTimeSamples_.mi);
         if (ref < 0 || static_cast<uint32_t>(ref) >= c.ring) return;
         const int64_t limit = static_cast<int64_t>(kDriftSeconds * c.rate);
         for (Speaker& sp : speakers_) {
+            if (sp.ch != &ch) continue;
             Il2CppObject* src = Target(sp.src);
             if (!src || src == master || !sp.live || sp.clipGen != c.clipGen || sp.paused) {
                 sp.drift = 0;
@@ -1010,12 +1135,32 @@ private:
     }
 
     // --------------------------------------------------------------- songs ----
-    void StopCurrent() {
-        if (!cur_) return;
-        if (cur_->stream) cur_->stream->Stop();
+    bool AnySong() const {
+        if (global_.cur) return true;
+        return std::any_of(radios_.begin(), radios_.end(), [](const auto& r) { return r->cur != nullptr; });
+    }
+    bool HasSpeaker(const Channel& ch) const {
+        return std::any_of(speakers_.begin(), speakers_.end(), [&](const Speaker& sp) { return sp.ch == &ch; });
+    }
+    // "Corral 2419": the last characters of the plot key (stable, short; the full key is in the tooltip).
+    static std::string RadioName(const Channel& r) {
+        std::string tail;
+        for (size_t i = r.key.size(); i > 0 && tail.size() < 4; --i) {
+            const char c = r.key[i - 1];
+            if (std::isalnum(static_cast<unsigned char>(c))) tail.insert(tail.begin(), c);
+            else if (!tail.empty()) break;
+        }
+        return "Corral " + (tail.empty() ? r.key : tail);
+    }
+
+    void StopCurrent(Channel& ch) {
+        if (!ch.cur) return;
+        if (ch.cur->stream) ch.cur->stream->Stop();
         // The vanilla tune stays silenced while the next song loads; TickMix / DestroySpeakers
         // bring it back when nothing plays.
+        const unsigned gen = ch.cur->clipGen;
         for (Speaker& sp : speakers_) {
+            if (!gen || sp.clipGen != gen) continue;
             if (Il2CppObject* src = Target(sp.src)) {
                 srcStop_.fn(src, srcStop_.mi);
                 srcSetClip_.fn(src, nullptr, srcSetClip_.mi);
@@ -1023,68 +1168,85 @@ private:
             sp.clipGen = 0;
             sp.paused = false;
         }
-        Destroy(Target(cur_->clip));
-        Free(cur_->clip);
-        Free(cur_->buf);
-        cur_.reset();
+        Destroy(Target(ch.cur->clip));
+        Free(ch.cur->clip);
+        Free(ch.cur->buf);
+        ch.cur.reset();
     }
 
-    bool StartSong(uint64_t id) {
+    void StopAll() {
+        StopCurrent(global_);
+        for (auto& r : radios_) StopCurrent(*r);
+    }
+
+    bool StartSong(Channel& ch, uint64_t id) {
         const dj::SongInfo* s = FindSong(id);
         if (!s) {
-            bridge::SetStatus("That song is no longer in the music folder. Rescan?", true);
+            if (!ch.Radio()) bridge::SetStatus("That song is no longer in the music folder. Rescan?", true);
             return false;
         }
         if (!s->error.empty()) {
-            bridge::SetStatus(std::format("Can't play {}: {}", s->name, s->error), true);
+            if (!ch.Radio()) bridge::SetStatus(std::format("Can't play {}: {}", s->name, s->error), true);
             return false;
         }
-        StopCurrent();
-        cur_ = std::make_unique<Current>();
-        cur_->song = s->id;
-        cur_->name = s->name;
-        cur_->hintSeconds = s->seconds;
-        cur_->stream = dj::Stream::Start(s->path);
-        lastSong_ = s->id;
-        SR2_INFO("slime_dj: playing '{}' ({})", s->name, s->file);
-        bridge::SetStatus("Now playing: " + s->name, false);
+        StopCurrent(ch);
+        ch.cur = std::make_unique<Current>();
+        ch.cur->song = s->id;
+        ch.cur->name = s->name;
+        ch.cur->hintSeconds = s->seconds;
+        ch.cur->stream = dj::Stream::Start(s->path);
+        ch.lastSong = s->id;
+        if (ch.Radio()) {
+            SR2_INFO("slime_dj: radio '{}' playing '{}' ({})", RadioName(ch), s->name, s->file);
+        } else {
+            SR2_INFO("slime_dj: playing '{}' ({})", s->name, s->file);
+            bridge::SetStatus("Now playing: " + s->name, false);
+        }
         return true;
     }
 
-    // Jumps within the current song: a new decoder from that frame and a new clip; every speaker
-    // restarts on it together (TickSong), so they stay in sync. Keeps the player's pause.
+    // Jumps within the current song of the global queue: a new decoder from that frame and a new
+    // clip; every speaker restarts on it together (TickSong), so they stay in sync. Keeps the
+    // player's pause.
     void SeekTo(double seconds) {
-        if (!cur_ || !cur_->stream || !std::isfinite(seconds)) return;
-        if (cur_->stream->state() != dj::Stream::State::Ready) return;  // still opening (or failed)
-        const dj::SongInfo* s = FindSong(cur_->song);
+        Channel& ch = global_;
+        if (!ch.cur || !ch.cur->stream || !std::isfinite(seconds)) return;
+        if (ch.cur->stream->state() != dj::Stream::State::Ready) return;  // still opening (or failed)
+        const dj::SongInfo* s = FindSong(ch.cur->song);
         if (!s || !s->error.empty()) return;
-        const uint32_t rate = cur_->stream->rate();
+        const uint32_t rate = ch.cur->stream->rate();
         if (!rate) return;
-        uint64_t total = cur_->stream->totalFrames();
-        if (!total && cur_->hintSeconds > 0) total = static_cast<uint64_t>(cur_->hintSeconds * rate);
+        uint64_t total = ch.cur->stream->totalFrames();
+        if (!total && ch.cur->hintSeconds > 0) total = static_cast<uint64_t>(ch.cur->hintSeconds * rate);
         uint64_t frame = static_cast<uint64_t>(std::max(0.0, seconds) * rate);
         if (total) frame = std::min(frame, total > rate / 2 ? total - rate / 2 : 0);  // not past the end
-        const bool paused = cur_->userPaused;
-        const double hint = cur_->hintSeconds;
-        StopCurrent();
-        cur_ = std::make_unique<Current>();
-        cur_->song = s->id;
-        cur_->name = s->name;
-        cur_->hintSeconds = hint;
-        cur_->userPaused = paused;
-        cur_->rate = rate;  // position shows the target while the new decoder opens
-        cur_->base = frame;
-        cur_->stream = dj::Stream::Start(s->path, frame);
+        const bool paused = ch.cur->userPaused;
+        const double hint = ch.cur->hintSeconds;
+        StopCurrent(ch);
+        ch.cur = std::make_unique<Current>();
+        ch.cur->song = s->id;
+        ch.cur->name = s->name;
+        ch.cur->hintSeconds = hint;
+        ch.cur->userPaused = paused;
+        ch.cur->rate = rate;  // position shows the target while the new decoder opens
+        ch.cur->base = frame;
+        ch.cur->stream = dj::Stream::Start(s->path, frame);
         SR2_INFO("slime_dj: seek to {:.1f} s in '{}'", static_cast<double>(frame) / rate, s->name);
     }
 
-    // Next song: the queue's first, else a random one (shuffle), else stop.
-    void NextSong() {
-        StopCurrent();
+    // Next song. Global queue: the queue's first, else a random one (shuffle), else stop. Radio: the
+    // next playlist entry (wrapping round), a random other one with its shuffle on; `resume` starts
+    // at the entry it played last (the radio coming back after a load / zone change).
+    void NextSong(Channel& ch, bool resume = false) {
+        StopCurrent(ch);
+        if (ch.Radio()) {
+            NextRadioSong(ch, resume);
+            return;
+        }
         while (!queue_.empty()) {
             const uint64_t id = queue_.front().song;
             queue_.pop_front();
-            if (StartSong(id)) return;
+            if (StartSong(ch, id)) return;
         }
         if (cfg_.shuffle) {
             RefreshSongIndex();
@@ -1092,10 +1254,10 @@ private:
             if (songs_)
                 for (const auto& s : *songs_)
                     if (s.error.empty()) pool.push_back(s.id);
-            if (pool.size() > 1) std::erase(pool, lastSong_);
+            if (pool.size() > 1) std::erase(pool, ch.lastSong);
             if (!pool.empty()) {
                 std::uniform_int_distribution<size_t> pick(0, pool.size() - 1);
-                if (StartSong(pool[pick(rng_)])) return;
+                if (StartSong(ch, pool[pick(rng_)])) return;
             } else if (!songs_ || songs_->empty()) {
                 bridge::SetStatus("No songs in the music folder yet: add .ogg, .mp3 or .wav files, then Rescan.", true);
                 return;
@@ -1104,19 +1266,53 @@ private:
         bridge::SetStatus("Queue finished.", false);
     }
 
-    void SongFailed(const std::string& why) {
-        SR2_WARN("slime_dj: '{}' failed: {}", cur_ ? cur_->name : std::string("?"), why);
-        bridge::SetStatus(std::format("Can't play {}: {}", cur_ ? cur_->name : std::string("the song"), why), true);
-        if (++failuresInARow_ >= kMaxFailuresInARow) {
-            failuresInARow_ = 0;
-            StopCurrent();
-            return;
+    void NextRadioSong(Channel& r, bool resume) {
+        const int n = static_cast<int>(r.playlist.size());
+        for (int tries = 0; tries < n; ++tries) {
+            int next;
+            if (resume && tries == 0 && r.index >= 0 && r.index < n) {
+                next = r.index;
+            } else if (r.shuffle && n > 1) {
+                const bool skipLast = r.index >= 0 && r.index < n;  // never the entry that just played
+                std::uniform_int_distribution<int> pick(0, skipLast ? n - 2 : n - 1);
+                next = pick(rng_);
+                if (skipLast && next >= r.index) ++next;
+            } else {
+                next = r.index < 0 ? 0 : (r.index + 1) % n;
+            }
+            r.index = next;
+            const dj::SongInfo* s = FindSongByFile(r.playlist[static_cast<size_t>(next)]);
+            if (s && StartSong(r, s->id)) {
+                SaveRadio(r);
+                return;
+            }
         }
-        NextSong();
+        r.on = false;
+        r.slot = false;
+        SaveRadio(r);
+        SR2_INFO("slime_dj: radio '{}' stopped: {}", RadioName(r), n ? "no playable song in its playlist" : "its playlist is empty");
+        bridge::SetStatus(std::format("{}: {}", RadioName(r), n ? "no playable song in its playlist (Rescan?)" : "the playlist is empty"), true);
     }
 
-    bool CreateClip() {
-        Current& c = *cur_;
+    void SongFailed(Channel& ch, const std::string& why) {
+        const std::string name = ch.cur ? ch.cur->name : std::string("?");
+        SR2_WARN("slime_dj: {}'{}' failed: {}", ch.Radio() ? std::format("radio '{}': ", RadioName(ch)) : std::string(), name, why);
+        bridge::SetStatus(std::format("{}Can't play {}: {}", ch.Radio() ? RadioName(ch) + ": " : std::string(), name, why), true);
+        if (++ch.failures >= kMaxFailuresInARow) {
+            ch.failures = 0;
+            StopCurrent(ch);
+            if (ch.Radio()) {  // else AllocateSlots starts it again at the next scan
+                ch.on = false;
+                ch.slot = false;
+                SaveRadio(ch);
+            }
+            return;
+        }
+        NextSong(ch);
+    }
+
+    bool CreateClip(Channel& ch) {
+        Current& c = *ch.cur;
         c.channels = c.stream->channels();
         c.rate = c.stream->rate();
         c.chunk = c.stream->chunkFrames();
@@ -1138,13 +1334,13 @@ private:
     }
 
     // Copies chunks into the ring ahead of the play head (never into the chunk being played).
-    // False when the song was dropped (cur_ replaced or gone).
-    bool Fill(int maxWrites) {
-        Current& c = *cur_;
+    // False when the song was dropped (ch.cur replaced or gone).
+    bool Fill(Channel& ch, int maxWrites) {
+        Current& c = *ch.cur;
         Il2CppObject* clip = Target(c.clip);
         auto* buf = unity::GCHandleTarget(c.buf);
         if (!clip || !buf) {
-            SongFailed("the AudioClip was destroyed");
+            SongFailed(ch, "the AudioClip was destroyed");
             return false;
         }
         float* dst = unity::ArrayData<float>(buf);
@@ -1163,7 +1359,7 @@ private:
             }
             const int32_t offset = static_cast<int32_t>(c.writeHead % c.ring);
             if (!clipSetData_.fn(clip, static_cast<Il2CppArray*>(static_cast<void*>(buf)), offset, clipSetData_.mi)) {
-                SongFailed("AudioClip.SetData refused the data");
+                SongFailed(ch, "AudioClip.SetData refused the data");
                 return false;
             }
             c.writeHead += c.chunk;
@@ -1171,31 +1367,31 @@ private:
         return true;
     }
 
-    // The clock: the first speaker that plays the song (or is paused with the others). One that
-    // stopped since the last box scan (its object switched off) is passed over, so the play head
-    // never freezes on it.
-    Il2CppObject* Master() {
-        if (!cur_) return nullptr;
+    // The clock of a channel: its first speaker that plays the song (or is paused with the others).
+    // One that stopped since the last box scan (its object switched off) is passed over, so the play
+    // head never freezes on it.
+    Il2CppObject* Master(Channel& ch) {
+        if (!ch.cur) return nullptr;
         for (Speaker& sp : speakers_)
-            if (sp.live && sp.clipGen == cur_->clipGen)
+            if (sp.ch == &ch && sp.live && sp.clipGen == ch.cur->clipGen)
                 if (Il2CppObject* src = Target(sp.src); src && (sp.paused || srcIsPlaying_.fn(src, srcIsPlaying_.mi))) return src;
         return nullptr;
     }
 
-    void TickSong() {
-        if (!cur_) return;
-        Current& c = *cur_;
+    void TickSong(Channel& ch) {
+        if (!ch.cur) return;
+        Current& c = *ch.cur;
         if (c.stream->state() == dj::Stream::State::Opening) return;
         if (c.stream->state() == dj::Stream::State::Failed) {
-            SongFailed(c.stream->error());
+            SongFailed(ch, c.stream->error());
             return;
         }
-        if (!c.clip && !CreateClip()) {
-            SongFailed("AudioClip.Create failed");
+        if (!c.clip && !CreateClip(ch)) {
+            SongFailed(ch, "AudioClip.Create failed");
             return;
         }
         // Play head.
-        Il2CppObject* master = Master();
+        Il2CppObject* master = Master(ch);
         if (c.started && master) {
             const int32_t ts = srcGetTimeSamples_.fn(master, srcGetTimeSamples_.mi);
             // Another speaker taking over continues from the same position: every speaker plays in
@@ -1207,12 +1403,12 @@ private:
             }
             c.lastTs = ts;
         }
-        if (cur_->endFrame && c.playPos >= c.endFrame) {
-            failuresInARow_ = 0;
-            NextSong();
+        if (c.endFrame && c.playPos >= c.endFrame) {
+            ch.failures = 0;
+            NextSong(ch);
             return;
         }
-        if (!Fill(c.started ? kWritesPerTick : static_cast<int>(kRingChunks))) return;
+        if (!Fill(ch, c.started ? kWritesPerTick : static_cast<int>(kRingChunks))) return;
         // Buffering: the decoder fell behind the play head.
         const uint64_t ahead = c.writeHead > c.playPos ? c.writeHead - c.playPos : 0;
         if (!c.stream->Done()) {
@@ -1224,12 +1420,13 @@ private:
         // First start once enough is written.
         const bool ready = c.writeHead >= static_cast<uint64_t>(kStartChunks) * c.chunk || c.stream->Done();
         Il2CppObject* clip = Target(c.clip);
-        const bool wantPause = c.userPaused || c.buffering || GamePaused() || speakers_.empty();
+        const bool wantPause = c.userPaused || c.buffering || GamePaused() || !HasSpeaker(ch);
         // Where a (re)joining speaker starts: the playing speakers' position, else where the song
         // stopped when the last box went away (the ring still holds what follows).
         int32_t joinAt = static_cast<int32_t>(c.playPos % c.ring);
         if (master) joinAt = srcGetTimeSamples_.fn(master, srcGetTimeSamples_.mi);
         for (Speaker& sp : speakers_) {
+            if (sp.ch != &ch) continue;
             Il2CppObject* src = Target(sp.src);
             if (!src || !clip || !sp.live) continue;  // switched off: rejoins when it is on again
             if (sp.clipGen != c.clipGen) {
@@ -1258,27 +1455,322 @@ private:
 
     void TickMix() {
         const float vol = std::clamp(cfg_.volume * MusicVolume(), 0.0f, 2.0f);
-        const bool mute = cur_ && !cur_->userPaused && cfg_.muteVanilla;
         for (Speaker& sp : speakers_) {
             // AudioSource.volume tops out at 1: Amplify's extra volume only helps below that (its
             // range boost always does).
-            const float v = std::clamp(vol * sp.volScale * sp.boost, 0.0f, 1.0f);
+            const float v = std::clamp(vol * sp.volScale * sp.boost * sp.lpVol, 0.0f, 1.0f);
             Il2CppObject* src = Target(sp.src);
             if (src && std::fabs(sp.volume - v) > 0.002f) {
                 srcSetVolume_.fn(src, v, srcSetVolume_.mi);
                 sp.volume = v;
             }
             if (src) ApplyRange(sp, src);
-            if (mute) Mute(sp);
+            // The vanilla tune is silenced while the speaker's own channel has a song (a radio corral
+            // whose radio is off or waiting for a slot keeps its tune).
+            const Current* cc = sp.ch ? sp.ch->cur.get() : nullptr;
+            if (cc && !cc->userPaused && cfg_.muteVanilla) Mute(sp);
             else Unmute(sp);
         }
     }
 
+    // ------------------------------------------------------------ corrals ----
+    static bool Finite(const Vec3& v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
+
+    bool CameraPos(Vec3& out) {
+        if (!trGetPosition_) return false;
+        Il2CppObject* c = unity::Camera_main();
+        Il2CppObject* tr = c ? unity::TransformOf(c) : nullptr;
+        if (!unity::IsAlive(tr)) return false;
+        out = trGetPosition_.fn(tr, trGetPosition_.mi);
+        return Finite(out);
+    }
+
+    // `p` within `half` of the corral's centre along its own x / z axes and within its height band.
+    static bool Inside(const Corral& c, const Vec3& p, float half) {
+        if (!c.posOk) return false;
+        const float dx = p.x - c.pos.x, dy = p.y - c.pos.y, dz = p.z - c.pos.z;
+        const float lx = dx * c.right.x + dy * c.right.y + dz * c.right.z;
+        const float lz = dx * c.fwd.x + dy * c.fwd.y + dz * c.fwd.z;
+        return std::fabs(lx) <= half && std::fabs(lz) <= half && dy >= -kInsideBelow && dy <= kInsideAbove;
+    }
+
+    // High Walls: WallUpgrader.UpgradeWalls active; Air Net: one of AirNetUpgrader.AirNets active (the
+    // owned net for the current walls). Both components sit on the plot root with MusicBoxUpgrader.
+    int WallsOf(Il2CppObject* up) {
+        int w = 0;
+        if (wallUpClass_)
+            if (Il2CppObject* wu = unity::GetComponent(up, wallUpClass_); unity::IsAlive(wu) && IsA(wu, wallUpClass_)) {
+                Il2CppObject* hi = unity::Field<Il2CppObject*>(wu, offUpgradeWalls_);
+                if (unity::IsAlive(hi) && IsA(hi, gameObjectClass_) && unity::ActiveInHierarchy(hi)) w |= kWallsHigh;
+            }
+        if (airNetUpClass_)
+            if (Il2CppObject* an = unity::GetComponent(up, airNetUpClass_); unity::IsAlive(an) && IsA(an, airNetUpClass_)) {
+                void* nets = unity::Field<void*>(an, offAirNets_);
+                for (size_t i = 0, n = nets ? std::min<size_t>(unity::ArrayLength(nets), 4) : 0; i < n; ++i) {
+                    auto* go = static_cast<Il2CppObject*>(unity::ArrayAt(nets, i));
+                    if (unity::IsAlive(go) && IsA(go, gameObjectClass_) && unity::ActiveInHierarchy(go)) w |= kWallsNet;
+                }
+            }
+        return w;
+    }
+
+    // Every box scan: the corral behind every box found (plot position and axes for the muffle, its
+    // walls / net, and whether it owns the Corral Radio).
+    void BuildCorrals() {
+        corrals_.clear();
+        const bool radios = cu::Active() && landPlotClass_ && compInParent_;
+        for (const auto& [box, up] : boxUps_) {
+            if (!unity::IsAlive(up)) continue;
+            Corral c;
+            c.box = box;
+            Il2CppObject* tr = unity::TransformOf(up);
+            if (trGetPosition_ && unity::IsAlive(tr)) {
+                c.pos = trGetPosition_.fn(tr, trGetPosition_.mi);
+                if (trGetRight_ && trGetForward_) {
+                    c.right = trGetRight_.fn(tr, trGetRight_.mi);
+                    c.fwd = trGetForward_.fn(tr, trGetForward_.mi);
+                }
+                c.posOk = Finite(c.pos) && Finite(c.right) && Finite(c.fwd);
+            }
+            c.walls = WallsOf(up);
+            if (radios) {
+                bool inactive = true, ok = false;
+                Il2CppObject* plot = Call(compInParent_, up, {unity::TypeOf(landPlotClass_), &inactive}, "GetComponentInParent(LandPlot)", &ok);
+                if (ok && unity::IsAlive(plot) && IsA(plot, landPlotClass_)) {
+                    c.plot = plot;
+                    if (cu::Owns(plot, cu::kCorralRadio)) c.radio = cu::PlotKey(plot);
+                }
+            }
+            corrals_.push_back(std::move(c));
+        }
+        int walled = 0;
+        for (const Corral& c : corrals_) walled += c.walls ? 1 : 0;
+        const std::array<int, 2> counts{static_cast<int>(corrals_.size()), walled};
+        if (counts != lastCorralCounts_) {
+            lastCorralCounts_ = counts;
+            SR2_INFO("slime_dj: {} corral(s) with a music box, {} with High Walls / Air Net (muffled from outside{})", counts[0],
+                     counts[1], cfg_.muffle ? "" : ": setting off");
+        }
+    }
+
+    Channel* FindRadio(const std::string& key) {
+        for (auto& r : radios_)
+            if (r->key == key) return r.get();
+        return nullptr;
+    }
+
+    // The radio's playlist and state from its plot's sidecar value: lines "on=0|1", "shuffle=0|1",
+    // "index=N", then one "song=<file>" per entry (files relative to the music folder).
+    void LoadRadio(Channel& r, Il2CppObject* plot) {
+        const std::string v = cu::PlotValue(plot, kRadioValue);
+        size_t pos = 0;
+        while (pos < v.size()) {
+            size_t end = v.find('\n', pos);
+            if (end == std::string::npos) end = v.size();
+            const std::string line = v.substr(pos, end - pos);
+            pos = end + 1;
+            if (line.rfind("song=", 0) == 0 && line.size() > 5 && r.playlist.size() < kMaxPlaylist) r.playlist.push_back(line.substr(5));
+            else if (line == "on=1") r.on = true;
+            else if (line == "shuffle=1") r.shuffle = true;
+            else if (line.rfind("index=", 0) == 0) r.index = std::atoi(line.c_str() + 6);
+        }
+        if (r.index < -1 || r.index >= static_cast<int>(r.playlist.size())) r.index = -1;
+    }
+
+    void SaveRadio(Channel& r) {
+        Il2CppObject* plot = Target(r.plot);
+        if (!plot) return;
+        std::string v = std::format("v=1\non={}\nshuffle={}\nindex={}\n", r.on ? 1 : 0, r.shuffle ? 1 : 0, r.index);
+        for (const std::string& f : r.playlist) v += "song=" + f + "\n";
+        if (!cu::SetPlotValue(plot, kRadioValue, v) && !radioSaveWarned_) {
+            radioSaveWarned_ = true;
+            SR2_WARN("slime_dj: could not store the playlist of radio '{}' (custom upgrades off or no save loaded)", RadioName(r));
+        }
+    }
+
+    void DropRadio(size_t i) {
+        Channel& r = *radios_[i];
+        StopCurrent(r);
+        for (Speaker& sp : speakers_) {
+            if (sp.ch != &r) continue;
+            sp.ch = &global_;
+            sp.clipGen = 0;
+            sp.paused = false;
+            sp.drift = 0;
+        }
+        Free(r.plot);
+        SR2_INFO("slime_dj: radio '{}' gone (corral not loaded, radio sold, or custom upgrades off)", RadioName(r));
+        radios_.erase(radios_.begin() + static_cast<std::ptrdiff_t>(i));
+    }
+
+    void DropRadios() {
+        while (!radios_.empty()) DropRadio(radios_.size() - 1);
+    }
+
+    // Box scan: one channel per corral that owns the Corral Radio and is loaded now; its playlist is
+    // read from the sidecar when it appears (another save may be loaded since it was last seen).
+    void SyncRadios() {
+        for (auto& r : radios_) r->seen = false;
+        for (const Corral& c : corrals_) {
+            if (c.radio.empty() || !c.plot) continue;
+            Channel* r = FindRadio(c.radio);
+            if (!r) {
+                if (radios_.size() >= kMaxRadios) continue;
+                auto ch = std::make_unique<Channel>();
+                ch->key = c.radio;
+                LoadRadio(*ch, c.plot);
+                r = ch.get();
+                radios_.push_back(std::move(ch));
+                SR2_INFO("slime_dj: radio '{}' (plot '{}'): {} song(s) in its playlist, {}{}", RadioName(*r), r->key,
+                         r->playlist.size(), r->on ? "on" : "off", r->shuffle ? ", shuffle" : "");
+            }
+            if (r->seen) continue;
+            r->seen = true;
+            if (Target(r->plot) != c.plot) {
+                Free(r->plot);
+                r->plot = unity::NewGCHandle(c.plot);
+            }
+            r->pos = c.pos;
+            r->posOk = c.posOk;
+        }
+        for (size_t i = radios_.size(); i > 0; --i)
+            if (!radios_[i - 1]->seen) DropRadio(i - 1);
+    }
+
+    // Box scan: decoder slots for the radios that are on (kMaxRadioStreams at once). A radio keeps its
+    // slot while it is on and loaded; free slots go to the nearest waiting ones. A radio with a slot
+    // and no song starts its playlist where it left off.
+    void AllocateSlots() {
+        Vec3 cam{};
+        const bool haveCam = CameraPos(cam);
+        size_t used = 0;
+        for (auto& r : radios_) {
+            const bool want = r->on && !r->playlist.empty();
+            if (!want && (r->slot || r->cur)) {
+                StopCurrent(*r);
+                r->slot = false;
+            }
+            if (r->slot) ++used;
+            r->dist = 1e9f;
+            if (haveCam && r->posOk) {
+                const float dx = r->pos.x - cam.x, dy = r->pos.y - cam.y, dz = r->pos.z - cam.z;
+                r->dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+            }
+        }
+        while (used < kMaxRadioStreams) {
+            Channel* best = nullptr;
+            for (auto& r : radios_)
+                if (r->on && !r->playlist.empty() && !r->slot && (!best || r->dist < best->dist)) best = r.get();
+            if (!best) break;
+            best->slot = true;
+            ++used;
+        }
+        RefreshSongIndex();
+        if (!songs_) return;  // the music folder is still being read: start later
+        for (auto& r : radios_)
+            if (r->slot && !r->cur) {
+                r->failures = 0;
+                NextSong(*r, true);
+            }
+    }
+
+    // Box scan: which corral every speaker is in (a box's own corral; an emitter by position) and so
+    // which channel it plays: the corral's radio, else the global queue. A speaker that changes
+    // channel leaves its clip and joins the other channel's song in TickSong.
+    void AssignSpeakers() {
+        int moved = 0;
+        for (Speaker& sp : speakers_) {
+            sp.corral = -1;
+            Il2CppObject* box = Target(sp.box);
+            if (!sp.emitter) {
+                for (size_t i = 0; i < corrals_.size(); ++i)
+                    if (box && corrals_[i].box == box) sp.corral = static_cast<int>(i);
+            } else if (trGetPosition_) {
+                Il2CppObject* go = Target(sp.go);
+                Il2CppObject* tr = go ? unity::TransformOf(go) : nullptr;
+                if (unity::IsAlive(tr)) {
+                    const Vec3 p = trGetPosition_.fn(tr, trGetPosition_.mi);
+                    for (size_t i = 0; Finite(p) && i < corrals_.size(); ++i)
+                        if (Inside(corrals_[i], p, kEmitterHalf)) {
+                            sp.corral = static_cast<int>(i);
+                            break;
+                        }
+                }
+            }
+            Channel* want = &global_;
+            if (sp.corral >= 0 && !corrals_[static_cast<size_t>(sp.corral)].radio.empty())
+                if (Channel* r = FindRadio(corrals_[static_cast<size_t>(sp.corral)].radio)) want = r;
+            if (sp.ch == want) continue;
+            if (sp.clipGen)
+                if (Il2CppObject* src = Target(sp.src)) {
+                    srcStop_.fn(src, srcStop_.mi);
+                    srcSetClip_.fn(src, nullptr, srcSetClip_.mi);
+                }
+            sp.ch = want;
+            sp.clipGen = 0;
+            sp.paused = false;
+            sp.drift = 0;
+            ++moved;
+        }
+        if (moved && (channelLogs_ += moved) <= 20)
+            SR2_INFO("slime_dj: {} speaker(s) switched between the global queue and a corral radio", moved);
+    }
+
+    // Every frame: the low-pass cutoff and volume factor of every speaker in a corral with High Walls /
+    // Air Net, muffled while the listener (main camera) is outside that corral, clear inside.
+    // Smoothed, so walking in or out fades over ~1 s.
+    void TickMuffle(float dt) {
+        if (speakers_.empty()) return;
+        auto walled = [&](const Speaker& sp) {
+            return sp.corral >= 0 && static_cast<size_t>(sp.corral) < corrals_.size() && corrals_[static_cast<size_t>(sp.corral)].walls;
+        };
+        Vec3 cam{};
+        const bool any = cfg_.muffle && std::any_of(speakers_.begin(), speakers_.end(), walled);
+        const bool haveCam = any && CameraPos(cam);
+        const float step = std::isfinite(dt) && dt > 0 ? std::min(dt, 0.5f) : 0.0f;
+        const float k = 1.0f - std::exp(-step / kMuffleTau);
+        for (Speaker& sp : speakers_) {
+            float cut = kOpenCutoff, vol = 1.0f;
+            if (haveCam && walled(sp)) {
+                const Corral& c = corrals_[static_cast<size_t>(sp.corral)];
+                if (!Inside(c, cam, kCorralHalf)) {
+                    const bool high = c.walls & kWallsHigh, net = c.walls & kWallsNet;
+                    cut = high && net ? kMuffleBothCut : high ? kMuffleHighCut : kMuffleNetCut;
+                    vol = high && net ? kMuffleBothVol : high ? kMuffleHighVol : kMuffleNetVol;
+                }
+            }
+            if (!(sp.lpCut > 0) || !std::isfinite(sp.lpCut)) sp.lpCut = kOpenCutoff;
+            sp.lpCut = std::exp(std::log(sp.lpCut) + (std::log(cut) - std::log(sp.lpCut)) * k);
+            sp.lpVol += (vol - sp.lpVol) * k;
+            if (std::fabs(sp.lpCut - cut) < cut * 0.005f) sp.lpCut = cut;
+            if (std::fabs(sp.lpVol - vol) < 0.002f) sp.lpVol = vol;
+            ApplyLowPass(sp);
+        }
+    }
+
+    void ApplyLowPass(Speaker& sp) {
+        Il2CppObject* f = Target(sp.lpf);
+        if (!f) return;
+        const bool on = sp.lpCut < kOpenCutoff * 0.95f;
+        if (on && (sp.lpSet < 0 || std::fabs(sp.lpCut - sp.lpSet) > sp.lpSet * 0.01f)) {
+            lpSetCutoff_.fn(f, sp.lpCut, lpSetCutoff_.mi);
+            sp.lpSet = sp.lpCut;
+        }
+        if (on != sp.lpOn) {
+            if (!on) {
+                lpSetCutoff_.fn(f, kOpenCutoff, lpSetCutoff_.mi);
+                sp.lpSet = kOpenCutoff;
+            }
+            if (behSetEnabled_) behSetEnabled_.fn(f, on, behSetEnabled_.mi);
+            sp.lpOn = on;
+        }
+    }
+
     // -------------------------------------------------------- walls dance ----
-    // Box scan: the corrals whose music box plays the song and that the camera is within hearing
-    // range of (the speaker's range, Amplify included).
+    // Box scan: the corrals whose music box plays the global song and that the camera is within
+    // hearing range of (the speaker's range, Amplify included). Radio corrals do not dance.
     void SyncDancer() {
-        if (!cfg_.danceWalls || !dancer_.Ready() || !cur_) return;
+        if (!cfg_.danceWalls || !dancer_.Ready() || !global_.cur) return;
         bool haveCam = false;
         Vec3 cam{};
         if (trGetPosition_)
@@ -1288,7 +1780,7 @@ private:
             }
         std::vector<Il2CppObject*> ups;
         for (const Speaker& sp : speakers_) {
-            if (sp.emitter || !sp.live || sp.clipGen != cur_->clipGen) continue;
+            if (sp.emitter || !sp.live || sp.ch != &global_ || sp.clipGen != global_.cur->clipGen) continue;
             Il2CppObject* box = Target(sp.box);
             if (!box) continue;
             auto it = std::find_if(boxUps_.begin(), boxUps_.end(), [&](const auto& b) { return b.first == box; });
@@ -1311,15 +1803,15 @@ private:
     // Every frame: the analysis at the play position (a bit behind it, see kDanceLagSeconds).
     void TickDancer(float dt) {
         if (!dancer_.Ready()) return;
-        if (!cfg_.danceWalls || !cur_) {
+        if (!cfg_.danceWalls || !global_.cur) {
             if (dancer_.Plots()) {
                 dancer_.Clear();
                 dancePlots_ = 0;
-                SR2_INFO("slime_dj: walls dance stopped ({}); walls restored", cur_ ? "setting off" : "no song");
+                SR2_INFO("slime_dj: walls dance stopped ({}); walls restored", global_.cur ? "setting off" : "no song");
             }
             return;
         }
-        const Current& c = *cur_;
+        const Current& c = *global_.cur;
         dj::BeatTrack::Sample s;
         const dj::BeatTrack::Sample* beat = nullptr;
         const bool playing = c.started && c.rate && c.stream && !c.userPaused && !c.buffering && !GamePaused() &&
@@ -1366,44 +1858,59 @@ private:
         }
         const bool viewed = bridge::WantsSnapshot();
         boxScan_ -= dt;
-        if (DrainApplied()) boxScan_ = 0;  // a plot with a music box appeared / a box was bought: now
+        // A plot with a music box appeared / a box was bought: scan now. With custom upgrades on, also
+        // while idle (one probe scan), so a Corral Radio left on in the save starts after a load.
+        if (DrainApplied()) {
+            boxScan_ = 0;
+            if (cu::Active()) probe_ = true;
+        }
         // Song started or tab opened after being idle: one scene search as a safety net (on a click, so
         // a one-off hitch); the hook keeps the cache current from then on.
-        const bool active = cur_ || viewed;
+        const bool radiosOn = std::any_of(radios_.begin(), radios_.end(), [](const auto& r) { return r->on; });
+        const bool active = global_.cur || radiosOn || viewed;
         if (active != wasActive_) {
             wasActive_ = active;
             if (active) fullScan_ = true;
         }
-        if (cur_) FindBuses(dt);  // nothing to look up while idle
+        if (AnySong()) FindBuses(dt);  // nothing to look up while idle
         if (const unsigned g = dj::emitters::Generation(); g != emitterGen_) {
             emitterGen_ = g;  // an emitter was (un)registered: pick it up now
             boxScan_ = 0;
         }
-        if (active && boxScan_ <= 0) {
+        if ((active || probe_) && boxScan_ <= 0) {
+            probe_ = false;
             boxScan_ = kBoxScanInterval;
             const LONGLONG scan0 = Qpc();
             std::vector<Il2CppObject*> boxes = FindBoxes();
             const std::vector<dj::emitters::Entry> emitters = dj::emitters::Collect();
             boxes_ = static_cast<int>(boxes.size());
             emitters_ = static_cast<int>(emitters.size());
-            if (cur_) {
+            BuildCorrals();
+            SyncRadios();
+            AllocateSlots();
+            if (AnySong()) {
                 SyncSpeakers(boxes, emitters);
+                AssignSpeakers();
                 CheckSpeakers();
                 UpdateBoost();
-                Resync(Master());
+                Resync(global_);
+                for (auto& r : radios_) Resync(*r);
                 SyncDancer();
             }
             perf_.Scan(Qpc() - scan0);
         }
         LogPerf(dt);
-        if (!cur_ && !speakers_.empty()) DestroySpeakers();
-        if (!cur_ && !viewed) boxes_ = -1;
-        TickSong();
+        if (!AnySong() && !speakers_.empty()) DestroySpeakers();
+        if (!AnySong() && !viewed) boxes_ = -1;
+        TickSong(global_);
+        for (size_t i = 0; i < radios_.size(); ++i) TickSong(*radios_[i]);
         TickMix();
+        TickMuffle(dt);
         TickDancer(dt);
-        dj::emitters::SetPlaying(cur_ && cur_->started && !cur_->userPaused &&
-                                     std::any_of(speakers_.begin(), speakers_.end(), [](const Speaker& sp) { return sp.live; }),
-                                 cur_ ? cur_->name : std::string());
+        const Current* g = global_.cur.get();
+        dj::emitters::SetPlaying(g && g->started && !g->userPaused &&
+                                     std::any_of(speakers_.begin(), speakers_.end(), [&](const Speaker& sp) { return sp.live && sp.ch == &global_; }),
+                                 g ? g->name : std::string());
         publishAcc_ += dt;
         if (viewed && publishAcc_ >= kPublishInterval) {
             publishAcc_ = 0;
@@ -1414,9 +1921,11 @@ private:
     void Shutdown() {
         dancer_.Clear();
         dancePlots_ = 0;
-        StopCurrent();
+        StopAll();
+        DropRadios();
         DestroySpeakers();
         FreeUpgraders();
+        corrals_.clear();
         wasActive_ = false;
         Free(musicBus_);
         Free(masterBus_);
@@ -1427,13 +1936,14 @@ private:
     // ------------------------------------------------------------- requests ----
     void Handle(const bridge::Action& a) {
         if (cfgDirty_.exchange(false)) cfg_ = LoadCfg();
+        Channel& g = global_;
         auto find = [&](uint64_t uid) {
             return std::find_if(queue_.begin(), queue_.end(), [&](const QueueItem& q) { return q.uid == uid; });
         };
         switch (a.op) {
             case bridge::Op::Play:
-                failuresInARow_ = 0;
-                StartSong(a.song);
+                g.failures = 0;
+                StartSong(g, a.song);
                 boxScan_ = 0;
                 break;
             case bridge::Op::Enqueue: {
@@ -1441,9 +1951,9 @@ private:
                 if (!s) break;
                 queue_.push_back({++queueUid_, s->id});
                 bridge::SetStatus("Queued: " + s->name, false);
-                if (!cur_) {
-                    failuresInARow_ = 0;
-                    NextSong();
+                if (!g.cur) {
+                    g.failures = 0;
+                    NextSong(g);
                     boxScan_ = 0;
                 }
                 break;
@@ -1459,21 +1969,21 @@ private:
                 break;
             case bridge::Op::ClearQueue: queue_.clear(); break;
             case bridge::Op::TogglePause:
-                if (cur_) {
-                    cur_->userPaused = !cur_->userPaused;
+                if (g.cur) {
+                    g.cur->userPaused = !g.cur->userPaused;
                 } else {
-                    failuresInARow_ = 0;
-                    NextSong();
+                    g.failures = 0;
+                    NextSong(g);
                     boxScan_ = 0;
                 }
                 break;
             case bridge::Op::Skip:
-                failuresInARow_ = 0;
-                NextSong();
+                g.failures = 0;
+                NextSong(g);
                 boxScan_ = 0;
                 break;
             case bridge::Op::Stop:
-                StopCurrent();
+                StopCurrent(g);
                 bridge::SetStatus("Stopped.", false);
                 break;
             case bridge::Op::Seek: SeekTo(a.seconds); break;
@@ -1481,8 +1991,81 @@ private:
                 library_.Rescan(folder_);
                 bridge::SetStatus("Reading the music folder...", false);
                 break;
+            default: HandleRadio(a); break;
         }
         Publish();
+    }
+
+    // Playlist edits keep `index` on the entry that plays, so the radio goes on with the entry after it.
+    void HandleRadio(const bridge::Action& a) {
+        Channel* r = FindRadio(a.radio);
+        if (!r) {
+            bridge::SetStatus("That corral radio is not loaded right now.", true);
+            return;
+        }
+        const int n = static_cast<int>(r->playlist.size());
+        const bool valid = a.index >= 0 && a.index < n;
+        switch (a.op) {
+            case bridge::Op::RadioToggle:
+                if (!r->on && r->playlist.empty()) {
+                    bridge::SetStatus(RadioName(*r) + ": add songs to its playlist first.", true);
+                    return;
+                }
+                r->on = !r->on;
+                bridge::SetStatus(std::format("{} {}.", RadioName(*r), r->on ? "switched on" : "switched off"), false);
+                SR2_INFO("slime_dj: radio '{}' switched {}", RadioName(*r), r->on ? "on" : "off");
+                break;
+            case bridge::Op::RadioSkip:
+                if (r->cur) {
+                    r->failures = 0;
+                    NextSong(*r);
+                }
+                break;
+            case bridge::Op::RadioShuffle: r->shuffle = !r->shuffle; break;
+            case bridge::Op::RadioAdd: {
+                const dj::SongInfo* s = FindSong(a.song);
+                if (!s) return;
+                if (r->playlist.size() >= kMaxPlaylist) {
+                    bridge::SetStatus(std::format("{}: the playlist is full ({} songs).", RadioName(*r), kMaxPlaylist), true);
+                    return;
+                }
+                r->playlist.push_back(s->file);
+                bridge::SetStatus(std::format("{}: added {}", RadioName(*r), s->name), false);
+                break;
+            }
+            case bridge::Op::RadioRemove:
+                if (!valid) return;
+                r->playlist.erase(r->playlist.begin() + a.index);
+                if (a.index < r->index || (a.index == r->index && r->index >= 0)) --r->index;
+                if (r->playlist.empty()) r->on = false;
+                break;
+            case bridge::Op::RadioUp:
+            case bridge::Op::RadioDown: {
+                const int other = a.op == bridge::Op::RadioUp ? a.index - 1 : a.index + 1;
+                if (!valid || other < 0 || other >= n) return;
+                std::swap(r->playlist[static_cast<size_t>(a.index)], r->playlist[static_cast<size_t>(other)]);
+                if (r->index == a.index) r->index = other;
+                else if (r->index == other) r->index = a.index;
+                break;
+            }
+            case bridge::Op::RadioClear:
+                r->playlist.clear();
+                r->index = -1;
+                r->on = false;
+                break;
+            case bridge::Op::RadioPlayAt:
+                if (!valid) return;
+                r->on = true;
+                r->index = a.index;
+                if (r->slot) {
+                    r->failures = 0;
+                    NextSong(*r, true);
+                }
+                break;
+            default: return;
+        }
+        SaveRadio(*r);
+        boxScan_ = 0;  // start / stop / hand slots out now
     }
 
     // ------------------------------------------------------------- snapshot ----
@@ -1504,31 +2087,79 @@ private:
             s.queue.push_back({q.uid, q.song, song ? song->name : std::string("(missing)"), song ? song->seconds : 0.0});
         }
         s.shuffle = cfg_.shuffle;
-        s.speakers = static_cast<int>(speakers_.size());
-        s.emitterSpeakers = static_cast<int>(std::count_if(speakers_.begin(), speakers_.end(), [](const Speaker& sp) { return sp.emitter; }));
+        for (const Speaker& sp : speakers_) {
+            if (sp.ch != &global_) continue;
+            ++s.speakers;
+            if (sp.emitter) ++s.emitterSpeakers;
+        }
         s.boxes = boxes_;
         s.emitters = emitters_;
-        if (cur_) {
-            const Current& c = *cur_;
+        for (const Corral& c : corrals_)
+            if (!c.radio.empty()) ++s.radioBoxes;
+        if (global_.cur) {
+            const Current& c = *global_.cur;
             s.hasSong = true;
             s.song = c.song;
             s.name = c.name;
             s.paused = c.userPaused;
-            const uint64_t total = c.stream ? c.stream->totalFrames() : 0;
-            s.duration = c.rate && total ? static_cast<double>(total) / c.rate : c.hintSeconds;
-            const uint64_t pos = c.endFrame ? std::min(c.playPos, c.endFrame) : c.playPos;
-            s.position = c.rate ? static_cast<double>(c.base + pos) / c.rate : 0.0;
-            if (s.duration > 0) s.position = std::min(s.position, s.duration);
+            Position(c, s.position, s.duration);
             if (!c.stream || c.stream->state() == dj::Stream::State::Opening || !c.clip) s.waiting = "Loading...";
-            else if (speakers_.empty())
+            else if (s.speakers == 0)
                 s.waiting = boxes_ == 0 && emitters_ == 0 ? "No music box nearby: buy the Music Box upgrade for a corral, or go back to "
-                                          "your ranch."
-                                        : "Looking for music boxes...";
+                                                            "your ranch."
+                            : boxes_ > 0 && s.radioBoxes >= boxes_ && emitters_ == 0
+                                ? "Every music box nearby is tuned to its Corral Radio (see Corral radios below)."
+                                : "Looking for music boxes...";
             else if (!c.started) s.waiting = "Loading...";
             else if (c.buffering) s.waiting = "Buffering...";
             else if (!c.userPaused && GamePaused()) s.waiting = "Game paused";
         }
+        s.radiosAvailable = cu::Active() && landPlotClass_ && compInParent_;
+        s.maxRadioStreams = static_cast<int>(kMaxRadioStreams);
+        for (const auto& rp : radios_) {
+            const Channel& r = *rp;
+            bridge::Radio br;
+            br.key = r.key;
+            br.name = RadioName(r);
+            br.distance = r.dist < 1e8f ? r.dist : -1.0f;
+            br.on = r.on;
+            br.shuffle = r.shuffle;
+            br.index = r.index;
+            for (const std::string& f : r.playlist) {
+                const dj::SongInfo* song = FindSongByFile(f);
+                bridge::RadioEntry e;
+                e.file = f;
+                e.name = song ? song->name : std::filesystem::path(f).stem().string();
+                e.seconds = song ? song->seconds : 0.0;
+                e.missing = !song || !song->error.empty();
+                br.playlist.push_back(std::move(e));
+            }
+            if (r.cur) {
+                const Current& c = *r.cur;
+                br.hasSong = true;
+                br.now = c.name;
+                Position(c, br.position, br.duration);
+                if (!c.stream || c.stream->state() == dj::Stream::State::Opening || !c.clip || !c.started) br.waiting = "Loading...";
+                else if (!HasSpeaker(r)) br.waiting = "No speaker in this corral right now.";
+                else if (c.buffering) br.waiting = "Buffering...";
+                else if (GamePaused()) br.waiting = "Game paused";
+            } else if (r.on && !r.slot) {
+                br.waiting = std::format("Waiting: {} radios play already (the nearest ones get the next free slot).", kMaxRadioStreams);
+            } else if (r.on && !songs_) {
+                br.waiting = "Reading the music folder...";
+            }
+            s.radios.push_back(std::move(br));
+        }
+        std::sort(s.radios.begin(), s.radios.end(), [](const bridge::Radio& x, const bridge::Radio& y) { return x.name < y.name; });
         bridge::Publish(std::move(s));
+    }
+
+    static void Position(const Current& c, double& position, double& duration) {
+        const uint64_t total = c.stream ? c.stream->totalFrames() : 0;
+        duration = c.rate && total ? static_cast<double>(total) / c.rate : c.hintSeconds;
+        const uint64_t pos = c.endFrame ? std::min(c.playPos, c.endFrame) : c.playPos;
+        position = c.rate ? static_cast<double>(c.base + pos) / c.rate : 0.0;
+        if (duration > 0) position = std::min(position, duration);
     }
 
     // ---------------------------------------------------------------- state ----
@@ -1555,7 +2186,17 @@ private:
     const MethodInfo* setParent_ = nullptr;
     const MethodInfo* goCtor_ = nullptr;
     const MethodInfo* addComponent_ = nullptr;
-    M<Vec3 (*)(Il2CppObject*, const MethodInfo*)> trGetPosition_;  // optional (Amplify)
+    M<Vec3 (*)(Il2CppObject*, const MethodInfo*)> trGetPosition_;  // optional (Amplify, Muffle, radios)
+    M<Vec3 (*)(Il2CppObject*, const MethodInfo*)> trGetRight_, trGetForward_;  // optional (Muffle: corral axes)
+    // optional: Muffle (AudioLowPassFilter.cutoffFrequency, Behaviour.enabled), corral walls / net / plot
+    Il2CppClass* lowPassClass_ = nullptr;
+    Il2CppClass* wallUpClass_ = nullptr;
+    Il2CppClass* airNetUpClass_ = nullptr;
+    Il2CppClass* landPlotClass_ = nullptr;
+    size_t offUpgradeWalls_ = 0, offAirNets_ = 0;
+    const MethodInfo* compInParent_ = nullptr;
+    M<void (*)(Il2CppObject*, float, const MethodInfo*)> lpSetCutoff_;
+    M<void (*)(Il2CppObject*, bool, const MethodInfo*)> behSetEnabled_;
 
     M<Il2CppObject* (*)(Il2CppString*, int32_t, int32_t, int32_t, bool, const MethodInfo*)> clipCreate_;
     M<bool (*)(Il2CppObject*, Il2CppArray*, int32_t, const MethodInfo*)> clipSetData_;
@@ -1579,17 +2220,19 @@ private:
     dj::SongList songs_;
     unsigned songsGen_ = ~0u;
     std::unordered_map<uint64_t, size_t> songIndex_;
+    std::unordered_map<std::string, size_t> fileIndex_;
     std::shared_ptr<const std::vector<bridge::Song>> uiSongs_;
 
-    std::unique_ptr<Current> cur_;
+    Channel global_;                               // the global queue
+    std::vector<std::unique_ptr<Channel>> radios_; // Corral Radios loaded now (pointers stable for Speaker::ch)
+    std::vector<Corral> corrals_;                  // last box scan
     std::deque<QueueItem> queue_;
-    uint64_t queueUid_ = 0, lastSong_ = 0;
-    unsigned clipGen_ = 0;
-    int failuresInARow_ = 0;
+    uint64_t queueUid_ = 0;
+    unsigned clipGen_ = 0;  // across all channels: a clip generation names one channel's clip
     std::vector<Speaker> speakers_;
     std::vector<std::pair<Il2CppObject*, Il2CppObject*>> boxUps_;  // last box scan: MusicBox GameObject, its MusicBoxUpgrader
     std::vector<Il2CppGCHandle> ups_;  // known MusicBoxUpgraders (scene search + Apply hook)
-    bool hooked_ = false, fullScan_ = true, dropApplied_ = false, wasActive_ = false;
+    bool hooked_ = false, fullScan_ = true, dropApplied_ = false, wasActive_ = false, probe_ = false;
     ScanPerf perf_;
     dj::WallDancer dancer_;
     size_t dancePlots_ = 0;
@@ -1597,6 +2240,9 @@ private:
     unsigned danceGen_ = 0;
     int boxes_ = -1, emitters_ = 0, resyncs_ = 0, restartLogs_ = 0;
     std::array<int, 5> lastCounts_{-1, -1, -1, -1, -1};
+    std::array<int, 2> lastCorralCounts_{-1, -1};
+    int channelLogs_ = 0;
+    bool radioSaveWarned_ = false, lowPassFailLogged_ = false;
     unsigned emitterGen_ = 0;
     Il2CppGCHandle musicBus_ = nullptr, masterBus_ = nullptr, cueBus_ = nullptr;
     float boxScan_ = 0, busRetry_ = 0, publishAcc_ = 0;
