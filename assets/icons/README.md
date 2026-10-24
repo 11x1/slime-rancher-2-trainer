@@ -20,7 +20,7 @@ embedded into the DLL (`ui/mod_icons_data.inc`) and turned into Unity sprites at
 | `coop_air_net.png` | unused: the Coop Air Net card shows the corral's own Air Net icon (user request) |
 | `hen_collector_source.png` | Hen Collector: the coop upgrade card and the drone program source (user's drawing, `source/roostercollector_custom.png`) |
 | `elder_collector_source.png` | Elder Collector drone source (user's drawing, `source/eldercollector_custom.png`); without it the source shows the elder hen |
-| `mods_tab.png` | the "Mods" tab of the in-game Options menu |
+| `mods_tab.png` | the "Mods" tab of the in-game Options menu (user's drawing, `source/modstabicon_custom.png`, kept at its 128 x 128: the tab scales it to the stock category icon, which is 128 x 128 too) |
 | `map_node.png` | collectible tracker: map data nodes (the game has no sprite for them) |
 | `research_drone.png` | collectible tracker: research drones (no map / Slimepedia / HUD sprite in the game) |
 | `ghost_drone.png` | collectible tracker: ghostly drones (their IdentifiableType has no icon) |
