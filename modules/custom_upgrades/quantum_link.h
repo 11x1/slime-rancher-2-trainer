@@ -79,7 +79,8 @@ bool Placed();
 Il2CppObject* Sources(Il2CppObject* predicate, Il2CppObject* program);
 // Any thread: `def` is the Quantum Storage Link definition (a runtime clone, never saved as itself).
 bool IsOurs(Il2CppObject* def);
-// The Quantum Storage Link gadget's icon (a Sprite) once known, else nullptr.
+// The Quantum Storage Link gadget's icon (a Sprite: our purple copy of the Refinery Link's, else the
+// Refinery Link's) once known, else nullptr.
 Il2CppObject* SourceIcon();
 
 // ---- for buildables.cpp (main thread) ----

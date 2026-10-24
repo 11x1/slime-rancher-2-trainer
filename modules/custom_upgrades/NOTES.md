@@ -271,7 +271,7 @@ Elder Collector hooks). Findings with RVAs are in the header comments of both fi
   (`Material.GetPropertyNames(Vector)`, names with color / tint / albedo) 60 % towards purple, emission properties
   (emiss / glow) cyan (HDR x1.5..6); instances are tagged ` [sr2q]` and the originals put back when the link stops
   being quantum. Holder `sr2qlink#<gen>`: a script-free clone of a teleporter gadget's `TeleporterNode._activeFX`
-  (tinted, 0.5 size, 1.1 m up) - the glow; plus the drone storage. The drone station's cloud-withdraw FX
+  (tinted, 0.3 size since round 9, 1 m up) - the glow; plus the drone storage. The drone station's cloud-withdraw FX
   (`DroneStationCloudExtractionController._spawnFX`, pooled `FXHelpers.SpawnAndPlayFX`) pulses every ~7 s and at
   every drone take. The log names the shaders and properties it tinted (`shader '...' (link): N colour / M emission`).
 - **Drone source "Quantum Storage Link"** (`kQuantumSourceType` 0x53520110, listed after Silo for every target while
@@ -296,8 +296,7 @@ Elder Collector hooks). Findings with RVAs are in the header comments of both fi
   Silo -> same destination (a Silo -> Silo program just moves items between silos); a favourite slot that held the
   variant holds the Refinery Link. Nothing else of ours is in the save (viewed-blueprint hashes are plain ints).
 - Known limits: drones need a path to the link (place it on the ranch); the variant (toggle key) is offered only while
-  a kit is left, so a placed quantum link without a spare kit turns plain only by picking it up; the variant's
-  inventory icon is the Refinery Link's (recoloured gradient only); a player withdrawing from the cloud in the station
+  a kit is left, so a placed quantum link without a spare kit turns plain only by picking it up; a player withdrawing from the cloud in the station
   menu while a drone takes the same type can give at most the items in flight twice (the tick re-syncs every second).
 
 Not checked in game yet: the Fabricator card (position, cost, unlock), fabricating (kits log), the variant toggle
@@ -306,6 +305,55 @@ glow (log lines name what was found), the source in the drone menu (after Silo, 
 drone taking from the cloud to a silo / feeder / refinery (cloud amount going down in the station's cloud menu), save
 + reload (links rebuilt, program restored), turning custom upgrades off (links plain, favourites back), a mod-free
 load of such a save.
+
+### Round 9 (user: "portal effect is too big ... glitch out and come back", "pressing Use on it shows the refinery still", card "icon same as refinery ... uses the refinery link's description", "needs a different icon (make it purpler) in drone menu source", placement "use the default label and the preview is also default")
+
+- **Why the card showed the Refinery Link's text**: `GadgetDefinition.get_LocalizedDescription` (0x51B440) walks
+  `VariantOf` to the root and returns ITS `_localizedDescription`, so our own (text_override) instance was never asked.
+  The title is fine (`localizedName` is read directly). Fixed in `gadget_look` (below): a registered definition answers
+  with its own description.
+- **Icon**: `quantum_link` makes a purple copy of the Refinery Link's sprite at the first tick
+  (`gadget_look::TintedSprite`: Graphics.Blit of the sprite's texture into an sRGB RenderTexture, ReadPixels of its
+  textureRect, pixels towards purple by brightness, Sprite.Create with the same pivot / pixels per unit) and puts it
+  into our definition's `icon` (`GadgetDefinition.get_Icon` returns its own icon when set: Fabricator grid tile, hotbar)
+  and `quantum::SourceIcon()` (the drone menu source). The card's details picture is the definition's full art
+  (an addressable sprite, `UIImageDynamicLoader`): `gadget_look` clears our clone's `_fullArt` / `_requiresFullArt` and
+  sets the details image to our icon after `FabricatorItemDetails.SetItem`. Log `quantum link: icon = a purple copy of
+  the Refinery Link's` / `gadget look: sprite 'iconRefineryLink...' recoloured (...)`.
+- **Glow**: 0.3 size (was 0.5), 1 m up. **Glitch**: every 3.5-8 s the glow stutters for ~0.5 s (on / off every
+  30-80 ms, jittered in place and size), then comes back (`QuantumLink::Frame`, per frame, field reads between
+  glitches). The ghost drones' look: `ComponentAcquisitionDroneController` (the "GhostDrone") keeps its renderers'
+  material instances and fades the shader float `_PhaseValue` 0 -> 1 in `Update` after arriving (`_phaseTimer`); that
+  is a property of their own shader, it can't be put on the teleporter FX, so the stutter imitates it.
+- **Use**: a placed link's `BaseUIInteractable`s are listed (log `Use component '<class>' on '<object>'` once per
+  class). `UIActivator.OnInteract` (0x6ACB60) and `UIDisplayInteractable.OnInteract` (0x6B0AD0) are hooked (pointer set
+  lookup for everything else): for a link they show one burst of HUD notices instead of the refinery screen - what the
+  link is for, then the five largest Quantum Cloud amounts (type icon, localized name, count) or "The Quantum Cloud is
+  empty" (free-text notices, `SaleNotices::QueueText`, 1.5 s cooldown). Chosen over a new screen: the drones take from
+  the cloud, so the cloud's contents are what the player wants to see; managing it stays in the drone station's cloud
+  menu. If no notice can be shown (no HUD list / text sink) the refinery screen opens as before. The link is still a
+  working refinery input (vacuuming into it still goes to the refinery). Not changed: the hover prompt (a shared
+  prompt prefab). If the log says `- not hooked`, the Refinery Link uses another interactable class and Use is vanilla.
+- **Placement**: held, the gadget-mode label says "Quantum Storage Link" and the preview is tinted purple; aimed at a
+  placed quantum link, the label says "Quantum Storage Link" too (see "Mod gadget looks").
+
+## Mod gadget looks (`gadget_look.h`, round 9)
+
+Shared by the Quantum Storage Link and the Slime DJ buildables. Owns four hooks (nobody else may hook them):
+`GadgetDefinition.get_LocalizedDescription` (registered definitions answer with their own description),
+`GadgetDirector.GetTargetGadgetInfo` (0x868E80; the gadget-mode label: `DisplayName` = the def's `_pediaLink` title,
+shared with the base; held: our def -> our name; aimed at a placed gadget: `AddPlacedLabel` providers, asked only
+when the label is not the held gadget's - `_isTargetingPlaceholder` and `SelectedSlottedGadget` - and the def is the
+targeted gadget's `IdentTypeAsDefinition`), `GadgetItem.SetHeldGadget` (0xA46810; after it built
+`_gadgetPlaceholderInstance` from the base prefab, the registered `dressPreview` runs on it) and
+`FabricatorItemDetails.SetItem` (the card picture). Helpers: `TintTree` (instanced materials tinted, tagged
+` [sr2look]`; preview instances go with the preview) and `TintedSprite`. API: `Register(def, Look{name, description,
+icon, dressPreview})`. Log `mod gadget looks ready: ...` / `gadget look: <what>: shader '...': N colour / M emission
+propert(ies) tinted`.
+
+Not checked in game yet (round 9): the purple icon (card tile, details picture, hotbar, drone menu source), the card
+description, the held label and purple preview, the label when aiming at a placed link, the glow size and glitch,
+Use on a link (notices; or the `- not hooked` log line).
 
 ## Slime DJ buildables (user requests: "a slime DJ booth with speakers", "a speaker buildable ... rotated variants, stackable", "a radio toy that plays slime pen music")
 
