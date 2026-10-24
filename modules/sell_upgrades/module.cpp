@@ -365,7 +365,12 @@ private:
     bool HasUpgrade(Il2CppObject* plot, int32_t upg) { return hasUpgrade_(plot, upg); }
     Il2CppObject* Type(Il2CppClass* k) { return unity::TypeOf(k); }
 
-    Il2CppObject* FindItemByInfoLabel(Il2CppObject* root, Il2CppObject* infoLabel, Il2CppObject*& category);
+    Il2CppObject* FindItemByInfoLabel(Il2CppObject* root, Il2CppObject* infoLabel, Il2CppObject* plot,
+                                      bool purchaseVariant, Il2CppObject*& category);
+    bool loggedHiddenMatch_ = false;
+    int loggedMultiMatch_ = 0;
+    std::string lastNoSell_;  // last "no Sell button" diagnostic (logged when it changes)
+    void NoSell(const std::string& what);
     size_t OffsetIn(Il2CppObject* obj, const char* field, std::unordered_map<Il2CppClass*, size_t>& cache);
     void DestroySellButton();
     void CreateAltPrompt(Il2CppObject* category, Il2CppObject* item, Il2CppObject* priceItem, int32_t upg,
@@ -938,30 +943,78 @@ size_t SellUpgrades::OffsetIn(Il2CppObject* obj, const char* field, std::unorder
     return off;
 }
 
-// The upgrade item of the open plot menu whose own _infoButtonLabel instance is `infoLabel`.
-Il2CppObject* SellUpgrades::FindItemByInfoLabel(Il2CppObject* root, Il2CppObject* infoLabel, Il2CppObject*& category) {
+// The upgrade item of the open plot menu whose own _infoButtonLabel instance is `infoLabel`. Every match
+// is collected (round 8: "can't sell Music Box I now, shows on hen upgrades" - a wrong first match would
+// put the button on the wrong card): the owned / not owned state must fit the view (PURCHASED = owned,
+// Purchase = not owned yet), the first fitting match wins; several matches are logged. A vanilla item
+// custom_upgrades took out of the list (a tier card stands in for it) is found too: an owned one sells
+// itself, priced by its own item, in the stand-in card's category.
+Il2CppObject* SellUpgrades::FindItemByInfoLabel(Il2CppObject* root, Il2CppObject* infoLabel, Il2CppObject* plot,
+                                                bool purchaseVariant, Il2CppObject*& category) {
     category = nullptr;
     Il2CppObject* config = unity::Field<Il2CppObject*>(root, offMenuConfig_);
     if (!unity::IsAlive(config)) return nullptr;
     const size_t offCats = OffsetIn(config, "categories", offCategories_);
     if (!offCats) return nullptr;
     void* cats = unity::Field<void*>(config, offCats);
+    struct Match {
+        Il2CppObject* item;
+        Il2CppObject* cat;
+    };
+    std::vector<Match> matches;
+    Il2CppObject* firstCat = nullptr;
+    Il2CppObject* standIn = nullptr;
+    Il2CppObject* standInCat = nullptr;
+    Il2CppObject* hidden = nullptr;
     for (size_t ci = 0, cn = unity::ListCount(cats); ci < cn && ci < 32; ++ci) {
         auto* cat = static_cast<Il2CppObject*>(unity::ListAt(cats, ci));
         if (!unity::IsAlive(cat)) continue;
         const size_t offItems = OffsetIn(cat, "items", offItems_);
         if (!offItems) continue;
+        if (!firstCat) firstCat = cat;
         void* items = unity::Field<void*>(cat, offItems);
         for (size_t i = 0, n = unity::ListCount(items); i < n && i < 64; ++i) {
             auto* item = static_cast<Il2CppObject*>(unity::ListAt(items, i));
-            if (!IsA(item, itemClass_)) continue;
-            if (unity::Field<Il2CppObject*>(item, offItemInfoLabel_) != infoLabel) continue;
-            if (!unity::IsAlive(item)) return nullptr;
-            category = cat;
-            return item;
+            if (!IsA(item, itemClass_) || !unity::IsAlive(item)) continue;
+            if (unity::Field<Il2CppObject*>(item, offItemInfoLabel_) == infoLabel) matches.push_back({item, cat});
         }
     }
-    return nullptr;
+    if (matches.empty()) {
+        hidden = custom_upgrades::HiddenMenuItem(offItemInfoLabel_, infoLabel, standIn);
+        if (!hidden || !IsA(hidden, itemClass_)) return nullptr;
+        for (size_t ci = 0, cn = unity::ListCount(cats); ci < cn && ci < 32 && standIn && !standInCat; ++ci) {
+            auto* cat = static_cast<Il2CppObject*>(unity::ListAt(cats, ci));
+            const size_t offItems = unity::IsAlive(cat) ? OffsetIn(cat, "items", offItems_) : 0;
+            void* items = offItems ? unity::Field<void*>(cat, offItems) : nullptr;
+            for (size_t i = 0, n = unity::ListCount(items); i < n && i < 64; ++i)
+                if (unity::ListAt(items, i) == standIn) standInCat = cat;
+        }
+        // A merged storage card has no stand-in: any category of this menu has the button prefabs.
+        category = standInCat ? standInCat : firstCat;
+        if (!category) return nullptr;
+        if (!loggedHiddenMatch_)
+            SR2_INFO("[{}] sell button: the details belong to the vanilla item '{}', which a tier card stands in for - "
+                     "matched it there", kModule, unity::GetName(hidden));
+        loggedHiddenMatch_ = true;
+        return hidden;
+    }
+    const Match* pick = &matches.front();
+    if (matches.size() > 1) {
+        for (const Match& m : matches)
+            if (plot && HasUpgrade(plot, unity::Field<int32_t>(m.item, offItemUpgrade_)) != purchaseVariant) {
+                pick = &m;
+                break;
+            }
+        if (loggedMultiMatch_ < 5) {
+            ++loggedMultiMatch_;
+            std::string names;
+            for (const Match& m : matches) names += std::format("{}'{}'", names.empty() ? "" : ", ", unity::GetName(m.item));
+            SR2_WARN("[{}] sell button: {} menu items share the details' info label ({}) - picked '{}' ({} card)", kModule,
+                     matches.size(), names, unity::GetName(pick->item), purchaseVariant ? "Purchase" : "PURCHASED");
+        }
+    }
+    category = pick->cat;
+    return pick->item;
 }
 
 void SellUpgrades::DestroySellButton() {
@@ -1098,6 +1151,13 @@ void SellUpgrades::CentrePair() {
 // sellable") get no button at all.
 bool TemporaryReason(const std::string& brief) { return brief.rfind("holds ", 0) == 0 || brief.rfind("sell ", 0) == 0; }
 
+// One line per distinct reason (selection changes rebind often): why a card has no (working) Sell button.
+void SellUpgrades::NoSell(const std::string& what) {
+    if (what == lastNoSell_) return;
+    lastNoSell_ = what;
+    SR2_INFO("[{}] no Sell button: {}", kModule, what);
+}
+
 void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
     if (!main_thread::IsMainThread()) return;
     // Any details bind (selection change, rebuild) replaces our previous button and prompt.
@@ -1107,25 +1167,38 @@ void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
     if (!IsA(view, moreViewClass_) || !unity::IsAlive(view)) return;
     Il2CppObject* infoLabel = unity::Field<Il2CppObject*>(vm, offVmInfoLabel_);
     if (!infoLabel) return;
-    Il2CppObject* category = nullptr;
-    Il2CppObject* item = FindItemByInfoLabel(root_, infoLabel, category);
-    if (!item || !category) return;  // another menu / not an upgrade item
     Il2CppObject* plot = unity::Field<Il2CppObject*>(root_, offActivator_);
     if (!IsA(plot, plotClass_) || !unity::IsAlive(plot)) return;
-
     // What the button sells: an owned item (PURCHASED variant) sells itself; the card of a custom
     // tier chain that shows the next tier (Purchase variant) sells the owned tier below it.
     const bool purchaseVariant = unity::Field<Il2CppObject*>(view, offMoreButton_) != nullptr;
+    Il2CppObject* category = nullptr;
+    Il2CppObject* item = FindItemByInfoLabel(root_, infoLabel, plot, purchaseVariant, category);
+    if (!item || !category) return;  // another menu / not an upgrade item
+
     int32_t upg = unity::Field<int32_t>(item, offItemUpgrade_);
     Il2CppObject* priceItem = item;
-    if (purchaseVariant && !custom_upgrades::ChainSellTarget(plot, item, upg, priceItem)) return;
-    if (!priceItem || !HasUpgrade(plot, upg)) return;
+    if (purchaseVariant) {
+        std::string why;
+        if (!custom_upgrades::ChainSellTarget(plot, item, upg, priceItem, &why)) {
+            // A vanilla card that is not owned has nothing to sell: only our tier cards are worth a line.
+            if (custom_upgrades::IsCustomUpgrade(upg))
+                NoSell(std::format("card '{}': no tier to sell ({})", UpgName(upg), why));
+            return;
+        }
+    }
+    if (!priceItem || !HasUpgrade(plot, upg)) {
+        NoSell(std::format("card '{}': {} not owned on this plot", unity::GetName(item), UpgName(upg)));
+        return;
+    }
 
     std::string brief;
     const std::string reason = CanSell(plot, upg, &brief);
     std::vector<Refund> refunds;
     int32_t price = 0, refund = 0;
     const bool sellable = reason.empty() && Price(priceItem, refunds, price, refund);
+    if (!sellable) NoSell(std::format("{}: {}", UpgName(upg), reason.empty() ? std::string("price unreadable") : reason));
+    else lastNoSell_.clear();
     // Gamepad / keyboard: the alt action sells it (prompt only while it can be sold now).
     if (sellable && altOk_) CreateAltPrompt(category, item, priceItem, upg, refund);
     if (!sellable && !TemporaryReason(brief)) return;  // no "can't sell" button (user feedback)
@@ -1208,6 +1281,7 @@ void SellUpgrades::AfterMoreBind(Il2CppObject* view, Il2CppObject* vm) {
         placed = PlaceButtons(view, btnView, !purchaseVariant);
     }
     if (!placed && purchaseVariant) {
+        NoSell(std::format("{}: the Sell button could not be placed next to Purchase", UpgName(upg)));
         DestroySellButton();
         return;
     }
