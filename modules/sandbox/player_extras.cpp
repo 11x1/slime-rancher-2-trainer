@@ -553,7 +553,7 @@ void SetupPlayerExtras(sr2::core::ModuleContext& ctx) {
     }
     {
         std::string nerr;
-        if (!g_notices.Setup(R, kModule, nerr) || !g_notices.SetupText(R, nerr))
+        if (!g_notices.Setup(R, kModule, nerr, "teleport") || !g_notices.SetupText(R, nerr))
             SR2_INFO("[{}] teleport to marker: no HUD pop-ups ({})", kModule, nerr);
     }
     SR2_INFO("[{}] player extras: infinite health {}, teleport to marker {}, unlock expansions {}", kModule,

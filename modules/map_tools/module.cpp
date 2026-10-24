@@ -441,7 +441,7 @@ public:
         s_.loadInProgress = c.Bind(s_.sceneLoaderClass, "get_IsSceneLoadInProgress", 0);
         {
             std::string nerr;
-            if (!notices_.Setup(Resolver::Get(), kModule, nerr) || !notices_.SetupText(Resolver::Get(), nerr))
+            if (!notices_.Setup(Resolver::Get(), kModule, nerr, "teleport") || !notices_.SetupText(Resolver::Get(), nerr))
                 c.missing.push_back("HUD notices: " + nerr);
         }
 
