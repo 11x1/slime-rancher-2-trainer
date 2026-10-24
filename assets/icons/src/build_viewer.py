@@ -12,7 +12,7 @@ from pathlib import Path
 
 from PIL import Image
 
-REPO = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(r"C:\Users\franz\Documents\sr2-mods")
+REPO = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parents[3]
 ICONS = REPO / "assets" / "icons"
 GAME = ICONS / "game"
 OUT = GAME / "index.html"
