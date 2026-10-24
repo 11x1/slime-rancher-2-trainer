@@ -3399,6 +3399,7 @@ bool SandboxHintBarShown(const Tab& tab, const ModuleView& mv) {
 namespace djb = ::sr2::ui::slime_dj;
 
 char g_djSearch[128] = {};
+std::string g_djRadioEdit;  // Corral radio whose playlist the Songs card's + buttons fill ("" = the queue)
 
 void DjRequest(djb::Op op, uint64_t song = 0, uint64_t uid = 0, double seconds = 0) {
     djb::Action a;
@@ -3502,6 +3503,22 @@ void DjSongs(const djb::Snapshot& s, float w, float listH) {
     HoverTip("Opens " + s.folder + "\nPut .ogg, .mp3 or .wav files there (subfolders work too), then Rescan.");
     item_grid::SearchBox("##djsearch", "Search songs...", g_djSearch, sizeof(g_djSearch), 0.0f, g_scale);
     const std::string needle = g_djSearch;
+    // + adds to a corral radio's playlist while one is being edited (DjRadios "Add songs").
+    const djb::Radio* target = nullptr;
+    for (const djb::Radio& r : s.radios)
+        if (r.key == g_djRadioEdit) target = &r;
+    if (!target) g_djRadioEdit.clear();
+    const std::string addTip = target ? "Add to " + target->name + "'s playlist" : std::string("Add to the queue");
+    if (target) {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.accent), "%s",
+                           std::format("+ adds to {}'s playlist ({} song{}).", target->name, target->playlist.size(),
+                                       target->playlist.size() == 1 ? "" : "s").c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Done")) g_djRadioEdit.clear();
+        HoverTip("Back to adding songs to the queue.");
+    }
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(4), U(2)));
@@ -3526,8 +3543,17 @@ void DjSongs(const djb::Snapshot& s, float w, float listH) {
             ImGui::SameLine(0, U(4));
             ImGui::SetCursorPosY(rowY + (U(30) - bs) * 0.5f);
             ImGui::BeginDisabled(bad);
-            if (DjIconButton("##add", bs, "Add to the queue", [](ImVec2 c, ImU32 col) { DrawPlus(ImGui::GetWindowDrawList(), c, col); }))
-                DjRequest(djb::Op::Enqueue, song.id);
+            if (DjIconButton("##add", bs, addTip.c_str(), [](ImVec2 c, ImU32 col) { DrawPlus(ImGui::GetWindowDrawList(), c, col); })) {
+                if (target) {
+                    djb::Action a;
+                    a.op = djb::Op::RadioAdd;
+                    a.radio = target->key;
+                    a.song = song.id;
+                    djb::Request(a);
+                } else {
+                    DjRequest(djb::Op::Enqueue, song.id);
+                }
+            }
             ImGui::EndDisabled();
             // Back to the row's bottom; the Dummy is the item that ends the line (moving the cursor
             // past the content without one trips ImGui's "submit an item" check at EndChild).
@@ -3637,7 +3663,7 @@ void DjNowPlaying(const Host& h, const ModuleView& mv, const djb::Snapshot& s, f
     }
     ImGui::Dummy(ImVec2(0, U(2)));
     // settings of the module
-    for (const char* key : {"shuffle", "volume", "range", "amplify", "mute_vanilla", "dance_walls",
+    for (const char* key : {"shuffle", "volume", "range", "amplify", "mute_vanilla", "muffle_walls", "dance_walls",
                             "dance_intensity"})
         if (const settings::Def* d = FindDef(mv, key); d && ParentChainAllows(mv, *d)) DrawRow(h, *d, d->label, false);
     EndCard();
@@ -3690,6 +3716,132 @@ void DjQueue(const djb::Snapshot& s, float w, float listH) {
     EndCard();
 }
 
+// Corral radios: one section per loaded corral that owns the Corral Radio (custom_upgrades), with its
+// own playlist. "Add songs" points the + buttons of the Songs card at that radio's playlist until
+// "Done" (g_djRadioEdit = its key).
+void DjRadioRequest(djb::Op op, const std::string& radio, int index = -1, uint64_t song = 0) {
+    djb::Action a;
+    a.op = op;
+    a.radio = radio;
+    a.index = index;
+    a.song = song;
+    djb::Request(a);
+}
+
+void DjRadios(const djb::Snapshot& s, float w) {
+    const Palette& P = theme::Colors();
+    BeginCard("dj_radios", w);
+    const float avail = ImGui::GetContentRegionAvail().x, x0 = ImGui::GetCursorPosX();
+    CardHeading(s.radios.empty() ? "Corral radios" : std::format("Corral radios ({})", s.radios.size()).c_str(), P.head);
+    if (!s.radiosAvailable) {
+        DimText("Turn on Custom upgrades to buy the Corral Radio for a corral (needs the Music Box): that corral then plays "
+                "its own playlist instead of the queue.");
+        EndCard();
+        return;
+    }
+    if (s.radios.empty()) {
+        DimText("No corral radio nearby. Buy the Corral Radio in a corral's plot menu (needs the Music Box); the corral "
+                "shows up here with its own playlist while you are near it.");
+        EndCard();
+        return;
+    }
+    DimText(std::format("These corrals play their own playlist instead of the queue. Up to {} radios play at once.",
+                        s.maxRadioStreams));
+    const float bs = U(24), gap = ImGui::GetStyle().ItemSpacing.x;
+    for (const djb::Radio& r : s.radios) {
+        ImGui::PushID(r.key.c_str());
+        ImGui::Dummy(ImVec2(0, U(4)));
+        // name, distance, on / off
+        {
+            FontScope f(theme::Body(), theme::kBodySize + 1);
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.text), "%s", r.name.c_str());
+        }
+        HoverTip("Plot " + r.key);
+        if (r.distance >= 0) {
+            ImGui::SameLine();
+            DimText(std::format("{:.0f} m away", r.distance));
+        }
+        ImGui::SameLine(x0 + avail - U(kSwitchW));
+        if (Switch("##on", r.on)) DjRadioRequest(djb::Op::RadioToggle, r.key);
+        HoverTip(r.on ? "Switch the radio off (the music box plays its own tune again)." : "Switch the radio on.");
+        // now playing / why not
+        if (r.hasSong) {
+            const std::string pos = r.duration > 0 ? std::format("  {} / {}", Clock(r.position), Clock(r.duration)) : std::string();
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.accent), "%s", (r.now + pos).c_str());
+            ImGui::PopTextWrapPos();
+        }
+        if (!r.waiting.empty()) {
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.warn), "%s", r.waiting.c_str());
+            ImGui::PopTextWrapPos();
+        } else if (!r.on) {
+            DimText(r.playlist.empty() ? "Off. Add songs to its playlist, then switch it on." : "Off.");
+        }
+        // controls
+        const bool editing = g_djRadioEdit == r.key;
+        const ImVec2 b((avail - 3 * gap) / 4, 0);
+        ImGui::BeginDisabled(!r.hasSong);
+        if (ImGui::Button("Skip", b)) DjRadioRequest(djb::Op::RadioSkip, r.key);
+        ImGui::EndDisabled();
+        HoverTip("Next song of this playlist.");
+        ImGui::SameLine();
+        if (ImGui::Button(r.shuffle ? "Shuffle: on" : "Shuffle: off", b)) DjRadioRequest(djb::Op::RadioShuffle, r.key);
+        HoverTip("On: a random other song of the playlist after each song. Off: the playlist in order, then from the top.");
+        ImGui::SameLine();
+        if (editing ? AccentButton("Done", b) : ImGui::Button("Add songs", b)) g_djRadioEdit = editing ? std::string() : r.key;
+        HoverTip(editing ? "Stop adding songs to this playlist."
+                         : "The + buttons in the Songs list add to this playlist (instead of the queue) until you press Done.");
+        ImGui::SameLine();
+        ImGui::BeginDisabled(r.playlist.empty());
+        if (ImGui::Button("Clear", b)) DjRadioRequest(djb::Op::RadioClear, r.key);
+        ImGui::EndDisabled();
+        HoverTip("Empty the playlist (switches the radio off).");
+        // playlist
+        if (!r.playlist.empty()) {
+            const float rowH = U(30) + U(2);
+            const float listH = std::min(static_cast<float>(r.playlist.size()), 5.0f) * rowH;
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(2), U(2)));
+            ImGui::BeginChild("##pl", ImVec2(0, listH), ImGuiChildFlags_None);
+            for (size_t i = 0; i < r.playlist.size(); ++i) {
+                const djb::RadioEntry& e = r.playlist[i];
+                const int idx = static_cast<int>(i);
+                ImGui::PushID(idx);
+                const float rowY = ImGui::GetCursorPosY();
+                const bool current = r.hasSong && idx == r.index;
+                if (DjRow("##row", std::format("{}. {}", i + 1, e.name), e.seconds > 0 ? Clock(e.seconds) : std::string(), current,
+                          e.missing, 3 * (bs + U(2)) + U(2)) &&
+                    !e.missing)
+                    DjRadioRequest(djb::Op::RadioPlayAt, r.key, idx);
+                HoverTip(e.missing ? e.file + "\nNot in the music folder (or not playable): skipped." : e.file + "\nClick to play it now.");
+                ImGui::SameLine(0, U(2));
+                ImGui::SetCursorPosY(rowY + (U(30) - bs) * 0.5f);
+                ImGui::BeginDisabled(i == 0);
+                if (DjIconButton("##up", bs, "Move up", [](ImVec2 c, ImU32 col) { DrawArrow(ImGui::GetWindowDrawList(), c, col, true); }))
+                    DjRadioRequest(djb::Op::RadioUp, r.key, idx);
+                ImGui::EndDisabled();
+                ImGui::SameLine(0, U(2));
+                ImGui::BeginDisabled(i + 1 == r.playlist.size());
+                if (DjIconButton("##down", bs, "Move down", [](ImVec2 c, ImU32 col) { DrawArrow(ImGui::GetWindowDrawList(), c, col, false); }))
+                    DjRadioRequest(djb::Op::RadioDown, r.key, idx);
+                ImGui::EndDisabled();
+                ImGui::SameLine(0, U(2));
+                if (DjIconButton("##rm", bs, "Remove from the playlist", [](ImVec2 c, ImU32 col) { DrawCross(ImGui::GetWindowDrawList(), c, col); }))
+                    DjRadioRequest(djb::Op::RadioRemove, r.key, idx);
+                ImGui::SetCursorPosY(rowY + U(30));
+                ImGui::Dummy(ImVec2(0, 0));  // see DjSongs
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor();
+        }
+        ImGui::PopID();
+    }
+    EndCard();
+}
+
 void DjStatus(const Host& h) {
     const djb::Status st = djb::GetStatus();
     if (st.text.empty()) return;
@@ -3731,6 +3883,8 @@ void DrawSlimeDjPage(const Host& h, const ModuleView& mv) {
     ImGui::Dummy(ImVec2(0, gapY));
     DjQueue(*snap, w, U(150));
     ImGui::EndGroup();
+    ImGui::Dummy(ImVec2(0, gapY));
+    DjRadios(*snap, 2 * w + U(kGap));
     DjStatus(h);
 }
 
