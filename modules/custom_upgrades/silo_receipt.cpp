@@ -1163,7 +1163,7 @@ void SiloReceipt::Impl::Teardown() {
 
 // ---------------------------------------------------------------- api --
 
-bool SiloReceipt::Open(const Receipt& r) {
+bool SiloReceipt::Open(const Receipt& r, const std::string& note) {
     if (!ready_ || !impl_ || impl_->open || !main_thread::IsMainThread()) return false;
     Impl& p = *impl_;
     auto failOpen = [&](const char* what) {
@@ -1211,7 +1211,7 @@ bool SiloReceipt::Open(const Receipt& r) {
     }
     p.canSell = r.marketAvailable && !r.marketClosed && !r.lines.empty();
     p.focus = p.canSell ? 1 : 0;
-    if (!p.Build(r, "")) return failOpen("panel failed");
+    if (!p.Build(r, note)) return failOpen("panel failed");
     // The game's own lock: pauses time, swaps to the UI action map, frees the cursor.
     if (!p.AddComponent(go, p.lockerClass, "AddComponent(UIInputLocker)")) return failOpen("UIInputLocker failed");
     if (p.Faulted()) return failOpen("module faulted");

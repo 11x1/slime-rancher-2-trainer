@@ -71,7 +71,7 @@ In-game test: the walls showed on the Labyrinth tab only while the player was in
   - Now only **fog-shader art** (material shader name with `FogOfWar`, enabled) of a fogged area is tested, as the static fog already was; a fogged area without such art is not a cloud (the old "no art at all: its own rect" fallback is gone too: it would have caught `zone_link_labyrinth*`). The click line lists them: `…, N fogged with no fog-shader art, not clouds (zone_link_strandmain, …)`. The rect fallback stays only for fog-shader images whose SDF cannot be read back.
 - Never while the player is knocked out or a scene load runs (`ground_teleport::PlayerUnavailable`): refused without the cue.
 - Ground and teleport: the shared ground teleport (next section), started at once; the map closes right after (`UIDisplayManager.Instance.CloseDisplayByObjectInHierarchy(MapUI)`, what `DroneUIDisplay.CloseThisDisplay` does). The result (landed, or no safe spot: the player stays where he is) comes as a pop-up, at once for a loaded spot or after up to ~6 s for a far one.
-- Refused clicks play the map's own `_failedPlaceWaypointCue` (`UIAudioCueHandle.PlayAudioCue`, NO_WARNING), log `teleport refused: <reason>` and show a pop-up. The cue is for targets that cannot be reached: outside the page / every zone, not discovered, no route. "No ground" is known only after the map closed: pop-up and log line, no cue.
+- Refused clicks play the map's own `_failedPlaceWaypointCue` (`UIAudioCueHandle.PlayAudioCue`, NO_WARNING), log `teleport refused: <reason>` and show the reason in the key bar hint (map open) or a pop-up (map closed). The cue is for targets that cannot be reached: outside the page / every zone, not discovered, no route. "No ground" is known only after the map closed: pop-up and log line, no cue.
 - A click over the slime sea, lava or another kill volume is refused ("no safe spot there"); in the Grey Labyrinth the floor under a roof is taken (next section).
 - The map gives only (x, z): there is no height to prefer the surface nearest to the clicked point, so the floor pick decides from the geometry and the collider names alone.
 
@@ -124,7 +124,17 @@ Logs (`ground_teleport[<module>]: ...`): `target (x, z) is N m away: L of P regi
 
 ### Pop-ups
 
-Every teleport (same zone, cross zone, arrival) and every refusal also shows in the HUD's drone notification list (the "plorts sold" / cloud upload pop-ups), with the teleporter icon (the icon of the home teleporter gadget definition, `GadgetDefinition.Type == TELEPORTER`) and a short text: "Teleported to <zone>", "Teleport refused: <reason>". Helper: `custom_upgrades/sale_notify.h` `SaleNotices::QueueText` (see that header: own `NotificationEntry` in the list's pending queue, text through `core/text_override` on a cloned LocalizedString). While the map (a menu) is open the HUD suppresses notices; they appear when it closes. The zone name is `ZoneDefinition._localizedName.GetLocalizedString()`.
+Every teleport (same zone, cross zone, arrival) and every refusal also shows in the HUD's drone notification list (the "plorts sold" / cloud upload pop-ups), with the teleporter icon (the icon of the home teleporter gadget definition, `GadgetDefinition.Type == TELEPORTER`) and a short text: "Teleported to <zone>", "Teleport refused: <reason>". Helper: `custom_upgrades/sale_notify.h` `SaleNotices::QueueText` (see that header: own `NotificationEntry` in the list's pending queue, text through `core/text_override` on a cloned LocalizedString). While the map (a menu) is open the HUD suppresses notices; they appear when it closes.
+
+**Refusals on the open map** (round 10: "no error message when reveal map off"). The log of that test: the first
+fog refusal was handed to an *inactive* HUD notification list (`drone provider found on another HUD notification
+list (inactive, list #2 ...)`) and never showed; the following ones waited and only appeared in one page after a
+later teleport closed the map. Now a refusal while the map is open is shown in the map's own key bar: the
+"[RMB] Teleport" hint's label reads "Teleport refused: <reason>" (e.g. "that spot is not on your map yet") for
+3 s, then "Teleport" again (log: `teleport refused: ... (shown in the map's key bar)`); no HUD pop-up for it (it
+would only come later, out of context). Without the hint (legend not found) or with the map closed ("no safe spot
+there"), the HUD pop-up as before. `SaleNotices` text notices now go to an active list only (they wait while the
+HUD is hidden instead of being handed to a hidden list). The zone name is `ZoneDefinition._localizedName.GetLocalizedString()`.
 
 ### "[RMB] Teleport" in the key bar
 

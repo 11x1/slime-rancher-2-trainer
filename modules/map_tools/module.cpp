@@ -85,6 +85,7 @@ inline bool Has(size_t off) { return off != kNoOff; }
 constexpr float kIconRefresh = 2.0f;   // full map icons re-collected this often while the map is open
 constexpr int kClosedTicks = 3;        // no MapUI.LateUpdate for this many frames = map closed
 constexpr float kHintDiagDelay = 3.0f; // no hint this long after the map opened: log why (once per session)
+constexpr float kHintMsgSeconds = 3.0f; // a refusal stays in the key bar hint this long
 constexpr float kTravelTimeout = 90.0f;  // zone change: give up if the player is not in the new zone by then
 constexpr float kTravelPoll = 0.5f;      // zone change: arrival checked this often
 constexpr float kWallPoll = 3.0f;        // Nullifier wall registry read this often (any time)
@@ -647,6 +648,7 @@ private:
     float hintPlaceAt_ = 0;
     Ref mouseGlyph_;           // the game's right mouse button sprite (or the left one, drawn mirrored)
     bool mouseGlyphMirror_ = false, mouseGlyphSearched_ = false;
+    float hintMsgUntil_ = 0;   // > 0: the hint shows a refusal ("Teleport refused: ...") until this time_
 
     // teleport
     Ref player_, net_, zoneMap_, sceneLoader_;
@@ -1265,6 +1267,21 @@ private:
         hint_.Destroy();
         hintLegend_.Reset(nullptr);
         hintPlaced_ = false;
+        hintMsgUntil_ = 0;
+    }
+
+    void HintLook(const std::string& label) {
+        hint_.SetLook("RMB", label, mouseGlyph_.Alive() ? mouseGlyph_.get() : nullptr, mouseGlyphMirror_);
+    }
+
+    // Round 10 ("no error message when reveal map off"): a refusal on the open map shows in the map's own key
+    // bar, in place of the "[RMB] Teleport" label, for kHintMsgSeconds. The HUD's notification list is hidden
+    // while the map is open, so its pop-up only came after the map closed (or was lost on the hidden list).
+    bool ShowOnMap(const std::string& text) {
+        if (!open_ || !hint_.Alive() || !hint_.HasLabel()) return false;
+        HintLook(text);
+        hintMsgUntil_ = time_ + kHintMsgSeconds;
+        return true;
     }
 
     // The key bar lays its hints out left to right in sibling order (the clone, last, showed on the far right).
@@ -1337,6 +1354,10 @@ private:
             return;
         }
         if (hint_.Alive()) {
+            if (hintMsgUntil_ > 0 && time_ >= hintMsgUntil_) {
+                hintMsgUntil_ = 0;
+                HintLook("Teleport");
+            }
             hint_.Tick();
             if (!hintPlaced_ && time_ >= hintPlaceAt_) {  // the Place Waypoint hint may show up later
                 hintPlaceAt_ = time_ + 0.5f;
@@ -1381,7 +1402,8 @@ private:
         hintPlaced_ = false;
         hintPlaceAt_ = 0;
         FindMouseGlyph();
-        hint_.SetLook("RMB", "Teleport", mouseGlyph_.Alive() ? mouseGlyph_.get() : nullptr, mouseGlyphMirror_);
+        HintLook("Teleport");
+        hintMsgUntil_ = 0;
         if (!hintLogged_) {
             hintLogged_ = true;
             SR2_INFO("map_tools: [RMB] Teleport hint cloned from the map legend's '{}' ({} key icon(s), label {}, icon {}; {})",
@@ -1455,9 +1477,13 @@ private:
     }
 
     // `why` for the log, `shortWhy` for the pop-up. The fail cue is for targets that cannot be reached at all.
+    // On the open map the message goes into the key bar (ShowOnMap); the HUD pop-up only when that is not
+    // possible (no hint) or the map is closed.
     void Refuse(const std::string& why, const std::string& shortWhy = {}, bool cue = true) {
-        SR2_INFO("map_tools: teleport refused: {}", why);
-        Notice("Teleport refused: " + (shortWhy.empty() ? why : shortWhy));
+        const std::string text = "Teleport refused: " + (shortWhy.empty() ? why : shortWhy);
+        const bool onMap = ShowOnMap(text);
+        SR2_INFO("map_tools: teleport refused: {}{}", why, onMap ? " (shown in the map's key bar)" : "");
+        if (!onMap) Notice(text);
         if (cue) PlayFailCue();
     }
 

@@ -176,17 +176,16 @@ const Part kHay[] = {
 const Part kNests[] = {
     {Src::kPlot, kPlotCoop, nullptr, "Deco/nestPlain01", {}, kId, S(1.0f), false, 5},
     {Src::kPlot, kPlotCoop, nullptr, "Deco/nestPlain01", {}, kId, S(1.0f), false, 6},
-    // The plush hen lies on its side in the second nest. Round 7 sank it upright to -0.06 ("hen one nest eggs
-    // are unnaturally lined up"); round 8: "what stuffed chicken" / "the 3 eggs in hen upgrade in one nest is
-    // singular asset, should be sideways probably". The mesh ("stuffedChicken", identifiabletypes bundle, y up,
-    // origin at the body centre, half extents 0.49 x 0.48 x 0.54; the model's own local transform is identity)
-    // is a round body with a head bulb at the top front and two wing bulbs: sunk upright, only those three
-    // bulbs rose over the straw and read as three eggs in a row. Now it is rolled 90 deg about its forward
-    // axis (z) and smaller (1.0 instead of the toy's 1.33): lying sideways its centre is 0.30 above the nest
-    // root (floor ~0.09, rim ~0.40), so the body shows over the rim and its lower third hides in the straw.
-    // The nest's slot gives it a random yaw per plot.
-    {Src::kToy, 0, "toyStuffedChicken", "model_stuffedChicken", {0.0f, 0.30f, 0.0f},
-     {0.0f, 0.0f, 0.70710678f, 0.70710678f}, S(1.0f), false, 6},
+    // The plush hen sits upright on the floor in the coop's (-x, -z) corner (round 10: "put it in a corner
+    // upright, a bit angled yaw"). Rounds 7-9 put it into the second nest (sunk upright its head and wing bulbs
+    // read as three eggs, lying sideways it looked dropped). The mesh ("stuffedChicken", identifiabletypes
+    // bundle, y up, origin at the body centre, half extents 0.49 x 0.48 x 0.54, front +z) at 1.1 size stands
+    // with its centre 0.53 above the floor. The corner is outside every layout slot (CoopLayout keeps
+    // |x| > 2.5 and |z| > 2.5 free) and inside the fence; the other corners hold the elder collector (+x, +z),
+    // the Hen Collector (+x, -z) and the Vitamizer (-x, +z); the plot menu terminal stands outside the fence at
+    // (-x, -z). Yaw 65 deg: facing the coop's middle (45 deg from this corner) turned 20 deg aside.
+    {Src::kToy, 0, "toyStuffedChicken", "model_stuffedChicken", {-3.45f, 0.53f, -3.45f},
+     YawQ(0.53729961f, 0.84339145f), S(1.1f), false},
     {Src::kGadget, 0, "decorFlowerPillowSmall", "mesh", {}, kId, S(0.7f), false, 7},
     {Src::kPlot, kPlotCoop, nullptr, "Deco/decoFieldsGrass02_Green", {}, kId, S(0.6f), false, 8},
     {Src::kPlot, kPlotCoop, nullptr, "Deco/decoFieldsGrass01 _Green", {}, kId, S(0.65f), false, 9},
@@ -717,7 +716,7 @@ void PlotProps::Impl::Create(Il2CppObject* plot, const KindDef& def, Il2CppObjec
             if (unity::IsAlive(clone)) sr2::modules::slime_dj::RegisterEmitter(clone, sr2::modules::slime_dj::EmitterKind::kSpeaker);
     std::string where;
     if (def.kind == kPropCoopNests)
-        where = std::format("; nests at ({:.1f}, {:.1f}) and ({:.1f}, {:.1f}), the plush hen lying in the second",
+        where = std::format("; nests at ({:.1f}, {:.1f}) and ({:.1f}, {:.1f}), the plush hen upright in the (-x, -z) corner",
                             layout[kNestSlotA].pos.x, layout[kNestSlotA].pos.z, layout[kNestSlotB].pos.x,
                             layout[kNestSlotB].pos.z);
     SR2_INFO("[{}] {} props built on plot '{}' ({} of {} piece(s){}{}){}", module, def.name, id, built, def.count,

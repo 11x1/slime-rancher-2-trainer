@@ -648,6 +648,25 @@ replaced (old type T, stored type T): dropped owned [...], values [...]`.
   Every card without a working Sell button now logs why, once per reason: `no Sell button: card 'Music Box II':
   no tier to sell (...)`, `no Sell button: Music Box: Sell 'Music Box II' first ...`, `... could not be placed
   next to Purchase`.
+- **Sell button, round 9 FAIL** ("sold music box II, still doesnt show a sell button, even when reopening upgrade
+  menu"). The log of that test (01:01, a corral bought in the same session: Music Box bought, Music Box II
+  bought, Music Box II sold) has no `no Sell button` line at all after the sale, while the same steps on an
+  older corral at 00:42 sold Music Box I right after Music Box II. So that bind left `AfterMoreBind` through an
+  exit that was silent: no info label, no plot, details matched to no menu item, a vanilla card in its Purchase
+  variant (ChainSellTarget is for tier cards only), or prefab / parent / Instantiate missing. Root cause not
+  proven offline. Round 10: each of those exits now logs (`no Sell button: a Purchase card on plot '...': its
+  details match no upgrade item of the menu`, `... has no info label`, ...), every Sell button shown logs once
+  per card / target (`sell offer: card 'sr2mods_corral_music_2' (Purchase) sells Music Box on plot '...' for
+  +175`), and a vanilla card that shows Purchase although its upgrade is owned (availability bound for another
+  plot) now offers Sell for it (`... is owned but shows Purchase - Sell offered for it`).
+- **Expansion purchase popup order** (round 10: "not on map expansions"): see sell_upgrades' header. Ranch
+  expansions go through `AccessDoorUI.PromptForExpansion` -> a `ConfirmPopup` whose prompts are sorted by
+  `<>c.<UpdateShowData>b__27_0` (`b.PromptType - a.PromptType`, SUBMIT first) into its InputLegend. Detours:
+  PromptForExpansion (remembers the item's `_title`), ConfirmPopup.UpdateShowData (flags the call when the
+  setup's Title is that LocalizedString), the comparison (reversed while flagged). Log once: `expansion purchase
+  popup: prompts reordered (Cancel left, Purchase right)`.
+- **Sprinkler II / III icon** (round 10: "use the default sprinkler upgrade icon"): no mod icon any more, the
+  vanilla Sprinkler card's icon (`iconFrom`); `growth_1` / `growth_2` stay embedded, unused.
 - **Coop Air Net icon**: the corral's own Air Net upgrade icon (`iconFrom` = Air Net, found in the corral
   menu's items by `GlobalUpgradeItem`), no mod icon any more (user: "use the air net icon from corrals").
 
@@ -660,8 +679,15 @@ showing the checkmark and no Purchase button at once, the Coop Air Net icon.
 
 Pressing the silo's Sell-All button no longer sells at once: it opens a receipt (`silo_receipt.cpp`).
 One row per sellable plort type (icon, name, "x count", unit price, line total + coin), the grand
-total, Cancel and Sell. Market closed / unreachable or no plorts: the old text above the button, no
-dialog.
+total, Cancel and Sell. Market closed / unreachable or no plorts: the dialog opens all the same (round
+10: "when no plorts to sell still open the dialog"), empty, with a note ("There are no plorts in this
+silo.", "The Plort Market is closed ...") and Sell disabled (`SiloReceipt::Open(quote, note)`).
+
+- **No text over the button** (round 10: "remove the ingame overlay on the button please (the rendered one,
+  the non-game one)"): the silo button no longer draws the ImGui world text (`SiloButtons::Message` via
+  `ui::hud`) for any outcome (no button upgrade, nothing to sell, sold, nothing sold). The sale shows through
+  the HUD notices and the currency popup; the outcomes are in the log. The Hen Collector's Activate button
+  keeps its short text ("Collecting N ...").
 
 - **Fits the screen** (feedback round 4: it ran off-screen on a smaller resolution). The panel height
   is capped at the canvas height (Screen size through the CanvasScaler formula, ScaleWithScreenSize
@@ -890,7 +916,7 @@ coop_world's scan would destroy), stripped of colliders, joints, rigidbodies and
 | tier | prop | source |
 |---|---|---|
 | Faster Hens I or II (u5) | two small hay bales (scale 0.5) and three grass tufts, scattered | decoration `decorHayBales`: `hayBale_2`, `hayBale_0 (1)`; coop prefab `Deco/decoFieldsGrass01 _Green`, `Deco/decoFieldsGrass02_Green` |
-| Faster Hens II (u6) | two nests (a stuffed chicken lying on its side in the second), a flower pillow and two more grass tufts, scattered | coop prefab `Deco/nestPlain01` (the vanilla nest), toy `toyStuffedChicken`: `model_stuffedChicken`, decoration `decorFlowerPillowSmall`: `mesh`, coop grass as above |
+| Faster Hens II (u6) | two nests, a stuffed chicken upright in the (-x, -z) corner, a flower pillow and two more grass tufts, scattered | coop prefab `Deco/nestPlain01` (the vanilla nest), toy `toyStuffedChicken`: `model_stuffedChicken`, decoration `decorFlowerPillowSmall`: `mesh`, coop grass as above |
 | Sprinkler II or III (u9; were Fast Growth I / II; since round 9 tiers of the vanilla Sprinkler card) | a third sprinkler head in the middle of the +x side, spraying inwards | garden prefab `Sprinkler/SprinklerBase` (vanilla heads are on the -z / +z sides) |
 | Sprinkler III | a fourth head in the middle of the -x side, turned 180 degrees | same |
 | Music Box II | a second speaker on the (-x, -z) corner post (above the plot menu terminal), leaning inwards | corral prefab `Music Box/techCorralMusicBox/MusicBox/Music` (the vanilla speaker sits on the (-x, +z) post) |
@@ -926,6 +952,13 @@ first, seen from the middle), up to 256 draws (no fallback over 2000 simulated i
 nest positions: `CoopNests props built ...; nests at (x, z) and (x, z), the plush hen lying in the second`. The
 layout of existing coops changes once. If the user still sees nests in a row, ask which objects (the deluxe coop has
 vanilla parts of its own).
+
+Round 10 feedback, coop: "put it in a corner upright, a bit angled yaw". The plush hen is no longer in a nest: it
+sits upright on the floor at plot-local (-3.45, 0.53, -3.45), size 1.1 (centre 0.48 x 1.1 above the floor), yaw
+65 degrees (facing the middle, 45 from that corner, turned 20 aside; front assumed +z). That corner square is never
+used by the layout slots; the other inner corners hold the elder collector (+x, +z), the Hen Collector (+x, -z)
+and the Vitamizer (-x, +z), the plot menu terminal is outside the fence. Build line: `... the plush hen upright in
+the (-x, -z) corner`. If it faces the wall, the model's front is -z: yaw 245 instead.
 
 Round 7 feedback, incinerator: "embers should come from ash aswell". Three more clones of the vanilla
 inactive `FireTest/Embers` emitter (turned -90 degrees about x, so it emits upwards), smaller, at r ~3.3
