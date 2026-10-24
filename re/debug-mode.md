@@ -87,6 +87,65 @@ Nothing like a Konami code, cheat console or hidden command was found: input han
 
 - **Secret styles** (`SlimeAppearanceDirector.MaybeDiscoverSecretStyle`, `SecretStyleDiscoveriesV01` in the save): the shipped "extremely rare subspecies" cosmetic feature from the Secret Style Pack, not a hidden easter egg.
 - **Gigi's secret conversation** (`GigiSecret`, `GigiSecret_Blocks/_Creative/_Goodbye/_Pretend`, `GigiSecretOptions*`, `Gigi Hidden Settings`, `LabSecretgate_A`, `LabSecretgate_Geyser`, `LabyrinthSecretEntryDoor_Switch`): most likely the hidden Labyrinth spot behind the secret gate (inferred from the asset names), where Gigi says "It seems you're awfully good at finding secrets. Took me forever to find this spot." with lines such as "Speaking of secrets, why did you pretend to be an AI?" (the string table has no speaker; it reads like a dialogue option). A real in-game secret, not unused content.
-- `musicShopSecret.ogg` / `musicShopSecret.asset`: a "secret" shop music track (music player definition); not traced to its trigger.
-- Achievement "Secret Behind the Waterfall".
 - Leftover text: the Early Access boot notice ("Slime Rancher 2 is currently in a pre-release state ..."), the "BrokenRobot" debug-only Caretaker conversation, `GigiEndTemp` ("Gigi/EndTemp"), `GigiTestCall*` conversations, `allzones ea placeholder.png`.
+
+### Ranked list (second pass)
+
+Sources: IDA on `GameAssembly.dll`, the shop UI scene bundle (`uiscenes_..._menulayer_shop.unity`), `scriptableobjectlookupdata_assets_all`, `sfx_assets_`, `music_assets_assets_audio_music`, `gamecore_assets_` and the English string tables (all read with UnityPy).
+
+**1. Midnight shop song (`musicShopSecret`). Confirmed.** This is a ProntoMart shop UI track, not a music player track. The chain:
+
+- `ShopUIBase._shopMusicList` (+0xF8) in the shop scene points to the `ShopMusicListDefinition` asset (scriptableobjectlookupdata).
+- The `ShopMusicSecret` entry in that list is a `MusicDefinition` (priority 900 = HOUSE, loops) whose `_cue` is the SECTR cue `musicShopSecret` (sfx bundle, PathID 6823199633913212233). That cue plays `musicShopSecret.ogg` (186.4 s, the same length as `musicShopNorm`).
+- `ShopUIBase.Update` waits until the music start time (`_musicDelaySeconds` = 0), then calls `ShopMusicListDefinition.PickSong(ShopUIBase.GetWorldTime(), eventDirector)`.
+- `ShopAudioListDefinitionBase<T>.PickAudio` takes `(int)worldTime % 86400` (game time of day in seconds) and keeps the entries whose `Condition` is true and whose `ScheduledTimes` slot contains that time (start inclusive, end exclusive). It then picks one at random by `OccurrenceWeight`. Only when no scheduled entry matches does it fall back to unscheduled entries.
+
+The song is picked once per shop opening. The list is:
+
+| entry (cue) | game time slots | weight |
+|---|---|---|
+| ShopMusicNorm | 06:00-18:00 | 0.6 |
+| ShopMusicHalf | 06:00-10:00 | 0.4 |
+| ShopMusicFast | 12:00-18:00 | 0.4 |
+| ShopMusicSlow | 18:00-24:00, 00:05-02:00, 04:00-06:00 | 1.0 |
+| ShopMusicRev | 02:00-03:59 (ends at 14340 s, not 14400) | 1.0 |
+| **ShopMusicSecret** | **00:00-00:05** (0-299 s) | 1.0 |
+| **ShopMusicChip** | 00:05-24:00 | **0.025** |
+
+All conditions are empty.
+
+- **How to trigger the secret song:** open the ProntoMart shop UI (home page, Coo-Coo Corner / Daily Deals or Polestar Provisions) while the in-game clock reads 00:00 to 00:04. It is the only entry scheduled then, so the chance is 100%. With the usual 24-minute day (`TimeDirector.SecsPerGameDay`, value not read), that window is about 5 real seconds.
+- The Night Market style (`ShopNightMarketStyle.OverrideMusicTracks` = `ShopNightMarketMusicListDefinition`, one unscheduled `ShopMusicNightMarket` entry) overrides the shop music on that page. The Caretaker shop has its own empty list.
+
+**2. Rare chiptune shop song (`musicShopChip`). Confirmed.** It is weighted 0.025 against the normal songs, so it is a rare variant:
+
+- about 2.4% per opening at most times (0.025 / 1.025);
+- 4% from 10:00 to 12:00 (only Norm 0.6 + Chip are active);
+- **100% from 03:59:00 to 03:59:59**, because `ShopMusicRev` ends at 14340 s while `ShopMusicSlow` starts at 14400 s. That gap looks like a deliberate one-minute window.
+
+`ShopMusicRev` (02:00-04:00, 211 s) is probably a reversed version of the theme for the small hours (the name suggests it; the audio was not checked). It is not rare.
+
+**3. "You Can Pet the Cat" (achievement `YouCanPetIt` = 26, "Pet the ProntoMart cat"). Confirmed.** The shop NPC (`ShopNpcBehaviour`) is a pixel cat on the shop UI. Clicking it (`TryClickOn` → `CanInteractWith` → `InteractWith`) does the following:
+
+- plays `_clickedCue` and sets the animator trigger `CLICKED`;
+- fires `_onCatInteracted`;
+- calls `MetaGameDirector.Grant(YouCanPetIt)`.
+
+Petting is refused while the cat sleeps (`IS_SLEEPING`), while `BLOCK_INTERACT` is set, during the `_secondsBetweenClicks` cooldown, or once `_annoyance` ≥ 1. A refused click, and the cat being bounced back and forth (direction reversals in `Update`), add `_bounceAnnoyanceGainRate` to an annoyance value (0-3, animator float `ANNOYANCE_LEVEL`). Spam-clicking therefore makes the cat visibly annoyed. Separately, `_onCatFlipped(bool)` is a flip event.
+
+The cat's colour palette is chosen once per game session by `ShopDirector.GetOrCalcNpcColorPaletteIndex`: (ms + 1000*(s + 60*min) of `DateTime.Now`, plus `abs(deviceUniqueIdentifier.GetHashCode())`) mod the palette count. The cat is a different colour each launch. This is random, not tied to the date.
+
+**4. "Secret Behind the Waterfall" (achievement 14, "Discover Powderfall Bluffs' entrance"). Confirmed; a hidden-area achievement, not a joke.** `MetaGameDirector.CheckForBehindTheWaterfall` grants it once all three puzzle slots in `AchievementGameplayData._puzzleSlotIDsForBehindTheWaterfall` are filled: `puz0260113737`, `puz1565498717`, `puz0406679521`. These are the plort locks of the Powderfall Bluffs gate (the location in Rainbow Fields is inferred from the name, not traced). `AchievementGameplayData` also links query achievement 14. Trigger: fill the three plort slots at the gate behind the waterfall.
+
+**5. Unused achievements (cut content, not reachable).** The string table still names `FriendFromTheFuture` ("Your Future Friend [UNUSED]": interact with every GG Research Drone and every Gigi projector), `Automation` ("Droning On"), `ShadowSureShot`, `SlimeChef`, `TrashPanda` (feed 20 items to a full Ringtail), and `TarrTarrRange` (disperse a tarr with water from more than 80 m). None of them is in the 1.3.0 `Achievement` enum (0-26), so they cannot be earned.
+
+**6. Twinkle slime / chimes (Pedia text only; SR1 holdover).** `Pedia_en` has `echo_note_gordo_slime` ("Twinkle Slime ... related to the passing of time, or a change in seasons") and `echo_notes` ("Chimes"). No code (`EchoNote*` / `Twinkle*` classes) and no addressable asset exists in 1.3.0, so nothing spawns it.
+
+**Searched and not found (negative results):**
+
+- **Real-date events.** In game code, only the shop uses `DateTime.Now` month/day (`ShopDayOfYear`, `ShopDate`, `ShopRealDateYearlyScheduleDefinition`, `ShopRealDateScheduleDefinition`). The only schedule asset in the catalog is `NightMarket_DailySchedule`, with no yearly or holiday schedule. The other `DateTime.Now` callers are analytics, saves, screenshots and the cat palette. There is no April Fools, holiday or birthday code.
+- **Name-based triggers.** Every Assembly-CSharp `String.Equals` / `op_Equality` / `Contains` / `StartsWith` call next to a string literal was checked. They only compare internal tokens ("Fireball", "Idle", "FlapWings", ...), with no save or rancher name comparisons.
+- **Konami or cheat codes.** None (see above).
+- **"Spooky" items.** `EndcapSpooky*` cues (ghosties that hide and unhide) and the "tall ashwood ... perfect for a spooky holiday" decoration are ordinary sanctuary or shop cosmetics, not date-gated.
+- **Developer cameos.** Nothing hidden: the names are only in the About/credits text (`m.about_note`).
+- The Options help for "Event Music" says the music may change for tarr, weather "or other, secret things!" (`MusicPriority` includes `SLIME_HOOP` = 101). The shop songs use priority 900, so they are probably not affected by that toggle (not verified).
