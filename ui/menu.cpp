@@ -3040,12 +3040,21 @@ void DrawSidebar(const Host& h, const std::vector<Category>& cats, const ModuleV
             ImGui::SetClipboardText(*full ? full : ::sr2::core::build_info::TimeIso());
             copiedUntil = h.nowMs + 1500;
         }
-        if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        const bool hovered = ImGui::IsItemHovered();
+        if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        // After "copied!" the normal text follows at once while the stamp stays
+        // hovered: HoverTip's hover delay restarts after the click, which closed the
+        // tooltip for a moment and reopened it. `noDelay` lasts until the mouse leaves.
+        static bool noDelay = false;
+        const char* tip = *::sr2::core::build_info::Commit() ? "Click to copy the commit" : "Click to copy the build time";
         if (copiedUntil != 0 && h.nowMs < copiedUntil) {
             Tooltip("copied!");
+            noDelay = hovered;
         } else {
             copiedUntil = 0;
-            HoverTip(*::sr2::core::build_info::Commit() ? "Click to copy the commit" : "Click to copy the build time");
+            if (!hovered) noDelay = false;
+            if (noDelay) Tooltip(tip);
+            else HoverTip(tip);
         }
     }
     ImGui::EndChild();

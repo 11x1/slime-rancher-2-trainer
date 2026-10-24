@@ -130,6 +130,9 @@ struct PlotMenuSlider::Impl {
     const MethodInfo* kbCurrent = nullptr, *kbLeft = nullptr, *kbRight = nullptr;
     const MethodInfo* padRStick = nullptr, *kbShift = nullptr;  // SliderInput::kSecondary
     const MethodInfo* mouseCurrent = nullptr, *mouseLeft = nullptr;
+    // spec.selectToStep: Selectable.IsPressed() / get_isPointerInside (the mouse on the slider), a press
+    // anywhere (ButtonControl.get_wasPressedThisFrame)
+    const MethodInfo* selIsPressed = nullptr, *selPointerInside = nullptr, *btnPressedThisFrame = nullptr;
     bool inputOk = false, selectionOk = false;
 
     using WBarrierFn = void (*)(Il2CppObject*, void**, void*);
@@ -164,6 +167,12 @@ struct PlotMenuSlider::Impl {
     int lastNavDir = 0;
     uint64_t lastNavMs = 0, lastPollStepMs = 0;
     bool loggedNav = false, loggedBlocked = false;
+    // spec.selectToStep
+    bool focused = false;         // selected: keys step it
+    bool focusFromMouse = false;  // selected by a mouse press: released when the mouse leaves it
+    bool focusGained = false;     // TakeFocusGained
+    int pendingClick = 0;         // frames until a mouse press elsewhere is judged (EventSystem order)
+    bool loggedFocus = false;
     // EventSystem selection to hand back after a mouse drag
     Il2CppObject* prevSel = nullptr;
     Il2CppGCHandle prevSelHandle = nullptr;
@@ -278,8 +287,15 @@ struct PlotMenuSlider::Impl {
         Il2CppObject* kb = Call(kbCurrent, nullptr, {}, "Keyboard.get_current", &ok);
         return ok && kb && Pressed(kbShift, kb);
     }
-    // This press / event is for this slider's keys (SliderInput): Shift held <=> kSecondary.
-    bool OwnInput() { return (spec.input == SliderInput::kSecondary) == ShiftHeld(); }
+    // This press / event is for this slider's keys (SliderInput): Shift held <=> kSecondary. A selected
+    // slider (selectToStep) takes the keys whatever Shift says.
+    bool OwnInput() {
+        if (spec.selectToStep) return focused;
+        return (spec.input == SliderInput::kSecondary) == ShiftHeld();
+    }
+    bool PrimaryKeys() const { return spec.input == SliderInput::kPrimary || spec.selectToStep; }
+    void FocusTick();
+    void SetFocus(bool on, bool fromMouse, const char* why);
     void PlaceInSlot(Il2CppObject* go, Il2CppObject* craftTr, bool layout);
     bool AddRaycaster(Il2CppObject* go, Il2CppObject* parentTr);
     bool InputBlocked();
@@ -293,7 +309,10 @@ struct PlotMenuSlider::Impl {
     Il2CppObject* SliderStyle();
     const char* BuildBody(Il2CppObject* root, Il2CppObject* rootRt, int layer, Il2CppObject* labelSrc, float fontSize,
                           float fontScale);
-    std::string LabelText(int v) const { return spec.label ? spec.label(v) : std::to_string(v); }
+    std::string LabelText(int v) const {
+        std::string s = spec.label ? spec.label(v) : std::to_string(v);
+        return spec.selectToStep && focused ? "< " + s + " >" : s;  // selected: the arrows step it
+    }
     int Snap(int v) const {
         const int step = std::max(spec.step, 1);
         v = std::clamp(v, spec.min, spec.max);
@@ -333,6 +352,8 @@ struct PlotMenuSlider::Impl {
         ForgetSelection();
         heldDir = blockedDir = 0;
         navDriven = false;
+        focused = focusFromMouse = focusGained = false;
+        pendingClick = 0;
         spec = {};
     }
 };
@@ -505,6 +526,13 @@ bool PlotMenuSlider::Setup(Resolver& R, const char* module, std::string& why) {
         p->mouseLeft = mouse ? R.Method(mouse, "get_leftButton", 0, &err) : nullptr;
         Il2CppClass* button = R.Class(kInput, "UnityEngine.InputSystem.Controls", "ButtonControl", &err);
         p->btnPressed = button ? R.Method(button, "get_isPressed", 0, &err) : nullptr;
+        p->btnPressedThisFrame = button ? R.Method(button, "get_wasPressedThisFrame", 0, &err) : nullptr;
+        if (Il2CppClass* sel = R.Class(kUi, "UnityEngine.UI", "Selectable", &err)) {
+            p->selIsPressed = R.Method(sel, "IsPressed", 0, &err);              // protected
+            p->selPointerInside = R.Method(sel, "get_isPointerInside", 0, &err);  // private
+        }
+        if (!p->selIsPressed || !p->selPointerInside || !p->btnPressedThisFrame)
+            report += " select by mouse: NOT available (Submit selects);";
         p->selectionOk = p->esCurrent && p->esGetSelected && p->esSetSelected && p->mouseCurrent && p->mouseLeft &&
                          p->btnPressed;
         if (!p->selectionOk) report += " selection hand-back: NOT available;";
@@ -901,7 +929,7 @@ int PlotMenuSlider::Impl::InputDirection() {
     if (!inputOk) return 0;
     bool ok = false;
     int dir = 0;
-    const bool primary = spec.input == SliderInput::kPrimary;
+    const bool primary = PrimaryKeys();
     if (padCurrent) {
         Il2CppObject* pad = Call(padCurrent, nullptr, {}, "Gamepad.get_current", &ok);
         if (ok && pad && primary) {
@@ -940,6 +968,66 @@ bool PlotMenuSlider::Impl::InputBlocked() {
                                : "PopupPrompt '" + unity::GetName(unity::GameObjectOf(found)) + "' is active");
     }
     return true;
+}
+
+void PlotMenuSlider::Impl::SetFocus(bool on, bool fromMouse, const char* why) {
+    focusFromMouse = on && fromMouse;
+    if (focused == on) return;
+    focused = on;
+    heldDir = blockedDir = 0;  // a press held across the change starts fresh
+    navDriven = false;
+    SetLabel(value);
+    if (!loggedFocus) {
+        loggedFocus = true;
+        SR2_INFO("[{}] slider '{}': {} ({}) - the arrows step it only while selected", module, spec.name,
+                 on ? "selected" : "released", why ? why : "");
+    } else {
+        SR2_DEBUG("[{}] slider '{}': {} ({})", module, spec.name, on ? "selected" : "released", why ? why : "");
+    }
+}
+
+// spec.selectToStep, every frame while shown: a mouse press on the slider selects it; a slider selected
+// that way is released when the mouse leaves it (not while the button is held: a drag may leave the
+// bar); a press anywhere else releases it, judged two frames later (the EventSystem may process the
+// press after us, so the slider's own pressed flag is not set yet in the frame of the press).
+void PlotMenuSlider::Impl::FocusTick() {
+    if (!selIsPressed || !selPointerInside) return;
+    bool ok = false;
+    const bool pressed = Unbox<bool>(Call(selIsPressed, slider, {}, "Selectable.IsPressed", &ok)) && ok;
+    const bool inside = Unbox<bool>(Call(selPointerInside, slider, {}, "Selectable.get_isPointerInside", &ok)) && ok;
+    if (pressed) {
+        if (!focused) focusGained = true;
+        SetFocus(true, true, "mouse press");
+    } else if (focused && focusFromMouse && !inside) {
+        SetFocus(false, false, "mouse left the slider");
+    }
+    if (pendingClick > 0 && --pendingClick == 0 && focused && !pressed && !inside)
+        SetFocus(false, false, "mouse press elsewhere");
+    if (btnPressedThisFrame && mouseCurrent && mouseLeft) {
+        Il2CppObject* mouse = Call(mouseCurrent, nullptr, {}, "Mouse.get_current", &ok);
+        Il2CppObject* left = ok && mouse ? Call(mouseLeft, mouse, {}, "Mouse.get_leftButton", &ok) : nullptr;
+        if (ok && left && Unbox<bool>(Call(btnPressedThisFrame, left, {}, "ButtonControl.get_wasPressedThisFrame", &ok)) && ok)
+            pendingClick = 2;
+    }
+}
+
+bool PlotMenuSlider::Focused() const { return impl_ && impl_->root && impl_->focused; }
+
+void PlotMenuSlider::SetFocused(bool on, const char* why) {
+    if (!impl_ || !impl_->root || !main_thread::IsMainThread() || impl_->Faulted() || !impl_->spec.selectToStep) return;
+    impl_->SetFocus(on, false, why);
+}
+
+bool PlotMenuSlider::TakeFocusGained() {
+    if (!impl_ || !impl_->focusGained) return false;
+    impl_->focusGained = false;
+    return true;
+}
+
+bool PlotMenuSlider::Blocked() {
+    if (!impl_ || !impl_->root || !main_thread::IsMainThread() || impl_->Faulted()) return true;
+    if (!unity::IsAlive(impl_->root) || !unity::IsAlive(impl_->slider)) return true;
+    return impl_->InputBlocked();
 }
 
 bool PlotMenuSlider::Step(int dir) {
@@ -1012,8 +1100,12 @@ void PlotMenuSlider::Tick(float dt) {
         }
     }
 
-    // Gamepad / keyboard steps (not while Unity's own Slider.OnMove has it, not under a popup).
-    int dir = (sliderSelected || !p.polling) ? 0 : p.InputDirection();
+    if (p.spec.selectToStep) p.FocusTick();
+
+    // Gamepad / keyboard steps (not while Unity's own Slider.OnMove has it, not under a popup; with
+    // selectToStep only while selected).
+    const bool keysOff = sliderSelected || !p.polling || (p.spec.selectToStep && !p.focused);
+    int dir = keysOff ? 0 : p.InputDirection();
     if (dir == 0 || dir != p.blockedDir) p.blockedDir = 0;
     if (dir != 0 && dir == p.blockedDir) dir = 0;  // held since it was refused: no re-check per frame
     if (dir != 0 && dir != p.heldDir && p.InputBlocked()) {  // checked once per new press, not per frame

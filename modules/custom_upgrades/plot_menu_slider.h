@@ -22,7 +22,9 @@
 // hands left / right to Step() while the slider is shown; the slider also polls pad / keys (fallback, de-duplicated per press).
 // Which pad / keys depends on spec.input (d-pad, left stick, arrows / right stick, Shift + arrows).
 // Steps only while the slider is interactable and no PopupPrompt is open. The value is read by
-// polling (no managed delegates).
+// polling (no managed delegates). With spec.selectToStep the keys act only while the slider is
+// selected (a mouse press on it: Selectable.IsPressed, or the host's SetFocused for Submit); the host
+// then lets the menu navigate while nothing is selected.
 //
 // Other hosts: CreateIn() builds the same slider into any RectTransform (a panel of our own, e.g. the
 // drone station price-limit dialog) at a given top-left position and width, with the label styled
@@ -71,6 +73,11 @@ struct SliderSpec {
     int column = 0;
     int columns = 1;
     SliderInput input = SliderInput::kPrimary;
+    // Selected-to-step: keys step the slider only while it is selected (SetFocused, or a mouse press
+    // on it); then the primary keys (d-pad / left stick / arrows, Shift or not) step it whatever
+    // `input` says, and the label reads "< Keep hens: 18 >". Released by SetFocused(false), the mouse
+    // leaving a slider that was selected with the mouse, or a mouse press anywhere else.
+    bool selectToStep = false;
 };
 
 // Where CreateIn() puts the slider.
@@ -122,6 +129,16 @@ public:
     // event is for the other input (Shift held or not, SliderInput). A polled press that already
     // stepped is not stepped again; repeats then come from the input module's events.
     bool Step(int dir);
+    // Main thread, spec.selectToStep only: selected or not (the label shows it). SetFocused(true) is
+    // the keyboard / pad route (Submit); the mouse route is inside Tick.
+    bool Focused() const;
+    void SetFocused(bool on, const char* why);
+    // Main thread: true once after Tick selected the slider by a mouse press (the host then releases
+    // the other sliders).
+    bool TakeFocusGained();
+    // Main thread: keys must be left to the game now (a PopupPrompt is open / not interactable). One
+    // FindAnyObjectByType: call it per key press, not per frame.
+    bool Blocked();
     // The navigation detour is installed (only for the build log).
     void SetNavigationSteps(bool on);
 

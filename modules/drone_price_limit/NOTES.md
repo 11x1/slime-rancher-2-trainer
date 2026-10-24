@@ -28,7 +28,7 @@ Status: built, not yet tested in game.
 ## Game UI (station_dialog.cpp)
 
 - Drone station menu, Programming page, destination **Plort Market** selected: a second pill next to
-  the destination's "Change" pill: `[C] Price limit` (or `Price limit: 120` / `: 80%` when set). It is
+  the destination's "Change" pill: `[C] Limit` (or `Limit: 120` / `Limit: 80%` when set; the longer "Price limit: 200%" wrapped). It is
   a clone of the game's `PromptContainer` with the key drawn by hand (C) and our label. The clone's
   `EncapsulateChildren` fits it to the label (minimum width 0) with 22 px `_horizontalPadding` per side.
 - Opens with **C**, the pad's **right stick click** (the button R3, not the stick deflection that steps
@@ -64,7 +64,7 @@ The rest of the findings (sink programs, fast forward, the dump trap) are in the
 
 1. Log: `[drone_price_limit] setup ok: ...` with `<GetSinks>.MoveNext`, and `station ui ready: ...`
    (any "NOT available" part is listed there).
-2. Open a ranch drone station, set the destination to Plort Market: the `[C] Price limit` pill
+2. Open a ranch drone station, set the destination to Plort Market: the `[C] Limit` pill
    appears right of the Change pill (position, size, key glyph, font). Log line
    `price-limit action cloned ...`. Switch to another destination: it disappears.
 3. Press C / click it: the dialog opens over the menu (log `dialog opened for station <id>`). Check

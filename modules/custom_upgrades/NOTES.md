@@ -49,9 +49,19 @@ findings from in-game tests that are easy to get wrong again.
   count. Sidecar `hen_collector_keep_hens` / `hen_collector_keep_roosters`; an old
   `hen_collector_keep` n reads as min(2, n) roosters and the rest hens.
 - The coop menu shows two `PlotMenuSlider`s in one row (`SliderSpec.columns`, `Create(..., rowOf)`).
-  Keys: d-pad / left stick / arrows for hens (`SliderInput::kPrimary`), right stick / Shift +
-  arrows for roosters (`kSecondary`). The grid navigation detour offers left / right to both;
-  each takes only its own (Shift held or not).
+- **Select to step** (feedback round 4: "only when selected should it be focused, right now arrow
+  buttons still navigate"). Nothing selected: the arrows / d-pad / stick navigate the menu as usual,
+  the sliders ignore them. A slider is selected by a mouse press on it (`Selectable.IsPressed`, polled)
+  or by Submit (Enter / pad A: the hens slider). The selected slider's label reads `< Keep hens: 18 >`;
+  left / right (arrows, d-pad, left stick, Shift or not) step it and no move reaches the menu; up / down
+  switch the selection to the other slider. Released by Submit again, Cancel (Esc / B: the menu stays
+  open), a mouse press anywhere else (judged two frames later, EventSystem order), or, when it was
+  selected with the mouse, the mouse leaving it (not while the button is held). A press on one slider
+  releases the other. Hooks: `ListUI.Submit(InputEventData)` (0x83F450, the list menus' submit listener;
+  the owned Hen Collector card's OnAction does nothing anyway) and `BaseUI.OnCancelPressed` (0x683490,
+  `if (CanClose()) Close()`), both shared bodies with one flag check; up / down / left / right through
+  the `TryHandleAsNavigation` detour below. Without the two hooks: the old always-on keys (d-pad / left
+  stick / arrows for hens, right stick / Shift + arrows for roosters).
 
 ### Activate button (checklist hc3)
 
@@ -91,7 +101,8 @@ findings from in-game tests that are easy to get wrong again.
   pointer down / up (before the Button click reaches the Press detour): on a tier card that opened
   the purchase prompt of the shown tier and the same click confirmed it (log: "sold Music Box" and
   "bought Music Box II" 4 ms apart). Disabled on our clone; its submit-key icon (`InputEventDisplay`
-  under "Icon Background") is hidden too. The popup-confirm guard from feature/plot-props-2 stays as a
+  under "Icon Background") now shows the alt-action key instead (`SetInputEvent(ListUI.altSubmit)`,
+  the key that sells, user feedback "sell should have a key"), hidden when the button is disabled. The popup-confirm guard from feature/plot-props-2 stays as a
   backstop.
 - **Stale card label** ("High Walls" on the Music Box card). The clones' texts were registered only
   in the post hook of `UpdateMenuItemAvailabilityAndHidden` / `RebuildUI`. With the menu open,
@@ -107,9 +118,31 @@ animation).
 ## Sell-All receipt
 
 Pressing the silo's Sell-All button no longer sells at once: it opens a receipt (`silo_receipt.cpp`).
-One row per sellable plort type (icon, name, "x count", "@ unit price", line total + coin), the grand
+One row per sellable plort type (icon, name, "x count", unit price, line total + coin), the grand
 total, Cancel and Sell. Market closed / unreachable or no plorts: the old text above the button, no
 dialog.
+
+- **Fits the screen** (feedback round 4: it ran off-screen on a smaller resolution). The panel height
+  is capped at the canvas height (Screen size through the CanvasScaler formula, ScaleWithScreenSize
+  1920 x 1080 match 0.5 -> 16:9 is 1080 units high, ultrawide less) minus 36 px each side. Rows shrink
+  from 56 to 40 px, then the row list scrolls: a uGUI `ScrollRect` (Clamped) on a `RectMask2D`
+  viewport with a thin `Scrollbar` in the right margin (draggable, hidden when not needed). Its own
+  wheel handling is off (sensitivity 0); the mouse wheel (`Mouse.scroll.y`, one row per notch whatever
+  the delta units), Up / Down, W / S, d-pad and left stick up / down step one row. Without these
+  classes the rows only shrink (to 34 px) as before.
+- **Game buttons.** Cancel and Sell are clones of the game's own confirm-popup buttons:
+  `GameContext.UITemplates.popupPrompt` (prefab `PopupPrompt`, gamecore_scenes bundle, read with
+  UnityPy) -> `PopupPrompt._negativeActionButton` / `_positiveActionButton`, both
+  `TextButton_NoneSelectable` (the Purchase button's prefab: Button, ButtonAnimator, EventTrigger,
+  DetailsMoreButtonView, InputEventButton, EncapsulateChildren, the key icon `InputEventDisplay`
+  under "Icon Background" bound to the popup's positive / negative InputEvent). On the clone the
+  InputEventButton is disabled (it would perform that InputEvent on pointer down / up), the label's
+  LocalizeStringEvent is disabled and the TMP text set to "Cancel" / "Sell"; a polled Toggle on its
+  root takes the click (Button.onClick is empty in the prefab). The keyboard / pad focus is a teal
+  (Cancel) / pink (Sell) ring behind the focused button, fitted to its self-sized rect for 30 frames
+  after a build; disabled Sell = `Selectable.interactable` false (the prefab's disabled colours).
+  Fallback when any piece is missing: our own SDF buttons with "(Esc / B)" / "(Enter / A)" in the
+  label. Log: `silo receipt: buttons cloned from the game's popup, rows fit|scroll (N px, canvas H high)`.
 
 - **Input lock = the game's own.** The dialog root carries the game's `UIInputLocker` component, as
   menu prefabs do: `OnEnable` -> `TimeDirector.Pause` (timeScale 0, ref-counted) ->

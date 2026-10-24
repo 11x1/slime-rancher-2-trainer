@@ -3,11 +3,23 @@
 // Layout (CanvasScaler reference 1920 x 1080, the panel centred):
 //   title "Sell-All receipt" + one line of explanation
 //   column labels   Plort | Count | Price | Total
-//   one row per plort type: inner box (kBacker), icon, localized name, "x N", "@ P", line total
+//   one row per plort type: inner box (kBacker), icon, localized name, "x N", unit price, line total
 //   separator, "Total" + "N plorts" + grand total with the Newbucks coin
 //   note line (orange; empty unless the receipt was refreshed / the market closed)
-//   [ Cancel (Esc / B) ]                                   [ Sell (Enter / A) ]
-// Rows shrink (56 -> 34 px) when there are many types; a silo has 12 slots, so 12 rows at most.
+//   [ (Esc) Cancel ]                                             [ (Enter) Sell ]
+// The panel never gets taller than the canvas (Screen size through the CanvasScaler formula): rows
+// shrink (56 -> 40 px) when there are many types, then the row list scrolls (uGUI ScrollRect in a
+// RectMask2D viewport, a thin Scrollbar on the right; mouse wheel / Up / Down / W / S / d-pad / left
+// stick up / down step one row). A silo has 12 slots, so 12 rows at most.
+// Buttons: clones of the game's own popup buttons (GameContext.UITemplates.popupPrompt ->
+// PopupPrompt._positiveActionButton / _negativeActionButton, the prefab TextButton_NoneSelectable,
+// gamecore_scenes bundle read with UnityPy: Button + ButtonAnimator (hover animation and colours) +
+// DetailsMoreButtonView (label = LocalizeStringEvent) + InputEventButton (performs the popup's
+// InputEvent on pointer down / up: disabled on the clone) + InputEventDisplay under "Icon Background"
+// (the key icon of the popup's positive / negative InputEvent, kept), self-sizing through
+// EncapsulateChildren). Our label goes into the TMP text (its LocalizeStringEvent disabled); a polled
+// Toggle on the clone's root takes the click; the keyboard focus is a coloured ring behind the button.
+// Without the prefab: our own SDF buttons with the keys in the label, as before.
 // The palette is the game's menu one (drone station / plot menu scene data): navy text, white
 // content, lavender border, light blue inner boxes, teal focus, pink accent (the plot menu's scroll
 // handle, used by the Hen Collector sliders too).
@@ -128,6 +140,24 @@ struct SiloReceipt::Impl {
     const MethodInfo* padSouth = nullptr, *padEast = nullptr, *padDpad = nullptr, *padStick = nullptr;
     const MethodInfo* dirLeft = nullptr, *dirRight = nullptr;      // DpadControl.get_left / get_right
     const MethodInfo* stickLeft = nullptr, *stickRight = nullptr;  // StickControl.get_left / get_right
+    // optional: scrolling rows (keys + mouse wheel) and the canvas height
+    const MethodInfo* kbUp = nullptr, *kbDown = nullptr, *kbW = nullptr, *kbS = nullptr;
+    const MethodInfo* dirUp = nullptr, *dirDown = nullptr, *stickUp = nullptr, *stickDown = nullptr;
+    const MethodInfo* mouseCurrent = nullptr, *mouseScroll = nullptr, *vec2Y = nullptr, *axisRead = nullptr;
+    const MethodInfo* screenW = nullptr, *screenH = nullptr;
+    Il2CppClass* scrollRectClass = nullptr, *scrollbarClass = nullptr, *rectMaskClass = nullptr;
+    const MethodInfo* srSetContent = nullptr, *srSetViewport = nullptr, *srSetHorizontal = nullptr,
+                    *srSetVertical = nullptr, *srSetMovement = nullptr, *srSetSensitivity = nullptr,
+                    *srGetNormY = nullptr, *srSetNormY = nullptr, *srSetScrollbar = nullptr,
+                    *srSetScrollbarVis = nullptr;
+    const MethodInfo* sbSetHandle = nullptr, *sbSetDirection = nullptr, *selSetTarget = nullptr;
+    bool scrollOk = false;
+    // optional: the game's popup buttons
+    const MethodInfo* gcGetTemplates = nullptr, *rtGetRect = nullptr, *behSetEnabled = nullptr,
+                    *selSetInteractable = nullptr;
+    Il2CppClass* popupClass = nullptr, *ieButtonClass = nullptr, *moreViewClass = nullptr, *uiButtonClass = nullptr;
+    size_t offTplPopup = 0, offPopupPositive = 0, offPopupNegative = 0, offMoreLabel = 0;
+    bool gameButtonsOk = false;
     using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
     ObjectNewFn objectNew = nullptr;
 
@@ -141,8 +171,14 @@ struct SiloReceipt::Impl {
     Il2CppObject* root = nullptr, *rootRt = nullptr, *backdropToggle = nullptr;
     Il2CppObject* panel = nullptr;
     Il2CppObject* btnBg[2] = {}, *btnText[2] = {}, *btnToggle[2] = {};
+    Il2CppObject* btnGame[2] = {};  // the cloned game button's root (nullptr: our own button)
+    Il2CppObject* btnRing[2] = {};  // focus ring behind a game button (its SDF graphic)
+    Vec2 btnCentre[2] = {};         // centre of a game button inside the panel (y down)
+    int ringFrames = 0;             // frames left to fit the rings to the buttons' self-sized rects
+    Il2CppObject* scrollRect = nullptr;
+    float scrollStep = 0.0f;        // one row in normalized scroll units (0 = no scrolling)
     Il2CppObject* font = nullptr;  // TMP_FontAsset of a HUD text (this open only)
-    bool loggedOpen = false, loggedFail = false;
+    bool loggedOpen = false, loggedFail = false, loggedButtons = false;
 
     // ---- helpers ----
     bool Faulted() const { return sr2::core::ModuleFaulted(module); }
@@ -346,6 +382,10 @@ struct SiloReceipt::Impl {
         return unity::IsAlive(icon) ? icon : nullptr;
     }
 
+    float CanvasHeight();
+    Il2CppObject* GameButton(Il2CppObject* parentRt, bool positive, const char* label);
+    void FitRings();
+    void ScrollBy(int rows);
     bool BuildPanel(const Receipt& r, const std::string& note);
     void StyleButtons();
     void Teardown();
@@ -503,6 +543,81 @@ bool SiloReceipt::Setup(Resolver& R, const char* module, std::string& why) {
         }
         if (!p->gcInstance || !p->offGcLookup || !p->offLookupCurrencies || !p->offCurrencyArr || !p->offCurrencyIcon)
             report += " coin icon: NOT available;";
+
+        // Optional lookups below never fail the setup; `opt` walks the parents like `method`.
+        auto opt = [&](Il2CppClass* k, const char* name, int argc) -> const MethodInfo* {
+            for (Il2CppClass* c = k; c; c = parentOf(c))
+                if (const MethodInfo* m = R.Method(c, name, argc, &err)) return m;
+            return nullptr;
+        };
+        auto optOff = [&](Il2CppClass* k, const char* field, size_t& out) {
+            for (Il2CppClass* c = k; c; c = parentOf(c))
+                if (auto o = R.FieldOffset(c, field, &err)) {
+                    out = *o;
+                    return true;
+                }
+            return false;
+        };
+
+        // Scrolling rows + the canvas height.
+        p->kbUp = opt(kb, "get_upArrowKey", 0);
+        p->kbDown = opt(kb, "get_downArrowKey", 0);
+        p->kbW = opt(kb, "get_wKey", 0);
+        p->kbS = opt(kb, "get_sKey", 0);
+        p->dirUp = opt(dpad, "get_up", 0);
+        p->dirDown = opt(dpad, "get_down", 0);
+        p->stickUp = opt(stick, "get_up", 0);
+        p->stickDown = opt(stick, "get_down", 0);
+        Il2CppClass* mouse = R.Class(kInput, "UnityEngine.InputSystem", "Mouse", &err);
+        Il2CppClass* vec2 = R.Class(kInput, "UnityEngine.InputSystem.Controls", "Vector2Control", &err);
+        Il2CppClass* axis = R.Class(kInput, "UnityEngine.InputSystem.Controls", "AxisControl", &err);
+        p->mouseCurrent = opt(mouse, "get_current", 0);
+        p->mouseScroll = opt(mouse, "get_scroll", 0);
+        p->vec2Y = opt(vec2, "get_y", 0);
+        p->axisRead = opt(axis, "ReadValue", 0);  // InputControl<float>.ReadValue (inflated parent)
+        Il2CppClass* screen = R.Class(kCore, "UnityEngine", "Screen", &err);
+        p->screenW = opt(screen, "get_width", 0);
+        p->screenH = opt(screen, "get_height", 0);
+        p->scrollRectClass = R.Class(kUi, "UnityEngine.UI", "ScrollRect", &err);
+        p->scrollbarClass = R.Class(kUi, "UnityEngine.UI", "Scrollbar", &err);
+        p->rectMaskClass = R.Class(kUi, "UnityEngine.UI", "RectMask2D", &err);
+        p->srSetContent = opt(p->scrollRectClass, "set_content", 1);
+        p->srSetViewport = opt(p->scrollRectClass, "set_viewport", 1);
+        p->srSetHorizontal = opt(p->scrollRectClass, "set_horizontal", 1);
+        p->srSetVertical = opt(p->scrollRectClass, "set_vertical", 1);
+        p->srSetMovement = opt(p->scrollRectClass, "set_movementType", 1);
+        p->srSetSensitivity = opt(p->scrollRectClass, "set_scrollSensitivity", 1);
+        p->srGetNormY = opt(p->scrollRectClass, "get_verticalNormalizedPosition", 0);
+        p->srSetNormY = opt(p->scrollRectClass, "set_verticalNormalizedPosition", 1);
+        p->srSetScrollbar = opt(p->scrollRectClass, "set_verticalScrollbar", 1);
+        p->srSetScrollbarVis = opt(p->scrollRectClass, "set_verticalScrollbarVisibility", 1);
+        p->sbSetHandle = opt(p->scrollbarClass, "set_handleRect", 1);
+        p->sbSetDirection = opt(p->scrollbarClass, "set_direction", 1);
+        p->selSetTarget = opt(selectable, "set_targetGraphic", 1);
+        p->scrollOk = p->scrollRectClass && p->rectMaskClass && p->srSetContent && p->srSetViewport &&
+                      p->srSetHorizontal && p->srSetVertical && p->srSetMovement && p->srSetSensitivity &&
+                      p->srGetNormY && p->srSetNormY;
+        if (!p->scrollOk) report += " scrolling rows: NOT available (rows only shrink);";
+        if (!p->screenW || !p->screenH) report += " screen size: NOT available (1080 assumed);";
+
+        // The game's popup buttons.
+        Il2CppClass* templates = R.Class(kImage, "MonomiPark.SlimeRancher.UI", "UITemplates", &err);
+        p->popupClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Popup", "PopupPrompt", &err);
+        p->ieButtonClass = R.Class(kImage, "MonomiPark.SlimeRancher.Input", "InputEventButton", &err);
+        p->moreViewClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Adapter", "DetailsMoreButtonView", &err);
+        p->uiButtonClass = R.Class(kUi, "UnityEngine.UI", "Button", &err);
+        Il2CppClass* behaviour = R.Class(kCore, "UnityEngine", "Behaviour", &err);
+        p->gcGetTemplates = opt(gameCtx, "get_UITemplates", 0);
+        p->rtGetRect = opt(p->rtClass, "get_rect", 0);
+        p->behSetEnabled = opt(behaviour, "set_enabled", 1);
+        p->selSetInteractable = opt(selectable, "set_interactable", 1);
+        p->gameButtonsOk = p->gcInstance && templates && p->popupClass && p->ieButtonClass && p->moreViewClass &&
+                           p->uiButtonClass && p->gcGetTemplates && p->rtGetRect && p->behSetEnabled &&
+                           optOff(templates, "popupPrompt", p->offTplPopup) &&
+                           optOff(p->popupClass, "_positiveActionButton", p->offPopupPositive) &&
+                           optOff(p->popupClass, "_negativeActionButton", p->offPopupNegative) &&
+                           optOff(p->moreViewClass, "label", p->offMoreLabel);
+        if (!p->gameButtonsOk) report += " game buttons: NOT available (own buttons);";
     }
     impl_ = p;
     ready_ = true;
@@ -512,13 +627,105 @@ bool SiloReceipt::Setup(Resolver& R, const char* module, std::string& why) {
 
 // ---------------------------------------------------------------- build --
 
+// Canvas height in reference units: the CanvasScaler (ScaleWithScreenSize, 1920 x 1080, match 0.5)
+// scales by sqrt(w / 1920 * h / 1080), so 16:9 is always 1080 high, ultrawide less, 4:3 more.
+float SiloReceipt::Impl::CanvasHeight() {
+    if (!screenW || !screenH) return 1080.0f;
+    bool ok = false, ok2 = false;
+    const int w = Unbox<int32_t>(Call(screenW, nullptr, {}, "Screen.get_width", &ok));
+    const int h = Unbox<int32_t>(Call(screenH, nullptr, {}, "Screen.get_height", &ok2));
+    if (!ok || !ok2 || w <= 0 || h <= 0) return 1080.0f;
+    const float scale = std::sqrt(static_cast<float>(w) / 1920.0f * static_cast<float>(h) / 1080.0f);
+    if (!std::isfinite(scale) || scale <= 0.0f) return 1080.0f;
+    return std::clamp(static_cast<float>(h) / scale, 400.0f, 4000.0f);
+}
+
+// A clone of the game's popup button (positive = Accept, else Cancel) under `parentRt`, labelled
+// `label`; its centre is set by the caller. nullptr: not available (the caller builds its own).
+Il2CppObject* SiloReceipt::Impl::GameButton(Il2CppObject* parentRt, bool positive, const char* label) {
+    if (!gameButtonsOk) return nullptr;
+    bool ok = false;
+    Il2CppObject* gc = Call(gcInstance, nullptr, {}, "GameContext.Instance", &ok);
+    if (!ok || !unity::IsAlive(gc)) return nullptr;
+    Il2CppObject* tpl = Call(gcGetTemplates, gc, {}, "GameContext.get_UITemplates", &ok);
+    if (!ok || !unity::IsAlive(tpl)) return nullptr;
+    Il2CppObject* popupGo = unity::Field<Il2CppObject*>(tpl, offTplPopup);
+    Il2CppObject* popup = unity::IsAlive(popupGo) ? unity::GetComponent(popupGo, popupClass) : nullptr;
+    if (!unity::IsAlive(popup)) return nullptr;
+    Il2CppObject* src = unity::Field<Il2CppObject*>(popup, positive ? offPopupPositive : offPopupNegative);
+    if (!unity::IsAlive(src) || !IsA(src, goClass)) return nullptr;
+    Il2CppObject* go = unity::Instantiate(src, parentRt);
+    if (!unity::IsAlive(go)) return nullptr;
+    unity::SetName(go, positive ? "Sell" : "Cancel");
+    // Its pointer down / up would perform the popup's InputEvent (a menu submit / cancel elsewhere).
+    if (Il2CppObject* ieb = unity::GetComponent(go, ieButtonClass); unity::IsAlive(ieb)) {
+        bool off = false;
+        Call(behSetEnabled, ieb, {&off}, "Behaviour.set_enabled(InputEventButton)");
+    }
+    // Label: the LocalizeStringEvent off (it would write "Confirm" / "Cancel" back), our text in.
+    Il2CppObject* view = unity::GetComponent(go, moreViewClass);
+    Il2CppObject* lse = unity::IsAlive(view) ? unity::Field<Il2CppObject*>(view, offMoreLabel) : nullptr;
+    Il2CppObject* tmp = nullptr;
+    if (unity::IsAlive(lse)) {
+        bool off = false;
+        Call(behSetEnabled, lse, {&off}, "Behaviour.set_enabled(LocalizeStringEvent)");
+        tmp = unity::GetComponent(lse, tmpTextClass);
+    }
+    if (!unity::IsAlive(tmp)) {
+        Destroy(go);
+        return nullptr;
+    }
+    SetText(tmp, label);
+    Keep(panelHandles, go);
+    Keep(panelHandles, tmp);
+    return go;
+}
+
+// Rings behind the game buttons, fitted to the size the buttons give themselves (EncapsulateChildren
+// runs in LateUpdate, so for a few frames after a build).
+void SiloReceipt::Impl::FitRings() {
+    for (int i = 0; i < 2; ++i) {
+        if (!unity::IsAlive(btnGame[i]) || !unity::IsAlive(btnRing[i])) continue;
+        bool ok = false;
+        Il2CppObject* boxed = Call(rtGetRect, unity::TransformOf(btnGame[i]), {}, "RectTransform.get_rect", &ok);
+        if (!ok || !boxed) continue;
+        const float* r = reinterpret_cast<const float*>(reinterpret_cast<char*>(boxed) + 2 * sizeof(void*));  // x y w h
+        const float w = r[2], h = r[3];
+        if (!std::isfinite(w) || !std::isfinite(h) || w <= 1.0f || h <= 1.0f || w > 2000.0f || h > 500.0f) continue;
+        constexpr float kRing = 6.0f;
+        Rect(unity::TransformOf(unity::GameObjectOf(btnRing[i])), {0, 1}, {0, 1}, {0.5f, 0.5f},
+             {btnCentre[i].x, -btnCentre[i].y}, {w + 2 * kRing, h + 2 * kRing});
+        if (sdfRectClass && IsA(btnRing[i], sdfRectClass)) {
+            float radius = h * 0.5f + kRing;
+            Call(sdfSetRadius, btnRing[i], {&radius}, "SDFRoundedRectangle.SetCornerRadius");
+        }
+    }
+}
+
+void SiloReceipt::Impl::ScrollBy(int rows) {
+    if (!unity::IsAlive(scrollRect) || scrollStep <= 0.0f || rows == 0) return;
+    bool ok = false;
+    const float y = Unbox<float>(Call(srGetNormY, scrollRect, {}, "ScrollRect.get_verticalNormalizedPosition", &ok));
+    if (!ok || !std::isfinite(y)) return;
+    // Normalized 1 = top: a row down lowers it.
+    float v = std::clamp(y - static_cast<float>(rows) * scrollStep, 0.0f, 1.0f);
+    Call(srSetNormY, scrollRect, {&v}, "ScrollRect.set_verticalNormalizedPosition");
+}
+
 bool SiloReceipt::Impl::BuildPanel(const Receipt& r, const std::string& note) {
-    // Rows sorted by the caller; heights shrink so 12 rows still fit 1080.
+    // Rows sorted by the caller. The panel fits the canvas: rows shrink to kMinRow, then scroll.
     const int n = static_cast<int>(r.lines.size());
     const float titleY = 28.0f, subY = 84.0f, headY = 136.0f, rowsY = 172.0f, gap = 6.0f;
-    const float maxRows = 1080.0f - 80.0f - rowsY - 230.0f;
-    const float rowH = std::clamp(n > 0 ? maxRows / n - gap : 56.0f, 34.0f, 56.0f);
-    const float rowsEnd = rowsY + n * (rowH + gap);
+    const float bottomH = 8.0f + 16.0f + 58.0f + 44.0f + kButtonH + 30.0f;  // separator .. below the buttons
+    const float kMinRow = scrollOk ? 40.0f : 34.0f;
+    const float maxPanel = std::max(rowsY + 56.0f + bottomH, CanvasHeight() - 2 * 36.0f);  // 36: border + margin
+    const float availRows = maxPanel - rowsY - bottomH;
+    const float rowH = std::clamp(n > 0 ? availRows / n - gap : 56.0f, kMinRow, 56.0f);
+    const float contentH = n > 0 ? n * (rowH + gap) - gap : 56.0f;
+    const bool scrolls = scrollOk && contentH > availRows + 0.5f;
+    const float viewH = scrolls ? std::max(rowH, std::floor((availRows + gap) / (rowH + gap)) * (rowH + gap) - gap)
+                                : contentH;
+    const float rowsEnd = rowsY + viewH + gap;
     const float sepY = rowsEnd + 8.0f, totalY = sepY + 16.0f, noteY = totalY + 58.0f, btnY = noteY + 44.0f;
     const float panelH = btnY + kButtonH + 30.0f;
     // Columns (x inside the content, left edge = kPad).
@@ -545,13 +752,78 @@ bool SiloReceipt::Impl::BuildPanel(const Receipt& r, const std::string& note) {
     Text(prt, "HeadPrice", cPrice, headY, colW, 30, "Price", 20.0f, kNavyDim, kAlignRight);
     Text(prt, "HeadTotal", cTotal, headY, totalW, 30, "Total", 20.0f, kNavyDim, kAlignRight);
 
+    // Rows: straight into the panel, or (too many for the screen) into a scrolling list.
+    Il2CppObject* rowsRt = prt;
+    float ox = 0.0f, oy = 0.0f;  // panel position of rowsRt's top-left
+    scrollRect = nullptr;
+    scrollStep = 0.0f;
+    if (scrolls) {
+        Il2CppObject* vp = NewUi("RowsViewport", prt);
+        Il2CppObject* vpRt = vp ? unity::TransformOf(vp) : nullptr;
+        Il2CppObject* content = vpRt ? NewUi("Rows", vpRt) : nullptr;
+        Il2CppObject* contentRt = content ? unity::TransformOf(content) : nullptr;
+        Il2CppObject* img = contentRt ? AddComponent(vp, imageClass, "AddComponent(Image)") : nullptr;
+        Il2CppObject* mask = img ? AddComponent(vp, rectMaskClass, "AddComponent(RectMask2D)") : nullptr;
+        Il2CppObject* sr = mask ? AddComponent(vp, scrollRectClass, "AddComponent(ScrollRect)") : nullptr;
+        if (sr) {
+            At(vpRt, kPad, rowsY, kInnerW, viewH);
+            SetColor(img, Color{0, 0, 0, 0});  // invisible, but a raycast target: drag / wheel land here
+            At(contentRt, 0, 0, kInnerW, contentH);
+            bool no = false, yes = true;
+            int32_t clamped = 2;   // MovementType.Clamped
+            float sensitivity = 0;  // the wheel is ours (one row per notch, Tick), not ScrollRect's
+            Call(srSetContent, sr, {contentRt}, "ScrollRect.set_content");
+            Call(srSetViewport, sr, {vpRt}, "ScrollRect.set_viewport");
+            Call(srSetHorizontal, sr, {&no}, "ScrollRect.set_horizontal");
+            Call(srSetVertical, sr, {&yes}, "ScrollRect.set_vertical");
+            Call(srSetMovement, sr, {&clamped}, "ScrollRect.set_movementType");
+            Call(srSetSensitivity, sr, {&sensitivity}, "ScrollRect.set_scrollSensitivity");
+            // A thin scrollbar in the right margin (draggable; ScrollRect keeps it in sync).
+            if (scrollbarClass && sbSetHandle && sbSetDirection && srSetScrollbar) {
+                Il2CppObject* track = Box(prt, "Scrollbar", kPanelW - kPad + 12.0f, rowsY, 10.0f, viewH, kBacker, 5.0f);
+                Il2CppObject* trackRt = track ? unity::TransformOf(track) : nullptr;
+                Il2CppObject* area = trackRt ? NewUi("Sliding Area", trackRt) : nullptr;
+                Il2CppObject* areaRt = area ? unity::TransformOf(area) : nullptr;
+                Il2CppObject* handle = areaRt ? NewUi("Handle", areaRt) : nullptr;
+                Il2CppObject* handleRt = handle ? unity::TransformOf(handle) : nullptr;
+                if (handleRt) {
+                    Rect(areaRt, {0, 0}, {1, 1}, {0.5f, 0.5f}, {0, 0}, {0, 0});
+                    Rect(handleRt, {0, 0}, {1, 1}, {0.5f, 0.5f}, {0, 0}, {0, 0});
+                    Il2CppObject* hg = Shape(handle, kLavender, 5.0f);
+                    SetRaycast(hg, true);
+                    SetRaycast(sdfRectClass ? unity::GetComponent(track, sdfRectClass) : unity::GetComponent(track, imageClass), true);
+                    if (Il2CppObject* sb = AddComponent(track, scrollbarClass, "AddComponent(Scrollbar)")) {
+                        int32_t none = 0, bottomToTop = 2;  // Transition.None, Direction.BottomToTop
+                        alignas(8) unsigned char nav[64] = {};  // Navigation.Mode.None
+                        Call(selSetTransition, sb, {&none}, "Selectable.set_transition");
+                        Call(selSetNav, sb, {nav}, "Selectable.set_navigation");
+                        if (selSetTarget && hg) Call(selSetTarget, sb, {hg}, "Selectable.set_targetGraphic");
+                        Call(sbSetHandle, sb, {handleRt}, "Scrollbar.set_handleRect");
+                        Call(sbSetDirection, sb, {&bottomToTop}, "Scrollbar.set_direction");
+                        Call(srSetScrollbar, sr, {sb}, "ScrollRect.set_verticalScrollbar");
+                    }
+                }
+            }
+            float top = 1.0f;
+            Call(srSetNormY, sr, {&top}, "ScrollRect.set_verticalNormalizedPosition");
+            scrollRect = sr;
+            Keep(panelHandles, sr);
+            scrollStep = (rowH + gap) / std::max(1.0f, contentH - viewH);
+            rowsRt = contentRt;
+            ox = kPad;
+            oy = rowsY;
+        } else if (vp) {
+            Destroy(vp);  // half built: rows go into the panel (they shrink as far as they can)
+        }
+    }
+
     Il2CppObject* coinSprite = CoinSprite();
     const float textSize = rowH >= 48.0f ? 26.0f : 22.0f;
     const float iconSize = std::min(44.0f, rowH - 8.0f);
     for (int i = 0; i < n; ++i) {
         const ReceiptLine& l = r.lines[static_cast<size_t>(i)];
-        const float y = rowsY + i * (rowH + gap);
-        Box(prt, "Row", kPad, y, kInnerW, rowH, kBacker, 18.0f);
+        const float y = rowsY + i * (rowH + gap) - oy;
+        Box(rowsRt, "Row", kPad - ox, y, kInnerW, rowH, kBacker, 18.0f);
         std::string name;
         Il2CppObject* icon = nullptr;
         if (unity::IsAlive(l.type) && IsA(l.type, identClass)) {
@@ -559,12 +831,12 @@ bool SiloReceipt::Impl::BuildPanel(const Receipt& r, const std::string& note) {
             if (name.empty()) name = unity::GetName(l.type);
             icon = unity::Field<Il2CppObject*>(l.type, offIdentIcon);
         }
-        Sprite(prt, "Icon", cIcon, y + (rowH - iconSize) * 0.5f, iconSize, iconSize, icon);
-        Text(prt, "Name", cName, y, nameW, rowH, name, textSize, kNavy, kAlignLeft);
-        Text(prt, "Count", cCount, y, colW, rowH, std::format("x {}", Group(l.count)), textSize, kNavy, kAlignRight);
-        Text(prt, "Price", cPrice, y, colW, rowH, std::format("@ {}", Group(l.price)), textSize, kNavyDim, kAlignRight);
-        Text(prt, "Total", cTotal, y, totalW, rowH, Group(l.Total()), textSize, kNavy, kAlignRight);
-        Sprite(prt, "Coin", cCoin, y + (rowH - coin) * 0.5f, coin, coin, coinSprite);
+        Sprite(rowsRt, "Icon", cIcon - ox, y + (rowH - iconSize) * 0.5f, iconSize, iconSize, icon);
+        Text(rowsRt, "Name", cName - ox, y, nameW, rowH, name, textSize, kNavy, kAlignLeft);
+        Text(rowsRt, "Count", cCount - ox, y, colW, rowH, std::format("x {}", Group(l.count)), textSize, kNavy, kAlignRight);
+        Text(rowsRt, "Price", cPrice - ox, y, colW, rowH, Group(l.price), textSize, kNavyDim, kAlignRight);
+        Text(rowsRt, "Total", cTotal - ox, y, totalW, rowH, Group(l.Total()), textSize, kNavy, kAlignRight);
+        Sprite(rowsRt, "Coin", cCoin - ox, y + (rowH - coin) * 0.5f, coin, coin, coinSprite);
     }
     if (n == 0) Text(prt, "Empty", cName, rowsY, kInnerW - 70, 56, "No plorts to sell.", 26.0f, kNavyDim, kAlignLeft);
 
@@ -577,9 +849,30 @@ bool SiloReceipt::Impl::BuildPanel(const Receipt& r, const std::string& note) {
     Sprite(prt, "TotalCoin", cCoin - 2, totalY + 9, 32, 32, coinSprite);
     if (!note.empty()) Text(prt, "Note", kPad, noteY, kInnerW, 40, note, 22.0f, kOrange, kAlignCenter, true);
 
-    const char* labels[2] = {"Cancel  (Esc / B)", "Sell  (Enter / A)"};
+    // Buttons: the game's own (popup Accept / Cancel), else ours with the keys in the label.
     const float bx[2] = {kPad, kPanelW - kPad - kButtonW};
     for (int i = 0; i < 2; ++i) {
+        btnCentre[i] = Vec2{bx[i] + kButtonW * 0.5f, btnY + kButtonH * 0.5f};
+        // The ring first (drawn behind the button); transparent until the button has the focus.
+        Il2CppObject* ringGo = gameButtonsOk ? Box(prt, "FocusRing", bx[i], btnY, kButtonW, kButtonH, Color{0, 0, 0, 0}, 36.0f)
+                                             : nullptr;
+        Il2CppObject* game = GameButton(prt, i == 1, i == 0 ? "Cancel" : "Sell");
+        if (game) {
+            Rect(unity::TransformOf(game), {0, 1}, {0, 1}, {0.5f, 0.5f}, {btnCentre[i].x, -btnCentre[i].y},
+                 {kButtonW, 59.0f});
+            btnGame[i] = game;
+            btnRing[i] = ringGo ? (sdfRectClass ? unity::GetComponent(ringGo, sdfRectClass) : unity::GetComponent(ringGo, imageClass))
+                                : nullptr;
+            btnToggle[i] = Clickable(game);
+            btnBg[i] = unity::GetComponent(game, uiButtonClass);  // its Selectable (interactable = Sell enabled)
+            Keep(panelHandles, btnRing[i]);
+            Keep(panelHandles, btnToggle[i]);
+            Keep(panelHandles, btnBg[i]);
+            if (!btnToggle[i]) return false;
+            continue;
+        }
+        if (ringGo) Destroy(ringGo);
+        const char* labels[2] = {"Cancel  (Esc / B)", "Sell  (Enter / A)"};
         Il2CppObject* b = NewUi(i == 0 ? "Cancel" : "Sell", prt);
         if (!b) return false;
         At(unity::TransformOf(b), bx[i], btnY, kButtonW, kButtonH);
@@ -592,6 +885,13 @@ bool SiloReceipt::Impl::BuildPanel(const Receipt& r, const std::string& note) {
         Keep(panelHandles, btnToggle[i]);
         if (!btnBg[i] || !btnToggle[i]) return false;
     }
+    ringFrames = 30;
+    if (!loggedButtons) {
+        loggedButtons = true;
+        SR2_INFO("[{}] silo receipt: buttons {}, rows {} ({} px, canvas {:.0f} high)", module,
+                 btnGame[0] && btnGame[1] ? "cloned from the game's popup" : btnGame[0] || btnGame[1] ? "mixed" : "own",
+                 scrolls ? "scroll" : "fit", static_cast<int>(rowH), CanvasHeight());
+    }
     StyleButtons();
     return !Faulted();
 }
@@ -601,6 +901,15 @@ void SiloReceipt::Impl::StyleButtons() {
     for (int i = 0; i < 2; ++i) {
         const bool focused = focus == i;
         const bool disabled = i == 1 && !canSell;
+        if (btnGame[i]) {
+            // The game's button keeps its own look (hover / disabled colours); the focus is the ring.
+            if (selSetInteractable && unity::IsAlive(btnBg[i])) {
+                bool on = !disabled;
+                Call(selSetInteractable, btnBg[i], {&on}, "Selectable.set_interactable");
+            }
+            SetColor(btnRing[i], focused && !disabled ? (i == 1 ? kPink : kTeal) : Color{0, 0, 0, 0});
+            continue;
+        }
         const Color fill = disabled ? kGrey : focused ? (i == 1 ? kPink : kTeal) : kBacker;
         SetColor(btnBg[i], fill);
         if (sdfSetBorderColor && sdfRectClass && IsA(btnBg[i], sdfRectClass)) {
@@ -619,8 +928,10 @@ void SiloReceipt::Impl::Teardown() {
         Destroy(root);
     }
     open = false;
-    root = rootRt = backdropToggle = panel = nullptr;
-    for (int i = 0; i < 2; ++i) btnBg[i] = btnText[i] = btnToggle[i] = nullptr;
+    root = rootRt = backdropToggle = panel = scrollRect = nullptr;
+    for (int i = 0; i < 2; ++i) btnBg[i] = btnText[i] = btnToggle[i] = btnGame[i] = btnRing[i] = nullptr;
+    scrollStep = 0.0f;
+    ringFrames = 0;
     font = nullptr;
     FreeLater(panelHandles);
     FreeLater(handles);
@@ -696,7 +1007,9 @@ void SiloReceipt::Refresh(const Receipt& r, const std::string& note, bool canSel
     Impl& p = *impl_;
     if (unity::IsAlive(p.panel)) p.Destroy(p.panel);
     p.panel = nullptr;
-    for (int i = 0; i < 2; ++i) p.btnBg[i] = p.btnText[i] = p.btnToggle[i] = nullptr;
+    for (int i = 0; i < 2; ++i) p.btnBg[i] = p.btnText[i] = p.btnToggle[i] = p.btnGame[i] = p.btnRing[i] = nullptr;
+    p.scrollRect = nullptr;
+    p.scrollStep = 0.0f;
     Impl::FreeLater(p.panelHandles);
     p.canSell = canSell;
     if (!p.BuildPanel(r, note)) {
@@ -719,6 +1032,10 @@ SiloReceipt::Result SiloReceipt::Tick(float unscaledDt) {
     const bool clickBackdrop = p.Clicked(p.backdropToggle);
     const bool clickCancel = p.Clicked(p.btnToggle[0]);
     const bool clickSell = p.Clicked(p.btnToggle[1]);
+    if (p.ringFrames > 0) {
+        --p.ringFrames;
+        p.FitRings();
+    }
     if (std::isfinite(unscaledDt) && unscaledDt > 0.0f) p.grace -= std::min(unscaledDt, 0.25f);
     if (p.grace > 0.0f) return Result::kNone;
     if (clickCancel || clickBackdrop) return Result::kCancel;
@@ -736,6 +1053,23 @@ SiloReceipt::Result SiloReceipt::Tick(float unscaledDt) {
     const bool right = p.Pressed(kb, p.kbRight) || p.Pressed(kb, p.kbD) || p.Pressed(pad, p.padDpad, p.dirRight) ||
                        p.Pressed(pad, p.padStick, p.stickRight);
     const bool tab = p.Pressed(kb, p.kbTab);
+    if (p.scrollStep > 0.0f) {  // the row list scrolls: one row per press / wheel notch
+        int rows = 0;
+        if (p.Pressed(kb, p.kbUp) || p.Pressed(kb, p.kbW) || p.Pressed(pad, p.padDpad, p.dirUp) ||
+            p.Pressed(pad, p.padStick, p.stickUp))
+            --rows;
+        if (p.Pressed(kb, p.kbDown) || p.Pressed(kb, p.kbS) || p.Pressed(pad, p.padDpad, p.dirDown) ||
+            p.Pressed(pad, p.padStick, p.stickDown))
+            ++rows;
+        if (Il2CppObject* mouse = p.Device(p.mouseCurrent); mouse && p.mouseScroll && p.vec2Y && p.axisRead) {
+            bool ok = false;
+            Il2CppObject* scroll = p.Call(p.mouseScroll, mouse, {}, "Mouse.get_scroll", &ok);
+            Il2CppObject* y = ok && scroll ? p.Call(p.vec2Y, scroll, {}, "Vector2Control.get_y", &ok) : nullptr;
+            const float dy = ok && y ? Impl::Unbox<float>(p.Call(p.axisRead, y, {}, "AxisControl.ReadValue", &ok)) : 0.0f;
+            if (ok && std::isfinite(dy) && dy != 0.0f) rows += dy > 0.0f ? -1 : 1;  // wheel up = list up
+        }
+        p.ScrollBy(rows);
+    }
     if (left || right || tab) {
         const int want = tab ? 1 - p.focus : left ? 0 : 1;
         if (want != p.focus && (want == 0 || p.canSell)) {

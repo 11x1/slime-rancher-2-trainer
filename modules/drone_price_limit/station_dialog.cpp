@@ -943,7 +943,8 @@ void StationUi::Impl::ApplyPillLook() {
 void StationUi::Impl::UpdatePillLabel() {
     if (!pillLabel || !haveStation || !host.get) return;
     const StationLimit l = host.get(station);
-    std::string s = "Price limit";
+    // Short label: "Price limit: 200%" overflowed the pill and wrapped.
+    std::string s = "Limit";
     if (l.Active()) s += l.mode == LimitMode::kFraction ? std::format(": {}%", l.value) : std::format(": {}", l.value);
     SetText(pillLabel, s);
 }
