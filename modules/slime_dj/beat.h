@@ -8,9 +8,11 @@
 // time. Memory: 2 bytes per hop (7 KB per minute of song).
 //
 // How (no libraries): mono mix, Hann window of ~23 ms (a power of two: 1024 frames at 44.1/48 kHz),
-// one radix-2 FFT per hop. Bass level = energy of the 35-160 Hz bins in dB against a slowly falling
-// peak (24 dB window). Onsets = spectral flux (rise of log magnitudes up to ~3 kHz, bass bins x3)
-// above an adaptive threshold (running mean + 1.5 deviations), local maximum, at least 120 ms apart.
+// one radix-2 FFT per hop. Bass level = energy of the 35-160 Hz bins in dB between a falling peak
+// and a rising floor (8-24 dB window), so loud, compressed music still swings 0..1 on every kick.
+// Onsets = half spectral flux (rise of log magnitudes up to ~3 kHz, bass bins x3), half rise of the
+// bass level, above an adaptive threshold (running mean + 1.5 deviations), local maximum, at least
+// 180 ms apart; strength against the recent strongest onsets.
 //
 // No game calls. Feed and Reset: one thread (the decoder); Query: any thread.
 
@@ -51,7 +53,8 @@ private:
     std::vector<uint32_t> bitrev_;
     std::vector<float> cosT_, sinT_;
     uint32_t bassLo_ = 1, bassHi_ = 2, fluxHi_ = 64;
-    float peakDb_ = -200.0f;
+    float peakDb_ = -200.0f, slowPeakDb_ = -200.0f, floorDb_ = -200.0f, prevBassDb_ = -200.0f;
+    float onsetPeak_ = 0;          // the recent strongest onset (falls slowly)
     float fluxMean_ = 0, fluxVar_ = 0;
     float flux1_ = 0, flux2_ = 0;  // flux of the previous two hops (peak picking)
     float thr1_ = 0;               // threshold at the previous hop

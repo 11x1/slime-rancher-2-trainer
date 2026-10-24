@@ -10,13 +10,19 @@ constexpr float kPi = 3.14159265358979f;
 constexpr float kWindowSeconds = 0.023f;  // FFT window, rounded up to a power of two
 constexpr float kBassLoHz = 35.0f, kBassHiHz = 160.0f, kFluxHiHz = 3000.0f;
 constexpr float kBassWeight = 3.0f;       // bass bins count this much more in the flux
-constexpr float kRangeDb = 24.0f;         // level 0..1 spans this many dB below the peak
-constexpr float kPeakFallDbPerSec = 2.0f;
-constexpr float kSilenceDb = -60.0f;      // peak below this: level 0 (silence, fade-in)
+constexpr float kBassRiseShare = 0.5f;    // detection function: this share from the bass level rise, the rest flux
+constexpr float kBassRiseDb = 12.0f;      // a bass rise of this many dB in one hop counts 1
+constexpr float kSlowFallDbPerSec = 2.0f; // slow peak of the bass level (silence gate)
+constexpr float kSilenceDb = -60.0f;      // slow peak below this: level 0 (silence, fade-in)
+constexpr float kGateDb = 30.0f;          // more than this under the slow peak: level 0 (breaks)
+constexpr float kPeakFallDbPerSec = 6.0f; // fast peak of the bass level
+constexpr float kFloorRiseDbPerSec = 10.0f;  // floor of the bass level (follows the dips between kicks)
+constexpr float kMinSpanDb = 8.0f, kMaxSpanDb = 24.0f;  // level 0..1 spans peak - floor, within these
 constexpr float kStatAlpha = 1.0f / 50;   // running flux mean / variance (~0.5 s)
 constexpr float kThrDeviations = 1.5f;
 constexpr float kMinFlux = 0.01f;         // absolute floor of the threshold
-constexpr int kMinGapHops = 12;           // onsets at least 120 ms apart
+constexpr int kMinGapHops = 18;           // onsets at least 180 ms apart (333 BPM)
+constexpr float kOnsetPeakFall = 0.33f;   // the recent strongest onset falls this fraction per second
 constexpr uint64_t kWarmHops = 30;        // no onsets in the first 0.3 s (statistics settle)
 constexpr size_t kMaxHops = 6u * 3600u * 100u;  // 6 hours (2 bytes each)
 }  // namespace
@@ -53,7 +59,8 @@ void BeatTrack::Reset(uint32_t rate, uint64_t startFrame) {
     bassLo_ = std::max<uint32_t>(1, static_cast<uint32_t>(std::lround(kBassLoHz / binHz)));
     bassHi_ = std::max(bassLo_, static_cast<uint32_t>(kBassHiHz / binHz));
     fluxHi_ = std::clamp<uint32_t>(static_cast<uint32_t>(kFluxHiHz / binHz), bassHi_, n_ / 2 - 1);
-    peakDb_ = -200.0f;
+    peakDb_ = slowPeakDb_ = floorDb_ = prevBassDb_ = -200.0f;
+    onsetPeak_ = 0;
     fluxMean_ = fluxVar_ = 0;
     flux1_ = flux2_ = thr1_ = 0;
     sinceOnset_ = 1000;
@@ -117,11 +124,21 @@ void BeatTrack::Hop() {
     }
     flux /= std::max(weights, 1.0f);
 
-    // Bass level against a slowly falling peak.
+    // Bass level between a falling peak and a rising floor.
+    const float hop = static_cast<float>(kHopSeconds);
     const float db = 10.0f * std::log10(bass + 1e-10f);
-    peakDb_ = std::max(db, peakDb_ - kPeakFallDbPerSec * static_cast<float>(kHopSeconds));
+    slowPeakDb_ = std::max(db, slowPeakDb_ - kSlowFallDbPerSec * hop);
+    peakDb_ = std::max(db, peakDb_ - kPeakFallDbPerSec * hop);
+    floorDb_ = std::max(std::min(db, floorDb_ + kFloorRiseDbPerSec * hop), peakDb_ - kMaxSpanDb);
     float level = 0;
-    if (peakDb_ > kSilenceDb) level = std::clamp((db - (peakDb_ - kRangeDb)) / kRangeDb, 0.0f, 1.0f);
+    if (slowPeakDb_ > kSilenceDb && db > slowPeakDb_ - kGateDb) {
+        const float span = std::clamp(peakDb_ - floorDb_, kMinSpanDb, kMaxSpanDb);
+        level = std::clamp((db - (peakDb_ - span)) / span, 0.0f, 1.0f);
+    }
+    // Detection function: spectral flux, mixed with the rise of the bass level (kicks).
+    const float rise = std::max(0.0f, db - prevBassDb_) / kBassRiseDb;
+    prevBassDb_ = std::max(db, slowPeakDb_ - kGateDb);
+    flux = (1.0f - kBassRiseShare) * flux + kBassRiseShare * rise;
 
     // Onset at the previous hop: a local flux maximum above the threshold of its time.
     const float thr = std::max(kMinFlux, fluxMean_ + kThrDeviations * std::sqrt(std::max(fluxVar_, 0.0f)));
@@ -131,8 +148,12 @@ void BeatTrack::Hop() {
     ++warm_;
     ++sinceOnset_;
     uint8_t onsetPrev = 0;
+    onsetPeak_ *= 1.0f - kOnsetPeakFall * hop;
     if (warm_ > kWarmHops && flux1_ > thr1_ && flux1_ > flux2_ && flux1_ >= flux && sinceOnset_ > kMinGapHops) {
-        const float strength = std::clamp((flux1_ - thr1_) / (thr1_ + 1e-6f), 0.0f, 1.0f);
+        onsetPeak_ = std::max(onsetPeak_, flux1_);
+        // Strength against the recent strongest onsets: on loud, even kicks (hardtekk) every kick is
+        // near 1 (against the threshold they were all ~0.4: "chill").
+        const float strength = std::clamp((flux1_ - thr1_) / std::max(onsetPeak_ - thr1_, 1e-6f), 0.0f, 1.0f);
         onsetPrev = static_cast<uint8_t>(std::lround(255.0f * (0.3f + 0.7f * strength)));
         sinceOnset_ = 1;  // counted from the previous hop
     }
