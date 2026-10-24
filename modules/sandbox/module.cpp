@@ -53,6 +53,7 @@
 #include "modules/sandbox/cheated_save.h"
 #include "modules/sandbox/player_extras.h"
 #include "modules/sandbox/prefab_icons.h"
+#include "modules/sandbox/upgrades.h"
 #include "ui/item_icons.h"
 #include "ui/overlay.h"
 #include "ui/sandbox_bridge.h"
@@ -597,7 +598,7 @@ private:
 
     Il2CppObject* OpenFabricator();                    // the open FabricatorUI, or nullptr
     Il2CppObject* FabricatorItem(Il2CppObject* ui, Il2CppObject** content, Il2CppObject** details);
-    void RefreshFabricator();
+    void RefreshFabricator(bool rebuild = false);  // rebuild: also the grid, as on opening (RebuildFabricator)
     Il2CppObject* SpendableDirector();
     bool UpgradeHidden(Il2CppObject* um, Il2CppObject* up, Il2CppObject* spend, std::vector<Il2CppObject*>* missing);
     void DoDiscoverUpgrades(const Ctx& c);
@@ -698,6 +699,9 @@ bool Sandbox::Setup(sr2::core::ModuleContext& ctx) {
     SetupExtras(R);
     SetupUnlocks(R);
     sandbox::SetupPlayerExtras(ctx);  // optional tools on the Extras card (player_extras.cpp)
+    sandbox::SetupUpgrades(ctx, {[this](uintptr_t id) { return Lookup(recipeById_, id, gadgetDefClass_); },
+                                 [this](bool rebuild) { RefreshFabricator(rebuild); },
+                                 [this] { lastRecipeState_ = lastUpgState_ = lastSnap_ = 0; }});  // upgrades.cpp
 
     g_self = this;
     if (!frameCb_) frameCb_ = main_thread::AddFrameCallback(kModule, [this](float dt) { Tick(dt); });
@@ -971,6 +975,7 @@ void Sandbox::OnEnable() {
     sandbox::SetAchievementsPaused(true);
     bridge::SetHandler(&HandleThunk);
     sandbox::PlayerExtrasEnabled(true);
+    sandbox::UpgradesEnabled(true);
     lastSnap_ = 0;
     togglesSeen_ = 0;  // the save's toggles apply again
     // A list that came out empty (built before the assets were loaded) is tried again.
@@ -988,6 +993,7 @@ void Sandbox::OnDisable() {
     batchNotices_.clear();
     bridge::SetHandler(nullptr);
     sandbox::PlayerExtrasEnabled(false);
+    sandbox::UpgradesEnabled(false);
     bridge::Snapshot s;
     s.tick = GetTickCount64();
     s.why = "Sandbox is off.";
@@ -2251,6 +2257,7 @@ void Sandbox::Tick(float dt) {
         Refresh();
     }
     sandbox::PlayerExtrasTick(snap);
+    sandbox::UpgradesTick(bridge::WantsSnapshot());
 }
 
 void Sandbox::Done(bool ok, const std::string& text) {
@@ -2986,7 +2993,7 @@ void Sandbox::DoUnlockSlot(const Ctx& c, int idx) {
             list += std::format("{}{} {} -> {}", list.empty() ? "" : ", ", unity::GetName(up), from, cur);
         }
     }
-    if (levels) RefreshFabricator();
+    if (levels) RefreshFabricator(true);
     Done(unlocked, unlocked ? std::format("Slot {} unlocked ({})", idx + 1, list)
                    : levels ? std::format("Slot {}: applied {}, but it is still locked", idx + 1, list)
                             : std::format("Slot {} not unlocked: its upgrades ({}) are at their last level already",
@@ -3210,7 +3217,7 @@ void Sandbox::DoUnlockUpgrades(const Ctx& c) {
                                : std::string("Every upgrade is at its last level already"));
         return;
     }
-    RefreshFabricator();
+    RefreshFabricator(true);
     SR2_INFO("[{}] maxed upgrades: {}", kModule, list);
     Done(true, std::format("Maxed all upgrades: {} level(s) of {} upgrade(s){}", levels, touched,
                            stuck ? std::format(" ({} could not be raised all the way)", stuck) : std::string()));
@@ -3300,9 +3307,9 @@ void Sandbox::DoDiscoverUpgrades(const Ctx& c) {
                                  : std::string("Every upgrade is discovered already"));
         return;
     }
-    RefreshFabricator();
+    RefreshFabricator(true);
     SR2_INFO("[{}] discovered upgrades (one upgrade component each, as when found): {}", kModule, list);
-    Done(failed == 0, std::format("Discovered {} upgrade(s){}. An open Fabricator shows them after you reopen it.", found,
+    Done(failed == 0, std::format("Discovered {} upgrade(s){}", found,
                                   failed ? std::format(" ({} could not be discovered)", failed) : std::string()));
 }
 
@@ -3349,11 +3356,15 @@ Il2CppObject* Sandbox::FabricatorItem(Il2CppObject* ui, Il2CppObject** contentOu
 // FabricatorContent.OnItemSelected(item, PROGRAMMATIC) (0x804700, decompiled: details SetItem -> recipe counts
 // and the Fabricate / Upgrade button, variants button, ItemSelected -> FabricatorUI.OnItemSelected ->
 // UpdateInputLegendBasedOnItemUpgrade, which enables the legend's Fabricate / Upgrade entry). PROGRAMMATIC
-// plays no selection sound. Without that method: FabricatorItemDetails.SetItem.
-void Sandbox::RefreshFabricator() {
+// plays no selection sound. Without that method: FabricatorItemDetails.SetItem. `rebuild` (levels, discoveries,
+// blueprints): first the whole Fabricator as when it opens (upgrades.cpp RebuildFabricator: grid buttons with
+// their icons and tiers, hidden placeholders, the gadgets of the owned blueprints); before, it had to be reopened.
+void Sandbox::RefreshFabricator(bool rebuild) {
     Il2CppObject* content = nullptr;
     Il2CppObject* details = nullptr;
-    Il2CppObject* item = FabricatorItem(OpenFabricator(), &content, &details);
+    Il2CppObject* ui = OpenFabricator();
+    if (rebuild && ui) sandbox::RebuildFabricator(ui);
+    Il2CppObject* item = FabricatorItem(ui, &content, &details);
     if (!item) return;
     bool ok = false;
     int32_t cause = 0;  // InteractionCause.PROGRAMMATIC
