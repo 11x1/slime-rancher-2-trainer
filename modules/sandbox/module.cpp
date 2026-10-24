@@ -312,7 +312,7 @@ private:
         int index;  // into the category titles
     };
     void ReadFabCategories(std::vector<FabCat>& cats, std::vector<std::string>& titles, std::vector<uint32_t>& icons);
-    bool EnsurePinnedIcon();
+    bool EnsurePinnedIcon(bool force = false);
     void GroupFabCategories(std::vector<std::unordered_set<uintptr_t>>& members, std::vector<std::string>& titles,
                             std::vector<uint32_t>& icons, std::vector<std::unordered_map<uintptr_t, int>>& orders);
     int RecipeCategory(const std::vector<FabCat>& cats, Il2CppObject* def, int* order);
@@ -541,6 +541,23 @@ private:
     Il2CppClass* fabPinnedCatClass_ = nullptr;       // PinnedFabricateCategory (optional: the Pinned tab's icon)
     uint32_t pinnedIcon_ = 0;
     int pinnedIconTry_ = -1;                         // g_fabStarts at the last EnsurePinnedIcon search
+    // The Fabricator's UI scene, preloaded for a moment through the game's own UIDisplayManager preload
+    // (round 10: the Pinned icon's sprite 'pin' is only in that scene; see PinIconTick). Optional.
+    Il2CppClass* udmClass_ = nullptr;                // UI.Framework.Displays.UIDisplayManager
+    Il2CppClass* sceneEntryClass_ = nullptr;         // UIDisplaySceneLoadEntry (the preload handle)
+    const MethodInfo* udmInstance_ = nullptr;        // UIDisplayManager.get_Instance
+    const MethodInfo* udmPreload_ = nullptr;         // RequestPreloadDisplay(UIDisplayHandle, object)
+    const MethodInfo* udmRelease_ = nullptr;         // ReleasePreloadDisplay(UIDisplayHandle, object)
+    const MethodInfo* entryIsDone_ = nullptr;        // UIDisplaySceneLoadEntry.get_IsDone
+    size_t offUdmLayerSet_ = 0, offLayerSetList_ = 0, offLayerDisplays_ = 0;  // _layerSet, _layerList, _displayList
+    size_t offEntryName_ = 0, offEntryScene_ = 0;    // UILayerDefinition.LayerEntry._name / _sceneAsset (live class)
+    std::string fabDisplay_;                         // the Fabricator's display name ("" = not found yet)
+    Il2CppGCHandle pinPreload_ = nullptr;            // the preload entry while we hold it
+    unsigned long long pinPreloadT0_ = 0, pinPreloadNext_ = 0, pinPreloadPoll_ = 0;
+    int pinPreloadTries_ = 0;
+    bool PinPreloadRequest();
+    void PinPreloadRelease(const char* why);
+    void PinIconTick(unsigned long long now);
     size_t offPinnedRecipe_ = 0;                     // PlayerModel.PinnedRecipe (IRecipe; optional)
     std::unordered_map<std::string, uintptr_t> recipeByRef_;  // gadget ReferenceId -> recipe id
     Il2CppObject* pinnedObj_ = nullptr;              // the IRecipe last resolved (identity only)
@@ -625,6 +642,17 @@ private:
 
     // ---- open plot purchase menu (optional): rebuilt after a Newbucks change ----
     Il2CppClass* landPlotUiClass_ = nullptr;           // MonomiPark.SlimeRancher.UI.Plot.LandPlotUIRoot
+
+    // ---- open gadget-mode menu (optional): its lists rebuilt after a craft (RefreshGadgetMenu) ----
+    Il2CppClass* gadgetSelUiClass_ = nullptr;          // MonomiPark.SlimeRancher.UI.Gadget.NewGadgetSelectionUI
+    size_t offSelCatList_ = 0, offSelGrid_ = 0;        // its _categoryList / _itemGrid
+    size_t offCatListButtons_ = 0;                     // NewGadgetCategoryList._buttons (NewGadgetCategoryButton[])
+    size_t offCatButtonCat_ = 0;                       // NewGadgetCategoryButton._category (GadgetCategoryRuntime)
+    size_t offGridCategory_ = 0;                       // NewGadgetItemGrid._category
+    const MethodInfo* catUpdateItems_ = nullptr;       // GadgetCategoryRuntime.UpdateItemList()
+    const MethodInfo* catListSelected_ = nullptr;      // NewGadgetCategoryList.get_SelectedCategory
+    const MethodInfo* selCategorySelected_ = nullptr;  // NewGadgetSelectionUI.OnCategorySelected(category, cause)
+    void RefreshGadgetMenu();
 
     Il2CppObject* OpenFabricator();                    // the open FabricatorUI, or nullptr
     Il2CppObject* FabricatorItem(Il2CppObject* ui, Il2CppObject** content, Il2CppObject** details);
@@ -982,6 +1010,28 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
         std::string lw2;
         landPlotUiClass_ = cls(kImage, "MonomiPark.SlimeRancher.UI.Plot", "LandPlotUIRoot", lw2);
         if (!lw2.empty()) SR2_WARN("[{}] Newbucks: an open plot menu is not refreshed ({})", kModule, lw2);
+        {
+            // Optional: the gadget-mode menu's lists after a craft (RefreshGadgetMenu).
+            std::string gw;
+            constexpr const char* kGadgetUi = "MonomiPark.SlimeRancher.UI.Gadget";
+            gadgetSelUiClass_ = cls(kImage, kGadgetUi, "NewGadgetSelectionUI", gw);
+            Il2CppClass* catList = cls(kImage, kGadgetUi, "NewGadgetCategoryList", gw);
+            Il2CppClass* catButton = cls(kImage, kGadgetUi, "NewGadgetCategoryButton", gw);
+            Il2CppClass* grid = cls(kImage, kGadgetUi, "NewGadgetItemGrid", gw);
+            Il2CppClass* catRuntime = cls(kImage, kGadgetUi, "GadgetCategoryRuntime", gw);
+            off(gadgetSelUiClass_, "_categoryList", offSelCatList_, gw);
+            off(gadgetSelUiClass_, "_itemGrid", offSelGrid_, gw);
+            off(catList, "_buttons", offCatListButtons_, gw);
+            off(catButton, "_category", offCatButtonCat_, gw);
+            off(grid, "_category", offGridCategory_, gw);
+            catUpdateItems_ = method(catRuntime, "UpdateItemList", 0, gw);
+            catListSelected_ = method(catList, "get_SelectedCategory", 0, gw);
+            selCategorySelected_ = method(gadgetSelUiClass_, "OnCategorySelected", 2, gw);
+            if (!gw.empty()) {
+                gadgetSelUiClass_ = nullptr;
+                SR2_WARN("[{}] crafter: an open gadget menu is not refreshed after a craft ({})", kModule, gw);
+            }
+        }
         // Optional: the Fabricator's order within a category, its Pinned category icon and the pinned recipe.
         std::string ow;
         fabCatIndexOf_ = method(fabGadgetCatClass_, "IndexOf", 1, ow);
@@ -991,6 +1041,25 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
         if (!ow.empty() || !pw2.empty())
             SR2_WARN("[{}] crafter: {}{}", kModule, ow.empty() ? "" : "no Fabricator order (" + ow + ") ",
                      pw2.empty() ? "" : "no Pinned tab content (" + pw2 + ")");
+        // Optional: the Fabricator UI scene preload that brings the Pinned icon's sprite in (PinIconTick).
+        std::string uw;
+        constexpr const char* kDisplays = "MonomiPark.SlimeRancher.UI.Framework.Displays";
+        udmClass_ = cls(kImage, kDisplays, "UIDisplayManager", uw);
+        sceneEntryClass_ = cls(kImage, kDisplays, "UIDisplaySceneLoadEntry", uw);
+        Il2CppClass* layerSet = cls(kImage, kDisplays, "UILayerSetDefinition", uw);
+        Il2CppClass* layer = cls(kImage, kDisplays, "UILayerDefinition", uw);
+        off(udmClass_, "_layerSet", offUdmLayerSet_, uw);
+        off(layerSet, "_layerList", offLayerSetList_, uw);
+        off(layer, "_displayList", offLayerDisplays_, uw);
+        udmInstance_ = method(udmClass_, "get_Instance", 0, uw);
+        udmPreload_ = method(udmClass_, "RequestPreloadDisplay", 2, uw);
+        udmRelease_ = method(udmClass_, "ReleasePreloadDisplay", 2, uw);
+        entryIsDone_ = method(sceneEntryClass_, "get_IsDone", 0, uw);
+        if (!uw.empty() || !fabPinnedCatClass_) {
+            udmPreload_ = nullptr;
+            SR2_WARN("[{}] crafter: no Fabricator UI preload for the Pinned icon ({})", kModule,
+                     uw.empty() ? "no PinnedFabricateCategory" : uw);
+        }
     }
     {
         // Optional: crafting materials straight into the refinery (GadgetDirector.AddItem
@@ -1301,24 +1370,14 @@ bool Sandbox::EnsureNamedSprites() {
                                           "iconCategoryCurios"};
     const unsigned long long t0 = GetTickCount64();
     size_t seen = 0;
-    std::string found, pins;
+    std::string found;
     for (Il2CppObject* s : unity::FindObjectsOfTypeAll(spriteClass_)) {
         if (sr2::core::ModuleFaulted(kModule)) break;
         if (!s || !unity::IsAlive(s)) continue;
         ++seen;
         const std::string n = unity::GetName(s);
-        // The Fabricator's Pinned tab icon. The category asset that points to it only loads with the
-        // Fabricator UI (EnsurePinnedIcon), while its sibling category sprites are loaded from the start, so
-        // a loaded sprite named like them ("iconCategory...Pin...", or plainly "iconPin" / "iconPinned") is
-        // taken right away. Sprites with "pin" in the name (not "pink" / "spin") are logged to learn its name.
-        std::string low;
-        for (char ch : n) low += static_cast<char>((ch >= 'A' && ch <= 'Z') ? ch - 'A' + 'a' : ch);
-        if (low.find("pin") != std::string::npos && low.find("pink") == std::string::npos &&
-            low.find("spin") == std::string::npos) {
-            if (pins.size() < 400) pins += (pins.empty() ? "" : ", ") + n;
-            if (!pinnedIcon_ && (low.starts_with("iconcategory") || low == "iconpin" || low == "iconpinned"))
-                if ((pinnedIcon_ = SpriteIcon(s))) SR2_INFO("[{}] crafter: the Pinned icon from the loaded sprite '{}'", kModule, n);
-        }
+        // (The Fabricator's Pinned icon, sprite 'pin', is not among them: it only comes with the Fabricator's
+        // UI scene, see PinIconTick.)
         for (const char* w : kWanted) {
             if (n != w || namedSprites_.count(n)) continue;
             if (const uint32_t id = SpriteIcon(s)) {
@@ -1329,7 +1388,6 @@ bool Sandbox::EnsureNamedSprites() {
     }
     SR2_INFO("[{}] game sprites by name: {} of {} wanted found among {} loaded sprites ({} ms): {}", kModule,
              namedSprites_.size(), std::size(kWanted), seen, GetTickCount64() - t0, found.empty() ? "none" : found);
-    SR2_INFO("[{}] game sprites with 'pin' in the name: {}", kModule, pins.empty() ? "none" : pins);
     return true;
 }
 
@@ -2016,8 +2074,8 @@ void Sandbox::ReadFabCategories(std::vector<FabCat>& cats, std::vector<std::stri
 // FindObjectsOfTypeAll) once, and again after each Fabricator UI was built (FabricatorUI.Start: the asset
 // comes with it), while missing. Not on a timer: a 5 s FindObjectsOfTypeAll retry for the menu asset
 // cost a 25 ms frame each time (see the Crafter notes). True if it searched.
-bool Sandbox::EnsurePinnedIcon() {
-    if (pinnedIcon_ || !fabPinnedCatClass_ || !offFabCatIcon_ || pinnedIconTry_ == g_fabStarts) return false;
+bool Sandbox::EnsurePinnedIcon(bool force) {
+    if (pinnedIcon_ || !fabPinnedCatClass_ || !offFabCatIcon_ || (!force && pinnedIconTry_ == g_fabStarts)) return false;
     const bool first = pinnedIconTry_ < 0;
     pinnedIconTry_ = g_fabStarts;
     for (Il2CppObject* c : unity::FindObjectsOfTypeAll(fabPinnedCatClass_)) {
@@ -2031,6 +2089,106 @@ bool Sandbox::EnsurePinnedIcon() {
     }
     if (first) SR2_INFO("[{}] crafter: the Fabricator's Pinned icon is not loaded yet (the overlay draws a pin until it is)", kModule);
     return true;
+}
+
+// The Pinned icon without opening the Fabricator first (round 10). Round 9's guess at a loaded sprite
+// failed: the log listed every loaded sprite with "pin" in its name and none was the icon; after the
+// Fabricator was opened the category asset gave it, sprite 'pin' ("Pinned Fabricate Category", Addressables
+// "Icon/pin.png"). It is only in the Fabricator's UI scene (MenuLayer_Fabricator), which the game loads when
+// the Fabricator opens. So that scene is preloaded for a moment with the game's own preload API
+// (UIDisplayManager.RequestPreloadDisplay, as UIDisplayPreloadOnDisplayOpenClose and the minimap use it):
+// the display is the UILayerDefinition entry named like "Fabricator" in UIDisplayManager._layerSet; once its
+// UIDisplaySceneLoadEntry.IsDone, one FindObjectsOfTypeAll(PinnedFabricateCategory) (EnsurePinnedIcon) and
+// the request is released. item_icons keeps the sprite and its D3D texture, so the icon stays after the
+// scene unloads. Only while the crafter list exists and the icon is missing; every 10 s at most, 6 tries,
+// 30 s per try. Main thread.
+bool Sandbox::PinPreloadRequest() {
+    Il2CppObject* udm = Call(udmInstance_, nullptr, {}, "UIDisplayManager.get_Instance");
+    if (!udm || !IsA(udm, udmClass_)) return false;
+    if (fabDisplay_.empty()) {
+        void* set = unity::Field<void*>(udm, offUdmLayerSet_);
+        void* layers = set ? unity::Field<void*>(set, offLayerSetList_) : nullptr;
+        std::string seen;
+        for (size_t i = 0, n = unity::ArrayLength(layers); i < n; ++i) {
+            auto* layer = static_cast<Il2CppObject*>(unity::ArrayAt(layers, i));
+            void* list = layer ? unity::Field<void*>(layer, offLayerDisplays_) : nullptr;
+            for (size_t j = 0, m = unity::ArrayLength(list); j < m; ++j) {
+                auto* e = static_cast<Il2CppObject*>(unity::ArrayAt(list, j));
+                if (!e) continue;
+                if (!offEntryName_ || !offEntryScene_) {  // UILayerDefinition.LayerEntry, from the live object
+                    Il2CppClass* k = api().il2cpp_object_get_class(e);
+                    if (auto o = Resolver::Get().FieldOffset(k, "_name")) offEntryName_ = *o;
+                    if (auto o = Resolver::Get().FieldOffset(k, "_sceneAsset")) offEntryScene_ = *o;
+                    if (!offEntryName_ || !offEntryScene_) return false;
+                }
+                const std::string name = Resolver::Get().ToUtf8(unity::Field<Il2CppString*>(e, offEntryName_));
+                const std::string low = Lower(name);
+                if (low.find("fabricat") == std::string::npos) continue;
+                seen += (seen.empty() ? "" : ", ") + name;
+                if (unity::Field<Il2CppObject*>(e, offEntryScene_) && (low == "fabricator" || fabDisplay_.empty()))
+                    fabDisplay_ = name;
+            }
+        }
+        if (fabDisplay_.empty()) {
+            if (pinPreloadTries_ == 1)
+                SR2_INFO("[{}] crafter: no Fabricator UI display to preload yet (displays named like it: {})", kModule,
+                         seen.empty() ? "none" : seen);
+            return false;
+        }
+        SR2_INFO("[{}] crafter: the Fabricator's UI display is '{}' (candidates: {})", kModule, fabDisplay_, seen);
+    }
+    Il2CppString* handle = unity::NewString(fabDisplay_);  // UIDisplayHandle = struct { string _name }
+    Il2CppString* requester = unity::NewString("SR2Mods.Sandbox.PinnedIcon");
+    Il2CppObject* entry = Call(udmPreload_, udm, {&handle, requester}, "UIDisplayManager.RequestPreloadDisplay");
+    if (!entry) {
+        SR2_INFO("[{}] crafter: the Fabricator UI display '{}' could not be preloaded (no UI scene, or the UI is not "
+                 "set up yet)", kModule, fabDisplay_);
+        return false;
+    }
+    pinPreload_ = unity::NewGCHandle(entry);
+    pinPreloadT0_ = pinPreloadPoll_ = GetTickCount64();
+    SR2_INFO("[{}] crafter: preloading the Fabricator UI '{}' for its Pinned icon ({})", kModule, fabDisplay_,
+             unity::ClassName(entry));
+    return pinPreload_ != nullptr;
+}
+
+void Sandbox::PinPreloadRelease(const char* why) {
+    if (!pinPreload_) return;
+    unity::FreeGCHandle(pinPreload_);  // frame callback, not a hook
+    pinPreload_ = nullptr;
+    Il2CppObject* udm = Call(udmInstance_, nullptr, {}, "UIDisplayManager.get_Instance");
+    bool ok = false;
+    if (udm && IsA(udm, udmClass_) && !fabDisplay_.empty()) {
+        Il2CppString* handle = unity::NewString(fabDisplay_);
+        Il2CppString* requester = unity::NewString("SR2Mods.Sandbox.PinnedIcon");  // HashSet<object>: string equality
+        Call(udmRelease_, udm, {&handle, requester}, "UIDisplayManager.ReleasePreloadDisplay", &ok);
+    }
+    SR2_INFO("[{}] crafter: Fabricator UI preload released ({}){}", kModule, why, ok ? "" : " - the release call failed");
+}
+
+void Sandbox::PinIconTick(unsigned long long now) {
+    if (!udmPreload_) return;
+    if (pinPreload_) {
+        if (now - pinPreloadPoll_ < 100) return;
+        pinPreloadPoll_ = now;
+        Il2CppObject* e = unity::GCHandleTarget(pinPreload_);
+        bool done = !IsA(e, sceneEntryClass_);  // another handle type: do not wait for it
+        if (!done) CallValue(entryIsDone_, e, {}, "UIDisplaySceneLoadEntry.get_IsDone", done);
+        if (done) {
+            EnsurePinnedIcon(true);
+            if (!pinnedIcon_)
+                SR2_WARN("[{}] crafter: the Fabricator UI is loaded ({:.1f} s) but no Pinned icon came with it", kModule,
+                         static_cast<double>(now - pinPreloadT0_) / 1000.0);
+            PinPreloadRelease(pinnedIcon_ ? "Pinned icon found" : "no Pinned icon in it");
+        } else if (now - pinPreloadT0_ > 30000) {
+            PinPreloadRelease("still loading after 30 s");
+        }
+        return;
+    }
+    if (pinnedIcon_ || !recipes_ || pinPreloadTries_ >= 6 || now < pinPreloadNext_) return;
+    pinPreloadNext_ = now + 10000;
+    ++pinPreloadTries_;
+    PinPreloadRequest();
 }
 
 // Index of the first category that contains the gadget, -1 if none. `order`: its position there as the
@@ -2724,6 +2882,7 @@ void Sandbox::TopUpEnergy() {
 void Sandbox::Tick(float dt) {
     if (!Live()) {
         if (fabHint_.Exists()) DropFabricatorHint();  // Sandbox off: the key bar entry goes
+        if (pinPreload_ && !sr2::core::ModuleFaulted(kModule)) PinPreloadRelease("Sandbox off");
         return;
     }
     if (notices_.Ready()) notices_.Frame(dt);  // queued HUD notices wait for the HUD (menus closed)
@@ -2738,6 +2897,7 @@ void Sandbox::Tick(float dt) {
         TopUpEnergy();
     }
     FabricatorTick(now);
+    PinIconTick(now);
     if (!batchNotices_.empty() && now - batchTick_ > 2000) {  // a batch whose last request never came
         FlushNotices();
         batchIdx_ = batchSize_ = 0;
@@ -2922,6 +3082,7 @@ void Sandbox::Handle(const bridge::Action& a) {
     if (a.op == bridge::Op::AddMaterial || a.op == bridge::Op::Craft || a.op == bridge::Op::SetNewbucks ||
         a.op == bridge::Op::AddNewbucks)
         RefreshFabricator();
+    if (a.op == bridge::Op::Craft) RefreshGadgetMenu();  // an open gadget-mode menu lists the new gadgets
     Refresh();
 }
 
@@ -2986,6 +3147,43 @@ void Sandbox::RefreshPurchaseMenus() {
     bool ok = false;
     if (rebuild) Call(rebuild, ui, {}, "LandPlotUIRoot.RebuildUI", &ok);
     SR2_INFO("[{}] Newbucks: open plot menu {}", kModule, ok ? "rebuilt (new amounts)" : "not rebuilt (RebuildUI not found or failed)");
+}
+
+// After a craft (vanilla or a mod buildable's grant): an open gadget-mode menu (NewGadgetSelectionUI, the
+// "place a gadget" menu) shows the new gadgets and counts (round 10: "give myself some buildable -> have to
+// reopen gadget menu"). Each category keeps the item list it read when the menu was built
+// (GadgetCategoryRuntime._itemList, from GadgetCategory.GetItems), and the grid only refills on a category
+// change. So: UpdateItemList on every category button's runtime (the game's own rebuild of that list), then
+// the selected category is shown again through NewGadgetSelectionUI.OnCategorySelected(category,
+// PROGRAMMATIC) with the grid's _category cleared first (SetCategory returns early for the same category):
+// empty / non-empty display, page count, page 1 refilled (NewGadgetItemButton.SetData reads the counts).
+// One FindObjectOfType per craft request, nothing otherwise.
+void Sandbox::RefreshGadgetMenu() {
+    if (!gadgetSelUiClass_) return;
+    Il2CppObject* ui = unity::FindObjectOfType(gadgetSelUiClass_);
+    if (!ui || !unity::IsAlive(ui) || !IsA(ui, gadgetSelUiClass_) || !unity::ActiveInHierarchy(unity::GameObjectOf(ui)))
+        return;
+    auto* list = unity::Field<Il2CppObject*>(ui, offSelCatList_);
+    auto* grid = unity::Field<Il2CppObject*>(ui, offSelGrid_);
+    if (!list || !grid || !unity::IsAlive(list) || !unity::IsAlive(grid)) return;
+    void* buttons = unity::Field<void*>(list, offCatListButtons_);
+    int updated = 0;
+    for (size_t i = 0, n = unity::ArrayLength(buttons); i < n; ++i) {
+        auto* b = static_cast<Il2CppObject*>(unity::ArrayAt(buttons, i));
+        auto* cat = b && unity::IsAlive(b) ? unity::Field<Il2CppObject*>(b, offCatButtonCat_) : nullptr;
+        bool ok = false;
+        if (cat) Call(catUpdateItems_, cat, {}, "GadgetCategoryRuntime.UpdateItemList", &ok);
+        updated += ok;
+    }
+    Il2CppObject* cur = Call(catListSelected_, list, {}, "NewGadgetCategoryList.SelectedCategory");
+    bool shown = false;
+    if (cur) {
+        unity::Field<Il2CppObject*>(grid, offGridCategory_) = nullptr;  // so SetCategory refills it
+        int32_t cause = 0;                                              // InteractionCause.PROGRAMMATIC
+        Call(selCategorySelected_, ui, {cur, &cause}, "NewGadgetSelectionUI.OnCategorySelected", &shown);
+    }
+    SR2_INFO("[{}] crafter: open gadget menu refreshed ({} categor{} re-read, selected one {})", kModule, updated,
+             updated == 1 ? "y" : "ies", shown ? "shown again" : "not shown again");
 }
 
 // Count of what a slot holds, clamped to [0, GetSlotMaxCount]: up through

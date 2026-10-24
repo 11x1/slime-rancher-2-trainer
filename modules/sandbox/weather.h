@@ -11,6 +11,10 @@
 // pattern). The forecast is never touched, so the save only ever holds the game's own forecast; a lock
 // lives in the save's sidecar (cheated_save.h, SaveData "weather") and is re-applied after a load.
 //
+// The same card has the time of day (TimeDirector / WorldModel.worldTime): skip ahead through the game's own
+// fast-forward (TimeDirector.FastForwardTo, as sleeping), rewind (worldTime set back, at most 24 h), pause
+// (WorldModel.pauseWorldTime). See weather.cpp, "time", and NOTES.md, "Time of day".
+//
 // No hooks: a 1 Hz main-thread check re-applies a lock when the game's forecast changes the zone's weather
 // and ends a timed start. Nothing is required: a missing symbol turns the card off (logged, the card says why).
 

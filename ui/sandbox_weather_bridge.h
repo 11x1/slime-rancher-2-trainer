@@ -59,12 +59,27 @@ struct Forecast {
     bool running = false; // started and not over
 };
 
+// The game's clock (TimeDirector / WorldModel.worldTime, game seconds; day 1 starts at 0, a new game at 09:00).
+struct Time {
+    bool ok = false;              // false: no clock (title screen) or unavailable (`why`)
+    std::string why;
+    double now = 0;               // world time, game seconds
+    double start = 0;             // WorldModel.worldTimeStart (a rewind never goes before it)
+    bool paused = false;          // WorldModel.pauseWorldTime (ours; not saved)
+    bool skipping = false;        // a fast-forward runs (WorldModel.fastForwardUntil)
+    double skipUntil = 0;         // its target, game seconds
+    double ffSecsPerDay = 0;      // real seconds per game day while fast-forwarding (TimeDirector.FfSecsPerGameDay)
+    double secsPerDay = 0;        // real seconds per game day normally (TimeDirector.SecsPerGameDay)
+};
+
 struct State {
     unsigned long long tick = 0;  // GetTickCount64 when it was taken
     bool inGame = false;
     std::string why;              // !inGame / unavailable: what is missing
+    Time time;                    // filled whenever a save is loaded, also when the weather is unavailable
     std::vector<Zone> zones;      // every zone with weather, in the registry's order
     int here = -1;                // index of the zone the player is in (-1: none with weather)
+    std::string hereName;         // the zone the player is in when it has no weather (the ranch), else ""
     int shown = -1;               // index of the zone the lists below are about (the UI's choice, else `here`)
     std::vector<Running> running; // in `shown`
     std::vector<Forecast> forecast;  // in `shown`, by start time
@@ -80,6 +95,11 @@ enum class Op {
     Show,     // zone = the zone the card shows (0 = where the player is)
     Start,    // zone, pattern (0 = clear skies), state, all, lock
     Natural,  // zone, all: back to the natural weather (clears the lock / override)
+    // The clock (the card's "Time of day" part).
+    TimeSkip,    // hour: fast-forward to its next occurrence, as sleeping does (the world catches up)
+    TimeRewind,  // hour: set the clock back to its last occurrence (at most 24 h back), at once
+    TimePause,   // lock: true pauses the clock, false lets it run
+    TimeStop,    // ends a running fast-forward where it is
 };
 
 struct Action {
@@ -88,7 +108,8 @@ struct Action {
     uintptr_t pattern = 0;
     uintptr_t state = 0;
     bool all = false;   // every weather zone (the same weather where the zone has it)
-    bool lock = false;  // keep it: re-applied when the game changes it, kept per save
+    bool lock = false;  // keep it: re-applied when the game changes it, kept per save (TimePause: on)
+    double hour = 0;    // TimeSkip / TimeRewind: the time of day, 0 <= hour < 24
 };
 
 // ---- module side (Unity main thread) ----

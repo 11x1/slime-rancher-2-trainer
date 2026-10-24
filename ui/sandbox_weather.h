@@ -1,5 +1,7 @@
 #pragma once
-// The Sandbox page's "Weather" card (modules/sandbox/weather.cpp, sandbox_weather_bridge.h): the weather
+// The Sandbox page's "Time & weather" card (modules/sandbox/weather.cpp, sandbox_weather_bridge.h). Time of
+// day first: the game's clock, quick skips to the next 06:00 / 12:00 / 18:00 / 00:00, a time slider with Skip
+// ahead (fast-forward, as sleeping) and Rewind (after a confirmation), Pause time. Then the weather
 // running in a zone (the player's by default) and its forecast, a weather picker (the zone's patterns with
 // the map's icons, plus Clear skies) with the pattern's states, "All zones" and "Lock" switches, Start now,
 // End weather and Back to natural weather. Render thread only; every change is a posted request. Kept out

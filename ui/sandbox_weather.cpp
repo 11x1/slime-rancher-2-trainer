@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <format>
 #include <string>
@@ -118,13 +119,21 @@ void ZoneCombo(const Helpers& h, const wb::State& st, float w) {
     HoverTip(h, "The zone this card shows and changes. It follows you until you pick another one.");
     if (!open) return;
     h.surface(true);
-    const std::string follow = st.here >= 0 ? std::format("Where you are ({})", st.zones[static_cast<size_t>(st.here)].name)
-                                            : std::string("Where you are");
-    if (ImGui::Selectable(follow.c_str(), false)) {
+    // "Where you are" follows the player; where there is no weather (the ranch) it is grayed out (round 10).
+    const bool noWeatherHere = st.here < 0;
+    const std::string follow =
+        !noWeatherHere         ? std::format("Where you are ({})", st.zones[static_cast<size_t>(st.here)].name)
+        : st.hereName.empty() ? std::string("Where you are (no weather here)")
+                              : std::format("Where you are ({}: no weather)", st.hereName);
+    if (ImGui::Selectable(follow.c_str(), false, noWeatherHere ? ImGuiSelectableFlags_Disabled : 0)) {
         wb::Action a;
         a.op = wb::Op::Show;
         wb::Request(a);
     }
+    if (noWeatherHere)
+        HoverTip(h, std::format("{} has no weather of its own, so there is nothing to change where you are. Pick a zone "
+                                "below; the card follows you again once you pick this in a zone with weather.",
+                                st.hereName.empty() ? std::string("This place") : st.hereName));
     ImGui::Separator();
     for (int i = 0; i < static_cast<int>(st.zones.size()); ++i) {
         ImGui::PushID(i);
@@ -314,18 +323,192 @@ void Controls(const Helpers& h, const wb::State& st, const wb::Zone& z) {
         DimText(std::format("Changed weather in {} zone(s), {} locked.", st.overriddenZones, st.lockedZones));
 }
 
+// ---- Time of day (round 10: "let me set time in sandbox, missed it by a second") ----
+constexpr double kDay = 86400.0;
+int g_timePick = -1;        // picked time of day in minutes (-1: not set yet, starts at the game's time)
+bool g_rewindAsk = false;   // open the rewind confirmation this frame
+int g_rewindMin = 0;        // the time it asks about
+
+std::string HhMm(int mins) { return std::format("{:02}:{:02}", mins / 60 % 24, mins % 60); }
+int MinuteOfDay(double t) { return static_cast<int>(std::floor((t - std::floor(t / kDay) * kDay) / 60.0)); }
+std::string Clock(double t) {
+    return std::format("Day {}, {}", static_cast<long long>(std::floor(t / kDay)) + 1, HhMm(MinuteOfDay(t)));
+}
+// The next / last time the clock shows `mins` (as the module computes it).
+double NextAt(double now, int mins) {
+    double t = std::floor(now / kDay) * kDay + mins * 60.0;
+    return t <= now + 30.0 ? t + kDay : t;
+}
+double LastAt(double now, int mins) {
+    double t = std::floor(now / kDay) * kDay + mins * 60.0;
+    return t >= now ? t - kDay : t;
+}
+std::string Span(double secs) {
+    const int m = static_cast<int>(std::lround(secs / 60.0));
+    return m < 60 ? std::format("{} min", m) : std::format("{} h {:02} min", m / 60, m % 60);
+}
+const char* DayPart(int mins) {
+    const int h = mins / 60;
+    return h < 6 ? "night" : h < 12 ? "morning" : h < 18 ? "afternoon" : "evening";
+}
+
+void TimeRequest(wb::Op op, int mins, bool on = false) {
+    wb::Action a;
+    a.op = op;
+    a.hour = mins / 60.0;
+    a.lock = on;
+    wb::Request(a);
+}
+
+// The rewind confirmation (Cancel / Rewind, Esc cancels), centred on the page.
+void RewindModal(const Helpers& h, const wb::Time& t, ImVec2 centre) {
+    const Palette& P = theme::Colors();
+    constexpr const char* kId = "##wxrewind";
+    if (g_rewindAsk) {
+        ImGui::OpenPopup(kId);
+        g_rewindAsk = false;
+    }
+    ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(U(430), 0), ImVec2(U(430), FLT_MAX));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(22), U(18)));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(10), U(8)));
+    ImGui::PushStyleColor(ImGuiCol_Border, P.cardBorder);
+    const ImGuiWindowFlags f = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                               ImGuiWindowFlags_AlwaysAutoResize;
+    if (ImGui::BeginPopupModal(kId, nullptr, f)) {
+        const double target = LastAt(t.now, g_rewindMin);
+        ImGui::PushFont(theme::Display(), theme::kDisplaySize + 4);
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::Current() == theme::Mode::Dark ? P.grab : P.accent);
+        ImGui::TextUnformatted("Set the clock back?");
+        ImGui::PopStyleColor();
+        ImGui::PopFont();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(std::format("From {} back to {} ({} earlier).", Clock(t.now), Clock(target),
+                                           Span(t.now - target))
+                                   .c_str());
+        ImGui::PopTextWrapPos();
+        DimText("Nothing is undone: plorts, items, Newbucks and the ranch stay as they are. Whatever the game has "
+                "scheduled after now (garden regrowth, slime hunger and feeding, the weather forecast, refinery and "
+                "drone timers) just comes that much later. Kept when the game saves.");
+        ImGui::Dummy(ImVec2(0, U(4)));
+        const ImVec2 bs(U(112), U(34));
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - 2 * bs.x -
+                             ImGui::GetStyle().ItemSpacing.x);
+        if (ImGui::Button("Cancel", bs) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::CloseCurrentPopup();
+        ImGui::SameLine();
+        if (h.accentButton("Rewind", bs)) {
+            TimeRequest(wb::Op::TimeRewind, g_rewindMin);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+}
+
+void TimeOfDay(const Helpers& h, const wb::State& st) {
+    const Palette& P = theme::Colors();
+    const wb::Time& t = st.time;
+    if (!t.ok) {
+        if (t.why.rfind("Time of day unavailable", 0) == 0) DimText(t.why);
+        return;
+    }
+    const ImVec2 centre(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x * 0.5f,
+                        ImGui::GetWindowPos().y + ImGui::GetWindowSize().y * 0.5f);
+    const int nowMin = MinuteOfDay(t.now);
+    if (g_timePick < 0) g_timePick = (nowMin + 4) / 5 * 5 % 1440;
+    SmallHeading("Time of day");
+    // The clock, then what it is doing.
+    ImGui::PushFont(theme::Display(), theme::kDisplaySize + 6);
+    ImGui::TextUnformatted(Clock(t.now).c_str());
+    ImGui::PopFont();
+    ImGui::SameLine(0, U(12));
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushFont(theme::Body(), theme::kSmallSize);
+    if (t.skipping) {
+        const double left = std::max(0.0, t.skipUntil - t.now);
+        const double real = t.ffSecsPerDay > 0 ? left / kDay * t.ffSecsPerDay : 0;
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.soft), "skipping ahead to %s, %s of game time left (about %.0f s)",
+                           HhMm(MinuteOfDay(t.skipUntil)).c_str(), Span(left).c_str(), real);
+    } else if (t.paused) {
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.warn), "paused");
+    } else {
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.dim), "%s", DayPart(nowMin));
+    }
+    ImGui::PopFont();
+
+    // Quick skips: the next 06:00 / 12:00 / 18:00 / 00:00.
+    const float sp = ImGui::GetStyle().ItemSpacing.x;
+    const float avail = ImGui::GetContentRegionAvail().x;
+    static const int kQuick[] = {6 * 60, 12 * 60, 18 * 60, 0};
+    const float qw = std::floor((avail - 3 * sp) / 4);
+    for (int i = 0; i < 4; ++i) {
+        if (i) ImGui::SameLine();
+        const int m = kQuick[i];
+        if (ImGui::Button(std::format("{}##wxq{}", HhMm(m), i).c_str(), ImVec2(qw, U(30)))) TimeRequest(wb::Op::TimeSkip, m);
+        const double in = NextAt(t.now, m) - t.now;
+        HoverTip(h, std::format("Skip ahead to the next {} (in {} of game time, about {:.0f} s): time runs fast until "
+                                "then, as when you sleep, so the ranch and the world catch up.",
+                                HhMm(m), Span(in), t.ffSecsPerDay > 0 ? in / kDay * t.ffSecsPerDay : 0.0));
+    }
+
+    // Any time: a slider in 5 minute steps, then Skip ahead / Rewind.
+    const float bw = U(104);
+    ImGui::SetNextItemWidth(std::max(U(120), avail - 2 * bw - 2 * sp));
+    const std::string fmt = HhMm(g_timePick);
+    if (ImGui::SliderInt("##wxtime", &g_timePick, 0, 1435, fmt.c_str(), ImGuiSliderFlags_AlwaysClamp))
+        g_timePick = std::clamp(g_timePick / 5 * 5, 0, 1435);
+    HoverTip(h, "The time of day to skip ahead or rewind to (5 minute steps; Ctrl+click to type it).");
+    ImGui::SameLine();
+    const double ahead = NextAt(t.now, g_timePick) - t.now;
+    if (h.accentButton("Skip ahead", ImVec2(bw, 0))) TimeRequest(wb::Op::TimeSkip, g_timePick);
+    HoverTip(h, std::format("Skip ahead to {} (in {} of game time, about {:.0f} s), as sleeping does: time runs fast, "
+                            "the ranch and the world catch up.",
+                            HhMm(g_timePick), Span(ahead), t.ffSecsPerDay > 0 ? ahead / kDay * t.ffSecsPerDay : 0.0));
+    ImGui::SameLine();
+    const double back = LastAt(t.now, g_timePick);
+    const bool canBack = back >= t.start;
+    ImGui::BeginDisabled(!canBack);
+    if (ImGui::Button("Rewind", ImVec2(bw, 0))) {
+        g_rewindMin = g_timePick;
+        g_rewindAsk = true;
+    }
+    ImGui::EndDisabled();
+    HoverTip(h, canBack ? std::format("Set the clock back to {} ({} earlier), at once. Asks first.", Clock(back),
+                                      Span(t.now - back))
+                        : std::format("{} is before this game started ({}).", Clock(back), Clock(t.start)));
+
+    // Pause, and Stop while skipping.
+    bool paused = t.paused;
+    SwitchItem(h, "pause", "Pause time", paused,
+               "Stops the clock: no time passes for the ranch, the weather or anything timed until you switch it off "
+               "(the game keeps running). Not saved: a reload or turning Sandbox off lets it run again.");
+    if (paused != t.paused) TimeRequest(wb::Op::TimePause, 0, paused);
+    if (t.skipping) {
+        ImGui::SameLine(0, U(28));
+        if (ImGui::Button("Stop skipping", ImVec2(0, 0))) TimeRequest(wb::Op::TimeStop, 0);
+        HoverTip(h, "Ends the skip where the clock is now.");
+    }
+    RewindModal(h, t, centre);
+}
+
 }  // namespace
 
 void DrawCard(const Helpers& h, float w) {
     g_scale = h.scale;
     const Palette& P = theme::Colors();
     h.beginCard("sbx_weather", w);
-    h.heading("Weather", P.head);
+    h.heading("Time & weather", P.head);
     const auto st = wb::Get();
     if (!st || GetTickCount64() - st->tick > 10000) {
         DimText("Reading the weather...");
         h.endCard();
         return;
+    }
+    TimeOfDay(h, *st);  // the clock first: it works where there is no weather too
+    if (st->time.ok) {
+        ImGui::Dummy(ImVec2(0, U(4)));
+        SmallHeading("Weather");
     }
     if (!st->inGame || st->zones.empty()) {
         DimText(st->why.empty() ? std::string("No weather here.") : st->why);
@@ -337,7 +520,8 @@ void DrawCard(const Helpers& h, float w) {
     const float leftW = split ? std::floor((avail - gap) * 0.42f) : avail;
     ZoneCombo(h, *st, split ? leftW : avail);
     if (st->shown < 0) {
-        DimText("There is no weather where you are. Pick a zone to change its weather.");
+        DimText(st->hereName.empty() ? std::string("There is no weather where you are. Pick a zone to change its weather.")
+                                     : std::format("{} has no weather. Pick a zone to change its weather.", st->hereName));
         h.endCard();
         return;
     }

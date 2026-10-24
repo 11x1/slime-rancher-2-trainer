@@ -31,6 +31,7 @@
 #include "core/il2cpp_api.h"
 #include "core/json.h"
 #include "core/log.h"
+#include "core/main_thread.h"
 #include "core/module.h"
 #include "core/unity.h"
 #include "modules/sandbox/cheated_save.h"
@@ -85,6 +86,23 @@ size_t g_offMetaPedia = 0, g_offMetaIcon = 0;             // WeatherTypeMetadata
 size_t g_offZoneName = 0;                                 // ZoneDefinition._localizedName
 // Nested classes, offsets read from the first live object.
 size_t g_offTrTo = 0, g_offTlFrom = 0, g_offTlList = 0;   // Transition.ToState, TransitionList.FromState / Transitions
+// ---- the clock (optional: the card's "Time of day" part; see SetTime below) ----
+std::string g_timeWhy;                         // "" = available
+const MethodInfo* g_fastForwardTo = nullptr;   // TimeDirector.FastForwardTo(double)
+const MethodInfo* g_ffEnd = nullptr;           // TimeDirector.ForceFastForwardEnd()
+size_t g_offTdModel = 0, g_offTdFfSecs = 0, g_offTdSecs = 0;  // TimeDirector._worldModel, FfSecsPerGameDay, SecsPerGameDay
+size_t g_offTdLastDay = 0, g_offTdLastHour = 0;               // TimeDirector._lastDay / _lastHour
+size_t g_offWmTime = 0, g_offWmStart = 0, g_offWmFf = 0;      // WorldModel.worldTime, worldTimeStart, fastForwardUntil
+size_t g_offWmPause = 0, g_offWmLast = 0;                     // WorldModel.pauseWorldTime, lastWorldTime
+bool g_timeLogged = false;
+bool g_pausedByUs = false;                     // the clock was paused from the card (unpaused when Sandbox goes off)
+// Nullable<double> as il2cpp lays it out (hasValue first; see TimeDirector.LateUpdate in IDA).
+struct NullableDouble {
+    bool hasValue;
+    double value;
+};
+static_assert(sizeof(NullableDouble) == 16);
+
 struct ForecastOffsets {
     Il2CppClass* klass = nullptr;
     bool ok = false;
@@ -212,13 +230,18 @@ bool Ready(Il2CppObject* reg) {
     return reg && unity::Field<void*>(reg, g_offRegModel) && !unity::Field<bool>(reg, g_offRegFirstLoad);
 }
 
-bool WorldTime(double& t) {
+Il2CppObject* TimeDir() {
     Il2CppObject* td = nullptr;
     bool found = false;
     if (!CallValue(g_tryGetTime, nullptr, {&td}, "SceneContextUtility.TryGetTimeDirector", found) || !found || !td ||
         !unity::IsAlive(td))
-        return false;
-    return CallValue(g_worldTime, td, {}, "TimeDirector.WorldTime", t) && std::isfinite(t);
+        return nullptr;
+    return td;
+}
+
+bool WorldTime(double& t) {
+    Il2CppObject* td = TimeDir();
+    return td && CallValue(g_worldTime, td, {}, "TimeDirector.WorldTime", t) && std::isfinite(t);
 }
 
 Il2CppObject* PlayerZone() {
@@ -554,6 +577,127 @@ void Enforce(Il2CppObject* reg) {
     if (locksChanged) SaveLocks();
 }
 
+// ------------------------------------------------------------- time ----
+// The game's clock is WorldModel.worldTime (game seconds, saved), advanced by TimeDirector.Update: by
+// deltaTime * 86400 / SecsPerGameDay, or while WorldModel.fastForwardUntil is set by 86400 / FfSecsPerGameDay
+// until it is reached (TimeDirector.FastForwardTo: the ranch house's sleep and the death screen use it;
+// RanchCellFastForwarder then simulates the ranch's corrals, gardens, feeders and drones for the skipped
+// time). WorldModel.pauseWorldTime makes Update return before touching the clock (set nowhere in the game
+// but InitModel; not saved). Everything timed (TimeDirector.HasReached / OnPassedTime delegates, garden
+// regrowth, slime hunger, the weather forecast, drones, the plort market day) compares against worldTime.
+//
+// - Forward (TimeSkip): only through FastForwardTo, so the world runs through the skipped time as when
+//   sleeping (nothing is jumped over). Takes FfSecsPerGameDay * hours / 24 real seconds.
+// - Back (TimeRewind, after a confirmation in the card): worldTime and lastWorldTime are set together (so
+//   DeltaWorldTime is 0 on that frame, not a negative step), and TimeDirector._lastDay / _lastHour to the
+//   new day and hour (no "day passed" / "hour passed" event for going back). Nothing is undone: whatever the
+//   game scheduled after the old time (regrowth, feeding, forecast entries, timers) simply comes that much
+//   later. At most 24 h back and never before WorldModel.worldTimeStart.
+// - Pause (TimePause): pauseWorldTime. Lasts until a reload (not saved) or Sandbox is turned off.
+constexpr double kSecsPerDay = 86400.0;
+
+std::string Clock(double t) {
+    const double day = std::floor(t / kSecsPerDay);
+    const int mins = static_cast<int>(std::floor((t - day * kSecsPerDay) / 60.0));
+    return std::format("day {}, {:02}:{:02}", static_cast<long long>(day) + 1, mins / 60 % 24, mins % 60);
+}
+
+Il2CppObject* WorldModel(Il2CppObject* td) {
+    auto* wm = td ? unity::Field<Il2CppObject*>(td, g_offTdModel) : nullptr;
+    return wm && std::isfinite(unity::Field<double>(wm, g_offWmTime)) ? wm : nullptr;
+}
+
+void ReadTime(wb::Time& out) {
+    out = {};
+    if (!g_timeWhy.empty()) {
+        out.why = "Time of day unavailable: " + g_timeWhy;
+        return;
+    }
+    Il2CppObject* td = TimeDir();
+    Il2CppObject* wm = WorldModel(td);
+    if (!wm) {
+        out.why = "Load a save to change the time.";
+        return;
+    }
+    out.ok = true;
+    out.now = unity::Field<double>(wm, g_offWmTime);
+    out.start = unity::Field<double>(wm, g_offWmStart);
+    out.paused = unity::Field<bool>(wm, g_offWmPause);
+    const NullableDouble ff = unity::Field<NullableDouble>(wm, g_offWmFf);
+    out.skipping = ff.hasValue;
+    out.skipUntil = ff.hasValue ? ff.value : 0;
+    out.ffSecsPerDay = unity::Field<float>(td, g_offTdFfSecs);
+    out.secsPerDay = unity::Field<float>(td, g_offTdSecs);
+    if (!g_timeLogged) {
+        g_timeLogged = true;
+        SR2_INFO("[{}] clock: {} (world time {:.0f} s, started at {:.0f} s); a game day takes {:.0f} real s, {:.0f} s "
+                 "while fast-forwarding{}", kModule, Clock(out.now), out.now, out.start, out.secsPerDay, out.ffSecsPerDay,
+                 out.paused ? "; paused" : "");
+    }
+}
+
+void EndSkip(Il2CppObject* td, Il2CppObject* wm) {
+    if (unity::Field<NullableDouble>(wm, g_offWmFf).hasValue) Call(g_ffEnd, td, {}, "TimeDirector.ForceFastForwardEnd");
+}
+
+void DoTime(const wb::Action& a) {
+    Il2CppObject* td = TimeDir();
+    Il2CppObject* wm = WorldModel(td);
+    if (!wm) return Done(false, "Time not changed: load a save first.");
+    const double now = unity::Field<double>(wm, g_offWmTime);
+    const double hour = std::clamp(a.hour, 0.0, 24.0 - 1.0 / 60.0);
+    const double dayStart = std::floor(now / kSecsPerDay) * kSecsPerDay;
+    switch (a.op) {
+        case wb::Op::TimeSkip: {
+            double target = dayStart + hour * 3600.0;
+            if (target <= now + 30.0) target += kSecsPerDay;  // its next occurrence, at least half a minute away
+            if (unity::Field<bool>(wm, g_offWmPause)) {
+                unity::Field<bool>(wm, g_offWmPause) = false;  // a paused clock would never get there
+                g_pausedByUs = false;
+            }
+            EndSkip(td, wm);
+            bool ok = false;
+            Call(g_fastForwardTo, td, {&target}, "TimeDirector.FastForwardTo", &ok);
+            const double ffDay = unity::Field<float>(td, g_offTdFfSecs);
+            const double hours = (target - now) / 3600.0;
+            return Done(ok, ok ? std::format("Time: skipping ahead from {} to {} ({:.1f} game hours, about {:.0f} s), as "
+                                             "sleeping does",
+                                             Clock(now), Clock(target), hours, ffDay > 0 ? hours / 24.0 * ffDay : 0.0)
+                               : std::string("Time not changed: TimeDirector.FastForwardTo failed."));
+        }
+        case wb::Op::TimeRewind: {
+            double target = dayStart + hour * 3600.0;
+            if (target >= now) target -= kSecsPerDay;  // its last occurrence (at most 24 h back)
+            const double start = unity::Field<double>(wm, g_offWmStart);
+            if (target < start)
+                return Done(false, std::format("Time not changed: {} is before this game started ({}).", Clock(target),
+                                               Clock(start)));
+            EndSkip(td, wm);
+            unity::Field<double>(wm, g_offWmTime) = target;
+            unity::Field<NullableDouble>(wm, g_offWmLast) = {true, target};  // no negative step this frame
+            unity::Field<int32_t>(td, g_offTdLastDay) = static_cast<int32_t>(std::floor(target / kSecsPerDay)) + 1;
+            unity::Field<int32_t>(td, g_offTdLastHour) =
+                static_cast<int32_t>(std::floor((target - std::floor(target / kSecsPerDay) * kSecsPerDay) / 3600.0));
+            return Done(true, std::format("Time: set back from {} to {} ({:.1f} game hours); what the game had scheduled "
+                                          "comes that much later",
+                                          Clock(now), Clock(target), (now - target) / 3600.0));
+        }
+        case wb::Op::TimePause:
+            if (a.lock) EndSkip(td, wm);
+            unity::Field<bool>(wm, g_offWmPause) = a.lock;
+            g_pausedByUs = a.lock;
+            return Done(true, a.lock ? std::format("Time paused at {} (until you let it run, reload or turn Sandbox off)",
+                                                   Clock(now))
+                                     : std::format("Time runs again from {}", Clock(now)));
+        case wb::Op::TimeStop: {
+            const bool was = unity::Field<NullableDouble>(wm, g_offWmFf).hasValue;
+            EndSkip(td, wm);
+            return Done(true, was ? std::format("Time: skip stopped at {}", Clock(now)) : std::string("Time: no skip running"));
+        }
+        default: break;
+    }
+}
+
 // ------------------------------------------------------------ state ----
 wb::State BaseState(const std::string& why) {
     wb::State st;
@@ -562,13 +706,18 @@ wb::State BaseState(const std::string& why) {
     return st;
 }
 
+void Send(wb::State st) {
+    ReadTime(st.time);
+    wb::Publish(std::move(st));
+}
+
 void Publish(Il2CppObject* reg) {
     if (!reg) {
-        wb::Publish(BaseState("Load a save to change the weather."));
+        Send(BaseState("Load a save to change the weather."));
         return;
     }
     if (!Ready(reg) || !EnsureCatalog(reg)) {
-        wb::Publish(BaseState("The weather is not running yet."));
+        Send(BaseState("The weather is not running yet."));
         return;
     }
     wb::State st = BaseState("");
@@ -590,6 +739,16 @@ void Publish(Il2CppObject* reg) {
         st.zones.push_back(std::move(wz));
         if (z.obj == here) st.here = static_cast<int>(i);
         if (!g_show.empty() && z.asset == g_show) st.shown = static_cast<int>(i);
+    }
+    if (st.here < 0 && here && unity::IsAlive(here)) {  // a zone without weather (the ranch): its name, cached
+        static const Il2CppObject* s_named = nullptr;
+        static std::string s_name;
+        if (here != s_named) {
+            s_named = here;
+            s_name = Localized(unity::Field<Il2CppObject*>(here, g_offZoneName));
+            if (s_name.empty()) s_name = unity::GetName(here);
+        }
+        st.hereName = s_name;
     }
     if (st.shown < 0) st.shown = st.here;
     for (const auto& [zone, ov] : g_over) {
@@ -642,7 +801,7 @@ void Publish(Il2CppObject* reg) {
             if (!it->second.locked && now > 0) st.endsIn = std::max(0.0, (it->second.until - now) / kSecsPerHour);
         }
     }
-    wb::Publish(std::move(st));
+    Send(std::move(st));
 }
 
 // The same weather in another zone: the pattern itself, else one of the same weather type
@@ -761,6 +920,14 @@ void DoNatural(Il2CppObject* reg, const wb::Action& a) {
 }
 
 void Handle(const wb::Action& a) {
+    if (a.op == wb::Op::TimeSkip || a.op == wb::Op::TimeRewind || a.op == wb::Op::TimePause || a.op == wb::Op::TimeStop) {
+        if (!Live()) return sr2::ui::sandbox::SetStatus("Sandbox is off.", true);
+        if (!g_timeWhy.empty()) return Done(false, "Time of day unavailable: " + g_timeWhy);
+        DoTime(a);
+        if (g_why.empty()) Publish(Registry());
+        else Send(BaseState("Weather changer unavailable: " + g_why));
+        return;
+    }
     if (!Live() || !g_why.empty()) {
         sr2::ui::sandbox::SetStatus(g_why.empty() ? "Sandbox is off." : "Weather changer unavailable: " + g_why, true);
         return;
@@ -856,12 +1023,56 @@ void SetupWeather(sr2::core::ModuleContext& ctx) {
                  Resolver::Rva(R.MethodPointer(g_setWeather)));
     else
         SR2_WARN("[{}] weather changer unavailable: {}", kModule, w);
+    {
+        // The clock (optional; its own reason, so the weather works without it and the other way round).
+        std::string& tw = g_timeWhy;
+        auto toff = [&](Il2CppClass* k, const char* field, size_t& out) {
+            std::string err;
+            if (!k) {
+                if (tw.empty()) tw = std::format("no class for {}", field);
+            } else if (auto o = R.FieldOffset(k, field, &err)) {
+                out = *o;
+            } else if (tw.empty()) {
+                tw = err.empty() ? std::format("field {} not found", field) : err;
+            }
+        };
+        std::string err;
+        Il2CppClass* td = R.Class(kImage, "", "TimeDirector", &err);
+        Il2CppClass* wm = R.Class(kImage, "MonomiPark.SlimeRancher.DataModel", "WorldModel", &err);
+        toff(td, "_worldModel", g_offTdModel);
+        toff(td, "FfSecsPerGameDay", g_offTdFfSecs);
+        toff(td, "SecsPerGameDay", g_offTdSecs);
+        toff(td, "_lastDay", g_offTdLastDay);
+        toff(td, "_lastHour", g_offTdLastHour);
+        toff(wm, "worldTime", g_offWmTime);
+        toff(wm, "worldTimeStart", g_offWmStart);
+        toff(wm, "fastForwardUntil", g_offWmFf);
+        toff(wm, "pauseWorldTime", g_offWmPause);
+        toff(wm, "lastWorldTime", g_offWmLast);
+        g_fastForwardTo = td ? R.Method(td, "FastForwardTo", 1, &err) : nullptr;
+        g_ffEnd = td ? R.Method(td, "ForceFastForwardEnd", 0, &err) : nullptr;
+        if (tw.empty() && (!g_fastForwardTo || !g_ffEnd)) tw = "TimeDirector.FastForwardTo / ForceFastForwardEnd not found";
+        if (tw.empty() && (!g_tryGetTime || !g_worldTime)) tw = "SceneContextUtility.TryGetTimeDirector not found";
+        if (tw.empty())
+            SR2_INFO("[{}] time of day ready: TimeDirector.FastForwardTo +0x{:X}, WorldModel.worldTime 0x{:X} "
+                     "pauseWorldTime 0x{:X} lastWorldTime 0x{:X}",
+                     kModule, Resolver::Rva(R.MethodPointer(g_fastForwardTo)), g_offWmTime, g_offWmPause, g_offWmLast);
+        else
+            SR2_WARN("[{}] time of day unavailable: {}", kModule, tw);
+    }
 }
 
 void WeatherEnabled(bool on) {
     g_live.store(on);
     wb::SetHandler(on ? &HandleThunk : nullptr);
     if (!on) wb::Publish(BaseState("Sandbox is off."));
+    if (!on && g_pausedByUs && sr2::core::main_thread::Ready())  // a clock paused from the card runs again
+        sr2::core::main_thread::Post([] {
+            if (!g_pausedByUs || sr2::core::ModuleFaulted(kModule) || g_live.load()) return;
+            g_pausedByUs = false;
+            if (Il2CppObject* wm = WorldModel(TimeDir())) unity::Field<bool>(wm, g_offWmPause) = false;
+            SR2_INFO("[{}] time runs again (Sandbox off)", kModule);
+        });
 }
 
 void WeatherTick(bool snapshot) {
@@ -870,12 +1081,14 @@ void WeatherTick(bool snapshot) {
     if (!g_why.empty()) {
         if (snapshot && now - g_lastSnap >= kSnapshotMs) {
             g_lastSnap = now;
-            wb::Publish(BaseState("Weather changer unavailable: " + g_why));
+            Send(BaseState("Weather changer unavailable: " + g_why));
         }
         return;
     }
     if (const unsigned v = SaveTogglesVersion(); v != g_dataSeen) {  // another save (or the title screen)
         g_dataSeen = v;
+        g_pausedByUs = false;  // a loaded save's clock runs (pauseWorldTime is not saved)
+        g_timeLogged = false;
         LoadLocks();
     }
     const bool snap = snapshot && now - g_lastSnap >= kSnapshotMs;
