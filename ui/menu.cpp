@@ -1307,6 +1307,7 @@ SlotPending g_slotPending[32];
 enum class SbxGrid { Vacpack, Spawner };
 uintptr_t g_ctxItem = 0;
 SbxGrid g_ctxGrid = SbxGrid::Vacpack;
+int g_ctxSlot = -1;  // the vacpack slot the menu was opened on (its Fill / Empty entries); -1: a grid tile
 constexpr const char* kSbxCtx = "##sbx_item_ctx";
 constexpr const char* kCraftCtx = "##sbx_craft_ctx";  // the crafter's right-click menu (variants)
 uintptr_t g_craftCtx = 0;                             // the recipe it was opened on
@@ -1521,6 +1522,20 @@ bool InGroup(sbx::Kind k, int group) {
     }
 }
 
+// The "Mod" tab of the vacpack picker and the spawner (round 8: "add a modded filter ... for
+// futureproofing"): the mod's own items (sbx::Item::mod), whatever their kind. Not an sbx::Group (no
+// game icon): a tab value of the overlay's own, only listed while the grid has such items.
+constexpr int kGroupMod = -10;
+
+// Whether a group tab (an sbx::Group or kGroupMod) shows the item.
+bool InTab(const sbx::Item& it, int group) { return group == kGroupMod ? it.mod : InGroup(it.kind, group); }
+
+// The Mod tab: an "M" in the accent colour, like the tiles' [M] badge.
+item_grid::Tab ModTab(const char* tip) {
+    const Palette& P = theme::Colors();
+    return {0, 'M', theme::Current() == theme::Mode::Dark ? P.grab : P.accent, tip};
+}
+
 // A crate's area: the zone the module found for it (sbx::Item::area, the game's zone name), else its
 // name without "Crate" / "Gold" / "Shadow" ("Bluffs Gold Crate" -> "Bluffs").
 std::string CrateArea(const sbx::Item& it) {
@@ -1563,9 +1578,10 @@ item_grid::Tab GroupTab(const sbx::Snapshot& s, int group, const std::vector<sbx
     return t;
 }
 
-// The vacpack tabs: All, Plorts, Slimes, Food, Resources, and Other while the list has items that
-// fit none of them. `groups` gets the sbx::Group of each tab.
-const std::vector<item_grid::Tab>& GroupTabs(const sbx::Snapshot& s, std::vector<int>& groups) {
+// The vacpack tabs: All, Plorts, Slimes, Food, Resources, Other while the list has items that fit
+// none of them, and Mod while the selected slot (`bit`) accepts any of the mod's items. `groups` gets
+// the sbx::Group (or kGroupMod) of each tab.
+const std::vector<item_grid::Tab>& GroupTabs(const sbx::Snapshot& s, std::vector<int>& groups, uint32_t bit) {
     static std::vector<item_grid::Tab> tabs;
     tabs.clear();
     groups.clear();
@@ -1580,11 +1596,18 @@ const std::vector<item_grid::Tab>& GroupTabs(const sbx::Snapshot& s, std::vector
         tabs.push_back(GroupTab(s, sbx::kGroupOther, s.catalog.get()));
         groups.push_back(sbx::kGroupOther);
     }
+    bool mod = false;
+    if (s.catalog)
+        for (size_t i = 0; i < s.catalog->size() && !mod; ++i) mod = (*s.catalog)[i].mod && ((*s.catalog)[i].slotMask & bit);
+    if (mod) {
+        tabs.push_back(ModTab("Mod (the mod's own items)"));
+        groups.push_back(kGroupMod);
+    }
     return tabs;
 }
 
-// The spawner tabs: All, then each group that has items, slimes and largos side by side, Other last.
-// `groups` gets the sbx::Group of each tab.
+// The spawner tabs: All, then each group that has items, slimes and largos side by side, Other, then
+// Mod while the list has any of the mod's items. `groups` gets the sbx::Group (or kGroupMod) of each tab.
 const std::vector<item_grid::Tab>& SpawnTabs(const sbx::Snapshot& s, std::vector<int>& groups) {
     static std::vector<item_grid::Tab> tabs;
     static const int kOrder[] = {sbx::kGroupAll,       sbx::kGroupPlorts,    sbx::kGroupSlimes,
@@ -1599,6 +1622,13 @@ const std::vector<item_grid::Tab>& SpawnTabs(const sbx::Snapshot& s, std::vector
         if (!any) continue;
         tabs.push_back(GroupTab(s, g, s.spawnables.get()));
         groups.push_back(g);
+    }
+    bool mod = false;
+    if (s.spawnables)
+        for (size_t i = 0; i < s.spawnables->size() && !mod; ++i) mod = (*s.spawnables)[i].mod;
+    if (mod) {
+        tabs.push_back(ModTab("Mod (the mod's own items)"));
+        groups.push_back(kGroupMod);
     }
     return tabs;
 }
@@ -1705,31 +1735,27 @@ void RelationRow(const sbx::Snapshot& s, const char* label, const std::vector<ui
     }
 }
 
-// The key hints at the bottom of a Sandbox tooltip: one row per hint, stacked, the keycaps (the HUD
-// edit bar's, 80 %) right-aligned in a column before their labels, the block at the tooltip's right.
+// The key hints at the bottom of a Sandbox tooltip: one row per hint, stacked at the tooltip's left
+// edge (round 8: not pushed right by the widest line above), each row its keycaps (the HUD edit bar's,
+// 80 %) from the left, then its own label right after them.
 void TipKeys(const std::vector<KeyRow>& keys) {
     if (keys.empty()) return;
     const Palette& P = theme::Colors();
     ImFont* f = theme::Body();
     const float fs = theme::kSmallSize - 0.5f, cap = g_scale * 0.8f;
-    float keyW = 0, textW = 0;
-    for (const KeyRow& k : keys) {
-        keyW = std::max(keyW, hud_edit::KeyComboWidth(k.keys, cap));
-        textW = std::max(textW, TextSize(f, fs, k.text.c_str()).x);
-    }
-    const float gap = U(8), rowH = U(22), blockW = keyW + gap + textW;
+    const float gap = U(8), rowH = U(22);
+    float blockW = 0;
+    for (const KeyRow& k : keys)
+        blockW = std::max(blockW, hud_edit::KeyComboWidth(k.keys, cap) + gap + TextSize(f, fs, k.text.c_str()).x);
     ImGui::Dummy(ImVec2(0, U(2)));
     const ImVec2 p = ImGui::GetCursorScreenPos();
-    // The widest line drawn so far this frame: the block's right edge (no jitter from last frame's size).
-    const float right = std::max(ImGui::GetCurrentWindow()->DC.CursorMaxPos.x, p.x + blockW);
-    const float x0 = right - blockW;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     for (size_t i = 0; i < keys.size(); ++i) {
         const KeyRow& k = keys[i];
         const float cy = std::round(p.y + rowH * (static_cast<float>(i) + 0.5f));
-        hud_edit::DrawKeyCombo(dl, x0 + keyW - hud_edit::KeyComboWidth(k.keys, cap), cy, k.keys, cap);
+        const float kw = hud_edit::DrawKeyCombo(dl, p.x, cy, k.keys, cap);
         const ImVec2 ts = TextSize(f, fs, k.text.c_str());
-        Text(dl, f, fs, ImVec2(x0 + keyW + gap, std::round(cy - ts.y * 0.5f)), P.soft, k.text.c_str());
+        Text(dl, f, fs, ImVec2(p.x + kw + gap, std::round(cy - ts.y * 0.5f)), P.soft, k.text.c_str());
     }
     ImGui::Dummy(ImVec2(blockW, rowH * static_cast<float>(keys.size())));
 }
@@ -1738,7 +1764,7 @@ void TipKeys(const std::vector<KeyRow>& keys) {
 // diet links with icons (favourite food, plort, who loves / makes it; no largos under "Made
 // by"); optional cost lines with icons (crafter), a dim info line, then the left / right click
 // as keycap rows (TipKeys; the tab bar's hints list the rest). `mod`: one of the mod's own items (its tile
-// has the "M" badge): a second tag "Added by the mod" in the accent colour.
+// has the "M" badge): a second tag "Mod" in the accent colour.
 void ItemTooltip(const sbx::Snapshot& s, const std::string& name, sbx::Kind kind, uintptr_t id, const char* info = nullptr,
                  const std::vector<sbx::CostLine>* costs = nullptr, const std::vector<KeyRow>& keys = {}, bool mod = false) {
     const Palette& P = theme::Colors();
@@ -1754,7 +1780,7 @@ void ItemTooltip(const sbx::Snapshot& s, const std::string& name, sbx::Kind kind
             ImGui::TextUnformatted(name.c_str());
         }
         TagPill(KindTag(kind), KindAccent(kind));
-        if (mod) TagPill("Added by the mod", theme::Current() == theme::Mode::Dark ? P.grab : P.accent);
+        if (mod) TagPill("Mod", theme::Current() == theme::Mode::Dark ? P.grab : P.accent);
         if (const sbx::Relation* r = id ? FindRelation(s, id) : nullptr) {
             RelationRow(s, "Favourite", r->favourites, 3);
             RelationRow(s, "Plort", r->plorts, 2);
@@ -1950,12 +1976,14 @@ uintptr_t SlotItem(const sbx::Slot& sl, int idx) {
 }
 
 // True if a vacpack item fits somewhere without removing anything: an unlocked slot that
-// accepts it and already holds it or is empty (where a "Give" entry puts it).
+// accepts it and is empty or holds it and is not full (where a "Give" entry puts it).
 bool HasRoomFor(const sbx::Snapshot& s, const sbx::Item& it) {
     const int n = std::min(static_cast<int>(s.slots.size()), 32);
     for (int i = 0; i < n; ++i) {
         const sbx::Slot& sl = s.slots[static_cast<size_t>(i)];
-        if (sl.unlocked && (it.slotMask & (1u << i)) && (!sl.item || sl.item == it.id)) return true;
+        if (!sl.unlocked || !(it.slotMask & (1u << i))) continue;
+        const uintptr_t holds = SlotItem(sl, i);
+        if (!holds || (holds == it.id && SlotCount(sl, i) < sl.max)) return true;
     }
     return false;
 }
@@ -2020,8 +2048,10 @@ void StowItem(int sel, uintptr_t id, int amount, bool replace) {
 // Right-click menu for an item (picker tiles, vacpack slots, spawner tiles): "Give: X" (vacpack)
 // or "Spawn: X" (spawner) for the related slimes, foods and plorts from the diets, done the grid's
 // way (vacpack: into a slot that holds it or an empty one, the slot's maximum, nothing is replaced;
-// spawner: spawn in front of you, SpawnAmount). A slime in the vacpack also gets "Spawn: <slime>"
-// first. Largos (of a slime, of a plort, or loving a food) are always spawned (SpawnAmount), since
+// spawner: spawn in front of you, SpawnAmount). A slime (not a largo) gets "Give: <slime>" (round 8:
+// into the vacpack, Op::StowItem, a slot that holds it and has room or an empty one; grayed with the
+// reason when none can take it), in the vacpack also "Spawn: <slime>" before it. Opened on a vacpack
+// slot (g_ctxSlot), the menu starts with that slot's Fill and Empty (the buttons under the slots). Largos (of a slime, of a plort, or loving a food) are always spawned (SpawnAmount), since
 // the vacpack can't hold them, and read
 // "Spawn: <this item's slime> <other> Largo". They are not listed directly: one "Largos" row opens
 // them in a submenu. That is
@@ -2054,12 +2084,44 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                 FontScope f(theme::Body(), theme::kSmallSize);
                 ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.soft), "%s", self->name.c_str());
             }
+            const float e = U(22), rowW = U(250), fs = theme::kSmallSize + 0.5f;
+            if (vac && g_ctxSlot >= 0 && g_ctxSlot < std::min(static_cast<int>(s.slots.size()), 32)) {
+                // The slot's Fill / Empty, as the buttons under the slots do them (round 8).
+                const int idx = g_ctxSlot;
+                const sbx::Slot& sl = s.slots[static_cast<size_t>(idx)];
+                const uintptr_t holds = SlotItem(sl, idx);
+                const int count = SlotCount(sl, idx), max = std::max(0, sl.max);
+                auto slotRow = [&](const char* id, const std::string& label, bool can, const char* why) {
+                    const ImVec2 p = ImGui::GetCursorScreenPos();
+                    ImGui::BeginDisabled(!can);
+                    const bool hit = ImGui::Selectable(id, false, 0, ImVec2(rowW, e));
+                    ImGui::EndDisabled();
+                    const ImVec2 ts = TextSize(theme::Body(), fs, label.c_str());
+                    Text(ImGui::GetWindowDrawList(), theme::Body(), fs, ImVec2(p.x + e + U(8), p.y + (e - ts.y) * 0.5f),
+                         can ? P.text : P.dim, label.c_str());
+                    if (!can && why && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) Tooltip(why);
+                    return hit && can;
+                };
+                if (sl.unlocked && holds) {
+                    if (slotRow("##fill", std::format("Fill slot {} ({}/{})", idx + 1, count, max), count < max,
+                                "The slot is full.")) {
+                        SetSlotPending(idx, holds, max);
+                        SbxRequest(sbx::Op::SetSlotCount, max, idx);
+                    }
+                    if (slotRow("##empty", std::format("Empty slot {}", idx + 1), true, nullptr)) {
+                        SetSlotPending(idx, 0, 0);
+                        SbxRequest(sbx::Op::SetSlotCount, 0, idx);
+                    }
+                    ImGui::Separator();
+                }
+            }
             struct Give {
                 std::string label;
                 const sbx::Item* it;
                 bool can;
                 bool spawn;        // spawned in front of the player (largos always: the vacpack can't hold them)
                 std::string sort;  // largos: the other slime's short name
+                const char* why = nullptr;  // grayed out: the tooltip (else the default reason)
             };
             std::vector<Give> gives, largos;
             auto spawnable = [&](uintptr_t id) -> const sbx::Item* {
@@ -2134,7 +2196,6 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                 for (uintptr_t id : r->favouriteOf) collectLargo(id);
             }
             std::stable_sort(largos.begin(), largos.end(), [](const Give& a, const Give& b) { return a.sort < b.sort; });
-            const float e = U(22), rowW = U(250), fs = theme::kSmallSize + 0.5f;
             int row = 0;
             auto entry = [&](const Give& g) {
                 ImGui::PushID(++row);
@@ -2148,20 +2209,33 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                 const ImVec2 ts = TextSize(theme::Body(), fs, label.c_str());
                 Text(dl, theme::Body(), fs, ImVec2(p.x + e + U(8), p.y + (e - ts.y) * 0.5f), g.can ? P.text : P.dim, label.c_str());
                 if (!g.can && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    Tooltip(g.it->tarr && s.tarrsOff ? "Tarrs are disabled in this save's game settings."
-                            : g.spawn        ? "Not in the spawn list."
-                                             : "No unlocked vacpack slot holds this or is empty. Empty a slot first.");
+                    Tooltip(g.why                            ? g.why
+                            : g.it->tarr && s.tarrsOff ? "Tarrs are disabled in this save's game settings."
+                            : g.spawn                  ? "Not in the spawn list."
+                                                       : "No unlocked vacpack slot has room for this (holding it, not full, or "
+                                                         "empty). Empty a slot first.");
                 if (hit && g.can) {
                     if (g.spawn) SbxRequest(sbx::Op::Spawn, SpawnAmount(g.it->id), -1, g.it->id);
                     else StowItem(g_sbxSlot, g.it->id, 0, false);
                 }
                 ImGui::PopID();
             };
-            if (vac && self->kind == sbx::Kind::Slime) {
-                // The slime itself, spawned in front of you (next to the Give entries).
-                const sbx::Item* sp = spawnable(self->id);
-                const bool can = sp && !(sp->tarr && s.tarrsOff);
-                entry({"Spawn: " + self->name, sp ? sp : self, can, true, {}});
+            if (self->kind == sbx::Kind::Slime) {
+                // The slime itself: spawned in front of you (vacpack; the spawner's click does that), then given
+                // into the vacpack like the Give entries.
+                if (vac) {
+                    const sbx::Item* sp = spawnable(self->id);
+                    const bool can = sp && !(sp->tarr && s.tarrsOff);
+                    entry({"Spawn: " + self->name, sp ? sp : self, can, true, {}});
+                }
+                const sbx::Item* ci = nullptr;
+                if (s.catalog)
+                    for (const sbx::Item& c : *s.catalog)
+                        if (c.id == self->id) ci = &c;
+                Give g{"Give: " + self->name, ci ? ci : self, ci && HasRoomFor(s, *ci), false, {}};
+                if (!s.catalog) g.why = "The vacpack's item list is not read yet.";
+                else if (!ci) g.why = "No vacpack slot takes this slime.";
+                entry(g);
             }
             for (const Give& g : gives) entry(g);
             if (!largos.empty()) {
@@ -2191,9 +2265,10 @@ void ItemContextMenu(const sbx::Snapshot& s) {
     ImGui::PopStyleVar(2);
 }
 
-void OpenItemContext(uintptr_t id, SbxGrid grid) {
+void OpenItemContext(uintptr_t id, SbxGrid grid, int slot = -1) {
     g_ctxItem = id;
     g_ctxGrid = grid;
+    g_ctxSlot = slot;
     ImGui::OpenPopup(kSbxCtx);
 }
 
@@ -2234,6 +2309,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     const float gap = U(8), avail = ImGui::GetContentRegionAvail().x;
     const float e = std::max(U(24), std::floor(std::min(U(92), (avail - gap * static_cast<float>(n - 1)) / static_cast<float>(n))));
     uintptr_t slotMenu = 0;  // right-clicked slot's item: its give menu opens after the loop (popup id outside the slot's id)
+    int slotMenuIdx = -1;    // that slot
     bool tierMenu = false;   // an empty / locked slot was right-clicked (sandbox_upgrades::SlotTierMenu)
     for (int i = 0; i < n; ++i) {
         const sbx::Slot& sl = s.slots[static_cast<size_t>(i)];
@@ -2251,7 +2327,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
             if (sl.unlocked) g_sbxSlot = i;
             else if (sl.unlockable) SbxRequest(sbx::Op::UnlockSlot, 0, i);
         }
-        if (right && sl.unlocked && sl.item) slotMenu = sl.item;
+        if (right && sl.unlocked && sl.item) slotMenu = sl.item, slotMenuIdx = i;
         else if (right) tierMenu = true;  // empty / locked: the slot-count upgrade's tier menu
         if (sl.unlocked) {
             // Shift / Ctrl + wheel over a slot: its count +-1 / +-10; an empty slot takes the last
@@ -2342,7 +2418,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
         }
         ImGui::PopID();
     }
-    if (slotMenu) OpenItemContext(slotMenu, SbxGrid::Vacpack);
+    if (slotMenu) OpenItemContext(slotMenu, SbxGrid::Vacpack, slotMenuIdx);
     sandbox_upgrades::SlotTierMenu(SbxHelpers(), tierMenu);
     // A dragged slot: its icon follows the cursor.
     int draggedSlot = -1;
@@ -2391,9 +2467,17 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     // ---- items the selected slot accepts ----
     ImGui::Dummy(ImVec2(0, U(2)));
     const uint32_t bit = 1u << g_sbxSlot;
-    static std::vector<int> vacGroups;  // sbx::Group per tab
-    const auto& tabs = GroupTabs(s, vacGroups);
-    item_grid::PredictTab(g_vacGrid);  // a tab pressed this frame filters this frame's tiles
+    static std::vector<int> vacGroups, vacShown;  // sbx::Group (or kGroupMod) per tab (this frame, last frame)
+    const auto& tabs = GroupTabs(s, vacGroups, bit);
+    item_grid::PredictTab(g_vacGrid);  // a tab pressed this frame filters this frame's tiles (last frame's indices)
+    if (vacGroups != vacShown) {  // the tab list changed (the Mod tab comes and goes with the slot): stay on the same group
+        const int was = g_vacGrid.tab >= 0 && static_cast<size_t>(g_vacGrid.tab) < vacShown.size()
+                            ? vacShown[static_cast<size_t>(g_vacGrid.tab)]
+                            : sbx::kGroupAll;
+        const auto at = std::find(vacGroups.begin(), vacGroups.end(), was);
+        g_vacGrid.tab = at != vacGroups.end() ? static_cast<int>(at - vacGroups.begin()) : 0;
+        vacShown = vacGroups;
+    }
     g_vacGrid.tab = std::clamp(g_vacGrid.tab, 0, static_cast<int>(vacGroups.size()) - 1);
     const int vacGroup = vacGroups[static_cast<size_t>(g_vacGrid.tab)];
     const sbx::Relation* hoverRel = nullptr;
@@ -2404,13 +2488,14 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     if (s.catalog) {
         tiles.reserve(s.catalog->size());
         for (const sbx::Item& it : *s.catalog) {
-            if (!(it.slotMask & bit) || !InGroup(it.kind, vacGroup)) continue;
+            if (!(it.slotMask & bit) || !InTab(it, vacGroup)) continue;
             item_grid::Tile t;
             t.id = it.id;
             t.name = &it.name;
             t.icon = it.icon;
             t.icon2 = it.icon2;
             t.accent = KindAccent(it.kind);
+            t.mod = it.mod;
             if (const auto pk = g_vacPick.find(it.id); pk != g_vacPick.end()) {
                 t.selected = true;
                 t.amount = pk->second;
@@ -2445,7 +2530,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
                 "in front of you.");
     if (r.hovered >= 0 && !ImGui::GetDragDropPayload() && !ImGui::IsPopupOpen(kSbxCtx)) {
         const sbx::Item& it = *src[static_cast<size_t>(r.hovered)];
-        ItemTooltip(s, it.name, it.kind, it.id, nullptr, nullptr, {{"LMB", "put in a slot"}, {"RMB", "menu"}});
+        ItemTooltip(s, it.name, it.kind, it.id, nullptr, nullptr, {{"LMB", "put in a slot"}, {"RMB", "menu"}}, it.mod);
     }
     if (r.dropped && r.dropped->DataSize == sizeof(int)) {
         const int from = *static_cast<const int*>(r.dropped->Data);
@@ -2535,7 +2620,7 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
     std::vector<const sbx::Item*> order;
     order.reserve(s.spawnables->size());
     for (const sbx::Item& it : *s.spawnables)
-        if (InGroup(it.kind, group)) order.push_back(&it);
+        if (InTab(it, group)) order.push_back(&it);
     // Largos tab: grouped by base slime (a section per slime, each largo under the alphabetically
     // first of its two), then by the other one.
     // Crates tab: a section per area ("Bluffs Gold Crate" -> "Bluffs"), sorted by area, then name.
@@ -2660,7 +2745,8 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
 // while the search box has text, shows every tab's items, a section per tab. Click selects
 // (Shift+wheel: amount), Craft adds everything selected at no cost: gadgets to the gadget inventory,
 // materials to the refinery.
-constexpr int kCraftEverything = -4, kCraftPinned = -3, kCraftMaterials = -2, kCraftAll = -1;
+// Last, while any recipe or material is the mod's own (Recipe::mod), a Mod tab with just those (round 8).
+constexpr int kCraftMod = -5, kCraftEverything = -4, kCraftPinned = -3, kCraftMaterials = -2, kCraftAll = -1;
 
 // Right-click menu of a crafter recipe: the gadget itself, then its variants (the game's, then the mod's
 // buildables on it, modules/sandbox: Recipe::variants), each crafted like a tile (Op::Craft; the amount
@@ -2792,6 +2878,15 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
         tabCat.push_back(kCraftMaterials);
         tabTitle.push_back("Crafting Resources");
     }
+    bool anyMod = false;
+    for (const auto* list : {s.recipes.get(), s.materials.get()})
+        if (list)
+            for (size_t i = 0; i < list->size() && !anyMod; ++i) anyMod = (*list)[i].mod;
+    if (anyMod) {
+        tabs.push_back(ModTab("Mod (the mod's own buildables)"));
+        tabCat.push_back(kCraftMod);
+        tabTitle.push_back("Mod");
+    }
     // A tab pressed this frame (last frame's indices, so before the remap below).
     item_grid::PredictTab(g_craftGrid);
     // The tab list changed (categories or materials arrived): stay on the same category. The first
@@ -2839,6 +2934,25 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
         } else if (c == kCraftMaterials) {
             if (s.materials)
                 for (const sbx::Recipe& rc : *s.materials) add(rc, section, true);
+        } else if (c == kCraftMod) {
+            // The mod's own, in the order the category tabs list them (categories, then materials).
+            std::vector<const sbx::Recipe*> v;
+            for (const sbx::Recipe& rc : *s.recipes)
+                if (rc.mod) v.push_back(&rc);
+            std::stable_sort(v.begin(), v.end(), [&](const sbx::Recipe* x, const sbx::Recipe* y) {
+                const auto rank = [&](const sbx::Recipe* r) {
+                    const auto at = std::find(tabCat.begin(), tabCat.end(), r->category);
+                    return at != tabCat.end() ? static_cast<int>(at - tabCat.begin()) : INT_MAX;
+                };
+                const int a = rank(x), b = rank(y);
+                if (a != b) return a < b;
+                const int oa = x->order < 0 ? INT_MAX : x->order, ob = y->order < 0 ? INT_MAX : y->order;
+                return oa != ob ? oa < ob : x->modRank < y->modRank;
+            });
+            for (const sbx::Recipe* rc : v) add(*rc, section, false);
+            if (s.materials)
+                for (const sbx::Recipe& rc : *s.materials)
+                    if (rc.mod) add(rc, section, true);
         } else {
             std::vector<const sbx::Recipe*> v;
             for (const sbx::Recipe& rc : *s.recipes)
@@ -2853,8 +2967,9 @@ void SandboxCrafter(const sbx::Snapshot& s, float w) {
     };
     const bool everything = searching || cat == kCraftEverything;
     if (everything) {
-        for (size_t ti = 0; ti < tabCat.size(); ++ti)  // the pinned one is in its category
-            if (tabCat[ti] != kCraftEverything && tabCat[ti] != kCraftPinned) addTab(ti, static_cast<int>(ti));
+        for (size_t ti = 0; ti < tabCat.size(); ++ti)  // the pinned one and the mod's are in their categories
+            if (tabCat[ti] != kCraftEverything && tabCat[ti] != kCraftPinned && tabCat[ti] != kCraftMod)
+                addTab(ti, static_cast<int>(ti));
     } else {
         addTab(static_cast<size_t>(g_craftGrid.tab), 0);
     }

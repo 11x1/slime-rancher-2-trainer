@@ -1297,12 +1297,24 @@ bool Sandbox::EnsureNamedSprites() {
                                           "iconCategoryCurios"};
     const unsigned long long t0 = GetTickCount64();
     size_t seen = 0;
-    std::string found;
+    std::string found, pins;
     for (Il2CppObject* s : unity::FindObjectsOfTypeAll(spriteClass_)) {
         if (sr2::core::ModuleFaulted(kModule)) break;
         if (!s || !unity::IsAlive(s)) continue;
         ++seen;
         const std::string n = unity::GetName(s);
+        // The Fabricator's Pinned tab icon. The category asset that points to it only loads with the
+        // Fabricator UI (EnsurePinnedIcon), while its sibling category sprites are loaded from the start, so
+        // a loaded sprite named like them ("iconCategory...Pin...", or plainly "iconPin" / "iconPinned") is
+        // taken right away. Sprites with "pin" in the name (not "pink" / "spin") are logged to learn its name.
+        std::string low;
+        for (char ch : n) low += static_cast<char>((ch >= 'A' && ch <= 'Z') ? ch - 'A' + 'a' : ch);
+        if (low.find("pin") != std::string::npos && low.find("pink") == std::string::npos &&
+            low.find("spin") == std::string::npos) {
+            if (pins.size() < 400) pins += (pins.empty() ? "" : ", ") + n;
+            if (!pinnedIcon_ && (low.starts_with("iconcategory") || low == "iconpin" || low == "iconpinned"))
+                if ((pinnedIcon_ = SpriteIcon(s))) SR2_INFO("[{}] crafter: the Pinned icon from the loaded sprite '{}'", kModule, n);
+        }
         for (const char* w : kWanted) {
             if (n != w || namedSprites_.count(n)) continue;
             if (const uint32_t id = SpriteIcon(s)) {
@@ -1313,6 +1325,7 @@ bool Sandbox::EnsureNamedSprites() {
     }
     SR2_INFO("[{}] game sprites by name: {} of {} wanted found among {} loaded sprites ({} ms): {}", kModule,
              namedSprites_.size(), std::size(kWanted), seen, GetTickCount64() - t0, found.empty() ? "none" : found);
+    SR2_INFO("[{}] game sprites with 'pin' in the name: {}", kModule, pins.empty() ? "none" : pins);
     return true;
 }
 
@@ -2005,8 +2018,10 @@ bool Sandbox::EnsurePinnedIcon() {
     pinnedIconTry_ = g_fabStarts;
     for (Il2CppObject* c : unity::FindObjectsOfTypeAll(fabPinnedCatClass_)) {
         if (!c || !IsA(c, fabPinnedCatClass_) || !unity::IsAlive(c)) continue;
-        if ((pinnedIcon_ = SpriteIcon(unity::Field<Il2CppObject*>(c, offFabCatIcon_)))) {
-            SR2_INFO("[{}] crafter: the Fabricator's Pinned icon found ({})", kModule, unity::GetName(c));
+        Il2CppObject* sprite = unity::Field<Il2CppObject*>(c, offFabCatIcon_);
+        if ((pinnedIcon_ = SpriteIcon(sprite))) {
+            SR2_INFO("[{}] crafter: the Fabricator's Pinned icon found ({}, sprite '{}')", kModule, unity::GetName(c),
+                     unity::GetName(sprite));
             return true;
         }
     }
