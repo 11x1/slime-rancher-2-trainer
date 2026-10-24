@@ -135,7 +135,7 @@ PlayerMarker  50x50, pivot (0.5, 0.45); PlayerMapMarker{_arrowRect = FacingFrame
 
 The old code took the FIRST Image under `_arrowRect`, which is the cone, so the minimap showed only the view cone (that was the "observed 180 deg off" sprite). Now every visible Image of the prefab is copied (`LoadGameMarker`, once per page build while its sprites live): sprite, colour x CanvasGroup alphas, type, preserveAspect, rect corners via `TransformPoint`/`InverseTransformPoint` in `_arrowRect` space (parts that turn) or the root's space (upright parts), and the original pivot. Our copy:
 
-- `Arrow/GameMarker` (centred, scale = arrow px / 50, own nested Canvas): a `Facing` container at `_arrowRect`'s origin, turned to `arrowZ`, holding FacingArrow; BeaIcon upright after it (prefab order).
+- `Arrow/GameMarker` (centred, scale = 1.5 x arrow px / 50 (`kGameMarkerScale`, user request: the game marker looked too small next to the classic arrow; the cone uses the same scale), own nested Canvas): a `Facing` container at `_arrowRect`'s origin, turned to `arrowZ`, holding FacingArrow; BeaIcon upright after it (prefab order).
 - The cone (`_moveBelowMarkersTransform` subtree) goes into our page as `PlayerCone` (own nested Canvas), created in `FinishBuild` after the art and before every icon, so icons are drawn over it like in the full map (`PlayerMapMarker.SetBelowMarkerLayer`). Placed every frame at the player point + the facing origin (screen offset turned by -rot, divided by the page scale), rotation `arrowZ - rot`, scale `k / s`; each only set when it changes.
 - Animation, from the Animator clips (streamed clips decoded from the bundle; path hashes are CRC32 of the paths): the root controller loops `ChooseLoop` -> `MapMarkerPulse` (4 s: FacingArrow localScale.xy 1, 0.75, 1, 0.75, 1 at 0..4 s, per-segment cubics reproduced exactly) or, picked by a random `LoopChoice`, `MapMarkerPulse_Rare` (the same pulse plus a BeaIcon rotation wobble 30/-20/10/-4/1 deg around t = 1 s; NOT reproduced). The cone controller loops `MapMarkerPulse_Cone` (4 s: Cone y -16 -> -14 -> -16, Image alpha 1 -> 0.75 -> 1, smoothstep). Driven from the module clock every frame; the nested Canvases keep these per-frame changes from rebatching the page.
 - If the prefab has no visible image, the classic arrow is used (WARN). If its sprites are unloaded, the copy is dropped and read again at the next page build.
@@ -458,7 +458,7 @@ All settings apply live.
 | `zoom` | float | 0.5–4; 1.0 ≈ 160 m |
 | `zoom_key` | key | `]`; ×2, wraps to 0.5 |
 | `orientation` | enum | north up / rotate with player |
-| `arrow_style` | enum | game marker / classic arrow (default: classic). Size = 13% of the minimap x clamp(zoom / 2.5, 0.4, 1.6), both styles (game marker: its 50-unit root rect gets that height). The icons scale in the same proportion but are at their old size at 1x: clamp(zoom, 0.6, 1.75). See "Player marker" |
+| `arrow_style` | enum | game marker / classic arrow (default: classic). Size = 13% of the minimap x clamp(zoom / 2.5, 0.4, 1.6), both styles (game marker: its 50-unit root rect gets 1.5x that height, `kGameMarkerScale`, so arrow, face and cone are 1.5x the classic arrow). The icons scale in the same proportion but are at their old size at 1x: clamp(zoom, 0.6, 1.75). See "Player marker" |
 | `show_altitude` | bool | OFF: the "Alt N m" label at the bottom of the minimap in the Grey Labyrinth (hidden, and its text re-set when shown again) |
 | `icon_teleporters` (Icons) | bool | on |
 | `icon_treasure_pods` (Icons) | bool | on |

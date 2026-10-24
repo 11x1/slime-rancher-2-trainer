@@ -97,6 +97,7 @@ constexpr float kPreloadInterval = 10.0f;     // re-assert the map UI preload (i
 constexpr float kPreloadWait = 30.0f;         // no asset scan while the preload is still loading (up to this)
 constexpr const char* kPreloadRequester = "SR2Mods.Minimap.PagePreload";  // HashSet<object> key (string equality)
 constexpr float kArrowBaseZoom = 2.5f;        // the arrow has its base size at this zoom
+constexpr float kGameMarkerScale = 1.5f;      // the game marker (arrow + face + cone) is this much bigger than the classic arrow
 constexpr float kIconBaseZoom = 1.0f;         // the map icons have their base size at this zoom (the default)
 constexpr float kRoundBorder = 52;            // 9-slice border (px) of the 128 px rounded-square mask / frame
 constexpr int kMarkerQueriesPerTick = 8;      // CanBeShown queries per 10 Hz tick (round robin)
@@ -2598,13 +2599,13 @@ private:
             game = ui_.gameMarkerT.Alive();
         }
         // Base size (13% of the minimap) at zoom 2.5x, proportional to the zoom, clamped to 0.4x..1.6x.
-        // Game marker: its root rect (50 units) gets this height.
+        // Game marker: its root rect (50 units) gets kGameMarkerScale times this height.
         float px = std::max(10.0f, ui_.size * 0.13f * ArrowZoomFactor());
         unity::SetActive(unity::GameObjectOf(ui_.arrowT.get()), !game);
         if (ui_.gameMarkerT.Alive()) unity::SetActive(unity::GameObjectOf(ui_.gameMarkerT.get()), game);
         if (view_.coneT.Alive()) unity::SetActive(unity::GameObjectOf(view_.coneT.get()), game);
         if (game) {
-            ui_.markerK = px / gm_.rootH;
+            ui_.markerK = px * kGameMarkerScale / gm_.rootH;  // the cone follows markerK
             ugui::SetLocalScale(ui_.gameMarkerT.get(), {ui_.markerK, ui_.markerK, 1});
         } else {
             ugui::ImageSetSprite(ui_.arrowImg.get(), sprArrow_.get());
