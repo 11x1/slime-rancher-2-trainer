@@ -576,12 +576,16 @@ the inventory slots aren't centered."
 - **Number keys.** The game has one `selectSlot` InputEvent for `MainGame/Slot1..Slot7`; `VacuumItem.SelectSlot(
   InputEventData)` (0xA69640) selects slot `round(value)` (0..6, `Optional<float>` at +4 of the data). No Slot8 / 9
   actions exist and an action asset can't be added at runtime without managed code, so:
-  - two Key settings (custom upgrades, group "Vacpack": "Extra Tank III slot key" = 8, "Extra Tank IV slot key" = 9),
+  - two Key settings (custom upgrades, group "Vacpack": "Extra Tank III slot key" = 7, "Extra Tank IV slot key" = 8),
     polled every frame (`GetAsyncKeyState` edge, game window in front, overlay closed, cursor locked and time running,
     `VacuumItem` active = not gadget mode); a press calls the game's own `VacuumItem.SelectSlot(int)` (sound, vac
-    animation; a locked slot is refused by `SetSelectedSlot`). Log `number key 8 selects vacpack slot 7 (Extra Tank
+    animation; a locked slot is refused by `SetSelectedSlot`). Log `number key 7 selects vacpack slot 7 (Extra Tank
     III)` once.
-  - The water slot keeps the game's key 7: a `VacuumItem.SelectSlot(InputEventData)` detour maps a vanilla index at or
+  - Defaults (round 4, user: "R selects water, not 7, so it's offset; 7 is missing as a key slot"): the game binds
+    Slot1..Slot6 to 1-6 and Slot7 (the water slot) to R, so 7 / 8 are free; the first builds used 8 / 9. A key still on
+    its old default (saved 8 for III, 9 for IV) moves once to the new one (marker `extra_slot_keys_v2` in sr2mods.json,
+    log `slot keys moved to the new defaults`); the HUD labels follow the setting.
+  - The water slot keeps the game's key (R): a `VacuumItem.SelectSlot(InputEventData)` detour maps a vanilla index at or
     after our slots to its index in our layout.
   - HUD key label: `AmmoSlotViewHolder.BindInputKey(definition.Hotkey)` with our null hotkey logged "No binding set for
     ammo slot!"; its detour now writes our key's name into `KeybindingText` (localized text off) for our slots and keeps
@@ -640,7 +644,7 @@ user feedback ("they should be refinery upgrades, not in a separate panel"). Now
 
 **Not verified in game yet:** the 12 circles / 12 pips (positions, the highlight), buying IX-XII and III-IV on the
 vanilla cards, the capacity values, save + reload (`... from the sidecar` lines), a mod-free load of such a save, the
-extra slots before the water slot, the number keys and their HUD labels, key 7 still selecting water, the centred row,
+extra slots before the water slot, the number keys (7 / 8) and their HUD labels, R still selecting water, the centred row,
 the battery saver's refund lines. Known rough edges: the save's "viewed upgrades" set (`ViewedItemsV02`) may get the
 Battery Saver id (harmless for a mod-free load); pinning the Battery Saver as the recipe was not checked for a mod-free
 load.

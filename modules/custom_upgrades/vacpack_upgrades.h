@@ -26,8 +26,8 @@
 // before the game builds the player's AmmoSlotManager (PlayerState.InitModel / Reset). The save
 // keeps the vanilla layout: AmmoModel.Pull hands it the vanilla slots in the vanilla order (the
 // extra slots' contents go to the sidecar), AmmoModel.Push spreads a loaded vanilla array into our
-// layout (water back into the water slot). Number keys (settings, default 8 / 9) select the extra
-// slots; the game's key 7 still selects the water slot; the HUD row is widened so it stays centred.
+// layout (water back into the water slot). Number keys (settings, default 7 / 8) select the extra
+// slots; the game's water key (Slot7, R by default) still selects the water slot; the HUD row is widened so it stays centred.
 //
 // Main thread only. All game objects come from the live player (SceneContextUtility.
 // TryGetPlayerState), our clones are pinned by never-freed GC handles (a handful per session).
