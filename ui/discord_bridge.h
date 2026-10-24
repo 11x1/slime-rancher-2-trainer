@@ -13,6 +13,12 @@ inline constexpr const char* kModule = "discord_rpc";
 inline constexpr const char* kKeyAppId = "application_id";     // settings::GetString: the Discord application id
 inline constexpr const char* kKeyNewbucks = "show_newbucks";   // Bool setting
 inline constexpr const char* kKeyZone = "show_zone";           // Bool setting
+inline constexpr const char* kKeyOfficial = "official_app";    // Bool setting: use kOfficialAppId instead of the field
+inline constexpr const char* kKeyMemberList = "member_list";   // Enum setting: what the member list shows
+// Slime Rancher 2's own Discord application (Discord's detectable-games list, see
+// modules/discord_rpc/NOTES.md): name and icon then come from Discord.
+inline constexpr const char* kOfficialAppId = "1124351953024077845";
+inline constexpr const char* kDevPortalUrl = "https://discord.com/developers/applications";
 
 enum class Level { Dim, Ok, Warn, Error };
 
@@ -23,5 +29,10 @@ struct Status {
 
 void SetStatus(std::string text, Level level);  // any thread
 Status GetStatus();                             // any thread
+
+// The card's Reconnect button (any thread): the pipe thread drops the connection
+// and connects again at once, skipping any retry wait.
+void RequestReconnect();
+bool TakeReconnect();  // pipe thread: true once per request
 
 }  // namespace sr2::ui::discord
