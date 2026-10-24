@@ -294,7 +294,21 @@ Storage per silo slot: 100 -> 200 (vanilla) -> 300 -> 400 -> 500 (ours).
 - **Not sellable**, like the vanilla silo storage upgrades: `CanSell` gives the same permanent reason
   ("silo storage"), so sell_upgrades shows no Sell button and no alt-action prompt.
 
-Not checked in game yet: the card chain (vanilla card -> II -> III -> IV), the slot displays showing
+- **Visuals** (feedback round 5: "I don't see any visual upgrades for tiers II, III and IV"). The
+  vanilla capacity upgrade shows one `techSiloCapacity` tank per owned storage section, high on the
+  silo's diagonals (`Capacity Addon 0..3`, plot-local about (-1.6, 3.3, -1.8) for section 0, each next
+  section turned 90 degrees and ~0.8 m higher). Our tiers add the same tank (0.8 size) standing on the
+  ground on a diagonal at (+-2.9, +-2.9): II (+x, +z), III also (-x, +z), IV also (+x, -z), each turned
+  like the vanilla tank on that diagonal (19.6 + k * 90 degrees). The (-x, -z) diagonal stays free (plot
+  menu terminal outside it, section 0's low pipes). Clearances: silo wall r 2.1, vanilla pipe elbows /
+  caps r <= 3.05 (>= 1.37 m from a tank centre), depositors in the middle of each side, corner posts at
+  4.75, the Sell-All button outside the (+x, -z) corner. Built by `plot_props` (holders
+  `sr2props_SiloTankII..IV#<gen>`), gone when the tier is not owned / the module is off, rebuilt
+  after a load from the sidecar. The tank's `ApplyPalette` is stripped, so it keeps the prefab's
+  default colours, not the silo's palette.
+
+Not checked in game yet: the tanks (position on the ground, no overlap with the silo, pipes or
+depositors at every storage level, colours), the card chain (vanilla card -> II -> III -> IV), the slot displays showing
 the new maximum, drones / silo input filling to 500, and the log lines after a load (200 -> 500 within
 a second).
 
@@ -328,6 +342,7 @@ coop_world's scan would destroy), stripped of colliders, joints, rigidbodies and
 | Fast Growth II | a fourth head in the middle of the -x side, turned 180 degrees | same |
 | Music Box II | a second speaker on the (-x, -z) corner post (above the plot menu terminal), leaning inwards | corral prefab `Music Box/techCorralMusicBox/MusicBox/Music` (the vanilla speaker sits on the (-x, +z) post) |
 | Ash Booster (u11) | glow + embers in the fire, embers rising out of the opening | incinerator prefab `.../meshIncinerator/FireTest/Glow` and `/Embers` (inactive in vanilla, switched on), decoration `decorFireFlower`: `FX Fireflower` |
+| Silo Capacity II / III / IV | one capacity tank per tier standing on the ground beside the silo: II (+x, +z), III adds (-x, +z), IV adds (+x, -z) | silo prefab `Silo Upgrade 0/Addition 0/Capacity Addon 0/techSiloCapacity` (the vanilla Storage Capacity Upgrade's tank, with its pipe-connector foot) at 0.8 size |
 
 Gadget / toy prefabs are found by prefab name in `LookupDirector._gadgetDefinitions` /
 `_toyDefinitions` (member types, then sub-groups). A missing model is logged once

@@ -2142,6 +2142,11 @@ std::vector<custom_upgrades::world::PropRequest> CustomUpgrades::WantedProps() c
         if (owns(ps, GARDEN_GROWTH_2)) kinds |= w::kPropGardenSprinkler2;
         if (owns(ps, INCIN_ASH_BOOST)) kinds |= w::kPropIncinGlow;
         if (owns(ps, CORRAL_MUSIC_2)) kinds |= w::kPropCorralMusic;
+        // Silo Capacity II / III / IV: one more ground tank per tier (a higher tier implies the lower ones).
+        const bool cap4 = owns(ps, SILO_CAPACITY_4), cap3 = cap4 || owns(ps, SILO_CAPACITY_3);
+        if (cap3 || owns(ps, SILO_CAPACITY_2)) kinds |= w::kPropSiloTank2;
+        if (cap3) kinds |= w::kPropSiloTank3;
+        if (cap4) kinds |= w::kPropSiloTank4;
         if (kinds) out.push_back({id, kinds});
     }
     return out;
