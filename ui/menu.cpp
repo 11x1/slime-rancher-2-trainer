@@ -726,7 +726,16 @@ void DrawRow(const Host& h, const settings::Def& d, const std::string& label, bo
         case settings::Kind::Enum: ComboDef(d, cur, ctlW); break;
         case settings::Kind::Key: KeyDef(h, d, cur, ctlW); break;
     }
-    PulseRow(d, rowStart, ImVec2(rowStart.x + avail, std::max(labelBottom, ImGui::GetItemRectMax().y)));
+    const ImVec2 rowEnd(rowStart.x + avail, std::max(labelBottom, ImGui::GetItemRectMax().y));
+    // Middle click anywhere on the row: back to the default. Not while the row is disabled (locked,
+    // or a nested row sliding shut), blocked by a popup, or this key bind is waiting for a key
+    // (the middle button can be bound).
+    const bool disabled = (GImGui->CurrentItemFlags & ImGuiItemFlags_Disabled) != 0;
+    const bool capturing = d.kind == settings::Kind::Key && h.isCapturing && h.isCapturing(d);
+    if (!disabled && !capturing && ImGui::IsMouseClicked(ImGuiMouseButton_Middle, false) && ImGui::IsWindowHovered() &&
+        ImGui::IsMouseHoveringRect(rowStart, rowEnd) && std::fabs(cur - d.def) > 1e-9)
+        Write(d, d.def);
+    PulseRow(d, rowStart, rowEnd);
     ImGui::PopID();
 }
 
@@ -4170,7 +4179,7 @@ bool DrawTopBar(const Category& cat, int& ti, const std::vector<ModuleView>& vie
         DrawResetIcon(dl, ImVec2(rx + ib * 0.5f, cy), ImGui::IsItemHovered() ? P.text : P.soft);
         HoverTip(tab.kind == TabKind::Profiles  ? "Rescan the profiles folder"
                  : tab.kind == TabKind::SlimeDj ? "Rescan the music folder"
-                                                : "Reset this tab to defaults");
+                                                : "Reset this tab to defaults (middle-click a setting to reset only that one)");
     }
     ImGui::SetCursorScreenPos(origin);
     ImGui::Dummy(ImVec2(barW, U(kTopH)));
