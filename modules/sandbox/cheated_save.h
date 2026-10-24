@@ -23,6 +23,8 @@
 // Plus a 1 Hz main-thread poll (title screen, saves loaded some other way, Sandbox switched on).
 // Everything runs on the main thread inside DetourGuards (fault name "sandbox_saves").
 
+#include "core/json.h"
+
 namespace sr2::core {
 class ModuleContext;
 }
@@ -44,5 +46,13 @@ inline constexpr const char* kToggleInfiniteHealth = "infinite_health";
 bool SaveToggle(const char* key);
 void SetSaveToggle(const char* key, bool on);
 unsigned SaveTogglesVersion();
+
+// ---- other Sandbox data per save (main thread) ----
+// A JSON value under `key` in the mark (next to "toggles"), loaded and dropped with the toggles (same
+// SaveTogglesVersion), written whenever it changes in a marked save and with every new save file of it.
+// A null value removes the key. The weather changer keeps its locks here (weather.h).
+inline constexpr const char* kDataWeather = "weather";
+const sr2::json::Value& SaveData(const char* key);
+void SetSaveData(const char* key, sr2::json::Value value);
 
 }  // namespace sr2::modules::sandbox
