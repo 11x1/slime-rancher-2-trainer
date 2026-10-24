@@ -586,6 +586,12 @@ private:
     const MethodInfo* acquireComponent_ = nullptr;     // static AcquisitionUtility.AcquireUpgradeComponent(component, int)
     const MethodInfo* fabGridSelected_ = nullptr;      // FabricatorItemGrid.TryGetSelectedItem(out IFabricatableItem)
     const MethodInfo* fabContentSelected_ = nullptr;   // FabricatorContent.OnItemSelected(IFabricatableItem, InteractionCause)
+    // The quantity popup (FabricatorUI._confirmPopup, a FabricatorConfirmPopup; optional, round 8).
+    size_t offFabUiPopup_ = 0, offPopupItem_ = 0, offPopupCount_ = 0;  // _confirmPopup / its _item / _countToMake
+    size_t offFabUiConfirming_ = 0, offPopupClosing_ = 0;              // FabricatorUI._confirming / popup _isClosing
+    const MethodInfo* popupUpdate_ = nullptr;    // FabricatorConfirmPopup.UpdateCountAndRecipeDisplay(FabricationBlockedReason)
+    const MethodInfo* checkGadget_ = nullptr;    // GadgetFabricatableItem's IFabricatableItem.CheckCanFabricate(int)
+    const MethodInfo* checkUpgrade_ = nullptr;   // PlayerUpgradeFabricatableItem's IFabricatableItem.CheckCanFabricate(int)
     unsigned long long lastFabPoll_ = 0;
     bool fabOpen_ = false, fabKeyDown_ = false;
     // "[G] Add materials" in the Fabricator's own key bar (modules/common/legend_hint.h), before "[Z] Pin"
@@ -605,6 +611,7 @@ private:
 
     Il2CppObject* OpenFabricator();                    // the open FabricatorUI, or nullptr
     Il2CppObject* FabricatorItem(Il2CppObject* ui, Il2CppObject** content, Il2CppObject** details);
+    Il2CppObject* FabricatorPopup(Il2CppObject* ui);  // the quantity popup while it is shown, else nullptr
     void RefreshFabricator(bool rebuild = false);  // rebuild: also the grid, as on opening (RebuildFabricator)
     Il2CppObject* SpendableDirector();
     bool UpgradeHidden(Il2CppObject* um, Il2CppObject* up, Il2CppObject* spend, std::vector<Il2CppObject*>* missing);
@@ -3177,6 +3184,24 @@ void Sandbox::SetupUnlocks(sr2::il2cpp::Resolver& R) {
     // (FabricatorContent.OnItemSelected: details SetItem, variants button, ItemSelected -> the key legend).
     fabGridSelected_ = method(grid, "TryGetSelectedItem", 1, fw);
     fabContentSelected_ = method(content, "OnItemSelected", 2, fw);
+    {
+        // The quantity popup that Fabricate opens for a gadget (optional): G then takes its item and count.
+        std::string pw;
+        Il2CppClass* popup = cls(kFabNs, "FabricatorConfirmPopup", pw);
+        off(fabUiClass_, "_confirmPopup", offFabUiPopup_, pw);
+        off(popup, "_item", offPopupItem_, pw);
+        off(popup, "_countToMake", offPopupCount_, pw);
+        off(fabUiClass_, "_confirming", offFabUiConfirming_, pw);
+        off(popup, "_isClosing", offPopupClosing_, pw);
+        popupUpdate_ = method(popup, "UpdateCountAndRecipeDisplay", 1, pw);
+        constexpr const char* kCheck = "MonomiPark.SlimeRancher.UI.Fabricator.IFabricatableItem.CheckCanFabricate";
+        checkGadget_ = method(fabGadgetItemClass_, kCheck, 1, pw);
+        checkUpgrade_ = method(fabUpgradeItemClass_, kCheck, 1, pw);
+        if (!pw.empty()) {
+            offFabUiPopup_ = 0;
+            SR2_WARN("[{}] Fabricator key: the quantity popup is not supported ({})", kModule, pw);
+        }
+    }
     // What it adds with: the crafter's refinery symbols and PurchaseCost layout, and the upgrade model.
     if (fw.empty() && (!gadgetAddItem_ || !refinerySpace_ || !offCraftCosts_ || !offCostIdent_ || !identCostStride_))
         fw = "the crafter's refinery / recipe-cost symbols are missing";
@@ -3451,6 +3476,20 @@ Il2CppObject* Sandbox::FabricatorItem(Il2CppObject* ui, Il2CppObject** contentOu
                : nullptr;
 }
 
+// The quantity popup (FabricatorUI._confirmPopup) while it is shown (FabricatorUI._confirming, the popup not
+// closing) with an item: Fabricate on a gadget opens it
+// (FabricatorConfirmPopup.Show; _countToMake is the chosen quantity, IncrementCount 0x800DB0 / DecrementCount
+// change it and call UpdateCountAndRecipeDisplay(item.CheckCanFabricate(count))).
+Il2CppObject* Sandbox::FabricatorPopup(Il2CppObject* ui) {
+    if (!ui || !offFabUiPopup_ || !unity::Field<bool>(ui, offFabUiConfirming_)) return nullptr;  // not confirming
+    Il2CppObject* popup = unity::Field<Il2CppObject*>(ui, offFabUiPopup_);
+    if (!popup || !unity::IsAlive(popup) || unity::Field<bool>(popup, offPopupClosing_) ||
+        !unity::ActiveInHierarchy(unity::GameObjectOf(popup)))
+        return nullptr;
+    Il2CppObject* item = unity::Field<Il2CppObject*>(popup, offPopupItem_);
+    return item && (IsA(item, fabGadgetItemClass_) || IsA(item, fabUpgradeItemClass_)) ? popup : nullptr;
+}
+
 // After anything that changes what the open Fabricator's selected recipe needs or has (G, refinery items,
 // crafts, Newbucks, upgrade levels, components): the refresh the game runs when the selection changes,
 // FabricatorContent.OnItemSelected(item, PROGRAMMATIC) (0x804700, decompiled: details SetItem -> recipe counts
@@ -3609,12 +3648,19 @@ void Sandbox::DoFabricatorMaterials() {
     Il2CppObject* content = nullptr;
     Il2CppObject* details = nullptr;
     Il2CppObject* item = FabricatorItem(ui, &content, &details);
+    Il2CppObject* recipe = details && unity::IsAlive(details) ? unity::Field<Il2CppObject*>(details, offFabDetailsRecipe_) : nullptr;
+    int count = recipe && unity::IsAlive(recipe) ? std::clamp(unity::Field<int32_t>(recipe, offFabRecipeCount_), 1, 999) : 1;
+    // On the quantity popup (round 8: "[G] should also work when choosing how much to fabricate"): its item and
+    // the quantity chosen there.
+    Il2CppObject* popup = FabricatorPopup(ui);
+    if (popup) {
+        item = unity::Field<Il2CppObject*>(popup, offPopupItem_);
+        count = std::clamp(unity::Field<int32_t>(popup, offPopupCount_), 1, 999);
+    }
     if (!item) {
         Done(false, "Fabricator: select a recipe first");
         return;
     }
-    Il2CppObject* recipe = details && unity::IsAlive(details) ? unity::Field<Il2CppObject*>(details, offFabDetailsRecipe_) : nullptr;
-    int count = recipe && unity::IsAlive(recipe) ? std::clamp(unity::Field<int32_t>(recipe, offFabRecipeCount_), 1, 999) : 1;
     // The cost: a gadget's CraftingCosts, or the next level's _costs of an upgrade.
     const char* costs = nullptr;
     std::string name;
@@ -3726,24 +3772,35 @@ void Sandbox::DoFabricatorMaterials() {
         const int maxBucks = unity::Field<int32_t>(c.model, offMaxCurrency_);
         int add = static_cast<int>(std::clamp<int64_t>(amount - have, 0, std::max(0, maxBucks - have)));
         if (add <= 0) continue;
-        bool popup = true, ok = false;
-        Call(addCurrency_, c.player, {c.currency, &add, &popup, nullptr}, "PlayerState.AddCurrency", &ok);
+        bool coinPopup = true, ok = false;
+        Call(addCurrency_, c.player, {c.currency, &add, &coinPopup, nullptr}, "PlayerState.AddCurrency", &ok);
         if (ok) added.push_back(std::format("{} Newbucks", Thousands(add)));
     }
     // Show the new counts: the game's selection-change refresh (it sets the recipe to 1 craft), then the
     // recipe again with the chosen count.
     if (!added.empty()) {
-        RefreshFabricator();
+        // With the popup up only the details panel behind it (no selection event: that would also switch the
+        // key bar to the recipe page's while the popup has its own).
+        if (!popup) RefreshFabricator();
+        else if (details && unity::IsAlive(details)) Call(fabDetailsSetItem_, details, {item}, "FabricatorItemDetails.SetItem");
         bool ok = false;
-        if (count > 1 && recipe && unity::IsAlive(recipe))
+        if (count > 1 && recipe && unity::IsAlive(recipe) && !popup)
             Call(fabRecipeSetItem_, recipe, {item, &count}, "FabricatorRecipe.SetItem", &ok);
+        // The popup's have / need counts and its confirm button, as its own +/- does.
+        if (popup && unity::IsAlive(popup)) {
+            const MethodInfo* check = IsA(item, fabGadgetItemClass_) ? checkGadget_ : checkUpgrade_;
+            int32_t reason = 0, n = count;
+            if (CallValue(check, item, {&n}, "IFabricatableItem.CheckCanFabricate", reason))
+                Call(popupUpdate_, popup, {&reason}, "FabricatorConfirmPopup.UpdateCountAndRecipeDisplay");
+        }
     }
     auto join = [](const std::vector<std::string>& v) {
         std::string s;
         for (const std::string& x : v) s += (s.empty() ? "" : ", ") + x;
         return s;
     };
-    const std::string what = count > 1 ? std::format("{} x {}", count, name) : name;
+    const std::string what = std::format("{}{}{}", count > 1 ? std::format("{} x ", count) : "", name,
+                                         popup ? " (quantity popup)" : "");
     if (added.empty() && missed.empty()) Done(true, std::format("Fabricator: you already have everything for {}", what));
     else if (missed.empty()) Done(true, std::format("Fabricator: added {} for {}", join(added), what));
     else Done(!added.empty(), std::format("Fabricator: {}{} for {}; not added: {}", added.empty() ? "nothing added" : "added ",
