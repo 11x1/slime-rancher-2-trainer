@@ -181,17 +181,52 @@ Other sources:
 
 | What | Rate / rule |
 |---|---|
-| Transform | per frame: player position + rotation, page scale/position, arrow. Rotator / icon updates only when the rotation or scale changes. |
+| Transform | per frame: player position + rotation read; page scale / position, rotator, arrow set only when they change (nothing is set while standing still); icon counter-rotation in 0.5 deg steps, counter-scale on zoom changes. Game marker: pulse animation (3 calls, own nested canvases). |
+| Outside-fog mask | only when the page moved / turned / scaled, after the full map closed or the minimap reappeared, on layout changes, and at least every 0.5 s |
 | Zone, hide rules, unknown area, marker visibility | 10 Hz |
 | `CanBeShown` per marker | re-queried every 2 s, cached in between |
 | Fog | every 2 s: unrevealed + unknown areas are queried (reveals are permanent within a save). Every area: after the build, when the save data becomes ready, on a zone change, after the full map closes, when the setting changes, and every 30 s. Readiness polled at 10 Hz only until settled. Our objects are touched only when an area's visibility changes. |
 | Dynamic elements | every 10 s |
-| Pods / nodes / gadgets | every 3 s, from the sources above |
+| Pods / nodes / gadgets | every 3 s, from the sources above; an icon's sprite / colour / position / orientation is set only when it changed |
 | Page copy | once per map change (or after the build fails), 32 graphics per frame |
 | `CanBeShown` per page marker | round robin, max 8 calls per 10 Hz tick, each marker every 2 s; hidden until its first answer |
 | World reset | on scene-load start, a new / destroyed `PlayerDisplayOnMap`, or the page prefab / MapDefinition no longer alive |
 | Map UI preload | requested on the first tick and after each world reset, re-asserted every 10 s; `IsDone` polled at 10 Hz only while loading |
 | Zoom hotkey | per frame `GetAsyncKeyState`, skipped while the settings overlay is open |
+
+## Performance (research 2026-10-24)
+
+### Numbers before (sr2mods.log 02:02-02:32, build before feature/minimap-perf, ~70-85 fps)
+
+- `perf:   frame:minimap` in the 10 s summaries: avg 0.030-0.049 ms per frame (25-36 ms per 10 s, about 0.3 % of the frame time), max 0.4-2.5 ms, 0-3 frames > 2 ms per 10 s (17 such WARN lines in 30 min, at irregular 1-30 s intervals: one of the low-rate steps; which one is what the new detail scopes show).
+- One-off spikes: 49.0 ms at the first UI build (02:03:21, during the load: UI build + procedural sprites + preload request; `frame:spawn_scaling` 23.6 ms in the same frame), 23.9 ms at 02:29:19 (after a zone change: a page build step).
+- For comparison in the same log: `frame:collectibles` up to 20.6 ms, `frame:custom_upgrades` up to 30.8 ms.
+- What these numbers do NOT contain: Unity's own work caused by our objects. Every Transform / Graphic set dirties the minimap's nested Canvas; Unity rebuilds its geometry / batches later in the frame (`Canvas.willRenderCanvases`, batching), outside our timing. The minimap is pure uGUI: no camera, no render texture (the full map is the same: an instantiated page prefab under a canvas), so that canvas rebuild is the only hidden cost. It is only visible as overall fps (minimap on vs off, standing still).
+
+### Where the time went (code review, before)
+
+- Every frame: player position + rotation (2 calls), `IsSceneLoadInProgress` (1 managed call), page `localScale` + `localPosition` set even when unchanged (a same-value set still marks the transform changed, so the whole minimap canvas was rebuilt every frame, also while standing still), rotator / arrow only on change, and while the static fog is shown (Rainbow Island, fog respected) the outside-fog mask: `worldToLocalMatrix` + `localToWorldMatrix` + `Shader.SetGlobalMatrix` every frame.
+- Rotate-with-player: one `SetLocalEuler` per visible icon on every frame the heading changed by > 0.05 deg.
+- 10 Hz: about 12 calls (zone, hide rules, unknown area) + up to 8 `CanBeShown` queries; marker visibility is pure C++.
+- Every 2 s: one `ShouldBeRevealed` per unrevealed fog area (each creates a query object: GC garbage). Every 10 s: `CanBeShown` per dynamic element.
+- Every 3 s (icons): per registered treasure pod 4 calls (`GameObject`, `activeInHierarchy`, `transform`, `position`) even for pods far away; placed gadgets: field reads + ~6 class checks per gadget; then FIVE sets per shown icon (sprite, colour, position, scale, rotation) whether or not anything changed: every 3 s every icon's mesh and the canvas were rebuilt.
+- Page build: 32 graphics per frame (about 30 calls each) while hidden; markers and the first fog query in one frame (`FinishBuild`).
+
+### Changes (feature/minimap-perf), visuals unchanged
+
+1. Page scale / position / rotator: set only when the value changed (standing still: no transform sets, the minimap canvas is not rebuilt by us).
+2. Outside-fog mask: set only when the page moved, the full map closed, the minimap reappeared or was laid out again, the canvas was re-resolved, and at least every 0.5 s (safety net in case anything else writes the global).
+3. Icons (3 s): sprite, colour, position and orientation are each set only when they differ from what that icon already has (cached per icon).
+4. Icon counter-rotation (rotate-with-player): re-applied when the map turned by 0.5 deg instead of 0.05 deg (an icon tilted by < 0.5 deg is invisible). Turning fast still costs one call per visible icon per frame: icons inside a rotating page must be counter-rotated one by one.
+5. Treasure pods: their world position is read once per pod (pods never move); far pods cost no game call, only pods in view are checked for active + LOCKED.
+
+Not changed (and why): `IsSceneLoadInProgress` stays per frame (it protects every map call during loads); fog queries stay at 2 s (reveal latency); `FinishBuild` is still one frame (once per map change, while hidden; time-slicing it is the next step if `minimap.build finish` shows large numbers).
+
+### Log lines to compare (after deploying)
+
+- `perf:   frame:minimap` (10 s summaries): avg / max / "N > 2 ms" against the numbers above. Standing still the avg should drop a little; the hidden canvas rebuild drops more (check the `perf: 10 s summary` fps standing still at the same spot).
+- New detail lines in the same summaries (and in "frame hitch ... top:" lists): `minimap.transform`, `minimap.negmask`, `minimap.slow (10 Hz)`, `minimap.markers (10 Hz)`, `minimap.fog (2 s)`, `minimap.dynamic (10 s)`, `minimap.icons (3 s)`, `minimap.build (page copy)`, `minimap.build finish (markers, first fog)`, `minimap.page build start`, `minimap.ui build (once)`, `minimap.ui sprites (procedural, once)`. Their max column names the step behind the 2 ms frames.
+- `minimap: perf (30 s): N frames shown, page transform set in P of them; outside-fog mask set M times; icon orient calls O; icon property sets S (U icon updates with nothing to set); pods A in view / B skipped without a game call` (every 30 s while `perf_log` is on). Standing still: P = 0 and M about 60 (before: both = N); S near 0 with U = icons x 10.
 
 ## Fault policy
 

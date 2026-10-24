@@ -6,7 +6,6 @@
 
 | note | about |
 |---|---|
-| `minimap-perf.md` | research and improve minimap performance |
 | `ideas.md` | unplanned ideas |
 
 ## Where the documentation lives
