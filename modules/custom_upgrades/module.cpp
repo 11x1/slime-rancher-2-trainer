@@ -16,6 +16,10 @@
 //   Silo Capacity III    silo         Silo Capacity II      4500    400 items per silo slot
 //   Silo Capacity IV     silo         Silo Capacity III     6500    500 items per silo slot
 //
+//   Not plot upgrades: the Fabricator vacpack upgrades Tank Booster IX-XII (+25 per slot per level,
+//   up to 200) and Extra Tank III-IV (a 7th / 8th slot), in vacpack_upgrades.cpp (own hooks, levels and
+//   extra slot contents in this module's sidecar as per-save values).
+//
 //   Silo capacity (vanilla, prefab + disassembly): the silo's SiloStorage has 12 slot definitions
 //   ("SiloNonSlimes", _maxAmount 100); STORAGE2/3/4 only swap slot GameObjects, the one vanilla
 //   capacity upgrade STORAGE_CAPACITY_INCREASE (1800) runs StorageUpgrader.Apply ->
