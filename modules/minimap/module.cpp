@@ -441,8 +441,9 @@ private:
     static constexpr size_t kMaxPageIcons = 2000;  // full map: the whole page
 
     void CollectPageIconsImpl(const minimap::api::PageIconQuery& q, std::vector<minimap::api::PageIcon>& out) {
-        static_assert(minimap::api::kIconCatCount == kCatCount && minimap::api::kIconPlacedDecor == kPlacedDecor &&
-                      minimap::api::kIconNullWall == kNullWall);
+        static_assert(int{minimap::api::kIconCatCount} == int{kCatCount} &&
+                      int{minimap::api::kIconPlacedDecor} == int{kPlacedDecor} &&
+                      int{minimap::api::kIconNullWall} == int{kNullWall});
         Step("full map icons: world scan");
         bool cats[kCatCount];
         for (int c = 0; c < kCatCount; ++c) cats[c] = q.cats[c];
