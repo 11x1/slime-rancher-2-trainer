@@ -32,7 +32,7 @@ The UI never draws an automatic `ui.enabled` toggle, because turning the UI off 
 | `hud_edit.cpp/.h` | HUD edit mode: move and resize the minimap and the Speed Panel with the mouse (see below) |
 | `momentum_hud.cpp/.h` | the Speed Panel (`hl2_movement`'s speed readout), drawn by the overlay |
 | `options_tab.cpp/.h` | "Mods" category in the game's Options menu |
-| `mod_icons.cpp/.h` | the mod's own icons (`assets/icons/`, embedded as `mod_icons_data.inc`) as Unity sprites: stb_image decode, `Texture2D` + `Sprite.Create`, cached and pinned; used by the Mods tab and the custom plot upgrades, with the game's sprite as fallback |
+| `mod_icons.cpp/.h` | the mod's own icons (`assets/icons/`, embedded as `mod_icons_data.inc`) as Unity sprites: stb_image decode, `Texture2D` + `Sprite.Create`, cached and pinned; used by the Mods tab, the custom plot upgrades and the Hen / Elder Collector drone sources, with the game's sprite as fallback; `Has(name)` checks quietly for an optional icon. `build.ps1` regenerates the .inc from `assets/icons/*.png` |
 | `settings_view.cpp/.h` | shared helpers (see above) |
 | `quick_start_hint.cpp/.h` | "Hold Shift to stay in the main menu" note: `quick_start` publishes its pending auto-continue (and countdown) from the main thread through atomics; `menu::DrawHint` stacks it under the hotkey note. Shown whenever auto-continue is pending, independent of `overlay_hint`; after a Shift cancel it says "Staying in the main menu" for 2.5 s |
 | `slime_dj_bridge.cpp/.h` | Ranch > Slime DJ: the same snapshot / posted-`Action` exchange for the `slime_dj` module (song list, queue, now playing, status), plus `OpenFolder` (explorer.exe on a short-lived thread) |

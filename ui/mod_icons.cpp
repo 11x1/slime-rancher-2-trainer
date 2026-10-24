@@ -259,4 +259,10 @@ Il2CppObject* Get(std::string_view name, Il2CppObject* sizeLike, bool greyed) {
     return e.sprite;
 }
 
+bool Has(std::string_view name) {
+    for (const EmbeddedPng& p : kEmbeddedIcons)
+        if (name == p.name) return true;
+    return false;
+}
+
 }  // namespace sr2::ui::mod_icons

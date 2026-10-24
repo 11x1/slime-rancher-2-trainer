@@ -66,6 +66,17 @@ if ($Regen) {
   if ($LASTEXITCODE -ne 0) { throw "gen_proxy.py failed" }
 }
 
+# ---- embedded icons: ui/mod_icons_data.inc from assets/icons/*.png ----------------
+# (rewritten only when an icon was added, changed or removed; without Python the
+# committed .inc is used as is)
+$py = Find-Python
+if ($py) {
+  & $py (Join-Path $root 'assets\icons\src\gen_inc.py')
+  if ($LASTEXITCODE -ne 0) { throw "gen_inc.py failed" }
+} else {
+  Write-Warning "Python not found - using the committed ui/mod_icons_data.inc (new icons in assets/icons are not embedded)"
+}
+
 if ($Clean -and (Test-Path $buildDir)) { Remove-Item -Recurse -Force $buildDir }
 
 # ---- configure + build ---------------------------------------------------------

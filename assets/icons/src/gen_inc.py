@@ -26,8 +26,16 @@ def main():
     for n in names:
         lines.append(f'    {{"{n}", kPng_{n}, sizeof(kPng_{n})}},')
     lines.append("};")
+    text = "\n".join(lines) + "\n"
+    # Unchanged icons: leave the file alone (build.ps1 runs this before every build; a CRLF
+    # checkout compares equal).
+    if os.path.exists(OUT):
+        with open(OUT, "r") as f:
+            if f.read() == text:
+                print(OUT, "up to date,", len(names), "icons")
+                return
     with open(OUT, "w", newline="\n") as f:
-        f.write("\n".join(lines) + "\n")
+        f.write(text)
     print("wrote", OUT, len(names), "icons")
 
 
