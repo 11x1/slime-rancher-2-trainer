@@ -24,6 +24,21 @@ std::atomic<bool> g_cheated{false};
 void SetSaveCheated(bool cheated) { g_cheated.store(cheated, std::memory_order_relaxed); }
 bool SaveCheated() { return g_cheated.load(std::memory_order_relaxed); }
 
+namespace {
+std::atomic<unsigned long long> g_fabHint{0};  // GetTickCount64 of the last "Fabricator open" (0: closed)
+std::atomic<int> g_fabKey{0};
+}  // namespace
+
+void SetFabricatorHint(bool open, int vk) {
+    g_fabKey.store(vk, std::memory_order_relaxed);
+    g_fabHint.store(open ? GetTickCount64() : 0, std::memory_order_relaxed);
+}
+
+int FabricatorHintKey() {
+    const unsigned long long t = g_fabHint.load(std::memory_order_relaxed);
+    return t != 0 && GetTickCount64() - t < 3000 ? g_fabKey.load(std::memory_order_relaxed) : 0;
+}
+
 void Publish(Snapshot s) {
     auto p = std::make_shared<const Snapshot>(std::move(s));
     std::lock_guard lock(g_mutex);

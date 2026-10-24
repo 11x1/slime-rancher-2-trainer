@@ -120,6 +120,9 @@ struct Snapshot {
     std::string craftWhy;                                 // crafter unavailable: why ("" = available)
     std::shared_ptr<const Relations> relations;           // slime diets (favourites, plorts); nullptr until built
     uint32_t groupIcons[kGroupCount] = {};                // the game's icons for the group tabs (0 = none; All has none)
+    int upgradeCount = 0;                                 // player upgrades (UpgradeModel.upgradeDefinitions)
+    int upgradeLevelsLeft = -1;                           // levels until all are at their last one (-1: unknown)
+    std::string upgradeWhy;                               // why "Unlock all upgrades" is unavailable ("" = it is not)
 };
 
 enum class Op {
@@ -139,6 +142,7 @@ enum class Op {
     StowItem,        // slot = selected slot, item (from catalog), value = amount (<= 0: one slot's maximum), replace:
                      // fills the selected slot (replacing its contents only if `replace`), then the slots that hold
                      // the item or are empty; what does not fit is dropped in front of the player
+    UnlockUpgrades,  // every player upgrade to its last level (UpgradeModel.IncrementUpgradeLevel), free
 };
 
 struct Action {
@@ -166,6 +170,10 @@ bool WantsSnapshot();
 // also with Sandbox off (modules/sandbox/cheated_save.cpp). Any thread.
 void SetSaveCheated(bool cheated);
 bool SaveCheated();
+// The game's Fabricator is open while Sandbox is on: the overlay shows a small hint for the
+// "add missing materials" key `vk`. Refreshed about once a second; stale after 3 s. Any thread.
+void SetFabricatorHint(bool open, int vk);
+int FabricatorHintKey();  // the key to show, 0 = no hint
 
 // ---- render thread ----
 std::shared_ptr<const Snapshot> Get();  // nullptr until the first publish
