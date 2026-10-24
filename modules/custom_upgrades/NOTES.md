@@ -381,9 +381,8 @@ of it is offered. Slime DJ plays the song through `slime_dj/api.h` emitters.
   is a ball (r 0.47, Rigidbody 0.5 kg, no constraints), so it rolled. Now it is stood up (euler x / z = 0), its
   rotation about x / z is frozen (`RigidbodyConstraints` 16 | 64, put back each tick if the vacuum reset it), the
   ball collider is off and its small bottom box collider is resized to the boombox (centre y -0.27, 0.62 x 0.46 x
-  0.4 toy units); all restored on undress. Slimes play with it like with any toy. There is no toy shop entry: the toy
-  shop's purchase path was not researched (`ToyShopUI` itself has no members in the dump); the Fabricator card reuses
-  the hooks the DJ gadgets need anyway.
+  0.4 toy units); all restored on undress. Slimes play with it like with any toy. It is also sold in the shop's
+  Daily Deals next to the daily toy (see "Slime Radio in the shop" below).
 - **Fabricator** (Decorations): DJ Booth after the Scientist Desk (cost: the desk's Newbucks x2.5, items x2), DJ
   Speaker after the Boombox (x1.5 / x1.5), Slime Radio after the DJ Speaker (x0.5 / x0.5); Newbucks rounded to 5.
   Unlocked with the base's blueprint (radio: the Boombox's) unless the sidecar overrides it (see "Mod buildables"). Owned count: kits (booth / speaker), radios in the save.
@@ -392,7 +391,8 @@ of it is offered. Slime DJ plays the song through `slime_dj/api.h` emitters.
   gives it back and holds the variant again; removed any other way (stored, picked up with a stack) the tick gives the
   kit back.
 - **Sidecar**: `dj.booths` (actor ids), `dj.speakers` (`id:kind`), `dj.radios`, `dj.booth_kits`, `dj.speaker_kits`,
-  `dj.on` (actor ids switched on with E; an id leaves it when its actor is picked up / gone).
+  `dj.on` (actor ids switched on with E; an id leaves it when its actor is picked up / gone), `dj.shop_radios_pending`
+  (radios bought at the shop and not dispensed yet).
 - **Save**: like the Quantum Storage Link (ReferenceId alias in `_reverseIndex`, `GetPersistenceId` detour mapping
   our definitions to the vanilla one for the favourite slots; Cleanup puts the vanilla gadget into those slots).
 - **Per-tick cost** (world tick, 1 Hz; reviewed in the Slime DJ perf round): no scene searches. Actors come from
@@ -488,6 +488,63 @@ fabricate it, hold a <base> in gadget mode, press the Variant key until it shows
 Not checked in game yet: the four cards appearing (position, locked look with name / icon, the hint in the details
 panel), unlocking with the base blueprint (buy / find a Boombox blueprint), the Sandbox override, the Warp Tech card
 after the Refinery Link (42 entries), Decorations (244 entries).
+
+## Slime Radio in the shop
+
+User report: "shop had punk and gray boombox, but not new upgrade". `radio_shop.cpp` (header comment for the RVAs).
+
+- **The shop (research).** There is no separate toy shop code: `ToyShopUI` / `ToyShopUIActivator` are empty shells and
+  the ranch shop is the generic shop system (`ShopDirector`, `ShopRuntime` per kiosk, `ShopCategoryRuntime` per
+  category, `ShopRuntimeItem` per entry, UI `ShopContentPage` / `ShopItemButton` / `ShopPurchasePopup`). Toys are in
+  the **Daily Deals** category (analytics name `DailyDeals`): rule set `DailyDeals_BaseToysRuleSet` (one toy per
+  restock) over `DailyDeals_BaseToysTable` (UnityPy on `scriptableobjectlookupdata_assets_all_*.bundle`: 22 toys,
+  500..2000 Newbucks, each limited to 1; the Night Light is GUID `6b6134bfd2a4907479a87c894d40324c`, id
+  `ToyDefinition.NightLight`, 500 Newbucks, filter flags TOY | SINGLE_ITEM). The boomboxes the user saw are presumably
+  Boombox variants from the gadget sources of the same category (not checked).
+- **Purchase path.** `ShopContentPage`'s popup calls `ShopRuntimeItem.TryPurchase(count, page._spawnHandlerId, ui
+  session)`: `CanAcquireIgnoringCosts`, `CanAfford`, `Acquire_SpawnOrStore(asset)` whose callback queues the
+  IdentifiableType at `ShopDataModel.QueueToSpawnItem(spawnHandlerId)` (= `ShopDirector.QueueToSpawnItem`), then the
+  transactor's `Purchase` = `SpendableDirector.Spend` + `ShopDirector.TrackItemPurchased` (purchase count by category
+  and unique id, saved). The kiosk's `ShopItemSpawner` dispenses the queue every few seconds through
+  `ShopDirector.SpawnNextItem` (dequeue, `InstantiateActor` at the spawner). `ShopDataModel` saves the purchase counts
+  and the pending queues (IdentifiableTypes).
+- **Display path.** Every UI read goes through `ShopRuntimeItem.get_Asset` (the loaded Addressables handle's result):
+  title / icon / picture (the asset as `IUIDisplayData` / `IFullArtAndIconSource`), item type and counts (the runtime
+  helper with the asset), the description (`get_Description` = the helper's `GetDescription(asset)`, the pedia
+  entry's text). `ToyShopItemHelper.GetPediaEntry` casts the asset to `ToyDefinition` (throws otherwise).
+- **What the mod does.** After `ShopCategoryRuntime.GetRuntimeItems` (it returns the category's `_cachedItemList`) the
+  Daily Deals list gets our `ShopRuntimeItem` after its last toy (at the end when no toy is in stock): a
+  `MemberwiseClone` of a toy entry of that list (owning category, transactor, provider) with our own
+  `ShopCategoryItemEntry`: the Night Light's asset reference (own `AssetInterface` / `AssetReference` objects of its
+  GUID, since `ReleaseResources` releases the AssetReference; reference / unique id `ToyDefinition.NightLight`),
+  **1000 Newbucks** (vanilla toys 500..2000, the Boombox fabricates for 1000 + materials), no count limit;
+  `ToyShopItemHelper.Instance`, no category updater, a cleared load handle (the UI loads it like any entry). Offered
+  while the radio card is unlocked (Boombox blueprint or the Sandbox override) and the text sink is live; taken out
+  of the list when that ends or custom upgrades go off. `get_Asset` / `get_Description` return, for our item only,
+  a runtime `ToyDefinition` clone of the Night Light named "Slime Radio" (Boombox icon, the Boombox's full-art
+  picture through its own AssetReference) and our description. Pointer compares only.
+- **Buying.** `TryPurchase` for our item: `CanAfford`, `SpendableDirector.Spend(our cost, count)`,
+  `ShopDirector.QueueToSpawnItem(spawnHandlerId, Night Light, count)`, sidecar `dj.shop_radios_pending` += count.
+  Nothing goes to the shop's purchase records (neither our id nor the Night Light's). Without a spawner id the radios
+  spawn in front of the player (`dj::Grant`, as the Fabricator). After `SpawnNextItem`, a Night Light while radios
+  are pending is listed in `dj.radios` (`dj::ListRadio`) and dressed at the next DJ tick; the count goes down. The
+  tick lowers the count to the Night Lights still in the shop's queues (plain reads of
+  `ShopDataModel._itemsPendingSpawn`), e.g. after Night Lights were dispensed while custom upgrades were off.
+- **Save.** The vanilla save sees spent Newbucks, Night Lights in the shop's pending queue and Night Light actors.
+  Without the mod: Night Lights come out of the shop instead of radios, dispensed radios are Night Lights. Should the
+  module fault while our item is in the list, the detours pass through and it is a plain Night Light at our price
+  (vanilla purchase, tracked under the Night Light's id) until the next restock clears the list.
+- **Log.** `radio shop: shop category 'DailyDeals' (N item(s)): the toy category, ...` (each category name once),
+  `shop entry look built`, `Slime Radio shop entry made (copied from a toy entry; 1000 Newbucks ...)`, `Slime Radio
+  added to the shop's toy category (position P of N)`, `Slime Radio offered in / no longer offered in the shop (why)`,
+  `N Slime Radio(s) bought for X Newbucks, queued at the shop's dispenser '<id>' as Night Light(s) (K radio(s)
+  pending)`, `the shop dispensed a Slime Radio (actor N; K still pending)` + `dj buildables: Slime Radio actor N
+  listed`, `... pending set to N`.
+
+Not checked in game yet: the entry in Daily Deals (position next to the toy, name, icon, picture in the details /
+popup, description, price 1000), buying 1 and several (Newbucks, the dispenser drops Night Lights that turn into
+radios within a second), save + reload with radios still queued, the entry hidden without the Boombox blueprint,
+custom upgrades off (entry gone, dispensed Night Lights stay Night Lights), a mod-free load.
 
 ## Demolish clears the plot (user report round 4)
 
