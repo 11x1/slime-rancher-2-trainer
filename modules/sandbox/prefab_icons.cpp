@@ -220,9 +220,19 @@ struct PrefabIcons::Impl {
         }
         return false;
     }
+    // Lower detail levels ("..._LOD1", "..._LOD01", "..._LOD02"; LOD0 / LOD00 is the one drawn) and the
+    // environment-interaction quads gadgets carry for grass bending ("Quad RGB Interaction", "Quad A
+    // Interaction"). Round 8: the old check only knew "LOD1".."LOD9", so the game's "_LOD01" / "_LOD02"
+    // meshes were drawn on top of the full one (the Boombox three times, every desk part twice).
     static bool SkipLod(const std::string& name) {
+        if (name.find("Interaction") != std::string::npos) return true;
         const size_t p = name.find("LOD");
-        return p != std::string::npos && p + 3 < name.size() && name[p + 3] >= '1' && name[p + 3] <= '9';
+        if (p == std::string::npos) return false;
+        int level = 0;
+        bool digits = false;
+        for (size_t i = p + 3; i < name.size() && name[i] >= '0' && name[i] <= '9'; ++i)
+            level = level * 10 + (name[i] - '0'), digits = true;
+        return digits && level > 0;
     }
 };
 

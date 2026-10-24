@@ -135,26 +135,26 @@ struct VariantSpec {
 };
 constexpr VariantSpec kBoothSpec[] = {
     {"SlimeDJBooth", "Slime DJ Booth",
-     "A DJ table with a mixer and two speakers that play your Slime DJ song. A slime can sit on the flower pillow "
-     "behind the table. Place it as the Scientist Desk's variant (each one uses a DJ Booth you fabricated); it is "
-     "saved as a Scientist Desk. Unlocked with the Scientist Desk blueprint.",
+     "A DJ table with a mixer and two speakers that play your Slime DJ song; a slime can sit on the pillow behind "
+     "it. To place one: fabricate it, hold a Scientist Desk in gadget mode, press the Variant key until it shows "
+     "Slime DJ Booth, then place it. Needs the Scientist Desk blueprint.",
      0.0f},
 };
 constexpr VariantSpec kSpeakerSpec[] = {
     {"SlimeDJSpeaker", "DJ Speaker",
-     "A speaker that plays your Slime DJ song. Other decorations and speakers stack on top of it. Toggle the variant "
-     "to tilt it; place it as the Boombox's variant (each one uses a DJ Speaker you fabricated). Saved as a Boombox. "
-     "Unlocked with the Boombox blueprint.",
+     "A big speaker that plays your Slime DJ song. Stack decorations or more speakers on top. To place one: "
+     "fabricate it, hold a Boombox in gadget mode, press the Variant key until it shows DJ Speaker (again for tilted "
+     "or facing up), then place it. Needs the Boombox blueprint.",
      0.0f},
     {"SlimeDJSpeakerTilted", "DJ Speaker (tilted)",
-     "A DJ Speaker leaning back, for stacks and stages. Plays your Slime DJ song. Saved as a Boombox.", 30.0f},
+     "A DJ Speaker leaning back, for stacks and stages. Plays your Slime DJ song.", 30.0f},
     {"SlimeDJSpeakerUp", "DJ Speaker (facing up)",
-     "A DJ Speaker facing the sky. Plays your Slime DJ song. Saved as a Boombox.", 80.0f},
+     "A DJ Speaker facing the sky. Plays your Slime DJ song.", 80.0f},
 };
 constexpr VariantSpec kRadioSpec = {
     "SlimeDJRadio", "Slime Radio",
-    "A radio toy that plays your Slime DJ song wherever it is - slimes love to play with it. Fabricating one drops "
-    "it in front of you. It is a Night Light toy for the save. Unlocked with the Boombox blueprint.",
+    "A little radio toy that plays your Slime DJ song wherever it goes; slimes love to play with it. Fabricating "
+    "one drops it right in front of you. Needs the Boombox blueprint.",
     0.0f};
 
 struct Family {
@@ -441,7 +441,7 @@ struct Impl : variant_ext::Extension {
         return unity::IsAlive(gd) && fams[f].base &&
                Value<bool>(Call(hasBp, gd, {fams[f].base}, "GadgetDirector.HasBlueprint", &ok)) && ok;
     }
-    std::string Hint(int f) const { return std::format("Unlocked with the {} blueprint.", fams[f].baseName); }
+    std::string Hint(int f) const { return std::format("Needs the {} blueprint.", fams[f].baseName); }
     std::map<int64_t, int> Actors(int f) {  // actor id -> kind
         std::map<int64_t, int> out;
         std::stringstream ss(host.value(fams[f].actorsKey));

@@ -41,7 +41,7 @@ struct Info {
     std::string name;          // "DJ Booth"
     std::string base;          // the vanilla base gadget's display name ("Scientist Desk")
     std::string baseAsset;     // its definition's asset name ("ScientistDesk")
-    std::string hint;          // what unlocks it ("Unlocked with the Scientist Desk blueprint.")
+    std::string hint;          // what unlocks it ("Needs the Scientist Desk blueprint.")
     Il2CppObject* def = nullptr;      // our Fabricator card definition (do not put it into the save, see above)
     Il2CppObject* baseDef = nullptr;  // the vanilla definition it is saved as (radio: the Boombox)
     Il2CppObject* icon = nullptr;     // Sprite for lists (the base gadget's icon), may be nullptr

@@ -350,13 +350,13 @@ Round 7: "no DJ booth in fabricator", "cant unlock the booth / speakers", "Slime
   Scientist Desk and Boombox in `GadgetDecorGroup`, 241 members; checked with UnityPy on
   `identifiabletypegroups_assets_*.bundle`). `FabricatorItemGrid.SetCategory` (0x80A170) sizes its pages from
   `TotalCount` (ceil(TotalCount / 36 or 16)) while the page contents come from `Items`, so `_categoryCount` is raised
-  only when our cards would fall onto a missing page (else the title's "unlocked / total" stays vanilla). Log
-  `Fabricator category '...': page count raised ...`.
+  to the item count (since round 8 always; the title's total then counts our cards). Log
+  `Fabricator category '...': entry count raised ...`.
 - **Locked look.** `GadgetFabricatableItem.get_IsMissingBlueprint` = recipe has items and `!helper.HasBlueprint(def)`
   (our helper detour), so a card whose rule says locked looks like a vanilla locked card. `get_ShouldShowPlaceholder`
   (0x828470) = the definition's pedia entry is not unlocked; our clones share the base's pedia link, so a player who
   never met a Boombox would see a "?" tile. A new detour (pointer compares only) returns false for our cards: they
-  always show name and icon, and the description ends with what unlocks them ("Unlocked with the Boombox
+  always show name and icon, and the description ends with what unlocks them ("Needs the Boombox
   blueprint.").
 - **Unlock rule.** Card unlocked = the base gadget's blueprint (Refinery Link, Scientist Desk, Boombox; the radio
   follows the Boombox), unless the sidecar has `buildables.unlock.<id>` = `1` (unlocked) / `0` (locked). The variant
@@ -376,9 +376,25 @@ Round 7: "no DJ booth in fabricator", "cant unlock the booth / speakers", "Slime
   their own in the Sandbox crafter (after their base gadget) and the Slime Radio is in the spawner, all given through
   `Grant`, with icons rendered from the dressed prefabs and an [M] badge (`modules/sandbox/NOTES.md`, "Mod buildables").
 
+**Round 8** ("there is a 41st blueprint after grey labyrinth portal but cant see what it is"; Quantum Storage Link
+still missing). The user's log: `quantum link: Fabricator opened before the definition was built` 11 minutes after
+the load, and never `definition ... built` nor a failure: `LookupDirector.get_RefineryLink()` returned null (or a
+non-definition) at every tick, which `EnsureDefinition` treated as "not ready yet" forever. Now it falls back to the
+`GadgetDefinition` named `RefineryLink` in `LookupDirector._gadgetDefinitions` and its member groups (it is member 13
+of `GadgetWarpGroup`), logged `quantum link: LookupDirector.RefineryLink is null - using 'RefineryLink' from the gadget
+groups`; still nothing after 30 ticks -> one WARN. Warp Tech has 41 vanilla members (UnityPy: TeleporterHome x4,
+TeleporterZone x4, TeleporterSanctuary x4, MarketLink, RefineryLink, Teleporter x10, WarpDepot x10, LinkedCannon x7);
+the Sandbox crafter shows 40 of them because Teleporter Sanctuary Blue has no crafting cost. The 41st entry the user
+saw is vanilla (no mod card was inserted that session). `FixPageCount` now always raises `_categoryCount` to the
+item count when mod cards were added (was: only when the 36 / 16 page count changed), so the card always has a page
+whatever the grid size, and logs `Fabricator category '...': entry count raised for N mod card(s) (41 -> 42 entries)`
+once per change. Card texts rewritten (round 8: "i dont understand the description"): what it is, "To place one:
+fabricate it, hold a <base> in gadget mode, press the Variant key until it shows <name>, then place it.", "Needs the
+<base> blueprint." (also the `hint` the Sandbox shows).
+
 Not checked in game yet: the four cards appearing (position, locked look with name / icon, the hint in the details
-panel), unlocking with the base blueprint (buy / find a Boombox blueprint), the Sandbox override, the page count of
-Decorations (244 entries: 7 pages of 36 either way, no raise expected).
+panel), unlocking with the base blueprint (buy / find a Boombox blueprint), the Sandbox override, the Warp Tech card
+after the Refinery Link (42 entries), Decorations (244 entries).
 
 ## Demolish clears the plot (user report round 4)
 
