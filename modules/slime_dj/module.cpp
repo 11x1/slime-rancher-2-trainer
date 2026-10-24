@@ -339,7 +339,7 @@ private:
         def("shuffle", "Shuffle", Kind::Bool, 1, 0, 1, 1,
             "When the queue is empty, keep playing random songs from the music folder.");
         def("mute_vanilla", "Mute the vanilla tune", Kind::Bool, 1, 0, 1, 1,
-            "Silence the music box's own tune while a song plays (it comes back when the song stops or is paused).");
+            "Silences the music box's own tune while a song plays.");
         settings::SetDisplay(kModule, "volume", "%", {}, 100);
     }
 

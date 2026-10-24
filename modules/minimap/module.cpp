@@ -190,26 +190,24 @@ void RegisterSettings() {
     settings::SetDisplay(kModule, "opacity", "%", {}, 100);
     settings::SetDisplay(kModule, "zoom", "x");
     def("show_altitude", "Show altitude label (Grey Labyrinth)", "View", Kind::Bool, 0, 0, 1, 1, {},
-        "Shows the player's height (\"Alt N m\") at the bottom of the minimap in the Grey Labyrinth");
+        "Shows your height at the bottom of the minimap.");
     def("icon_teleporters", "Teleporters (map markers)", "Icons", Kind::Bool, 1, 0, 1, 1, {},
-        "Teleporters drawn on the game's map page. Placed teleporter gadgets have their own toggle");
+        "Teleporters shown on the game's map. Placed teleporters have their own switch.");
     def("icon_treasure_pods", "Treasure pods", "Icons", Kind::Bool, 1, 0, 1, 1);
     def("icon_gordos", "Gordos", "Icons", Kind::Bool, 1, 0, 1, 1);
     def("icon_resource_nodes", "Resource nodes", "Icons", Kind::Bool, 0, 0, 1, 1);
     def("icon_other", "Other map markers (plort doors, landmarks)", "Icons", Kind::Bool, 1, 0, 1, 1);
     def("icon_null_walls", "Nullifier walls (Grey Labyrinth)", "Icons", Kind::Bool, 1, 0, 1, 1, {},
-        "Walls a placed Nullifier opens. Shown while intact, hidden once a Nullifier has opened them");
+        "Walls a Nullifier can open. Hidden once opened.");
     def("icon_placed_gadgets", "Placed gadgets", "Icons", Kind::Bool, 1, 0, 1, 1, {},
-        "Every gadget you placed, with its own icon. Placed gadgets ignore the fog of war. The three options "
-        "below refine this one");
+        "Every gadget you placed, also under fog. The options below pick which kinds.");
     def("icon_drone_ports", "Placed gadgets: drone ports", "Icons", Kind::Bool, 1, 0, 1, 1, {},
-        "Quantum drone stations, with the full map's drone-type icon (ranch / explorer)");
+        "Drone stations, with their ranch or explorer icon.");
     def("icon_placed_teleporters", "Placed gadgets: teleporters, warp depots, market/refinery links", "Icons", Kind::Bool, 1, 0, 1, 1);
     def("icon_placed_decor", "Placed gadgets: decorations", "Icons", Kind::Bool, 0, 0, 1, 1, {},
-        "Purely decorative gadgets (usually many on a ranch). Off by default to keep the minimap readable");
+        "Decorative gadgets. Off by default, since a ranch often has many.");
     def("respect_fog", "Respect fog of war", "Icons", Kind::Bool, 1, 0, 1, 1, {},
-        "Hide unrevealed map areas and every icon inside them (as the game's map does). Popped gordos, opened "
-        "treasure pods, solved plort doors and opened Nullifier walls are never shown, whatever this setting");
+        "Hides unexplored areas and the icons in them, like the game's map.");
     def("hide_full_map", "Full map open", "Hide when", Kind::Bool, 1, 0, 1, 1);
     def("hide_menus", "Menus open", "Hide when", Kind::Bool, 1, 0, 1, 1);
     def("hide_conservatory", "In the Conservatory", "Hide when", Kind::Bool, 0, 0, 1, 1);

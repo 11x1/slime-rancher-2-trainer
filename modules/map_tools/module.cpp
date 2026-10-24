@@ -107,19 +107,19 @@ struct IconKind {
 // Order = mapi::IconCat.
 const IconKind kKinds[mapi::kIconCatCount] = {
     {"icon_teleporters", "size_teleporters", "Undiscovered ancient teleporters", 0, 30,
-     "The map shows ancient teleporters once found. This adds the ones not found yet (spoilers)"},
+     "Adds the ones you have not found yet (spoilers)."},
     {"icon_treasure_pods", "size_treasure_pods", "Treasure pods", 1, 26, "Unopened treasure pods"},
     {"icon_gordos", "size_gordos", "Undiscovered gordos", 0, 30,
-     "The map shows gordos once seen. This adds the ones not seen yet (spoilers); popped gordos never show"},
+     "Adds the ones you have not seen yet (spoilers)."},
     {"icon_resource_nodes", "size_resource_nodes", "Resource nodes", 0, 22,
      "Resource nodes ready to harvest (only in loaded areas)"},
     {"icon_other", "size_other", "Undiscovered plort doors and landmarks", 0, 28,
-     "Map markers not discovered yet besides teleporters and gordos (spoilers); solved plort doors never show"},
+     "Adds the ones you have not found yet (spoilers)."},
     {"icon_null_walls", "size_null_walls", "Nullifier walls (Grey Labyrinth)", 1, 24, "Intact Nullifier walls"},
     {"icon_placed_gadgets", "size_placed_gadgets", "Placed gadgets", 1, 24,
-     "Every gadget you placed, with its own icon. The three options below refine this one"},
+     "Every gadget you placed. The options below pick which kinds."},
     {"icon_drone_ports", "size_drone_ports", "Placed gadgets: drone ports", 1, 28,
-     "Quantum drone stations (the map already shows them; this draws them in your size)"},
+     "Drone stations, drawn at your size."},
     {"icon_placed_teleporters", "size_placed_teleporters",
      "Placed gadgets: teleporters, warp depots, market/refinery links", 1, 26, ""},
     {"icon_placed_decor", "size_placed_decor", "Placed gadgets: decorations", 0, 20, "Purely decorative gadgets"},
@@ -156,25 +156,21 @@ void RegisterSettings() {
         settings::Register(x);
     };
     def("reveal_all", "Reveal the whole map", "Fog of war", Kind::Bool, 0, 0, 1, 1,
-        "The full map shows every area without fog, and every zone name. Display only: your save is not changed, "
-        "nothing counts as discovered, and with this off the fog is back the next time you open the map");
+        "Shows the full map without fog. Display only: nothing counts as discovered.");
     for (const IconKind& k : kKinds) {
         def(k.key, k.label, "Icons", Kind::Bool, k.def, 0, 1, 1, k.tip);
         def(k.sizeKey, (std::string(k.label) + ": size").c_str(), "Icons", Kind::Float, k.size, 12, 64, 1,
-            "Icon size on screen (in 1080p pixels), at every map zoom");
+            "Icon size in pixels at 1080p, the same at every zoom.");
         settings::SetDisplay(kModule, k.sizeKey, " px");
         settings::SetParent(kModule, k.sizeKey, k.key);
     }
     for (const char* k : {"icon_drone_ports", "icon_placed_teleporters", "icon_placed_decor"})
         settings::SetParent(kModule, k, "icon_placed_gadgets");
     def("icons_under_fog", "Hide icons under fog", "Icons", Kind::Bool, 1, 0, 1, 1,
-        "Icons are drawn below the map's fog, so unexplored areas hide them like the map art. Off: icons are drawn "
-        "on top of the fog");
+        "Unexplored areas hide the icons in them. Off: icons show on top of the fog.");
     def("rmb_teleport", "Right-click to teleport", "Teleport", Kind::Bool, 0, 0, 1, 1,
-        "Right-click a spot on the open map to teleport there, onto the ground straight below it; the map closes. "
-        "A spot in another zone you have already visited (also on another map tab) goes through the game's "
-        "teleporter loading screen first. The map's key bar shows [RMB] Teleport while this is on, and every "
-        "teleport shows a pop-up");
+        "Right-click a spot on the open map to teleport there. Other zones you have visited work too, after a "
+        "loading screen.");
 }
 
 Cfg LoadCfg() {

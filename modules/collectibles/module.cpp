@@ -127,24 +127,21 @@ struct CatInfo {
 };
 const CatInfo kCats[kCatCount] = {
     {"cat_treasure_pods", "Treasure pods", "Pods", false,
-     "Opened / total, from the game's own map counter (includes unvisited areas)"},
-    {"cat_gordos", "Gordos", "Gordos", false, "Popped / total gordos on the map page of this zone"},
+     "Opened / total, including areas you have not visited."},
+    {"cat_gordos", "Gordos", "Gordos", false, "Popped / total in this zone."},
     {"cat_shadow_depositors", "Shadow plort depositors", "Depositors", false,
-     "Filled / total shadow plort depositors (Grey Labyrinth), from the game's map counter"},
+     "Filled / total (Grey Labyrinth)."},
     {"cat_shadow_doors", "Shadow plort doors", "Shadow doors", false, "Opened / total plort doors that take shadow plorts"},
     {"cat_plort_doors", "Plort doors", "Doors", false, "Opened / total plort doors"},
     {"cat_teleporters", "Ancient teleporters (found)", "Teleporters", true, "Discovered / total ancient teleporters"},
     {"cat_stabilizers", "Stabilizer gates (found)", "Gates", true,
-     "Discovered / total prisma stabilizer gates (Grey Labyrinth)"},
+     "Discovered / total (Grey Labyrinth)."},
     {"cat_map_nodes", "Map data nodes", "Nodes", false,
-     "Activated / total map data nodes: the fog areas of the full map in this zone (one per node), revealed or not. "
-     "Includes unvisited areas"},
+     "Activated / total, including areas you have not visited."},
     {"cat_research_drones", "Research drones (read)", "Drones", false,
-     "Read / total research drones. The game keeps no static list, so drones are counted from the loaded scenes: "
-     "complete once you have been in the zone (its scenes load as a whole), marked with * until then"},
+     "Read / total. Marked * until you have been in the zone."},
     {"cat_ghostly_drones", "Ghostly drones (opened)", "Ghosts", false,
-     "Opened / total ghostly drones (each carries a treasure pod). Counted from the loaded scenes like research "
-     "drones: complete once you have been in the zone, marked with * until then"},
+     "Opened / total (each carries a treasure pod). Marked * until you have been in the zone."},
 };
 
 struct NativeFault : std::runtime_error {
@@ -185,16 +182,14 @@ void RegisterSettings() {
         settings::Register(x);
     };
     def("compact", "Compact grid (icons + numbers)", "Display", 1,
-        "A grid of 3 equal columns centred under the minimap: each category's icon and count, filled left to "
-        "right (rows as needed, usually 2). Off: one text line per category");
+        "Icons with counts in a 3-column grid. Off: one text line per category.");
     def("show_labels", "Show labels", "Display", 1,
-        "A tiny name under each count (Pods, Gordos, Doors, Nodes, Drones, Ghosts, ...)");
+        "A small name under each count.");
     settings::SetParent(kModule, "show_labels", "compact");
     def("show_completed_categories", "Show completed categories (dimmed)", "Display", 1,
-        "Off: categories with everything collected are hidden");
+        "Off: categories you have completed are hidden.");
     def("hide_totals_until_discovered", "Spoiler-free totals", "Display", 0,
-        "Totals count only what you have discovered: '3/4+' means more exist that you have not found yet; "
-        "pods and depositors show '?' until complete");
+        "Totals count only what you have found. '3/4+' means there is more to find.");
     settings::Def size;
     size.module = kModule;
     size.key = "size";
@@ -206,7 +201,7 @@ void RegisterSettings() {
     size.min = 60;
     size.max = 160;
     size.step = 5;
-    size.tooltip = "Icon and text size of the tracker, relative to the minimap's size (100 = default)";
+    size.tooltip = "Tracker size, relative to the minimap.";
     settings::Register(size);
     for (const CatInfo& c : kCats) def(c.key, c.label, "Categories", 1, c.tip);
 }

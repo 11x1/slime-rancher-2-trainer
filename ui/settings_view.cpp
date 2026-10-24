@@ -52,7 +52,7 @@ void RegisterUiSettings() {
         hk.min = 1;
         hk.max = 254;
         hk.step = 1;
-        hk.tooltip = "Opens and closes the sr2mods settings overlay.";
+        hk.tooltip = "Opens and closes this overlay.";
         settings::Register(hk);
 
         settings::Def hint;
@@ -77,7 +77,7 @@ void RegisterUiSettings() {
         theme.max = 1;
         theme.step = 1;
         theme.options = {"Dark", "Light"};
-        theme.tooltip = "Colours of the sr2mods overlay. Also switchable at the bottom of the overlay's sidebar.";
+        theme.tooltip = "Dark or light overlay. Also switchable at the bottom of the sidebar.";
         settings::Register(theme);
     });
 }

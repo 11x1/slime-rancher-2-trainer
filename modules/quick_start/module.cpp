@@ -505,13 +505,10 @@ bool QuickStart::Setup(sr2::core::ModuleContext& ctx) {
     };
     if (introOk_)
         reg(kSkipIntro, "Skip intro screens", Kind::Bool, 1.0, 0, 1, 1,
-            "At launch: the Monomi Park logo, the warning screen and the game logo end after one frame each, and "
-            "the 'press any key' prompt is answered automatically. Scene loading is never skipped. Takes effect at "
-            "the next launch.");
+            "Skips the logos, the warning screen and 'press any key' at launch. Takes effect at the next launch.");
     if (continueOk_) {
         reg(kAutoContinue, "Auto-continue last save", Kind::Bool, 0.0, 0, 1, 1,
-            "Once per launch, when the main menu is ready, do what the Continue button does (load the most recent "
-            "save). Hold Shift while the game starts to cancel it for that launch.");
+            "Loads your latest save when the main menu is ready, like Continue. Hold Shift at launch to cancel.");
         reg(kAutoContinueDelay, "Auto-continue delay", Kind::Float, 0.5, 0.0, 5.0, 0.1,
             "How long the main menu stays interactive before auto-continue fires.");
         settings::SetDisplay(kModule, kAutoContinueDelay, " s", "instant");
@@ -519,8 +516,7 @@ bool QuickStart::Setup(sr2::core::ModuleContext& ctx) {
     }
     if (newGameIntroOk_)
         reg(kSkipNewGameIntro, "Skip new-game intro", Kind::Bool, 1.0, 0, 1, 1,
-            "When a new save starts, end the story intro (the text frames before you get control) right away "
-            "through the game's own end-of-intro path, so the main quest and tutorials start as usual.");
+            "Skips the story intro of a new save. The main quest and tutorials start as usual.");
 
     // A fault in Frame() marks the module faulted (logged by the guard); exceptions are logged and skipped.
     frameId_ = main_thread::AddFrameCallback(kModule, [this](float) { g_frameGuard.Run([this] { Frame(); }); });

@@ -493,22 +493,19 @@ bool FreePlacement::Setup(sr2::core::ModuleContext& ctx) {
         "Gadgets may overlap other gadgets, walls and props. Placing a gadget into the player can push you away.",
         true);
     reg(kIgnoreSlope, "Ignore slope",
-        "Place on any slope up to a vertical wall, and over edges (the gadget no longer has to sit fully on the "
-        "ground). The gadget tilts with the surface as usual.",
+        "Place on any slope up to a vertical wall, and over edges.",
         true);
     reg(kAllowUpsideDown, "Ignore slope: upside-down",
-        "Also place on ceilings, overhangs and the underside of things. The gadget's up follows the surface. "
-        "Teleporters keep the normal limits (you would arrive upside down).",
+        "Also place on ceilings and overhangs. Teleporters keep the normal limits.",
         true);
     settings::SetParent(kModule, kAllowUpsideDown, kIgnoreSlope);
     reg(kIgnoreRange, "Ignore range limits",
-        "Place as far as the placement outline reaches, and place linked gadgets (pairs) at any distance from "
-        "their partner.",
+        "Place as far as the outline reaches, and linked pairs at any distance.",
         true);
     reg(kAllowAirborne, "Place while airborne", "Place gadgets while jumping or flying with the jetpack.", true);
     reg(kIgnoreZones, "Ignore no-gadget zones",
-        "Gadget mode also works in the areas where the game turns it off. The ranch house stays blocked. Gadgets "
-        "placed there are saved like any other, but those areas were not made for them.",
+        "Gadget mode also works where the game turns it off, except in the ranch house. Those areas were not "
+        "made for gadgets.",
         false);
     {
         settings::Def d;

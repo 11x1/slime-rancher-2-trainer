@@ -1683,7 +1683,7 @@ void RegisterSettings() {
         d.label = "Enabled";
         d.kind = Kind::Bool;
         d.def = 0;
-        d.tooltip = "Turn this module on or off (applies immediately).";
+        d.tooltip = "Turns this module on or off.";
         settings::Register(d);
     }
     auto add = [](const char* key, const char* label, const char* group, Kind kind, double def, double mn, double mx,
@@ -1705,96 +1705,73 @@ void RegisterSettings() {
     add(kAccel, "sv_accelerate", "Physics", Kind::Float, mv::kSvAccelerate, 0, 100, 0.5,
         "Ground acceleration (HL2: 10).");
     add(kAirAccel, "sv_airaccelerate", "Physics", Kind::Float, mv::kSvAirAccelerate, 0, 1000, 1,
-        "Air acceleration (HL2: 10). Air-strafe gain comes from the 30 u/s air speed cap.");
+        "Air acceleration (HL2: 10).");
     add(kFriction, "sv_friction", "Physics", Kind::Float, mv::kSvFriction, 0, 20, 0.1, "Ground friction (HL2: 4).");
     add(kStopSpeed, "sv_stopspeed", "Physics", Kind::Float, mv::kSvStopSpeed, 0, 500, 5,
         "Below this speed friction acts as if moving at this speed (HL2: 100).");
     add(kGravityMode, "Gravity and jump", "Physics", Kind::Enum, 0, 0, 1, 1,
-        "HL2: sv_gravity (x multiplier) and a fixed jump to 'Jump height', no variable jump height. Vanilla SR2: "
-        "the game's gravity and "
-        "jump height (horizontal movement stays HL2). The jetpack always uses vanilla gravity.",
+        "HL2: sv_gravity and a fixed jump height. Vanilla SR2: the game's gravity and jump. The jetpack always "
+        "uses the game's gravity.",
         {"HL2", "Vanilla SR2"});
     add(kGravity, "sv_gravity", "Physics", Kind::Float, mv::kSvGravity, 0, 2000, 10,
-        "Gravity in HL2 mode, units/s^2 (HL2: 600). The jump impulse follows it so the jump height stays at the "
-        "'Jump height' setting.");
+        "Gravity in HL2 mode (HL2: 600). Jumps still reach 'Jump height'.");
     add(kGravityMult, "Gravity multiplier", "Physics", Kind::Float, 1.0, 0.25, 3.0, 0.05,
-        "Multiplies sv_gravity in HL2 mode (1 = HL2). Lower = floatier, longer jumps at the same height; the jump "
-        "height setting is kept.");
+        "Multiplies sv_gravity in HL2 mode. Lower = floatier jumps at the same height.");
     add(kRampPhysics, "Ramp physics (Source)", "Physics", Kind::Bool, 1, 0, 1, 1,
-        "Source ramp behaviour: landing clips your full velocity against the slope (falling onto a down slope turns "
-        "fall speed into speed = ramp boost, an up slope costs speed), ground speed is kept on slopes like Source, "
-        "moving up faster than 140 u/s leaves the ground (launch / slide up ramps), surfaces too steep to stand on "
-        "are surfed: you slide along them in the air, strafing into the ramp holds you on it. Off = previous "
-        "behaviour.");
+        "Source-style ramps: landing on a down slope gains speed, fast ramps launch you, and slopes too steep "
+        "to stand on can be surfed.");
     add(kSurfLimit, "Surf slope limit", "Physics", Kind::Enum, 0, 0, 1, 1,
-        "Which slopes are too steep to stand on (surfed) while ramp physics is on. SR2: KCC's MaxStableSlopeAngle "
-        "(logged), the game's walkable slopes stay walkable. Source: 45.6 degrees (normal.z < 0.7) like HL2; steeper "
-        "SR2 slopes that were walkable become slides.",
+        "Which slopes are too steep to stand on. SR2: the game's own limit. Source: 45.6 degrees, so some "
+        "walkable slopes become slides.",
         {"SR2 (KCC max stable slope)", "Source (45.6 degrees)"});
     add(kMaxVelocity, "sv_maxvelocity", "Physics", Kind::Float, mv::kSvMaxVelocity, 100, 100000, 100,
-        "Per-axis velocity clamp, units/s (HL2: 3500, CGameMovement::CheckVelocity).");
+        "Speed limit per axis (HL2: 3500).");
 
     add(kWalkSpeed, "Walk speed", "Speeds", Kind::Float, mv::kWalkSpeed, 10, 2000, 5,
-        "hl2_walkspeed (150), used while the walk key is held.");
-    add(kNormSpeed, "Normal speed", "Speeds", Kind::Float, mv::kNormSpeed, 10, 2000, 5, "hl2_normspeed (190).");
+        "Speed while the walk key is held (HL2: 150).");
+    add(kNormSpeed, "Normal speed", "Speeds", Kind::Float, mv::kNormSpeed, 10, 2000, 5, "Running speed (HL2: 190).");
     add(kSprintSpeed, "Sprint speed", "Speeds", Kind::Float, mv::kSprintSpeed, 10, 4000, 5,
-        "hl2_sprintspeed (320), while sprinting.");
+        "Speed while sprinting (HL2: 320).");
     add(kWalkKey, "Walk key", "Speeds", Kind::Key, 0, 0, 255, 1,
-        "Hold to move at walk speed (hl2_walkspeed). Unbound by default because Alt (HL2's walk key) is the "
-        "autobhop hold key; if both are bound to the same key, autobhop wins.");
+        "Hold to walk. If it is the same key as the autobhop key, autobhop wins.");
 
     add(kJumpHeight, "Jump height", "Jumping", Kind::Float, 2.0, 0.5, 6.0, 0.05,
-        "Jump apex in metres in HL2 gravity mode; the impulse is sqrt(2 g h) at the HL2 gravity in effect (HL2's own "
-        "jump is 1.1 m at the default scale). Air time grows with the height. Gravity mode Vanilla SR2 ignores it; "
-        "its first jump logs the measured vanilla apex.");
+        "How high you jump in HL2 gravity mode (HL2's own jump: about 1.1 m). Vanilla SR2 mode ignores it.");
     add(kAutobhop, "Autobhop", "Jumping", Kind::Bool, 0, 0, 1, 1,
-        "While the autobhop hold key is held, you jump on the first grounded tick of every landing (no friction, "
-        "jump boost per 'Jump boost'). Space always does normal single jumps and needs a release between jumps, "
-        "as in Source.");
+        "While the autobhop key is held, you jump again the moment you land. Space still does single jumps.");
     add(kAutobhopKey, "Autobhop hold key", "Jumping", Kind::Key, VK_MENU, 0, 255, 1,
-        "Hold to bunnyhop automatically while Autobhop is on (default Alt). Only read, never blocked, so Alt+Tab "
-        "and Alt+F4 still work. Set to none to disable.");
+        "Hold to bunnyhop while Autobhop is on. Alt+Tab and Alt+F4 still work.");
     add(kScrollJump, "Scroll-wheel jump", "Jumping", Kind::Bool, 0, 0, 1, 1,
-        "A mouse wheel tick jumps (like binding +jump to the wheel). While on, the wheel no longer cycles vacpack or "
-        "gadget slots.");
+        "A mouse wheel tick jumps. The wheel then no longer switches vacpack or gadget slots.");
     add(kScrollDir, "Scroll-wheel jump direction", "Jumping", Kind::Enum, 2, 0, 2, 1,
         "Which wheel direction jumps.", {"Wheel up", "Wheel down", "Both"});
     add(kBoostMode, "Jump boost", "Jumping", Kind::Enum, 2, 0, 3, 1,
-        "HL2 adds 50% of your forward input (10% sprinting) along the view on every jump. Uncapped forward boost: "
-        "never limited. Vanilla HL2: the exact Source SDK 2013 clamp (forward hops capped near 1.5x max speed), "
-        "which makes hopping backwards above that speed accelerate (ABH). Uncapped + ABH: uncapped while moving "
-        "forward relative to the view, vanilla formula (ABH) while moving backwards. Accelerated forward + back: "
-        "the ABH formula mirrored for forward travel, so hopping forward (facing where you go, no key or W held) "
-        "gains speed each hop exactly like a back hop, up to sv_maxvelocity; back hops are vanilla ABH.",
+        "The speed each jump adds along your view, and whether hopping keeps gaining speed (ABH).",
         {"Uncapped forward boost", "Vanilla HL2 (clamp, with ABH)", "Uncapped + ABH",
          "Accelerated forward + back (ABH both ways)"});
 
     add(kHl2Sprint, "HL2-style sprint", "Sprint", Kind::Bool, 1, 0, 1, 1,
-        "Hold sprint for sprint speed; drains the energy bar like HL2 suit power (only while moving), cannot start "
-        "below 10%, stops when empty. Off = SR2 decides when you sprint and drains as vanilla.");
+        "Hold sprint for sprint speed. Uses energy like HL2 suit power and stops when empty. Off: the game's "
+        "own sprint.");
     add(kSprintDrain, "Sprint energy drain", "Sprint", Kind::Float, mv::kSprintDrainPerSec, 0, 100, 0.5,
-        "Percent of max energy per second while sprinting (HL2: 12.5 = empty in 8 s).");
+        "Energy used per second while sprinting (HL2: 12.5, empty in 8 s).");
 
     add(kSpeedLimitOn, "Safety speed limit", "Safety", Kind::Bool, 0, 0, 1, 1,
         "Caps horizontal speed so you cannot outrun SR2's world streaming.");
     add(kSpeedLimit, "Speed cap", "Safety", Kind::Float, 2000, 100, 100000, 50,
-        "Horizontal speed cap in Source units/s when the safety limit is on.");
+        "Highest horizontal speed while the safety limit is on.");
     add(kFallRecovery, "Fall-through recovery", "Safety", Kind::Bool, 1, 0, 1, 1,
         "If you fall far below your last grounded position for several seconds, teleport back to it.");
 
     add(kMatchVanilla, "Match vanilla walk speed", "Advanced", Kind::Bool, 1, 0, 1, 1,
-        "Pick the unit scale so normal speed (190 u/s) equals SR2's vanilla max ground speed (10 m/s in 1.3.0 -> "
-        "0.0526 m/u). Speeds, gravity and jump height all scale together, so the movement is HL2's at SR2 scale. "
-        "While on, the manual unit scale below is ignored; moving that slider turns this off.");
+        "Scales HL2 movement so normal speed matches the game's own run speed. While on, Unit scale is ignored.");
     add(kUnitScale, "Unit scale", "Advanced", Kind::Float, 0.0254, 0.005, 0.2, 0.0001,
-        "Metres per Source unit (0.0254 = 1 inch, HL2's real size: 190 u/s = 4.8 m/s). Scales all speeds, gravity "
-        "and jump height together. Changing it turns 'Match vanilla walk speed' off.");
+        "Metres per Source unit (0.0254 = HL2's real size). Scales all speeds and jumps. Changing it turns off "
+        "'Match vanilla walk speed'.");
     add(kMomentumHud, "Momentum HUD", "HUD", Kind::Bool, 1, 0, 1, 1,
-        "Small horizontal speed readout (Source u/s) just below the crosshair: neutral while steady, green-tinted while "
-        "gaining speed, red-tinted while losing. Hidden in menus, the map and the mod settings.");
+        "Your speed below the crosshair: green while gaining speed, red while losing it.");
     add(kMomentumDetails, "Momentum HUD: details", "HUD", Kind::Bool, 0, 0, 1, 1,
-        "Second, smaller line: speed at your last take-off (pre-speed, tinted vs the hop before) and strafe sync % "
-        "(share of air ticks that gained speed; live while airborne).");
+        "A second line with your take-off speed and strafe sync.");
     add(kMomentumFade, "Momentum HUD: fade when still", "HUD", Kind::Bool, 1, 0, 1, 1,
         "Fade the readout out after standing still for a moment; it fades back in when you move.");
     add(kMomentumBar, "Momentum HUD: underline bar", "HUD", Kind::Bool, 0, 0, 1, 1,
@@ -1811,8 +1788,7 @@ void RegisterSettings() {
     if (migrate) MigrateMomentumPlacement();
 
     add(kSpeedReadout, "Fast-movement log", "Advanced", Kind::Bool, 1, 0, 1, 1,
-        "Once per second while faster than 2x normal speed, log (Info) the speed in u/s and m/s, grounded state and "
-        "which limiter (friction, speed limit, sv_maxvelocity, boost clamp, ...) touched the velocity.");
+        "While you move very fast, writes your speed and what limited it to the log once a second.");
     add(kDebugLog, "Debug speed log", "Advanced", Kind::Bool, 0, 0, 1, 1,
         "Log speed, input and tick counts once per second (needs log_level debug).");
 
