@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <format>
 #include <initializer_list>
@@ -38,7 +39,10 @@ constexpr float kRayLength = 4000.0f;
 constexpr float kLandOffset = 0.6f;    // land this far above the floor, then fall
 constexpr float kHeadroom = 2.6f;      // free space above a floor (landing offset + the player)
 constexpr float kMinNormalY = 0.7f;    // walkable: at most ~45 degrees
-constexpr float kRoofThick = 6.0f;     // a surface at most this thick with a floor below it is a roof
+constexpr float kRoofThick = 6.0f;     // a surface at most this thick (modelled underside) with a floor below it is a roof
+constexpr float kPickEvery = 0.1f;     // while waiting: one floor check per this many seconds (not every frame)
+constexpr float kFallCheck = 1.5f;     // after landing: the player's height is checked this long after
+constexpr float kFallMax = 8.0f;       // ... more than this below the landing point = fell through: put back
 constexpr float kOpenRay = 4.0f;       // sealed-in test: 8 horizontal rays this long, one must be free
 constexpr float kHazardRadius = 1.0f;  // hazard trigger test: sphere this big, 1 m above the floor
 constexpr float kPinMargin = 24.0f;    // regions whose bounds come this close to the column are loaded
@@ -78,6 +82,8 @@ struct Syms {
     const MethodInfo* trEuler = nullptr;             // Transform.get_eulerAngles (optional: rotation kept)
     const MethodInfo* trParent = nullptr;            // Transform.get_parent
     const MethodInfo* layersCollided = nullptr;      // Layers.GetLayersCollidedWith(int) (optional: ray mask)
+    const MethodInfo* getBackfaces = nullptr;        // Physics.get_queriesHitBackfaces (optional: buried test)
+    const MethodInfo* setBackfaces = nullptr;        // Physics.set_queriesHitBackfaces
     // regions
     Il2CppClass* regionLoader = nullptr;             // RegionLoader (on the player)
     size_t rlRegistry = 0, rlLoadSize = 0, rlWakeSize = 0;
@@ -120,7 +126,9 @@ struct Request {
     bool havePrev = false;
     float prevY = 0, prevT = 0;
     int rays = 0, selfHits = 0, picks = 0;
+    float nextPick = 0;               // age of the next floor check
     std::string lastHit, lastWhy;     // the last surface hit / the last pick refusal (log)
+    std::string lastSurfaces;         // the surfaces of the last floor check (log)
 };
 Request g_req;
 std::vector<Il2CppGCHandle> g_pins;  // regions with our reference (request, then kReleaseDelay after landing)
@@ -129,6 +137,15 @@ int g_frameCb = 0;
 Il2CppGCHandle g_loader = nullptr;   // SceneLoader (session cache)
 float g_loaderRetry = 0;
 bool g_checksLogged = false;         // the player state checks logged once (first Start)
+struct FallWatch {                   // after a landing: did the player stay up there?
+    bool active = false;
+    std::string owner;
+    Il2CppGCHandle player = nullptr, group = nullptr;
+    Vec3f from, to, euler;
+    bool haveEuler = false;
+    float at = 0;                    // g_clock of the check
+};
+FallWatch g_fall;
 
 // ------------------------------------------------------------ game calls ---
 struct Fault {};  // a native fault inside a game call: abort the request, owner faulted
@@ -173,13 +190,13 @@ bool Position(Il2CppObject* comp, Vec3f& out) {
 
 // TeleportablePlayer.TeleportTo(position, sceneGroup, rotation, overlayEnabled). With a rotation the game also
 // zeroes the controller's velocity (IPlayerController.BaseVelocity), so the player does not keep falling speed.
-bool TeleportTo(Il2CppObject* player, Il2CppObject* group, Vec3f pos, bool overlay) {
+bool TeleportTo(Il2CppObject* player, Il2CppObject* group, Vec3f pos, bool overlay, NullableVec3 rot) {
     struct Ctx {
         Il2CppObject *player, *group;
         Vec3f pos;
         NullableVec3 rot;
         bool overlay;
-    } ctx{player, group, pos, {g_req.haveEuler, g_req.euler}, overlay};
+    } ctx{player, group, pos, rot, overlay};
     std::string err;
     core::FaultInfo fi;
     bool ok = core::GuardedCallEx(
@@ -282,26 +299,68 @@ std::string HazardAt(Vec3f c) {
     return found;
 }
 
+// Collider names. Render / visibility helpers are never floors and are looked through ('Depth Only Quad' in the
+// Grey Labyrinth, 'areaPlane01-VISBLOCKER' planes high over Ember Valley). Roofs by name: the Labyrinth's
+// 'caveRoof01', the Conservatory greenhouse's 'greenhouseRoof_03' / 'glass'.
+std::string Lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+bool HelperName(const std::string& name) {
+    std::string n = Lower(name);
+    return n.find("visblocker") != std::string::npos || n.find("depth only") != std::string::npos;
+}
+bool RoofName(const std::string& name) {
+    std::string n = Lower(name);
+    for (const char* w : {"roof", "glass", "ceiling", "canopy"})
+        if (n.find(w) != std::string::npos) return true;
+    return false;
+}
+
+// A ray with Physics.queriesHitBackfaces on (restored right after): also hits mesh faces from behind. False when
+// the switch is not available.
+bool CastBackfaces(Vec3f origin, Vec3f dir, float len, Il2CppObject* playerT, Hit& out) {
+    if (!g_s.getBackfaces || !g_s.setBackfaces) return false;
+    bool prev = false;
+    if (!CallValue(g_s.getBackfaces, nullptr, {}, "Physics.get_queriesHitBackfaces", prev)) return false;
+    bool on = true;
+    bool ok = false;
+    Call(g_s.setBackfaces, nullptr, {&on}, "Physics.set_queriesHitBackfaces", &ok);
+    if (!ok) return false;
+    bool hit = false;
+    try {
+        hit = Cast(origin, dir, len, playerT, out, true);
+    } catch (const Fault&) {
+        Call(g_s.setBackfaces, nullptr, {&prev}, "Physics.set_queriesHitBackfaces");
+        throw;
+    }
+    Call(g_s.setBackfaces, nullptr, {&prev}, "Physics.set_queriesHitBackfaces");
+    return hit;
+}
+
 struct Surface {
     Hit h;
-    bool ok = false;
-    std::string why;  // not a valid floor: why
+    bool helper = false;  // looked through (HelperName)
+    bool judged = false, ok = false;
+    std::string why;      // not a valid floor: why
 };
 
 void Judge(Surface& s, Il2CppObject* playerT) {
+    if (s.judged) return;
+    s.judged = true;
     const Vec3f p = s.h.p;
     Hit tmp;
     if (s.h.n.y < kMinNormalY) {
-        s.why = std::format("too steep at y {:.1f}", p.y);
+        s.why = "too steep";
         return;
     }
     if (Cast({p.x, p.y + 0.05f, p.z}, {0, 1, 0}, kHeadroom, playerT, tmp, false)) {
-        s.why = std::format("no headroom at y {:.1f} ({:.1f} m)", p.y, tmp.p.y - p.y);
+        s.why = std::format("no headroom ({:.1f} m)", tmp.p.y - p.y);
         return;
     }
     std::string hazard = HazardAt({p.x, p.y + 1.0f, p.z});
     if (!hazard.empty()) {
-        s.why = std::format("hazard at y {:.1f}: {}", p.y, hazard);
+        s.why = "hazard: " + hazard;
         return;
     }
     int free = 0;
@@ -310,25 +369,66 @@ void Judge(Surface& s, Il2CppObject* playerT) {
         if (!Cast({p.x, p.y + 1.0f, p.z}, {std::cos(a), 0, std::sin(a)}, kOpenRay, playerT, tmp, false)) ++free;
     }
     if (!free) {
-        s.why = std::format("sealed in at y {:.1f}", p.y);
+        s.why = "sealed in";
         return;
     }
     s.ok = true;
 }
 
-// Is surface `a` a thin slab (a roof) over the floor `b` below it? The underside above `b` (an upward ray only
-// hits downward-facing faces) must be within kRoofThick of `a`'s top, with headroom above `b`.
-bool RoofOver(const Surface& a, const Surface& b, Il2CppObject* playerT) {
-    Hit up;
-    float ceiling = a.h.p.y;
-    if (Cast({b.h.p.x, b.h.p.y + 0.05f, b.h.p.z}, {0, 1, 0}, a.h.p.y - b.h.p.y + 1.0f, playerT, up, false)) ceiling = up.p.y;
-    return a.h.p.y - ceiling <= kRoofThick && ceiling - b.h.p.y >= kHeadroom;
+// What is straight above the floor `b`, up to the surface `a` above it: a ceiling seen from below (a downward
+// face: an indoor floor), or the back of a one-sided surface (b is inside the level geometry / under the map:
+// the Conservatory test landed on 'caveRoof01' under the one-sided ground plane 'areaFieldsPlane03').
+struct Cover {
+    bool covered = false;  // a ceiling at `ceiling`
+    bool buried = false;   // the nearest thing above is a backface (not of a roof by name)
+    float ceiling = 0;
+    std::string why;
+};
+Cover CoverOf(const Surface& a, const Surface& b, Il2CppObject* playerT) {
+    Cover c;
+    Vec3f o{b.h.p.x, b.h.p.y + 0.05f, b.h.p.z};
+    float len = std::max(a.h.p.y - b.h.p.y + 1.0f, 3.0f);
+    Hit front, back;
+    bool hf = Cast(o, {0, 1, 0}, len, playerT, front, false);
+    bool hb = CastBackfaces(o, {0, 1, 0}, len, playerT, back);
+    if (hb && (!hf || back.p.y < front.p.y - 0.05f)) {  // the nearest face above is seen from behind
+        if (!RoofName(back.name)) {
+            c.buried = true;
+            c.why = std::format("under the back of '{}' at y {:.1f} (inside the level geometry)", back.name, back.p.y);
+            return c;
+        }
+        c.covered = true;  // a one-sided roof seen from below
+        c.ceiling = back.p.y;
+        return c;
+    }
+    if (hf) {
+        c.covered = true;
+        c.ceiling = front.p.y;
+    } else if (!g_s.setBackfaces && RoofName(a.h.name)) {  // no backface test: trust the roof's name
+        c.covered = true;
+        c.ceiling = a.h.p.y;
+    }
+    return c;
+}
+
+// Is surface `a` a roof over the valid floor `b` below it? b must be indoors (a ceiling above it, at most at
+// a's height, with headroom) and not inside the geometry; a must be a thin slab (its underside within
+// kRoofThick) or a roof by name (then any thickness: the Labyrinth's cave roofs). A buried b is marked invalid.
+bool RoofOver(const Surface& a, Surface& b, Il2CppObject* playerT) {
+    Cover c = CoverOf(a, b, playerT);
+    if (c.buried) {
+        b.ok = false;
+        b.why = c.why;
+        return false;
+    }
+    if (!c.covered || c.ceiling > a.h.p.y + 0.1f || c.ceiling - b.h.p.y < kHeadroom) return false;
+    return a.h.p.y - c.ceiling <= kRoofThick || RoofName(a.h.name);
 }
 
 struct Pick {
     bool ok = false;
     float y = 0;
-    std::string name, why, note;
+    std::string name, why, note, surfaces;
     int layer = -1;
 };
 
@@ -344,35 +444,66 @@ Pick PickFloor(float x, float z, Il2CppObject* player) {
         if (!Cast({x, top, z}, {0, -1, 0}, kRayLength - (kRayTop - top), playerT, cur.h, true)) break;
         if (std::fabs(cur.h.p.x - x) > 1.0f || std::fabs(cur.h.p.z - z) > 1.0f) break;
         if (i == 0) g_req.lastHit = std::format("'{}' at y {:.1f} (layer {})", cur.h.name, cur.h.p.y, cur.h.layer);
+        cur.helper = HelperName(cur.h.name);
         top = cur.h.p.y - 0.05f;
         s.push_back(std::move(cur));
     }
-    if (s.empty()) {
-        r.why = "no collider below the spot (area not loaded, or outside the world)";
+    auto list = [&] {
+        std::string out;
+        for (const Surface& v : s) {
+            out += std::format("{}'{}' y {:.1f} ", out.empty() ? "" : "; ", v.h.name, v.h.p.y);
+            out += v.helper ? std::string("(looked through)") : !v.judged ? std::string("(not checked)") : v.ok ? std::string("ok") : v.why;
+        }
+        return out;
+    };
+    size_t first = 0;
+    while (first < s.size() && s[first].helper) ++first;
+    if (first == s.size()) {
+        r.why = s.empty() ? "no collider below the spot (area not loaded, or outside the world)"
+                          : "only render helpers below the spot, no ground";
+        r.surfaces = list();
+        g_req.lastSurfaces = r.surfaces;
         return r;
     }
     size_t best = s.size();
-    Judge(s[0], playerT);
-    if (s[0].ok) best = 0;
-    // Down through roofs: from the chosen surface (or a refused top surface) to a valid floor right below a thin slab.
-    size_t from = 0;
-    for (size_t j = 1; j < s.size(); ++j) {
+    Judge(s[first], playerT);
+    if (s[first].ok) best = first;
+    // Down through roofs: from the chosen surface (or a refused top surface) to a valid indoor floor below it.
+    // A surface that is a roof by name is never the floor under a roof (the Conservatory test went on down to the
+    // top of a 'caveRoof01' below the ground).
+    size_t from = first;
+    for (size_t j = first + 1; j < s.size(); ++j) {
+        if (s[j].helper) continue;
         Judge(s[j], playerT);
         if (!s[j].ok) continue;
-        if (!RoofOver(s[from], s[j], playerT)) break;
+        if (RoofName(s[j].h.name)) {
+            s[j].ok = false;
+            s[j].why = "a roof by name, not a floor under a roof";
+            continue;
+        }
+        if (!RoofOver(s[from], s[j], playerT)) {
+            if (!s[j].ok) continue;  // inside the geometry: look further down
+            break;
+        }
         r.note += std::format("{}'{}' at y {:.1f} is a roof over '{}' at y {:.1f}", r.note.empty() ? "" : "; ", s[from].h.name,
                               s[from].h.p.y, s[j].h.name, s[j].h.p.y);
         best = j;
         from = j;
     }
+    r.surfaces = list();
+    g_req.lastSurfaces = r.surfaces;
     if (best == s.size()) {
-        r.why = std::format("the spot is not safe to stand on: '{}' {}", s[0].h.name, s[0].why);
+        r.why = std::format("the spot is not safe to stand on: '{}' at y {:.1f}: {}", s[first].h.name, s[first].h.p.y,
+                            s[first].why);
         return r;
     }
     r.ok = true;
     r.y = s[best].h.p.y;
     r.name = s[best].h.name;
     r.layer = s[best].h.layer;
+    if (best == first && RoofName(r.name))
+        r.note += std::format("{}landing on '{}' (a roof by name): no indoor floor found below it", r.note.empty() ? "" : "; ",
+                              r.name);
     return r;
 }
 
@@ -487,7 +618,7 @@ void Finish(Result r, bool landed) {
     g_req = Request{};
     if (landed && !g_pins.empty()) g_releaseAt = g_clock + kReleaseDelay;  // the loader takes over first
     else ReleasePins(!g_dead);
-    if (g_pins.empty()) StopFrame();
+    if (g_pins.empty() && !g_fall.active) StopFrame();
     if (done) done(r);
 }
 
@@ -517,7 +648,7 @@ void Land(Il2CppObject* player, Il2CppObject* group, const Pick& pick) {
         Finish(r, false);
         return;
     }
-    if (!TeleportTo(player, group, dest, true)) {
+    if (!TeleportTo(player, group, dest, true, {g_req.haveEuler, g_req.euler})) {
         r.why = "the game's teleport call failed";
         Finish(r, false);
         return;
@@ -533,6 +664,22 @@ void Land(Il2CppObject* player, Il2CppObject* group, const Pick& pick) {
              g_req.age, g_req.picks, g_req.rays,
              g_req.selfHits ? std::format(", {} hit(s) on the player skipped", g_req.selfHits) : std::string(),
              pick.note.empty() ? std::string() : "; " + pick.note);
+    SR2_INFO("ground_teleport[{}]: surfaces below ({:.1f}, {:.1f}), top down: {}", Owner(), g_req.x, g_req.z, pick.surfaces);
+    // Watch the landing: a player who drops far below it fell through (or the floor was not real): put him back.
+    for (Il2CppGCHandle h : {g_fall.player, g_fall.group})
+        if (h) unity::FreeGCHandle(h);
+    g_fall = FallWatch{};
+    g_fall.player = unity::NewGCHandle(player);
+    g_fall.group = unity::NewGCHandle(group);
+    if (g_fall.player && g_fall.group) {
+        g_fall.active = true;
+        g_fall.owner = g_req.owner;
+        g_fall.from = g_req.from;
+        g_fall.to = dest;
+        g_fall.euler = g_req.euler;
+        g_fall.haveEuler = g_req.haveEuler;
+        g_fall.at = g_clock + kFallCheck;
+    }
     Finish(r, true);
 }
 
@@ -542,6 +689,9 @@ void Refuse(const std::string& why, Il2CppObject* player) {
              Owner(), g_req.x, g_req.z, why, RayParams(), g_req.picks, g_req.rays,
              g_req.lastHit.empty() ? "none" : g_req.lastHit, g_req.from.x, g_req.from.y, g_req.from.z, g_req.regionsPinned,
              g_req.regionsLoaded, player ? LoaderSizes(player) : std::string("no player"));
+    if (!g_req.lastSurfaces.empty())
+        SR2_INFO("ground_teleport[{}]: surfaces below ({:.1f}, {:.1f}) at the last check, top down: {}", Owner(), g_req.x, g_req.z,
+                 g_req.lastSurfaces);
     Result r;
     r.why = why;
     Finish(r, false);
@@ -576,7 +726,8 @@ void Step(float dt) {
         Abort(busy);
         return;
     }
-    if (g_req.age >= kSettle) {
+    if (g_req.age >= kSettle && g_req.age >= g_req.nextPick) {
+        g_req.nextPick = g_req.age + kPickEvery;  // a check costs dozens of rays: not every frame
         Pick p = PickFloor(g_req.x, g_req.z, player);
         if (p.ok) {
             if (g_req.havePrev && std::fabs(p.y - g_req.prevY) < kStableDy) {
@@ -619,6 +770,35 @@ void Guarded(F&& f) {
     }
 }
 
+void EndFallWatch() {
+    for (Il2CppGCHandle h : {g_fall.player, g_fall.group})
+        if (h) unity::FreeGCHandle(h);
+    g_fall = FallWatch{};
+}
+
+// kFallCheck after a landing: the player more than kFallMax below the landing point fell through (or stood on
+// something that is not there any more): back to where the teleport started (same scene group, not knocked out).
+void CheckFall() {
+    Il2CppObject* player = Target(g_fall.player);
+    Il2CppObject* group = Target(g_fall.group);
+    std::string owner = g_fall.owner;
+    Vec3f from = g_fall.from, to = g_fall.to;
+    NullableVec3 rot{g_fall.haveEuler, g_fall.euler};
+    EndFallWatch();
+    if (!player || !unity::IsAlive(player) || !group) return;
+    if (Call(g_s.sceneGroup, player, {}, "TeleportablePlayer.get_SceneGroup") != group) return;
+    if (!Unavailable(unity::GameObjectOf(player)).empty()) return;
+    Vec3f now;
+    if (!Position(player, now)) return;
+    if (now.y >= to.y - kFallMax) return;
+    bool back = TeleportTo(player, group, from, true, rot);
+    SR2_WARN("ground_teleport[{}]: the player fell through after landing at ({:.1f}, {:.1f}, {:.1f}): at y {:.1f} {:.1f} s later - "
+             "{}",
+             owner, to.x, to.y, to.z, now.y, kFallCheck,
+             back ? std::format("put back at the start point ({:.1f}, {:.1f}, {:.1f})", from.x, from.y, from.z)
+                  : std::string("putting him back failed"));
+}
+
 void Frame(float dt) {
     g_clock += dt;
     if (g_req.active) {
@@ -626,7 +806,8 @@ void Frame(float dt) {
         return;
     }
     if (g_releaseAt >= 0 && g_clock >= g_releaseAt) Guarded([] { ReleasePins(!g_dead); });
-    if (g_pins.empty()) StopFrame();
+    if (g_fall.active && g_clock >= g_fall.at) Guarded([] { CheckFall(); });
+    if (g_pins.empty() && !g_fall.active) StopFrame();
 }
 
 bool EnsureFrame() {
@@ -727,6 +908,9 @@ bool ResolveImpl(std::string& err) {
                               : nullptr;
     if (!s.overlapSphere) missing.push_back("Physics.OverlapSphere(4)");
     s.layersCollided = optMethod(optClass(kImage, "", "Layers"), "GetLayersCollidedWith", 1);
+    s.getBackfaces = optMethod(physics, "get_queriesHitBackfaces", 0);
+    s.setBackfaces = optMethod(physics, "set_queriesHitBackfaces", 1);
+    if (!s.getBackfaces || !s.setBackfaces) s.getBackfaces = s.setBackfaces = nullptr;
     s.deathHandler = optClass(kImage, "", "PlayerDeathHandler");
     if (s.deathHandler) {
         auto o = R.FieldOffset(s.deathHandler, "_isPlayerDead", &opt);
@@ -748,10 +932,10 @@ bool ResolveImpl(std::string& err) {
     std::string miss;
     for (const std::string& m : missing) miss += (miss.empty() ? "" : ", ") + m;
     SR2_INFO("ground_teleport: resolved (hit names {}, collision matrix mask {}, hazard triggers {} of 4{}, knock-out check {}, "
-             "scene load check {}, rotation kept {}){}{}",
+             "scene load check {}, rotation kept {}, backface test {}){}{}",
              s.idToObject ? "yes" : "no", s.layersCollided ? "yes" : "no", s.hazards.size(),
              s.overlapSphere ? "" : " (no OverlapSphere: unchecked)", s.deathHandler && s.scriptedBoolValue ? "yes" : "no",
-             s.loadInProgress ? "yes" : "no", s.trEuler ? "yes" : "no", miss.empty() ? "" : "; missing: ", miss);
+             s.loadInProgress ? "yes" : "no", s.trEuler ? "yes" : "no", s.setBackfaces ? "yes" : "no", miss.empty() ? "" : "; missing: ", miss);
     return true;
 }
 
@@ -794,6 +978,7 @@ bool Start(const char* owner, float x, float z, Done done, std::string* why) {
     if (core::ModuleFaulted(owner)) return fail("module faulted");
     if (!EnsureFrame()) return fail("no frame callback");
     if (g_releaseAt >= 0) Guarded([] { ReleasePins(true); });  // the last landing's references, early
+    if (g_fall.active) EndFallWatch();                          // a new teleport: the last landing is not watched
     g_req = Request{};
     g_req.owner = owner;
     bool started = false;
