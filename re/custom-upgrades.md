@@ -564,7 +564,7 @@ Original research:
   layer). Option (2) is the cheapest and most useful. (1) needs a check of what the solar shield
   actually toggles (`SolarShield` components inside Shields).
 
-### 2.5 Drone Battery Saver - IMPLEMENTED (`modules/drone_price_limit/battery.cpp`)
+### 2.5 Drone Battery Saver - IMPLEMENTED (`modules/custom_upgrades/drone_battery.cpp`)
 
 * Battery = `DroneStationGadgetModel._energyDepleteTime` (ObservableValue<double>, saved). Energy =
   max(0, depleteTime - worldTime) / 3600 x `DroneDirector.EnergyDepletedPerHour` (field +0x38, read by
@@ -572,10 +572,10 @@ Original research:
   DroneFuelDepositor, ExplorerDroneProgram; always passed to the model's GetCurrEnergy 0xA8D0D0 /
   GetEnergyAtTime 0xA8D160 / IsEnergyFull 0xA8D4B0 / AddEnergy 0xA8CFB0, max 1000). No per-drone rate:
   drain is world time only.
-* Tiers I..IV (1/1.25 .. 1/2 drain), per station, bought in the station menu (no station purchase menu;
-  the fabricator's upgrades are vacpack UpgradeDefinitions in the vanilla PlayerUpgrades save). Applied
-  as a refund through AddEnergy every ~2 s, so the saved battery stays a vanilla value. Details:
-  `modules/drone_price_limit/NOTES.md`.
+* Levels I..IV (1/1.25 .. 1/2 drain), global for every station, a Fabricator upgrade (clone of a vanilla
+  UpgradeDefinition like the vacpack upgrades, level in the sidecar; first built per station in the
+  station menu, moved after user feedback). Applied as a refund through AddEnergy every ~2 s, so the
+  saved battery stays a vanilla value. Details: `modules/custom_upgrades/NOTES.md` ("Vacpack upgrades").
 
 ---------------------------------------------------------------------------------------------
 ## 2b. User feedback (IMPLEMENTED, differs from the plan below)

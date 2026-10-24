@@ -350,7 +350,7 @@ right, and that nothing of the stripped clones still logs errors.
 
 ## Vacpack upgrades (Fabricator)
 
-`vacpack_upgrades.cpp`. Two new cards in the Fabricator's Upgrades category, each a clone of a vanilla
+`vacpack_upgrades.cpp`. Three new cards in the Fabricator's Upgrades category, each a clone of a vanilla
 `UpgradeDefinition`, bought through the vanilla flow (recipe panel, cost check, `SpendableDirector.Spend`,
 `UpgradeModel.IncrementUpgradeLevel`; the game's own modifier code applies the effect).
 
@@ -358,6 +358,7 @@ right, and that nothing of the stripped clones still logs errors.
 |---|---|---|---|
 | Tank Booster IX-XII (id `0x53520101`) | 4 | +25 / +50 / +75 / +100 items per slot on top of Tank Booster VIII: 125 / 150 / 175 / 200 | Tank Booster VIII owned |
 | Extra Tank III-IV (id `0x53520102`) | 2 | a 7th / 8th vacpack slot | Extra Tank II owned |
+| Drone Battery Saver I-IV (id `0x53520103`) | 4 | every drone station's drone uses 1/1.25, 1/1.5, 1/1.75, 1/2 of the battery (80 / 67 / 57 / 50 %) | Drone Station blueprint owned |
 
 **Vanilla data** (UnityPy on `duplicateassetisolation_assets__54b00e46...bundle` and `corescenes_scenes_...bundle`,
 names from the English string table):
@@ -380,7 +381,36 @@ Tank Booster IX-XII use V-VIII's items with the amounts doubled (+2 for the rare
 unchanged and 25,000 / 50,000 Newbucks (vanilla Extra Tank II: 5,000; a slot this late is worth more than +25 per
 slot). No upgrade component: vanilla consumes one Tank Booster / Extra Tank component per level (counted items from
 treasure pods / the shop) and the world may hold no more than vanilla needs, so ours would be unbuyable; the cloned
-component list is cleared. The log lists every level's exact cost (`vacpack: TankBoosterPlus ready ...`).
+component list is cleared (and `_requireComponentToBeVisibleToPlayer` set false on our clones). The log lists
+every level's exact cost (`vacpack: TankBoosterPlus ready ...`).
+
+### Drone Battery Saver
+
+First built as per-station tiers bought from a `[B] Battery` pill in the drone station menu; moved here after
+user feedback ("they should be refinery upgrades, not in a separate panel"). Now one global upgrade.
+
+- **Card.** Same clone of `AmmoCapacity`, its single modifier set to ADD 0 (no vacpack effect; the effect list
+  keeps the one entry the game expects). Icon and pedia entry: the Drone Station gadget's (`DroneDirector.
+  _droneStationType`, a `GadgetDefinition`: `icon`, `_pediaLink`), set by the tick once the scene has it (log
+  `Drone Battery Saver card uses the '...' icon`); until then / if missing, Tank Booster's. Listed at the end of
+  the category (no vanilla parent).
+- **Prerequisite: the Drone Station blueprint** (`GadgetDirector.HasBlueprint`, checked when the Fabricator
+  builds its items). Without it the upgrade is useless and would only clutter the list early on; the blueprint
+  rather than a placed station, so it can be bought before building the first one (and stays visible with all
+  stations picked up). An owned level always shows the card; an unknown answer (lookup failed) shows it too.
+- **Prices: 7,500 / 10,000 / 15,000 / 25,000 Newbucks (57,500 for IV) plus half of Tank Booster V-VIII's refinery
+  items** (rounded up, at least 1). The per-station version cost 1,500-7,500 (17,000 for one station's IV); one
+  purchase now covers every station, so it costs about three stations' worth, and the items put it in the late
+  game with the drone stations. Less fuel is its only gain, so it stays at half of the vac upgrade it is cut from.
+- **Effect** (`drone_battery.cpp`, from the old `drone_price_limit/battery.cpp`): every ~2 s each station gets back
+  what it drained beyond the level's share since the last look, through the game's own `AddEnergy`; the saved
+  battery stays a vanilla value. Runs from custom_upgrades' frame callback while the module is on (no longer tied
+  to drone_price_limit being on). Level = the per-save value `custom_upgrades.vacpack.drone_battery` (0-based).
+  Log: `battery saver: station <id>: Drone Battery Saver II active (battery drain x0.67)`.
+- **Migration.** Old sidecars hold `drone_battery.station.<actor id>` = 1..4. On the first tick after a load the
+  highest tier of any station becomes the global level (if higher than an owned one), all those keys are erased
+  and one line is logged (`migrated the per-station Battery Saver of an older build: N station(s), highest tier T
+  -> global ...`). The other stations' tiers are not refunded (they are covered by the global level anyway).
 
 **How it works.**
 
@@ -420,7 +450,8 @@ number key (mouse wheel / next-previous only; `BindInputKey(null)` logs the game
 warning); new slots come after the water slot (index order; putting them before it would move the saved water slot
 into a regular one); and the width of the HUD row (not measured). Two extra slots = 9 icons in the row.
 
-**Not verified in game yet:** everything above. Known rough edges: Unity logs "Unserializing ammo slot length different
+**Not verified in game yet:** everything above, including the Drone Battery Saver card (icon, texts, blueprint gate,
+the refund and the migration). Known rough edges: Unity logs "Unserializing ammo slot length different
 than expected" on every load with the module on (7 saved vs 9 defined, harmless); the save's "viewed upgrades" set
 (`ViewedItemsV02`, a set of ints) may get our ids (harmless for a mod-free load, unknown ids are never looked up);
 pinning one of our upgrades as the recipe (`PinnedRecipeDirector`, saved as a string) was not checked for a mod-free
