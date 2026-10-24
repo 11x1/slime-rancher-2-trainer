@@ -32,15 +32,41 @@ are listed dimmed with the reason.
 
 **Threads.** Library scan and decoding run on their own threads and never touch the game.
 Everything IL2CPP runs in one frame callback (`main_thread::AddFrameCallback`) or in posted
-requests from the tab, both on the Unity main thread inside `GuardedCallEx`. There are no hooks.
+requests from the tab, both on the Unity main thread inside `GuardedCallEx`. One hook,
+`MusicBoxUpgrader.Apply`, only records its `this` (next section).
 A native fault marks the module faulted and stops it for the session (handles are leaked then,
 on purpose); managed exceptions are logged (3 lines) and the module stops after 20.
 
-**Music boxes.** `Object.FindObjectsByType(MusicBoxUpgrader, FindObjectsInactive.Exclude, None)`
-every 2 s, only while a song is loaded or the tab is open (never `FindObjectsOfTypeAll`, never
-per frame). A box counts while `MusicBoxUpgrader.MusicBox` (the GameObject the vanilla Music Box
-upgrade switches on) is active in the hierarchy, i.e. the corral owns the upgrade and the plot is
-loaded. Music Box II (custom_upgrades) keeps the same GameObject, so it plays too.
+**Music boxes.** A box scan runs every 2 s while a song is loaded or the tab is open (and right
+away after an emitter (un)register or an upgrade applied). A box counts while
+`MusicBoxUpgrader.MusicBox` (the GameObject the vanilla Music Box upgrade switches on) is active in
+the hierarchy, i.e. the corral owns the upgrade and the plot is loaded. Music Box II
+(custom_upgrades) keeps the same GameObject, so it plays too.
+
+*Where the upgraders come from (perf round, 2026-10-24).* The box scan used to call
+`Object.FindObjectsByType(MusicBoxUpgrader, Exclude, None)` every time. That walks every object of
+the loaded scenes: the user log had `perf: frame:slime_dj took 8-14 ms` every 2 s on the ranch (with
+1 box + 1 emitter as much as with 9 emitters) and ~2.5 ms off the ranch, i.e. the cost followed the
+scene size, not the speaker count. Now the module keeps GC handles to the known upgraders (`ups_`,
+at most 256) and the scan only reads `MusicBox` + `activeInHierarchy` of each (microseconds).
+The list is filled by
+- one scene search (`FindObjectsByType(..., Include, None)`, inactive ones too, so plots that are
+  switched off and on are kept) on the first scan after the module is enabled and whenever a song
+  starts or the tab opens after being idle (a click, so a one-off hitch is fine);
+- the `MusicBoxUpgrader.Apply(Upgrade)` hook (0x98A810, its own body, 0x2A bytes; nothing else hooks
+  it). `LandPlot.ApplyUpgrades` (0x9887E0, checked in IDA) calls `Apply` on every `PlotUpgrader` of
+  the plot for every owned upgrade (and `MusicBoxUpgrader.Apply` itself does
+  `if (upgrade == MUSIC_BOX) MusicBox.SetActive(true)`), on load and on every purchase. So a corral
+  with a music box always passes here when its plot appears (zone load, new plot built + box
+  bought), and a purchase triggers a scan in the next frame. The detour calls the original, then
+  records the raw `this` (DetourGuard, main thread, deduplicated, at most 512); the tick pins it with
+  a GC handle in the next frame. Records from before a disable are dropped on enable.
+- Gone upgraders (plot demolished, scene unloaded: `m_CachedPtr` 0) are freed at the next scan.
+- A box sold (MusicBox switched off) or switched back on (Music Box II purchase) is seen at the
+  next scan through `activeInHierarchy`, as before.
+Without the hook (not created) every scan searches the scene, as before (a warning says so).
+`slime_dj: box scans in the last 60 s: N (avg X ms, max Y ms); scene searches K (max Z ms); C
+corral(s) known, S speaker(s)` is logged once a minute while scans ran.
 
 **Several boxes: all in sync.** Every owned box nearby (at most 12) and every registered emitter
 (at most 48, see below) gets a speaker: a new
@@ -272,6 +298,7 @@ stops for the session and leaves the walls as they are (handles leaked by design
 - `slime_dj: speaker on emitter '…' (kind K, range xA, volume xB[, switched off for now])`
 - `slime_dj: N music box(es), M emitter(s) registered; speakers: B on boxes, E on emitters (K switched off)` (when a count changes)
 - `slime_dj: N speaker(s) had stopped (object switched off and on); rejoined in sync` (first 10)
+- `slime_dj: box scans in the last 60 s: …` (once a minute while scans ran), `slime_dj: no MusicBoxUpgrader.Apply hook (…)`
 - `slime_dj: speaker N ms off the others, moved back in sync`
 - `slime_dj: walls dance at 'patchCorral…': N wall field(s) under '…', M net renderer(s) under '…'; wall _Intensity X
   _Color (r, g, b), net _Intensity Y[ (other renderers skipped: …)]` (per corral built, first 24)
@@ -292,6 +319,9 @@ game. To check:
 - the hearing range default (60 m, linear) and Amplify;
 - the Music Box II second speaker playing (emitter registered by custom_upgrades plot_props);
 - seeking (Vorbis / MP3 / WAV) and that the speakers stay in sync after it.
+- box cache: no `frame:slime_dj took` warnings in normal play; a Music Box bought on a new corral,
+  and corrals after a teleport back to the ranch, get a speaker within ~2 s without a scene search
+  (the minute line shows `scene searches 0`).
 - walls dance: that `_Intensity` / `_Color` in a property block visibly change the CorralBarrier
   and AirNet shaders (if the log shows the values but nothing glows, only the height bob is left;
   an HDRP GPU Resident Drawer could also ignore property blocks), that the beat looks in time
