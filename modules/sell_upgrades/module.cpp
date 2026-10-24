@@ -174,6 +174,12 @@
 //   and the popup was just instantiated anyway): Cancel left, Purchase right, still centred, the same
 //   order as the card's Sell / Purchase pair (user report round 7: "not on confirmation buttons when
 //   buying with space"). Keys and actions are unchanged. Other menus' popups are not touched.
+//   Buying a plot (an empty plot's menu: corral, coop, ...) does not go through OpenPopupPrompt:
+//   LandPlotUIRoot.PromptForPlot (0x6E77D0) calls UITemplates.CreatePopupPrompt(body, misc, positive,
+//   negative, expiration) (0x6B1910) itself (round 8: "same for plot buying, not just upgrades"). A
+//   PromptForPlot detour marks the call and a CreatePopupPrompt detour reorders the popup it returns
+//   while the mark is set (GetComponent<PopupPrompt> on the returned GameObject); every other popup
+//   passes through untouched.
 //
 // Fault policy: every detour runs its logic inside a DetourGuard (native fault -> module
 // faulted, detours pass-through). Objects are class- and IsAlive-checked; runtime_invoke
@@ -312,7 +318,8 @@ public:
         return (altGo_ && item == altItem_) || (btnAltCard_ && item == btnAltCard_);
     }
     bool HandleAltAction(Il2CppObject* root, Il2CppObject* item);
-    void SwapPopupButtons(Il2CppObject* popup);
+    void SwapPopupButtons(Il2CppObject* popup, bool plot = false);
+    bool loggedPlotPopup_ = false;
 
     // Ash Trough re-purchase: a vanilla purchase closure about to buy ASH_TROUGH on a plot
     // whose ash was remembered at its sale (else plot == nullptr).
@@ -610,6 +617,36 @@ Il2CppObject* OpenPopupDetour(Il2CppObject* self, Il2CppObject* title, Il2CppObj
     return popup;
 }
 
+// Plot purchase (an empty plot's menu: corral, coop, ...): LandPlotUIRoot.PromptForPlot builds its popup with
+// UITemplates.CreatePopupPrompt directly (IDA: 0x6E7A8E), not through OpenPopupPrompt. The PromptForPlot detour
+// marks the call; the CreatePopupPrompt detour reorders the popup it returns while the mark is set (any other
+// popup is left alone).
+sr2::core::DetourGuard g_plotPromptGuard{kModule, "LandPlotUIRoot.PromptForPlot"};
+using PromptForPlotFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+PromptForPlotFn g_origPromptForPlot = nullptr;
+int g_inPromptForPlot = 0;  // main thread only
+void PromptForPlotDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo* mi) {
+    struct Mark {
+        Mark() { ++g_inPromptForPlot; }
+        ~Mark() { --g_inPromptForPlot; }
+    } mark;
+    g_origPromptForPlot(self, item, mi);
+}
+// UITemplates.CreatePopupPrompt(body, misc, positive, negative, expiration) -> the popup's GameObject
+using CreatePopupFn = Il2CppObject* (*)(Il2CppObject*, Il2CppObject*, Il2CppObject*, Il2CppObject*, Il2CppObject*,
+                                        Il2CppObject*, const MethodInfo*);
+CreatePopupFn g_origCreatePopup = nullptr;
+Il2CppObject* CreatePopupDetour(Il2CppObject* self, Il2CppObject* body, Il2CppObject* misc, Il2CppObject* pos,
+                                Il2CppObject* neg, Il2CppObject* expire, const MethodInfo* mi) {
+    Il2CppObject* go = g_origCreatePopup(self, body, misc, pos, neg, expire, mi);
+    if (g_inPromptForPlot > 0 && g_self && go && g_self->On())
+        g_plotPromptGuard.Run([&] {
+            if (!unity::IsAlive(go)) return;
+            if (Il2CppObject* popup = unity::GetComponent(go, g_self->popupClass_)) g_self->SwapPopupButtons(popup, true);
+        });
+    return go;
+}
+
 void OnActionDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo* mi) {
     bool handled = false;
     if (g_self && self && item && g_self->On())
@@ -847,7 +884,7 @@ bool SellUpgrades::HandleAction(Il2CppObject* root, Il2CppObject* item) {
 
 // Cancel left, Purchase right (see the header): the positive button becomes the last child of the
 // ButtonPanel, whose HorizontalLayout lays its children out in sibling order.
-void SellUpgrades::SwapPopupButtons(Il2CppObject* popup) {
+void SellUpgrades::SwapPopupButtons(Il2CppObject* popup, bool plot) {
     if (!setAsLastSibling_ || !main_thread::IsMainThread()) return;
     if (!IsA(popup, popupClass_) || !unity::IsAlive(popup)) return;
     auto* pos = unity::Field<Il2CppObject*>(popup, offPopupPositive_);
@@ -863,10 +900,11 @@ void SellUpgrades::SwapPopupButtons(Il2CppObject* popup) {
         return;
     }
     setAsLastSibling_(posTr);
-    if (!loggedPopup_)
-        SR2_INFO("[{}] purchase popup: buttons reordered (Cancel left, Purchase right) under '{}'", kModule,
-                 unity::GetName(unity::GameObjectOf(parent)));
-    loggedPopup_ = true;
+    bool& logged = plot ? loggedPlotPopup_ : loggedPopup_;
+    if (!logged)
+        SR2_INFO("[{}] {} popup: buttons reordered (Cancel left, Purchase right) under '{}'", kModule,
+                 plot ? "plot purchase" : "purchase", unity::GetName(unity::GameObjectOf(parent)));
+    logged = true;
 }
 
 // ---------------------------------------------------------------- sell button --
@@ -1994,6 +2032,20 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         }
     }
 
+    // Plot purchase popup (an empty plot's menu): PromptForPlot -> UITemplates.CreatePopupPrompt (optional).
+    const MethodInfo* promptPlotMi = nullptr;
+    const MethodInfo* createPopupMi = nullptr;
+    if (openPopupMi) {
+        std::string saved = why, perr;
+        promptPlotMi = method(rootClass_, "PromptForPlot", 1, false);
+        if (Il2CppClass* templates = R.Class(kImage, "MonomiPark.SlimeRancher.UI", "UITemplates", &perr))
+            createPopupMi = method(templates, "CreatePopupPrompt", 5, false);
+        why = saved;
+        if (!promptPlotMi || !createPopupMi)
+            SR2_WARN("[{}] plot purchase popup order unavailable (PromptForPlot / UITemplates.CreatePopupPrompt missing) - "
+                     "the game's order there", kModule);
+    }
+
     // ---- hooks ----
     std::string err;
     void* onActionPtr = R.MethodPointer(onActionMi, &err);
@@ -2047,6 +2099,15 @@ bool SellUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         if (!pp || !ctx.HookAddress("ListUIRoot.OpenPopupPrompt", pp, reinterpret_cast<void*>(&OpenPopupDetour),
                                     reinterpret_cast<void**>(&g_origOpenPopup)))
             SR2_WARN("[{}] hook ListUIRoot.OpenPopupPrompt failed - purchase popup keeps the game's order", kModule);
+    }
+    if (promptPlotMi && createPopupMi) {
+        void* a = R.MethodPointer(promptPlotMi, &err);
+        void* b = a ? R.MethodPointer(createPopupMi, &err) : nullptr;
+        if (!a || !b || !ctx.HookAddress("LandPlotUIRoot.PromptForPlot", a, reinterpret_cast<void*>(&PromptForPlotDetour),
+                                         reinterpret_cast<void**>(&g_origPromptForPlot)) ||
+            !ctx.HookAddress("UITemplates.CreatePopupPrompt", b, reinterpret_cast<void*>(&CreatePopupDetour),
+                             reinterpret_cast<void**>(&g_origCreatePopup)))
+            SR2_WARN("[{}] plot purchase popup hooks failed - that popup keeps the game's order", kModule);
     }
     if (!altOk_)
         SR2_WARN("[{}] alt-action sell unavailable ({}) - selling is mouse-only this session", kModule, altWhy);
