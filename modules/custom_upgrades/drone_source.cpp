@@ -1,5 +1,5 @@
-// custom_upgrades: drone program sources "Hen Collector" and "Elder Collector" (see drone_source.h).
-// SR2 1.3.0, all by name; RVAs for reference only.
+// custom_upgrades: drone program sources "Hen Collector", "Elder Collector" and "Quantum Storage Link"
+// (see drone_source.h). SR2 1.3.0, all by name; RVAs for reference only.
 //
 // Findings (disassembly):
 //   * Sources of a program: DroneTaskSourceType (int enum NONE..SPRINKLE_CANISTER = 10). The station
@@ -56,6 +56,20 @@
 //     Elder Collector existed) becomes Elder Collector (or Coop without an elder collector).
 //   * Module off / faulted: Revert writes COOP into every program that had ours (plain field writes,
 //     any thread) and, on the main thread without a fault, gives the running drones the Coop program.
+//
+// Quantum Storage Link (third kind, the same hooks; vanilla type SILO instead of COOP):
+//   * GatherSinkTasks (0xA196D0, filter 0xA37690) drops the SILO sink only for the SILO source, so every
+//     vanilla destination is offered for ours. RanchDroneSourceProgramSiloStorage (the elder collector
+//     program's base): the drone flies to StorageMetadata.catcher, takes min(drone space, slot count,
+//     sink space), one item per OnAction through StorageMetadata.Decrement; CanCancel = the storage's
+//     GameObject not active in the hierarchy; Relevancy calls GetSources(IsSourceValid).
+//   * GetSources of a Quantum Storage Link program: quantum::Sources (quantum_link.cpp), the links'
+//     hidden storages whose slots mirror the Quantum Cloud amounts of the types the program wants.
+//   * Offered right after Silo (else at the end) for every target while a link is built with a drone
+//     port; definition = a copy of Silo's (name "Quantum Storage Link", the Refinery Link gadget's
+//     icon). Saved as SILO (the vanilla source that accepts every target); sidecar
+//     "drone_quantum_source.stations". Restored at the first tick that sees the station while the save
+//     lists a link; no link left in the save -> Silo (logged). Its own pass in Tick (QuantumTick).
 
 #include "modules/custom_upgrades/drone_source.h"
 
@@ -81,6 +95,7 @@
 #include "core/text_override.h"
 #include "core/unity.h"
 #include "modules/custom_upgrades/api.h"
+#include "modules/custom_upgrades/quantum_link.h"
 
 namespace sr2::modules::custom_upgrades::drones {
 namespace {
@@ -94,21 +109,36 @@ constexpr const char* kImage = "Assembly-CSharp";
 constexpr const char* kDroneNs = "MonomiPark.SlimeRancher.Drone";
 constexpr const char* kDataNs = "MonomiPark.SlimeRancher.DataModel";
 constexpr int32_t kSourceCoop = 5;    // DroneTaskSourceType.COOP
+constexpr int32_t kSourceSilo = 6;    // DroneTaskSourceType.SILO
 constexpr int32_t kTargetSingle = 1;  // DroneTaskTargetType.SINGLE
 constexpr int32_t kTargetElders = 6;  // DroneTaskTargetType.ELDERS
 
-// Our sources. Index = kind; -1 = none (Coop / anything vanilla).
-constexpr int kHen = 0, kElder = 1, kKinds = 2;
+// Our sources. Index = kind; -1 = none (anything vanilla). `vanilla` = what the save holds and what the
+// program falls back to (also the definition's template).
+constexpr int kHen = 0, kElder = 1, kQuantum = 2, kKinds = 3;
 struct KindInfo {
     int32_t type;
     const char* key;   // sidecar value: station actor ids, comma separated
     const char* name;  // shown name
+    int32_t vanilla;
 };
 constexpr KindInfo kKind[kKinds] = {
-    {kHenSourceType, "drone_hen_source.stations", "Hen Collector"},
-    {kElderSourceType, "drone_elder_source.stations", "Elder Collector"},
+    {kHenSourceType, "drone_hen_source.stations", "Hen Collector", kSourceCoop},
+    {kElderSourceType, "drone_elder_source.stations", "Elder Collector", kSourceCoop},
+    {kQuantumSourceType, "drone_quantum_source.stations", "Quantum Storage Link", kSourceSilo},
 };
-int KindOf(int32_t type) { return type == kHenSourceType ? kHen : type == kElderSourceType ? kElder : -1; }
+int KindOf(int32_t type) {
+    for (int k = 0; k < kKinds; ++k)
+        if (kKind[k].type == type) return k;
+    return -1;
+}
+// The chicken kinds (Hen / Elder Collector, Coop-based), handled together in Tick.
+int ChickenKind(int32_t type) {
+    const int k = KindOf(type);
+    return k == kHen || k == kElder ? k : -1;
+}
+int32_t VanillaOf(int kind) { return kind >= 0 && kind < kKinds ? kKind[kind].vanilla : kSourceCoop; }
+const char* VanillaName(int32_t type) { return type == kSourceSilo ? "Silo" : "Coop"; }
 const char* NameOf(int kind) { return kind >= 0 && kind < kKinds ? kKind[kind].name : "Coop"; }
 
 template <class T>
@@ -175,7 +205,8 @@ struct Impl {
     };
     std::mutex mu;                               // known / pending (Revert from any thread)
     std::unordered_map<int64_t, Known> known;    // station models that carried one of our types
-    std::unordered_set<int64_t> pending;         // reverted without game calls: drone still on our program
+    std::unordered_map<int64_t, int32_t> pending;  // reverted without game calls: drone still on ours (-> vanilla type)
+    bool quantumOffer = false;                   // a Quantum Storage Link is built with a drone port
     std::unordered_set<int64_t> seen;            // stations looked at since the load / enable
     const void* seenGame = nullptr;
     std::atomic<bool> resetSeen{false};
@@ -240,19 +271,25 @@ struct Impl {
     Il2CppObject* Sources(Il2CppObject* program, Il2CppObject* predicate, int kind);
     void SetIcon(int kind);
     Il2CppObject* Definition(Il2CppObject* defSource, const MethodInfo* mi, int kind);
-    Il2CppObject* CopyAsCoop(Il2CppObject* data);
-    bool Switch(Il2CppObject* model, int64_t id, int kind, const char* why);
+    void AddChickenOptions(Il2CppObject* drone, Il2CppObject* target, Il2CppObject* list);
+    void AddQuantumOption(Il2CppObject* drone, Il2CppObject* list);
+    Il2CppObject* CopyAsVanilla(Il2CppObject* data, int32_t vanilla);
+    bool Switch(Il2CppObject* model, int64_t id, int kind, const char* why, int32_t vanilla = kSourceCoop);
+    void QuantumTick(const std::vector<Il2CppObject*>& stations, const std::unordered_set<int64_t>& first,
+                     const std::unordered_map<int64_t, int32_t>& reverted);
+    const MethodInfo* listAdd = nullptr;
+    const void* listAddClass = nullptr;
     bool Stations(std::vector<Il2CppObject*>& out);
 };
 
 Impl* g = nullptr;
-sr2::core::DetourGuard g_guard{"custom_upgrades", "drone sources Hen / Elder Collector"};
+sr2::core::DetourGuard g_guard{"custom_upgrades", "drone sources Hen / Elder Collector, Quantum Storage Link"};
 
 // ---------------------------------------------------------------- detours --
 
 Il2CppObject* GatherSourceDetour(Il2CppObject* self, int32_t type, const MethodInfo* mi) {
     const int kind = KindOf(type);
-    if (!g || !main_thread::IsMainThread()) return g_origGatherSource(self, kind >= 0 ? kSourceCoop : type, mi);
+    if (!g || !main_thread::IsMainThread()) return g_origGatherSource(self, kind >= 0 ? VanillaOf(kind) : type, mi);
     if (kind < 0) {
         Il2CppObject* r = g_origGatherSource(self, type, mi);
         g_guard.Run([&] { g->NoteDrone(self); });  // remember the station's drone (for switching a loaded program)
@@ -262,9 +299,10 @@ Il2CppObject* GatherSourceDetour(Il2CppObject* self, int32_t type, const MethodI
     if (!Impl::Faulted(g->module)) g_guard.Run([&] { r = g->BuildSource(self, kind); });
     if (r) return r;
     if (!g->loggedBuildFail)
-        SR2_WARN("[{}] drone source {} could not be built - the drone uses Coop", g->module, NameOf(kind));
+        SR2_WARN("[{}] drone source {} could not be built - the drone uses {}", g->module, NameOf(kind),
+                 VanillaName(VanillaOf(kind)));
     g->loggedBuildFail = true;
-    return g_origGatherSource(self, kSourceCoop, mi);
+    return g_origGatherSource(self, VanillaOf(kind), mi);
 }
 
 Il2CppObject* GatherSourcesDetour(Il2CppObject* self, Il2CppObject* target, const MethodInfo* mi) {
@@ -280,34 +318,40 @@ Il2CppObject* GetSourcesDetour(Il2CppObject* self, Il2CppObject* predicate, cons
     int kind = -1;
     g_guard.Run([&] {
         kind = g->ProgramKind(self);
-        if (kind >= 0) r = g->Sources(self, predicate, kind);
+        if (kind == kQuantum) r = quantum::Sources(predicate, self);
+        else if (kind >= 0) r = g->Sources(self, predicate, kind);
     });
+    if (kind == kQuantum && !r && g->arrayNew && g->storageMetaClass)
+        r = g->arrayNew(g->storageMetaClass, 0);  // never the vanilla elder collector walk for a cloud program
     return kind >= 0 && r ? r : g_origGetSources(self, predicate, mi);
 }
 
 Il2CppObject* FindDefDetour(Il2CppObject* self, int32_t type, const MethodInfo* mi) {
     const int kind = KindOf(type);
-    if (kind < 0 || !g || !main_thread::IsMainThread()) return g_origFindDef(self, kind >= 0 ? kSourceCoop : type, mi);
+    if (kind < 0 || !g || !main_thread::IsMainThread()) return g_origFindDef(self, kind >= 0 ? VanillaOf(kind) : type, mi);
     Il2CppObject* r = nullptr;
     if (!Impl::Faulted(g->module)) g_guard.Run([&] { r = g->Definition(self, mi, kind); });
-    return r ? r : g_origFindDef(self, kSourceCoop, mi);
+    return r ? r : g_origFindDef(self, VanillaOf(kind), mi);
 }
 
-// Never lets our types into the save: a copy saying COOP, or (no copy possible) the live data set to
-// COOP. Plain memory work only besides il2cpp_object_new, so it also runs after a fault.
+// Never lets our types into the save: a copy saying the vanilla type (COOP / SILO), or (no copy
+// possible) the live data set to it. Plain memory work only besides il2cpp_object_new, so it also runs
+// after a fault.
 void PullDetour(Il2CppObject* self, double* a, bool* b, int8_t* c, void** d, void** e, Il2CppObject** taskData,
                 double* f, int32_t* h, Il2CppObject* lookups, const MethodInfo* mi) {
     g_origPull(self, a, b, c, d, e, taskData, f, h, lookups, mi);
     if (!g || !taskData || !*taskData || !g->offTdSource) return;
     Il2CppObject* data = *taskData;
-    if (KindOf(unity::Field<int32_t>(data, g->offTdSource)) < 0) return;
-    if (Il2CppObject* copy = g->CopyAsCoop(data)) {
+    const int kind = KindOf(unity::Field<int32_t>(data, g->offTdSource));
+    if (kind < 0) return;
+    if (Il2CppObject* copy = g->CopyAsVanilla(data, VanillaOf(kind))) {
         *taskData = copy;  // PullGadget's local; converted into a DroneTaskV01 right after
         return;
     }
-    unity::Field<int32_t>(data, g->offTdSource) = kSourceCoop;
+    unity::Field<int32_t>(data, g->offTdSource) = VanillaOf(kind);
     if (!g->loggedPullFallback)
-        SR2_WARN("[{}] drone source: save copy failed - program saved and kept as Coop", g->module);
+        SR2_WARN("[{}] drone source: save copy failed - program saved and kept as {}", g->module,
+                 VanillaName(VanillaOf(kind)));
     g->loggedPullFallback = true;
 }
 
@@ -460,6 +504,46 @@ Il2CppObject* Impl::BuildSource(Il2CppObject* drone, int kind) {
 
 void Impl::AddOption(Il2CppObject* drone, Il2CppObject* target, Il2CppObject* list) {
     if (!hooked || !IsA(drone, droneClass)) return;  // all hooks (the Pull one too) or no option
+    AddChickenOptions(drone, target, list);
+    if (Faulted(module)) return;
+    AddQuantumOption(drone, list);
+}
+
+// Quantum Storage Link right after Silo, or at the end when Silo is not offered (every target: the
+// cloud decides what there is to take).
+void Impl::AddQuantumOption(Il2CppObject* drone, Il2CppObject* list) {
+    if (!quantumOffer) return;
+    const size_t n = unity::ListCount(list);
+    int32_t silo = -1;
+    for (size_t i = 0; i < n && i < 64; ++i) {
+        auto* s = static_cast<Il2CppObject*>(unity::ListAt(list, i));
+        if (!IsA(s, taskSourceClass)) continue;
+        const int32_t t = unity::Field<int32_t>(s, offSrcType);
+        if (t == kQuantumSourceType) return;  // already added
+        if (t == kSourceSilo) silo = static_cast<int32_t>(i);
+    }
+    Il2CppClass* lk = api().il2cpp_object_get_class(list);
+    if (lk != listInsertClass) {
+        std::string err;
+        listInsert = Resolver::Get().Method(lk, "Insert", 2, &err);
+        listInsertClass = lk;
+    }
+    if (lk != listAddClass) {
+        std::string err;
+        listAdd = Resolver::Get().Method(lk, "Add", 1, &err);
+        listAddClass = lk;
+    }
+    Il2CppObject* src = BuildSource(drone, kQuantum);
+    if (!src) return;
+    if (silo >= 0 && listInsert) {
+        int32_t at = silo + 1;
+        Call(listInsert, list, {&at, src}, "List<DroneTaskSource>.Insert");
+    } else if (listAdd) {
+        Call(listAdd, list, {src}, "List<DroneTaskSource>.Add");
+    }
+}
+
+void Impl::AddChickenOptions(Il2CppObject* drone, Il2CppObject* target, Il2CppObject* list) {
     NoteDrone(drone);
     available[kElder] = ElderStorages() > 0;
     if (!available[kHen] && !available[kElder]) return;
@@ -469,7 +553,7 @@ void Impl::AddOption(Il2CppObject* drone, Il2CppObject* target, Il2CppObject* li
         auto* s = static_cast<Il2CppObject*>(unity::ListAt(list, i));
         if (!IsA(s, taskSourceClass)) continue;
         const int32_t t = unity::Field<int32_t>(s, offSrcType);
-        if (KindOf(t) >= 0) return;  // already added
+        if (ChickenKind(t) >= 0) return;  // already added
         if (t == kSourceCoop) coop = static_cast<int32_t>(i);
     }
     if (coop < 0) return;  // Coop not offered for this target: no chickens wanted
@@ -484,7 +568,7 @@ void Impl::AddOption(Il2CppObject* drone, Il2CppObject* target, Il2CppObject* li
     }
     if (!listInsert) return;
     int32_t at = coop + 1;
-    for (int kind = 0; kind < kKinds; ++kind) {
+    for (int kind = kHen; kind <= kElder; ++kind) {
         if (!available[kind]) continue;
         // Elder Collector needs known elder types (else it would show for every Coop target).
         if (kind == kElder && elderTypes.empty()) continue;
@@ -549,13 +633,19 @@ Il2CppObject* Impl::Sources(Il2CppObject* program, Il2CppObject* predicate, int 
     return out;
 }
 
-// The definition's icon: the kind's chicken sprite as soon as it is known (until then Coop's).
+// The definition's icon: the kind's chicken sprite / the Quantum Storage Link gadget's icon as soon as
+// it is known (until then the template's).
 void Impl::SetIcon(int kind) {
     Il2CppObject* d = definition[kind];
+    if (kind == kQuantum && !icon[kQuantum]) {
+        Il2CppObject* sprite = quantum::SourceIcon();
+        if (unity::IsAlive(sprite) && unity::NewGCHandle(sprite)) icon[kQuantum] = sprite;
+    }
     if (iconSet[kind] || !d || !offDefIcon || !icon[kind]) return;
     SetRef(d, reinterpret_cast<void**>(reinterpret_cast<char*>(d) + offDefIcon), icon[kind]);
     iconSet[kind] = true;
-    SR2_INFO("[{}] drone source: {} icon = the {} icon", module, kKind[kind].name, kind == kHen ? "Hen" : "Elder Hen");
+    SR2_INFO("[{}] drone source: {} icon = the {} icon", module, kKind[kind].name,
+             kind == kHen ? "Hen" : kind == kElder ? "Elder Hen" : "Quantum Storage Link gadget");
 }
 
 Il2CppObject* Impl::Definition(Il2CppObject* defSource, const MethodInfo* mi, int kind) {
@@ -570,8 +660,8 @@ Il2CppObject* Impl::Definition(Il2CppObject* defSource, const MethodInfo* mi, in
         return nullptr;
     };
     if (loggedDefFail[kind]) return nullptr;
-    Il2CppObject* tmpl = g_origFindDef(defSource, kSourceCoop, mi);
-    if (!tmpl) return fail("no Coop definition");
+    Il2CppObject* tmpl = g_origFindDef(defSource, VanillaOf(kind), mi);
+    if (!tmpl) return fail("no template definition");
     Il2CppClass* k = api().il2cpp_object_get_class(tmpl);
     Resolver& R = Resolver::Get();
     std::string err;
@@ -579,8 +669,8 @@ Il2CppObject* Impl::Definition(Il2CppObject* defSource, const MethodInfo* mi, in
          oIcon = R.FieldOffset(k, "_icon", &err), oSort = R.FieldOffset(k, "_sortIndex", &err);
     if (!oType || !oName || !oIcon || !oSort) return fail("definition fields");
     Il2CppObject* tmplName = unity::Field<Il2CppObject*>(tmpl, *oName);
-    if (!IsA(tmplName, lsClass)) return fail("Coop name is no LocalizedString");
-    // A LocalizedString of our own (Coop's table entry); its text comes from text_override.
+    if (!IsA(tmplName, lsClass)) return fail("template name is no LocalizedString");
+    // A LocalizedString of our own (the template's table entry); its text comes from text_override.
     bool ok = false;
     Il2CppObject* table = Call(lsGetTable, tmplName, {}, "LocalizedString.get_TableReference", &ok);
     Il2CppObject* entry = ok ? Call(lsGetEntry, tmplName, {}, "LocalizedString.get_TableEntryReference", &ok) : nullptr;
@@ -591,36 +681,39 @@ Il2CppObject* Impl::Definition(Il2CppObject* defSource, const MethodInfo* mi, in
     if (!d || !unity::NewGCHandle(d)) return fail("object");
     char* base = reinterpret_cast<char*>(d);
     *reinterpret_cast<int32_t*>(base + *oType) = kKind[kind].type;
-    // Coop + 1 for both: ties keep the list order (Coop, Hen Collector, Elder Collector).
+    // Template + 1 (Coop + 1 for both chicken kinds: ties keep the list order Coop, Hen Collector, Elder
+    // Collector; Silo + 1 for Quantum Storage Link).
     *reinterpret_cast<int32_t*>(base + *oSort) = unity::Field<int32_t>(tmpl, *oSort) + 1;
     SetRef(d, reinterpret_cast<void**>(base + *oName), name);
     SetRef(d, reinterpret_cast<void**>(base + *oIcon), unity::Field<Il2CppObject*>(tmpl, *oIcon));
     sr2::core::text_override::Set(name, kKind[kind].name);
     offDefIcon = *oIcon;
     definition[kind] = d;
-    SR2_INFO("[{}] drone source: \"{}\" definition built from Coop{}", module, kKind[kind].name,
-             sr2::core::text_override::SinkActive() ? "" : " (text sink off: shows Coop's name)");
+    SR2_INFO("[{}] drone source: \"{}\" definition built from {}{}", module, kKind[kind].name,
+             VanillaName(VanillaOf(kind)),
+             sr2::core::text_override::SinkActive() ? "" : " (text sink off: shows the template's name)");
     if (kind == kElder) EnsureElderTypes();
     SetIcon(kind);
     return d;
 }
 
-Il2CppObject* Impl::CopyAsCoop(Il2CppObject* data) {
+Il2CppObject* Impl::CopyAsVanilla(Il2CppObject* data, int32_t vanilla) {
     if (!objectNew || !taskDataClass) return nullptr;
     Il2CppObject* copy = objectNew(taskDataClass);
     if (!copy) return nullptr;
     unity::Field<int32_t>(copy, offTdTarget) = unity::Field<int32_t>(data, offTdTarget);
     SetRef(copy, reinterpret_cast<void**>(reinterpret_cast<char*>(copy) + offTdIdent),
            unity::Field<Il2CppObject*>(data, offTdIdent));
-    unity::Field<int32_t>(copy, offTdSource) = kSourceCoop;
+    unity::Field<int32_t>(copy, offTdSource) = vanilla;
     unity::Field<int32_t>(copy, offTdSink) = unity::Field<int32_t>(data, offTdSink);
     return copy;
 }
 
-// The station's program to one of our sources (kind >= 0) or to Coop (-1). With its drone: the game's
-// own AssignRanchTask (new task data + the drone's programs); without (station not loaded): the data
-// only, RanchDrone.Init builds the source from it later.
-bool Impl::Switch(Il2CppObject* model, int64_t id, int kind, const char* why) {
+// The station's program to one of our sources (kind >= 0) or to the vanilla type `vanilla` (-1: Coop,
+// or Silo for a Quantum Storage Link program). With its drone: the game's own AssignRanchTask (new task
+// data + the drone's programs); without (station not loaded): the data only, RanchDrone.Init builds the
+// source from it later.
+bool Impl::Switch(Il2CppObject* model, int64_t id, int kind, const char* why, int32_t vanilla) {
     Il2CppObject* task = TaskOf(model);
     if (!task) return false;
     Il2CppObject* drone = nullptr;
@@ -636,10 +729,10 @@ bool Impl::Switch(Il2CppObject* model, int64_t id, int kind, const char* why) {
         bool ok = false;
         Il2CppObject* target = objectNew(taskTargetClass);
         if (target) Call(targetCtor, target, {unity::Field<Il2CppObject*>(drone, offDroneCfg), &tt, ident}, "DroneTaskTarget..ctor", &ok);
-        int32_t coop = kSourceCoop;
+        int32_t van = vanilla;
         Il2CppObject* source = !ok ? nullptr
                                : kind >= 0 ? BuildSource(drone, kind)
-                                           : Call(gatherSourceMi, drone, {&coop}, "RanchDrone.GatherSourceTask", &ok);
+                                           : Call(gatherSourceMi, drone, {&van}, "RanchDrone.GatherSourceTask", &ok);
         Il2CppObject* sink = ok && source ? Call(gatherSinkMi, drone, {&sk}, "RanchDrone.GatherSinkTask", &ok) : nullptr;
         bool analytics = false;
         if (ok && source && sink) Call(assignMi, station, {target, source, sink, &analytics}, "DroneStation.AssignRanchTask", &ok);
@@ -647,11 +740,11 @@ bool Impl::Switch(Il2CppObject* model, int64_t id, int kind, const char* why) {
     }
     if (!assigned) {
         Il2CppObject* live = TaskOf(model);  // AssignRanchTask may have replaced it
-        if (live) unity::Field<int32_t>(live, offTdSource) = kind >= 0 ? kKind[kind].type : kSourceCoop;
+        if (live) unity::Field<int32_t>(live, offTdSource) = kind >= 0 ? kKind[kind].type : vanilla;
     }
     if (kind >= 0) NoteKnown(model);
-    SR2_INFO("[{}] drone source: station {} program -> {} ({}; {})", module, id, NameOf(kind), why,
-             assigned ? "drone re-programmed" : "program data only");
+    SR2_INFO("[{}] drone source: station {} program -> {} ({}; {})", module, id, kind >= 0 ? NameOf(kind) : VanillaName(vanilla),
+             why, assigned ? "drone re-programmed" : "program data only");
     return true;
 }
 
@@ -705,6 +798,72 @@ std::string JoinIds(const std::set<int64_t>& ids) {
     std::string s;
     for (int64_t id : ids) s += (s.empty() ? "" : ",") + std::to_string(id);
     return s;
+}
+
+// The Quantum Storage Link list against the live stations (vanilla type SILO). `first`: stations seen
+// for the first time this tick (since the load / enable); `reverted`: programs reverted to their vanilla
+// type without game calls while the module was off.
+void Impl::QuantumTick(const std::vector<Il2CppObject*>& stations, const std::unordered_set<int64_t>& first,
+                       const std::unordered_map<int64_t, int32_t>& reverted) {
+    const KindInfo& K = kKind[kQuantum];
+    std::set<int64_t> listed = ParseIds(custom_upgrades::SaveValue(K.key));
+    const std::set<int64_t> before = listed;
+    std::set<int64_t> present;
+    for (Il2CppObject* model : stations) {
+        const int64_t id = StationId(model);
+        Il2CppObject* task = TaskOf(model);
+        if (!id || !task) continue;
+        present.insert(id);
+        const int32_t src = unity::Field<int32_t>(task, offTdSource);
+        const bool isFirst = first.count(id) > 0;
+        const bool isListed = listed.count(id) > 0;
+        const bool restore = isFirst && isListed && src == kSourceSilo && available[kQuantum];
+        if (auto it = reverted.find(id); it != reverted.end() && it->second == kSourceSilo && KindOf(src) < 0 && !restore)
+            Switch(model, id, -1, "custom upgrades were off", kSourceSilo);
+        if (isFirst) {
+            if (isListed && src == kSourceSilo) {
+                if (available[kQuantum]) {
+                    Switch(model, id, kQuantum, "saved as Silo, restored from the sidecar");
+                } else {
+                    SR2_INFO("[{}] drone source: station {} used Quantum Storage Link, but the save has no link - it stays "
+                             "Silo", module, id);
+                    listed.erase(id);
+                }
+            } else if (isListed && src != K.type) {
+                SR2_INFO("[{}] drone source: station {}'s program is no Silo program any more - Quantum Storage Link entry "
+                         "dropped", module, id);
+                listed.erase(id);
+            } else if (src == K.type) {
+                listed.insert(id);
+                NoteKnown(model);
+            }
+            continue;
+        }
+        if (src == K.type) {
+            NoteKnown(model);
+            if (!available[kQuantum]) {
+                Switch(model, id, -1, "no Quantum Storage Link left", kSourceSilo);
+                listed.erase(id);
+            } else if (!isListed) {
+                listed.insert(id);
+                SR2_INFO("[{}] drone source: station {} uses Quantum Storage Link (saved as Silo + sidecar entry)", module, id);
+            }
+        } else if (isListed) {
+            listed.erase(id);
+            SR2_INFO("[{}] drone source: station {} no longer uses Quantum Storage Link - sidecar entry dropped", module, id);
+        }
+    }
+    for (auto it = listed.begin(); it != listed.end();) {
+        if (present.count(*it)) {
+            ++it;
+            continue;
+        }
+        SR2_INFO("[{}] drone source: station {} is gone (picked up?) - its Quantum Storage Link entry is dropped; placed "
+                 "again it has a new id and a Silo program",
+                 module, *it);
+        it = listed.erase(it);
+    }
+    if (listed != before) custom_upgrades::SetSaveValue(K.key, JoinIds(listed));
 }
 
 }  // namespace
@@ -861,7 +1020,7 @@ bool HenSource::Setup(sr2::core::ModuleContext& ctx, const char* module, std::st
             why = std::format("hook {} failed", hooks[i].name);
             // Hooks already made stay (the module manager owns them); without the source option and
             // its definition nobody can pick our type, so they only pass through.
-            p->available[kHen] = p->available[kElder] = false;
+            p->available[kHen] = p->available[kElder] = p->available[kQuantum] = p->quantumOffer = false;
             return false;
         }
         report += std::format(" {}@0x{:X}", hooks[i].name, Resolver::Rva(ptrs[i]));
@@ -873,11 +1032,13 @@ bool HenSource::Setup(sr2::core::ModuleContext& ctx, const char* module, std::st
 
 // ---------------------------------------------------------------- tick --
 
-void HenSource::Tick(const std::vector<Il2CppObject*>& henStorages) {
+void HenSource::Tick(const std::vector<Il2CppObject*>& henStorages, bool quantumReady, bool quantumPlaced) {
     if (!ready_ || !g || !main_thread::IsMainThread() || Impl::Faulted(g->module)) return;
     Impl& p = *g;
     p.henStorages = henStorages;
     p.available[kHen] = !henStorages.empty();
+    p.available[kQuantum] = quantumPlaced || quantumReady;
+    p.quantumOffer = quantumReady;
     const int elders = p.ElderStorages();  // -1 = unknown (no drone seen yet)
     if (elders >= 0) p.available[kElder] = elders > 0;
     if (p.resetSeen.exchange(false)) p.seen.clear();
@@ -885,16 +1046,20 @@ void HenSource::Tick(const std::vector<Il2CppObject*>& henStorages) {
     if (!p.Stations(stations)) return;
     if (!custom_upgrades::Active()) return;
     // Programs reverted without game calls (module was off): their drones still run our program.
-    std::unordered_set<int64_t> pending;
+    std::unordered_map<int64_t, int32_t> pending;
     {
         std::lock_guard lk(p.mu);
         pending.swap(p.pending);
     }
+    std::unordered_set<int64_t> firstSeen;  // for QuantumTick (the chicken pass below marks them seen)
+    for (Il2CppObject* model : stations)
+        if (const int64_t id = p.StationId(model); id && !p.seen.count(id)) firstSeen.insert(id);
+    // The chicken kinds (Coop-based) here; Quantum Storage Link in QuantumTick below.
     std::set<int64_t> listed[kKinds], before[kKinds];
-    for (int k = 0; k < kKinds; ++k) before[k] = listed[k] = ParseIds(custom_upgrades::SaveValue(kKind[k].key));
+    for (int k = kHen; k <= kElder; ++k) before[k] = listed[k] = ParseIds(custom_upgrades::SaveValue(kKind[k].key));
     auto listedKind = [&](int64_t id) { return listed[kHen].count(id) ? kHen : listed[kElder].count(id) ? kElder : -1; };
     auto setListed = [&](int64_t id, int kind) {
-        for (int k = 0; k < kKinds; ++k)
+        for (int k = kHen; k <= kElder; ++k)
             if (k == kind) listed[k].insert(id);
             else listed[k].erase(id);
     };
@@ -910,13 +1075,14 @@ void HenSource::Tick(const std::vector<Il2CppObject*>& henStorages) {
         if (!id || !task) continue;
         present.insert(id);
         const int32_t src = unity::Field<int32_t>(task, p.offTdSource);
-        const int cur = KindOf(src);
+        const int cur = ChickenKind(src);
         const int was = listedKind(id);
         const bool first = !p.seen.count(id);
         if (first && was == kElder && src == kSourceCoop && elders < 0) continue;  // ranch unknown yet: next tick
         p.seen.insert(id);
         const bool restore = first && was >= 0 && src == kSourceCoop;
-        if (pending.count(id) && cur < 0 && !restore) p.Switch(model, id, -1, "custom upgrades were off");
+        if (auto pit = pending.find(id); pit != pending.end() && pit->second == kSourceCoop && KindOf(src) < 0 && !restore)
+            p.Switch(model, id, -1, "custom upgrades were off");
         if (first) {
             if (restore) {
                 const int want = fitKind(was, task);
@@ -964,7 +1130,7 @@ void HenSource::Tick(const std::vector<Il2CppObject*>& henStorages) {
             SR2_INFO("[{}] drone source: station {} no longer uses {} - sidecar entry dropped", p.module, id, NameOf(was));
         }
     }
-    for (int k = 0; k < kKinds; ++k) {
+    for (int k = kHen; k <= kElder; ++k) {
         for (auto it = listed[k].begin(); it != listed[k].end();) {
             if (present.count(*it)) {
                 ++it;
@@ -977,6 +1143,8 @@ void HenSource::Tick(const std::vector<Il2CppObject*>& henStorages) {
         }
         if (listed[k] != before[k]) custom_upgrades::SetSaveValue(kKind[k].key, JoinIds(listed[k]));
     }
+    if (Impl::Faulted(p.module)) return;
+    p.QuantumTick(stations, firstSeen, pending);
     // Models that no longer carry one of our types need no pin.
     std::vector<Il2CppGCHandle> doomed;
     {
@@ -1008,21 +1176,22 @@ void HenSource::Revert(bool gameCalls, const char* why) {
     int n = 0;
     for (const auto& [id, model] : models) {
         Il2CppObject* task = p.TaskOf(model);
-        const bool ours = task && KindOf(unity::Field<int32_t>(task, p.offTdSource)) >= 0;
-        bool wasPending = false;
+        const int kind = task ? KindOf(unity::Field<int32_t>(task, p.offTdSource)) : -1;
+        int32_t pendingTo = 0;
         {
             std::lock_guard lk(p.mu);
-            wasPending = p.pending.count(id) > 0;
+            if (auto it = p.pending.find(id); it != p.pending.end()) pendingTo = it->second;
         }
-        if (!ours && !(calls && wasPending)) continue;
+        if (kind < 0 && !(calls && pendingTo)) continue;
+        const int32_t to = kind >= 0 ? VanillaOf(kind) : pendingTo;
         if (calls) {
-            p.Switch(model, id, -1, why);
+            p.Switch(model, id, -1, why, to);
             std::lock_guard lk(p.mu);
             p.pending.erase(id);
         } else {
-            unity::Field<int32_t>(task, p.offTdSource) = kSourceCoop;
+            unity::Field<int32_t>(task, p.offTdSource) = to;
             std::lock_guard lk(p.mu);
-            p.pending.insert(id);
+            p.pending[id] = to;
         }
         ++n;
     }
@@ -1031,14 +1200,15 @@ void HenSource::Revert(bool gameCalls, const char* why) {
         if (p.Stations(stations))
             for (Il2CppObject* model : stations) {
                 Il2CppObject* task = p.TaskOf(model);
-                if (task && KindOf(unity::Field<int32_t>(task, p.offTdSource)) >= 0) {
-                    p.Switch(model, p.StationId(model), -1, why);
+                const int kind = task ? KindOf(unity::Field<int32_t>(task, p.offTdSource)) : -1;
+                if (kind >= 0) {
+                    p.Switch(model, p.StationId(model), -1, why, VanillaOf(kind));
                     ++n;
                 }
             }
     }
     p.resetSeen.store(true);  // enabled again: the sidecar's stations are mapped back
-    if (n) SR2_INFO("[{}] drone source: {} program(s) set to Coop ({})", p.module, n, why);
+    if (n) SR2_INFO("[{}] drone source: {} program(s) set to their vanilla source (Coop / Silo) ({})", p.module, n, why);
 }
 
 void HenSource::ResetSeen() {

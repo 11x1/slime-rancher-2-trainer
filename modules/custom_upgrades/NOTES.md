@@ -170,6 +170,85 @@ in the picker (only for elder targets, only with a deluxe coop), a drone emptyin
 collector, Hen Collector no longer offered for an elder target, save + reload of both (log `restored
 from the sidecar`), the migration of an elder-target Hen Collector program.
 
+## Quantum Storage Link (user request: "drones take items out of a quantum storage link and put them into acceptable inputs")
+
+`quantum_link.cpp` (gadget, visuals, cloud mirror) and `drone_source.cpp` (the source; shares the Hen /
+Elder Collector hooks). Findings with RVAs are in the header comments of both files.
+
+- **"Quantum storage" = the Quantum Cloud** (`DroneDirector.GetCloudModel()` -> `DroneCloudModel._amounts`,
+  `Dictionary<IdentifiableType, int>`, one key per storable type; saved as `DroneCloudV01`). Explorer drones upload
+  into it, the drone station's cloud menu withdraws. Not the refinery, not the warp depots.
+- **The gadget is a variant of the Refinery Link.** A runtime clone of `LookupDirector.RefineryLink`
+  (`Object.Instantiate`, name `QuantumStorageLink`, ReferenceId `GadgetDefinition.QuantumStorageLink`), `VariantOf` =
+  Refinery Link, the SAME prefab, variant gradient purple -> cyan, own name / description (text_override).
+  - A placed gadget's model type comes from the prefab (`GadgetDirector.InstantiateGadget`: `TryGetId(prefab)`), so a
+    placed Quantum Storage Link is a vanilla Refinery Link model and is saved as one. Variants share their base's
+    inventory (`GetItemCount` -> `BaseGadget`, placing spends `{BaseGadget, 1}`), so our definition never enters
+    `GadgetsModel._itemCounts` / blueprints (their `Pull` would throw on an unknown or duplicate id).
+  - The sidecar lists the quantum actor ids (`quantum_link.actors`) and the unplaced Quantum Storage Links
+    (`quantum_link.kits`).
+  - Registered in the live `GadgetDirector._gadgetVariantMap` (in the Refinery Link's list, plus a key of its own with
+    no variants: every variant lookup is `get_Item` without a fallback). Checked every tick (a new scene has a new
+    director).
+  - Favourite slots can hold the variant (`OnGadgetVariantToggled` -> `SetFavorite`) and ARE saved. Two guards: the
+    save index `_reverseIndex` gets our ReferenceId -> the Refinery Link's persistence id (data only, re-added every
+    tick; the save's id table `_primaryIndex` is separate, so nothing new is written), and a
+    `SaveReferenceTranslation.GetPersistenceId(IdentifiableType)` detour maps our definition to the Refinery Link.
+    Cleanup (module off / faulted) also puts the Refinery Link into those slots. After a load the slot shows the
+    Refinery Link (toggle the variant again).
+- **Fabricator**: its own card right after the Refinery Link (`GadgetFabricateCategory.GetItems` detour). Cost =
+  the Refinery Link's with 3x the Newbucks and 2x the items (log `Fabricator cost ...`). Fabricating it never runs the
+  vanilla body (it would `AddItem` our type): the card's own `CheckCanFabricate`, `SpendableDirector.Spend(our cost)`,
+  `AddItem(Refinery Link, n)`, kits += n. The card is unlocked with the Refinery Link blueprint (helper `HasBlueprint`
+  detour); its owned count is `min(kits, Refinery Links)` (`GetItemCount` detour).
+- **Placing**: hold a Refinery Link, press the toggle-variant key -> Quantum Storage Link (offered while a kit is left:
+  `GadgetDirector.HasBlueprint(ours)` = kits > 0 and the Refinery Link blueprint), place. `PlaceGadgetEvent` detour: the
+  new gadget's actor id is listed and a kit used (log `Quantum Storage Link placed`). No kit left: the held gadget
+  becomes the Refinery Link first (a plain one is placed, logged).
+- **Picking up** a quantum link (`PickupGadget` detour) gives its kit back and holds the variant, so placing it again
+  keeps it quantum. Removed any other way (stored): the tick gives the kit back. **Toggle-variant on a placed Refinery
+  Link** (`Gadget.ChangeVariant(ours)` detour) flips it quantum <-> plain in place (kit used / back), never the
+  original (that destroys and re-places the gadget: new actor id). The toggle is only offered while a kit is left.
+- **Look** (tick, every loaded listed link): its renderers' materials are instanced and tinted: every colour property
+  (`Material.GetPropertyNames(Vector)`, names with color / tint / albedo) 60 % towards purple, emission properties
+  (emiss / glow) cyan (HDR x1.5..6); instances are tagged ` [sr2q]` and the originals put back when the link stops
+  being quantum. Holder `sr2qlink#<gen>`: a script-free clone of a teleporter gadget's `TeleporterNode._activeFX`
+  (tinted, 0.5 size, 1.1 m up) - the glow; plus the drone storage. The drone station's cloud-withdraw FX
+  (`DroneStationCloudExtractionController._spawnFX`, pooled `FXHelpers.SpawnAndPlayFX`) pulses every ~7 s and at
+  every drone take. The log names the shaders and properties it tinted (`shader '...' (link): N colour / M emission`).
+- **Drone source "Quantum Storage Link"** (`kQuantumSourceType` 0x53520110, listed after Silo for every target while
+  a link is built): a `RanchDroneSourceProgramElderCollector` whose `GetSources` returns `StorageMetadata` of the
+  links' hidden storages (`sr2qstore`: a `SiloStorage` added to our holder, 8 slots of a session `AmmoSlotDefinition`
+  copy without type group and 999 per slot, its own `AmmoModel`; active in the hierarchy, else the drone cancels).
+  The catcher (where the drone flies) is the link's own `SiloCatcher` (its refinery input). The cloud types with an
+  amount that the program's predicate accepts (cached 1 s per program, at most 4) get a slot; every link's slot
+  mirrors `min(cloud amount, 999)`. Every take goes through `StorageMetadata.Decrement` (its only callers: the
+  silo-storage source's `OnAction` and fast-forward): its detour lowers the cloud amount by the count taken
+  (`GetAmount` + `SetAmount`, never below 0) and every mirror follows. The tick re-syncs with the cloud (uploads,
+  station menu withdrawals) and frees slots unused for 30 s. Destinations are the vanilla sinks (silo, corral,
+  feeder, incinerator, market, refinery, caretaker shop); the Silo sink stays offered (vanilla drops it only for the
+  Silo source).
+- **Save of the program**: like the Hen Collector, but saved as **Silo** (the vanilla source that accepts every
+  target); sidecar `drone_quantum_source.stations`; restored at the first tick that sees the station. The option is
+  offered while a link is built (loaded, with a drone port); saved programs are kept while the save lists any link
+  (also with the ranch not loaded: the drone then just finds nothing); no link left in the save -> back to Silo
+  (logged).
+- **Without the mod**: every Quantum Storage Link loads as a plain Refinery Link where it stood; unplaced Quantum
+  Storage Links are gone, but the Refinery Links fabricated with them stay in the inventory; drone programs run as
+  Silo -> same destination (a Silo -> Silo program just moves items between silos); a favourite slot that held the
+  variant holds the Refinery Link. Nothing else of ours is in the save (viewed-blueprint hashes are plain ints).
+- Known limits: drones need a path to the link (place it on the ranch); the variant (toggle key) is offered only while
+  a kit is left, so a placed quantum link without a spare kit turns plain only by picking it up; the variant's
+  inventory icon is the Refinery Link's (recoloured gradient only); a player withdrawing from the cloud in the station
+  menu while a drone takes the same type can give at most the items in flight twice (the tick re-syncs every second).
+
+Not checked in game yet: the Fabricator card (position, cost, unlock), fabricating (kits log), the variant toggle
+while holding a Refinery Link (name, gradient), placing / picking up / toggling a placed link (logs), the tint and the
+glow (log lines name what was found), the source in the drone menu (after Silo, icon = the Refinery Link icon), a
+drone taking from the cloud to a silo / feeder / refinery (cloud amount going down in the station's cloud menu), save
++ reload (links rebuilt, program restored), turning custom upgrades off (links plain, favourites back), a mod-free
+load of such a save.
+
 ## Demolish clears the plot (user report round 4)
 
 "Sold the silo plot, capacity stayed at full upgrade" / "bought corral, Music Box II, sold plot, bought
