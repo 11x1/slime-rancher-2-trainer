@@ -7,6 +7,7 @@
 | note | about |
 |---|---|
 | `ideas.md` | unplanned ideas |
+| `agent-context.md` | a library of what is decompiled and known, so agents find context fast |
 
 ## Where the documentation lives
 
