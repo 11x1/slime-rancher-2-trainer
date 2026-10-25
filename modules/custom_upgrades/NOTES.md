@@ -192,6 +192,15 @@ RanchDroneSourceProgramDynamic).
 - **Stuck**: working with no cargo for 90 s (`kStuckMs`) = nothing to do; logged with the behaviour class
   and `GetProgramStateStr`.
 - Log `drone programs: station N: program 1 -> 2 (nothing to do)`, at most one per station per 30 s.
+  The first idle switch of a program since the drone last held cargo is always logged with the reason:
+  `program 1 -> 2 (nothing to do: program 1 (target .. source .. sink ..) - <reason>)`. For an Incinerator
+  destination the reason counts the incinerators with room in their Ash Trough (a drone only burns into
+  one whose Ash Trough is built and not full: re/drones.md "Incinerator sink"); otherwise "the game finds
+  nothing to gather that the destination has room for".
+- Round 10 "after the plort program it rests instead of doing the chicken program": the log had the
+  switches (`program 2 -> 1 (nothing to do)` every ~40 s); program 1 was Meats / Outside Plots ->
+  Incinerator and had nothing to do by the game's own rule (`MaybeHasNextGatherBehavior` false), most
+  likely a full Ash Trough. The drone rested on it 20 s, went back to the plort program, and so on.
 - **Editing**: the page shows the running program; Start Program changes that one (`program N changed`),
   as does a game fallback (Hen Collector -> Coop).
 - **Save**: the vanilla save holds program 1 (source mapped to Coop / Silo when ours). Sidecar

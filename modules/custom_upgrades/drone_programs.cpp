@@ -29,6 +29,12 @@
 //     that differ (ProgramChanged event -> the menu redraws). station_dialog.cpp calls it after Run so
 //     the page shows the program that now runs.
 //   * Fast-forward (sleeping / away) only runs the program that is current at that moment.
+//   * Incinerator destination (RanchDroneSinkProgramIncinerator): GetSinks keeps only incinerators with
+//     Incinerate.GetAshSpace() > 0 (0x987DA0: 0 without an active Ash Trough, else ceil(trough space /
+//     AshPerIncineration)). A source only gathers while a sink has space, so with the trough full (or no
+//     Ash Trough) a "burn X" program has nothing to do: MaybeHasNextGatherBehavior is false and the drone
+//     rests. Round 10 "not starting with chickens" was this (the switch lines were in the log, the
+//     chicken program -> Incinerator had nothing to do); the first idle switch of a program now logs why.
 //
 // Save: drone_source.cpp's Pull detour asks SaveFilter for program 1 (any thread; the entries are
 // guarded by a mutex). Its source goes to the save as the vanilla type; the sidecar keeps the true one.
@@ -106,11 +112,14 @@ struct Entry {
     uint64_t lastCargo = 0;          // last time it held something (or the program started)
     uint64_t lastLog = 0;
     int unlogged = 0;
+    unsigned explained = 0;          // programs whose "nothing to do" was logged since the last cargo (bits)
 };
 
 struct Impl {
     const char* module = "custom_upgrades";
     Il2CppClass* droneClass = nullptr, *restClass = nullptr, *idleClass = nullptr, *identClass = nullptr;
+    Il2CppClass* incinerateClass = nullptr;      // optional (idle explanation only)
+    const MethodInfo* ashSpace = nullptr;        // Incinerate.GetAshSpace(), optional
     size_t offPlexer = 0, offAmmo = 0, offCurrBehaviour = 0, offProgramPlexer = 0;
     const MethodInfo* ammoIsEmpty = nullptr, *droneEnergy = nullptr, *maybeHasGather = nullptr;
     std::unordered_map<Il2CppClass*, const MethodInfo*> stateStr;  // GetProgramStateStr per behaviour class
@@ -164,6 +173,7 @@ struct Impl {
     void Rotate(int64_t id, Entry& e, uint64_t now);
     int NextValid(const Entry& e) const;
     std::string BehaviourInfo(Il2CppObject* beh);
+    std::string IdleReason(const ProgramData& p);
     Entry* Find(int64_t id) {
         auto it = entries.find(id);
         return it != entries.end() ? &it->second : nullptr;
@@ -363,6 +373,25 @@ std::string Impl::BehaviourInfo(Il2CppObject* beh) {
     return st.empty() ? name : std::format("{} ({})", name, st);
 }
 
+// Why a program has nothing to do, for the first idle switch of a program (rare: at most once per program
+// until the drone holds cargo again, so the scene scan for incinerators is fine here).
+std::string Impl::IdleReason(const ProgramData& p) {
+    constexpr int kSinkIncinerator = 4;  // DroneTaskSinkType.INCINERATOR
+    if (p.sink != kSinkIncinerator || !incinerateClass || !ashSpace)
+        return "the game finds nothing to gather that the destination has room for";
+    int total = 0, room = 0;
+    for (Il2CppObject* inc : unity::FindObjectsOfTypeAll(incinerateClass)) {
+        if (!unity::IsAlive(inc) || !unity::ActiveInHierarchy(unity::GameObjectOf(inc))) continue;  // prefabs
+        ++total;
+        bool ok = false;
+        const int space = Unbox<int>(Call(ashSpace, inc, {}, "Incinerate.GetAshSpace", &ok));
+        if (ok && space > 0) ++room;
+    }
+    return std::format("incinerators with room in their Ash Trough: {} of {} (a drone only burns into an incinerator "
+                       "whose Ash Trough is built and not full)",
+                       room, total);
+}
+
 void Impl::Rotate(int64_t id, Entry& e, uint64_t now) {
     if (e.progs.size() < 2 || !e.model) return;
     Il2CppObject* drone = drones::DroneOf(e.model);
@@ -387,6 +416,7 @@ void Impl::Rotate(int64_t id, Entry& e, uint64_t now) {
         e.idleTicks = 0;
         e.idleRound = 0;
         e.lastCargo = now;
+        e.explained = 0;
         return;
     }
     const bool delivered = e.cargo;
@@ -422,6 +452,13 @@ void Impl::Rotate(int64_t id, Entry& e, uint64_t now) {
         return;
     }
     const int from = e.active;
+    // The first idle switch of a program since the last cargo says why it had nothing to do (the drone
+    // rests on it; round 10 read that as "never switches").
+    std::string reason;
+    if (stuck.empty() && !delivered && !(e.explained & (1u << from))) {
+        e.explained |= 1u << from;
+        reason = IdleReason(e.progs[from]);
+    }
     if (!drones::AssignProgram(e.model, e.progs[next], nullptr)) return;
     {
         std::lock_guard lk(mu);
@@ -435,6 +472,11 @@ void Impl::Rotate(int64_t id, Entry& e, uint64_t now) {
         SR2_INFO("[{}] drone programs: station {}: program {} ({}) held no cargo for {} s while working, the drone was "
                  "{} - program {} runs",
                  module, id, from + 1, Describe(e.progs[from]), kStuckMs / 1000, stuck, next + 1);
+        return;
+    }
+    if (!reason.empty()) {  // always logged (once per program per idle streak)
+        SR2_INFO("[{}] drone programs: station {}: program {} -> {} (nothing to do: program {} ({}) - {})", module, id,
+                 from + 1, next + 1, from + 1, Describe(e.progs[from]), reason);
         return;
     }
     if (now - e.lastLog >= kLogEveryMs || e.lastLog == 0) {
@@ -643,6 +685,12 @@ bool Rotation::Setup(Resolver& R, const char* module, std::string& why) {
     if (!why.empty()) {
         delete p;
         return false;
+    }
+    {  // optional: only explains an idle "burn" program in the log
+        std::string err;
+        p->incinerateClass = R.Class(kImage, "", "Incinerate", &err);
+        p->ashSpace = p->incinerateClass ? R.Method(p->incinerateClass, "GetAshSpace", 0, &err) : nullptr;
+        if (!p->ashSpace) SR2_INFO("[{}] drone programs: Incinerate.GetAshSpace not found (idle log without ash info)", module);
     }
     g = p;
     drones::SetProgramHooks(&SaveFilter, &ManagedFilter);
