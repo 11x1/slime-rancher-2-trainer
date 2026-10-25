@@ -71,6 +71,10 @@
 - methods: `GetShootSpeedFactor(HashSet<GameObject>)` 0xA67940 (private): largest `IVacShootAccelerator.GetVacShootSpeedFactor()` among objects in the vac cone, else 1
 - methods: `Expel(float shootAudioVolume)` 0xA66C00 (private; resolve by parameter type)
 - mod: misc_tweaks detours GetShootSpeedFactor and Expel
+- methods: `Expel(float)` dispatches: `_held` set -> `ExpelHeld(float)` 0xA66730, else the inlined `ExpelAmmo` (0xA665E0 has no native caller): `AmmoSlotManager.PopFromSelectedSlot` -> public `Expel(AmmoMetadata, bool ignoreEmotions, float velocityOverride, bool forceUncollected)` 0xA66E40 (round 15, IDA)
+- launch speed: `EjectSpeed` (+0x28, public float). `ExpelHeld`: velocity = `VacOrigin.up.normalized * EjectSpeed` + the player controller's velocity, `EnsureNotShootingIntoRock(..., ref vel)`, `Rigidbody.set_linearVelocity`, `Vacuumable.Release` + `Launch(PLAYER)`, `SlimeEat.CancelChomp`, `ClearHeld`, `ShootEffect`. Public `Expel`: speed = `velocityOverride` if > 0, else `EjectSpeed`, x3 when `ValleyAmmoTypeGroup.IsMember(id)` (`GetSpeed(IdentifiableType)` 0xA67B40 is that code, inlined; no native caller); then the same velocity math on the instantiated actor. Callers of the public Expel: `Expel(float)`, `ExpelAmmo`, `BossFightController.<ExpelAmmo>d__106.MoveNext` (IDA)
+- `AmmoSlot.AmmoMetadata` struct (0x20 bytes, passed by pointer): `Id` IdentifiableType @0, `Emotions` float4 @8, `Radiant` bool @0x18 (dump)
+- mod: custom_upgrades slime_launcher.cpp detours the public Expel and ExpelHeld and scales `EjectSpeed` for one call when the shot is a SlimeDefinition (Slime Launcher)
 
 ### IVacShootAccelerator / VacAccelerationHelper
 - implementers: `SiloCatcher` (silo, refinery, storage ports), `ScorePlort` (market), `DroneFuelDepositor`, `ResourceDepositor`; each returns its `VacAccelerationHelper.Factor`

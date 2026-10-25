@@ -13,6 +13,8 @@
 //                                on the ranch (effect: shadow_catcher.cpp)
 //   Drone Program         1      several programs per drone station (effect:         own card, like the
 //     Scheduler                  drone_programs.cpp; without it: one program)        Battery Saver
+//   Slime Launcher I-III  3      slimes (and held largos) shot 1.2x / 1.4x / 1.6x    own card
+//                                as fast (effect: slime_launcher.cpp)
 //
 // Tiers: four / two more UpgradeLevelDefinitions (deep copies from Object.Instantiate of
 // "AmmoCapacity", with our values, costs and texts) appended to the vanilla definitions' _levels at
@@ -62,6 +64,8 @@ inline constexpr const char* kOldBatteryPrefix = "drone_battery.station.";
 inline constexpr const char* kDroneProgramsKey = "custom_upgrades.vacpack.drone_programs";
 // Per-save value of the Shadow Catcher: "0" = owned ("" = not).
 inline constexpr const char* kShadowCatcherKey = "custom_upgrades.vacpack.shadow_catcher";
+// Per-save value of the Slime Launcher: the owned level, 0-based ("" = none).
+inline constexpr const char* kSlimeLauncherKey = "custom_upgrades.vacpack.slime_launcher";
 // Shadow slimes in the player's vanilla vacpack slots at the last game save: "v=count;..." (v = vanilla
 // slot index 0..6).
 inline constexpr const char* kShadowStashKey = "custom_upgrades.vacpack.shadow_slots";

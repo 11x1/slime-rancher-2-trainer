@@ -74,6 +74,8 @@
 #include "modules/custom_upgrades/drone_programs.h"
 #include "modules/custom_upgrades/fabricator_levels.h"
 #include "modules/custom_upgrades/shadow_catcher.h"
+#include "modules/custom_upgrades/slime_launcher.h"
+#include "ui/mod_icons.h"
 #include "ui/overlay.h"
 #include "ui/settings_view.h"
 
@@ -116,6 +118,7 @@ enum class Kind {
     kDroneBattery,  // own card, no modifier (empty effect list); drone_battery.cpp reads the level
     kShadowCatcher, // own card, no modifier; shadow_catcher.cpp does the work while it is owned
     kDronePrograms, // own card, no modifier; drone_programs.cpp rotates programs only while it is owned
+    kSlimeLauncher, // own card, no modifier; slime_launcher.cpp speeds up slime shots by the owned level
 };
 struct Spec {
     int32_t id;         // own card: our _uniqueId (custom range); tiers: 0 (they are vanilla levels)
@@ -164,6 +167,11 @@ const Spec kSpecs[] = {
     // and III, next to the drone stations themselves.
     {custom_upgrades::kIdBase + 0x0105, 0, kDroneProgramsKey, "", "DroneProgramScheduler", 5, Kind::kDronePrograms, 1,
      {{0.0f, 20000, "Drone Program Scheduler"}, {}, {}, {}}},
+    // Slime Launcher I-III (slime shots 1.2x / 1.4x / 1.6x as fast, launcher::kSpeedFactor): Tank Booster
+    // III-V's refinery items as they are and 5k / 12k / 25k Newbucks (vanilla III-V: 3k / 10k / 15k), a
+    // mid-game comfort upgrade priced next to the tank boosters.
+    {custom_upgrades::kIdBase + 0x0106, 0, kSlimeLauncherKey, "", "SlimeLauncher", 2, Kind::kSlimeLauncher, 3,
+     {{1.2f, 5000, "Slime Launcher I"}, {1.4f, 12000, "Slime Launcher II"}, {1.6f, 25000, "Slime Launcher III"}, {}}},
 };
 constexpr int kSpecCount = static_cast<int>(sizeof(kSpecs) / sizeof(kSpecs[0]));
 
@@ -179,7 +187,8 @@ int ScaleAmount(const Spec& s, int amount) {
         case Kind::kSlots: return amount;
         case Kind::kDroneBattery:
         case Kind::kDronePrograms: return std::max(1, (amount + 1) / 2);
-        case Kind::kShadowCatcher: return amount;
+        case Kind::kShadowCatcher:
+        case Kind::kSlimeLauncher: return amount;
         default: return amount <= 5 ? amount + 2 : amount * 2;
     }
 }
@@ -587,7 +596,7 @@ bool CreateDefs(Il2CppObject* items) {
             // list). It used to keep the cloned one as ADD 0 on AmmoLimit, so each of its level changes
             // re-evaluated the vacpack capacity and, when that threw (round 8), left Tank Booster-sized
             // modifiers behind (x1880 slots) - see NOTES.md "Drone Battery Saver".
-            if ((IsDroneCard(s) || s.kind == Kind::kShadowCatcher) &&
+            if ((IsDroneCard(s) || s.kind == Kind::kShadowCatcher || s.kind == Kind::kSlimeLauncher) &&
                 (!ListRemoveRange(effects, 0, static_cast<int32_t>(unity::ListCount(effects))) || unity::ListCount(effects))) {
                 SR2_WARN("[{}] vacpack: {} level {} kept its vacpack modifier - no vacpack upgrades", kModule, s.name, k + 1);
                 return false;
@@ -627,6 +636,11 @@ bool CreateDefs(Il2CppObject* items) {
                                    "programs and switches to the next one when the current one runs out of work. Add "
                                    "programs with Programs in the drone station's menu.",
                                    drone_programs::kMaxPrograms);
+            } else if (s.kind == Kind::kSlimeLauncher) {
+                desc = std::format("A spring-loaded nozzle coil: slimes leave your vacpack {}% faster and fly much further, "
+                                   "both slimes from your tanks and largos held at the nozzle. Food, plorts and other "
+                                   "items still shoot as before.",
+                                   static_cast<int>(std::lround((s.level[k].value - 1.0f) * 100.0f)));
             } else if (s.kind == Kind::kDroneBattery) {
                 const float f = s.level[k].value;
                 desc = std::format("Quantum power cells for your ranch drones: every drone station's drone uses {}% of its "
@@ -1068,7 +1082,9 @@ const Ours* ShadowOurs() {
 // icon not the shadow catcher"). The Shadow slime's own pedia entry (PediaDirector.GetEntry, an
 // IdentifiablePediaEntry whose art is the slime's _fullArt / icon) replaces it, as the Battery Saver takes the
 // Drone Station's.
-void ShadowPedia(Il2CppObject* def, Il2CppObject* shadow) {
+// The scene's pedia entry of an IdentifiableType (PediaDirector.GetEntry), nullptr if none yet;
+// `noApi` = the lookup can never work (methods / fields not found).
+Il2CppObject* PediaEntryOf(Il2CppObject* ident, bool& noApi) {
     Resolver& R = Resolver::Get();
     static Il2CppClass* scK = R.Class("Assembly-CSharp", "", "SceneContext");
     static Il2CppClass* pdK = R.Class("Assembly-CSharp", "", "PediaDirector");
@@ -1080,16 +1096,24 @@ void ShadowPedia(Il2CppObject* def, Il2CppObject* shadow) {
     }();
     static const std::optional<size_t> offPd = scK ? R.FieldOffset(scK, "<PediaDirector>k__BackingField") : std::nullopt;
     static const MethodInfo* getEntry = pdK ? R.Method(pdK, "GetEntry", 1) : nullptr;
-    if (!inst || !offPd || !getEntry) {
+    noApi = !inst || !offPd || !getEntry;
+    if (noApi) return nullptr;
+    bool ok = false;
+    Il2CppObject* sc = Invoke(inst, nullptr, {}, "SceneContext.Instance", &ok);
+    Il2CppObject* pd = ok && unity::IsAlive(sc) ? unity::Field<Il2CppObject*>(sc, *offPd) : nullptr;
+    Il2CppObject* entry = unity::IsAlive(pd) ? Invoke(getEntry, pd, {ident}, "PediaDirector.GetEntry", &ok) : nullptr;
+    return unity::IsAlive(entry) ? entry : nullptr;
+}
+
+void ShadowPedia(Il2CppObject* def, Il2CppObject* shadow) {
+    bool noApi = false;
+    Il2CppObject* entry = PediaEntryOf(shadow, noApi);
+    if (noApi) {
         g.shadowPedia = true;
         SR2_WARN("[{}] vacpack: Shadow Catcher keeps Tank Booster's card picture (PediaDirector.GetEntry not found)", kModule);
         return;
     }
-    bool ok = false;
-    Il2CppObject* sc = Invoke(inst, nullptr, {}, "SceneContext.Instance", &ok);
-    Il2CppObject* pd = ok && unity::IsAlive(sc) ? unity::Field<Il2CppObject*>(sc, *offPd) : nullptr;
-    Il2CppObject* entry = unity::IsAlive(pd) ? Invoke(getEntry, pd, {shadow}, "PediaDirector.GetEntry", &ok) : nullptr;
-    if (!unity::IsAlive(entry)) {
+    if (!entry) {
         if (++g.shadowPediaTries < 30) return;  // the scene's PediaDirector may come later
         g.shadowPedia = true;
         SR2_WARN("[{}] vacpack: Shadow Catcher keeps Tank Booster's card picture (no pedia entry for the Shadow slime)", kModule);
@@ -1142,6 +1166,53 @@ void PatchShadowCard() {
                                 unity::GetName(*reinterpret_cast<Il2CppObject**>(x + 8)));
         }
         SR2_INFO("[{}] vacpack: Shadow Catcher costs {} Newbucks + {}", kModule, o->spec->level[0].newbucks, paid);
+    }
+}
+
+// ---- Slime Launcher ----
+
+const Ours* LauncherOurs() {
+    for (const Ours& o : g.ours)
+        if (o.spec && o.spec->kind == Kind::kSlimeLauncher && o.def) return &o;
+    return nullptr;
+}
+
+// The card's art: the user's drawing "slime_launcher" when one is embedded (ui/mod_icons), else the Pink
+// slime's icon; the details picture is the Pink slime's pedia entry (vanilla art until a drawing exists,
+// .claude/notes/custom-icons.md). Until the Pink slime is loaded the card keeps Tank Booster's.
+struct LauncherArtState {
+    bool icon = false, pedia = false;
+    int pediaTries = 0;
+} g_launcherArt;
+
+void LauncherArt() {
+    const Ours* o = LauncherOurs();
+    if (!o || (g_launcherArt.icon && g_launcherArt.pedia)) return;
+    Il2CppObject* pink = launcher::CardSlime();
+    if (!pink) return;
+    if (!g_launcherArt.icon) {
+        g_launcherArt.icon = true;
+        const size_t offIcon = FieldOff(pink, "icon");
+        Il2CppObject* icon = offIcon ? unity::Field<Il2CppObject*>(pink, offIcon) : nullptr;
+        Il2CppObject* drawn = sr2::ui::mod_icons::Has("slime_launcher")
+                                  ? sr2::ui::mod_icons::Get("slime_launcher", unity::IsAlive(icon) ? icon : nullptr)
+                                  : nullptr;
+        if (drawn) icon = drawn;
+        if (unity::IsAlive(icon)) SetRef(o->def, g.offUdIcon, icon);
+        SR2_INFO("[{}] vacpack: Slime Launcher card uses {}", kModule,
+                 drawn ? std::string("the drawn icon 'slime_launcher'")
+                 : unity::IsAlive(icon) ? std::format("the Pink slime's icon '{}'", unity::GetName(icon))
+                                        : std::string("Tank Booster's icon (the Pink slime has none)"));
+    }
+    if (!g_launcherArt.pedia) {
+        bool noApi = false;
+        Il2CppObject* entry = PediaEntryOf(pink, noApi);
+        if (!entry && !noApi && ++g_launcherArt.pediaTries < 30) return;  // the scene's PediaDirector may come later
+        g_launcherArt.pedia = true;
+        if (entry) SetRef(o->def, g.offUdPedia, entry);
+        SR2_INFO("[{}] vacpack: Slime Launcher card picture = {}", kModule,
+                 entry ? std::format("the Pink slime's pedia entry '{}'", unity::GetName(entry))
+                       : std::string("Tank Booster's (no pedia entry for the Pink slime)"));
     }
 }
 
@@ -1691,6 +1762,9 @@ void VacpackUpgrades::Tick() {
         // shadow slimes back into the vacpack), the card's icon / Shadow plort cost.
         PublishShadow(p, dict);
         PatchShadowCard();
+        // Slime Launcher: the owned level for slime_launcher.cpp's shot detours (a Sandbox change too), the card's art.
+        if (const Ours* lo = LauncherOurs()) launcher::SetLevel(DictGet(dict, lo->spec->id) + 1);
+        LauncherArt();
         // Extra slots' contents, once per player ammo model; the HUD row wide enough to centre them.
         auto* live = p.ammoModel ? unity::Field<Il2CppArray*>(p.ammoModel, g.offAmodelSlots) : nullptr;
         if (p.ammoModel && p.ammoModel != g.restoredAmmo) RestoreStash(p);
@@ -1780,6 +1854,7 @@ void VacpackUpgrades::Cleanup(const char* why) {
         // save is made without our Pull detour; a load then drops them (no vanilla slot allows them).
         shadow::SetOwned(false);
         shadow::SetPlayerSlots({});
+        launcher::SetLevel(0);  // vanilla shot speed
         if (Il2CppObject* shadowType = havePlayer && p.ammoModel ? shadow::ShadowType() : nullptr) {
             auto* live = unity::Field<Il2CppArray*>(p.ammoModel, g.offAmodelSlots);
             int count = 0;
@@ -1806,6 +1881,7 @@ void VacpackUpgrades::Reset() {
     g.migrated = false;
     g.tiersMigrated = false;
     g.loggedRemap = false;
+    launcher::SetLevel(0);  // the loaded save's level comes with the next tick
 }
 
 int VacpackUpgrades::DroneBatteryLevel() const {
