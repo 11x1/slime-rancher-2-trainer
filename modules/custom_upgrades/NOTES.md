@@ -193,8 +193,13 @@ re/custom-upgrades.md 2.1 / 2.4.
 - **Activate button**: the vanilla collector button is kept (Collector null) while the Activate detour is
   installed (`CoopWorld::KeepHenButton`; build line `Activate button kept` / `no Activate button`). A press
   runs the excess-only vacuum at once (the 6 h period restarts) with animation, cue and 0.4 s rate limit
-  (`SiloButtons::Press`) and a short world text ("Collecting N chickens", "Nothing to collect (keeps H hens /
-  R roosters)", "The Hen Collector is full", "Already collecting").
+  (`SiloButtons::Press`). Round 15 (user: "Remove the popup when manually clicking the collector, just start
+  sucking (dont get them in if over limit)"): no notification and no world text any more; every press spins
+  the cyclone and plays the vac sound for the vanilla minimum (`_forceCollectUntil` = HoursFromNow(1/12), as
+  DoCollection does), and only the chickens over the coop's keep-limits are pulled in, as long as the
+  2 x 100 storage has room ("over limit" read as the storage limit: nothing goes in once it is full; the
+  keep-limits stay as before). The result ("Collecting N chickens", "Nothing to collect (keeps H hens /
+  R roosters)", "The Hen Collector is full", "Already collecting") is only logged (`hen collector button:`).
 - **Ranch drones (Coop)**: the tick appends the Hen Collector's two slots to the coop's
   `RanchMetadata ... elderCollectors` (`LinkDrones`, log `linked to the ranch drones`); every Register
   replaces the entry, so the next tick adds them again. Sold / not owned / off:

@@ -2834,7 +2834,9 @@ void CustomUpgrades::ReceiptTick(float dt) {
 // The Hen Collector's own button (the elder collector's, kept on the clone with a null Collector,
 // coop_world.cpp): collects the excess chickens now, like the vanilla collector buttons. Button
 // animation, press cue and the 0.4 s rate limit as on the silo button (SiloButtons::Press works on
-// any PlortCollectorActivator); the result as a short text above the button.
+// any PlortCollectorActivator). Round 15 (user: "Remove the popup when manually clicking the
+// collector, just start sucking"): no notification and no text; the cyclone spins at once and the
+// result goes to the log only.
 bool CustomUpgrades::OnHenButton(Il2CppObject* activator) {
     if (!world_.Ready()) return false;
     Il2CppObject* plot = world_.HenButtonPlot(activator);
@@ -2845,10 +2847,7 @@ bool CustomUpgrades::OnHenButton(Il2CppObject* activator) {
         return state_.loaded && WorldQuery(p, req);
     };
     const std::string text = world_.Activate(plot, query);
-    // Round 12 ("USE GAME's NOTIFICATIONS PLEASE"): the game's notification pop-up; the text above the
-    // button only when the HUD can't take one.
-    if (!Notify(CardIcon(COOP_HEN_COLLECTOR), text) && silo_.Ready())
-        silo_.Message(activator, text, text.rfind("Collecting", 0) == 0);
+    SR2_INFO("[{}] hen collector button: {}", kModule, text);
     return true;
 }
 

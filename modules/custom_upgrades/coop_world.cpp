@@ -1546,11 +1546,19 @@ void CoopWorld::Impl::ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopReque
     }
     Il2CppObject* timeDir = unity::Field<Il2CppObject*>(pc, offPcTimeDir);
     if (!timeDir) return;
+    bool ok = false;
+    if (manual && vac) {
+        // Round 15 (user: "just start sucking"): a press always spins the cyclone and plays the vac sound
+        // for the vanilla minimum (DoCollection's _forceCollectUntil), also when nothing is over the limits
+        // or the storage is full; only the excess chickens are taken in (below).
+        float force = kForceCollectHours;
+        const double until = Value<double>(Call(hoursFromNow, timeDir, {&force}, "TimeDirector.HoursFromNow", &ok));
+        if (ok && until > unity::Field<double>(pc, offPcForce)) unity::Field<double>(pc, offPcForce) = until;
+    }
     if (PendingJoints(pc) > 0) {  // chickens still on their way in
         say("Already collecting");
         return;
     }
-    bool ok = false;
     if (!manual && t.next > 0.0 && !Value<bool>(Call(hasReached, timeDir, {&t.next}, "TimeDirector.HasReached", &ok)))
         return;
     Census in;
