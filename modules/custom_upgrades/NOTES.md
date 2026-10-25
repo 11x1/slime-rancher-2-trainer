@@ -103,7 +103,8 @@ MinHook allows one hook per address; other modules must not hook these:
   `GadgetDirector.HasBlueprint` / `GetItemCount`, `GadgetDirectorHelper.HasBlueprint`,
   `GadgetFabricateCategoryRuntime..ctor`, `GadgetFabricatableItem.get_ShouldShowPlaceholder` /
   `FabricateAndSpendCost`, `GadgetItem.PlaceGadgetEvent` / `PickupGadget`, `Gadget.ChangeVariant`,
-  `StorageMetadata.Decrement`, `UIActivator.OnInteract`, `UIDisplayInteractable.OnInteract`.
+  `StorageMetadata.Decrement`, `UIActivator.OnInteract`, `UIDisplayInteractable.OnInteract`, and (optional)
+  `DroneListButton.BindItem` / `IFocusReceivedHandler.OnFocusReceived`.
 - gadget_look.cpp: `GadgetDefinition.get_LocalizedDescription`, `GadgetDirector.GetTargetGadgetInfo`,
   `GadgetItem.SetHeldGadget`, `FabricatorItemDetails.SetItem`.
 - dj_buildables.cpp: `GadgetMusicPlayer.OnInteract` / `ShowDeactivatePrompt`.
@@ -415,6 +416,17 @@ GadgetItem, Fabricator categories), re/save.md (GetPersistenceId, `_reverseIndex
     the ghost's shared materials; colour properties dark cyan alpha 0.25, emission cyan x0.35; destroyed in
     `Undecorate`). Assumed, not proven: the pass's overlay takes something from the ghost's own GBuffer colour (if not,
     the flicker and depth do the work). Log: `phase ghost = ... N dim cyan material(s) ... flickers for 0.6-1.1 s`.
+    Round 17 ("can we somehow make the white transparent? otherwise clean"): disassembled, the pass's fullscreen shader
+    (re/drones.md "Drone phase-through pass") reads only the ghost's depth, not its colours (so the round 16 materials
+    did nothing there), blends SrcAlpha / OneMinusSrcAlpha with alpha = scanline alpha (`_ScanlineBGAlpha` /
+    `_ScanlineLineAlpha`) x intersection fade, and fades the colour into `_IntersectionEdgeColorClose` (HDR ~350) the
+    closer the hidden surface is to the occluder. The ghost sits a few cm behind the link's surface, so all of it
+    drew that edge colour: the white. Now, while a ghost phases (first `PhaseOn` to last `PhaseOff`),
+    `ApplyPassLook` sets the ranch pass's material (the `CustomPassVolume.customPasses` entry with filter bit 16):
+    close edge = cyan x0.7 (`kPassEdge`), other colours clamped to LDR, scanline alphas x0.35 (`kPassAlpha`);
+    `RestorePassLook` puts the saved values back (also posted after a `Reset`). The material is the drones' too: a
+    drone crossing a wall during that 0.6-1.1 s looks the same way. A faulted module can't restore (calls off): the
+    toned look then stays for the session. Log once: `phase pass material '...' toned down ...; its values: ...`.
   - **No idle ping**: the cloud-withdraw FX no longer pulses every ~7 s, only at a take (1.5 s cooldown).
   - **No suction**: the Refinery Link's vac particles at the port (`model_refineryLink/Dust ` with `Rings`) are
     switched off ("has a suction effect on the output").
@@ -472,6 +484,12 @@ GadgetItem, Fabricator categories), re/save.md (GetPersistenceId, `_reverseIndex
   Go To); `RowsFrame` re-checks every 0.25 s while the menu is open (repopulated rows) and, once the list is gone or
   inactive, turns the parts back on for a menu kept alive. Log: `drone rows' Go To hint: N row(s), M hint part(s)
   hidden` in the `Quantum Cloud menu open` line.
+  Round 17 ("Its there for a split second, like 200-500ms"): the sweep came after the menu loaded, was active
+  0.15 s and was filled, while the first row had focus from the start. Two optional detours,
+  `DroneListButton.BindItem` and `IFocusReceivedHandler.OnFocusReceived`, hide that row's parts (`HideRow`) right
+  after the original, in the same frame, while the link's menu is opening or open (`LinkMenu`: a cloud request or
+  the watched list); every other row costs a pointer check. The sweep stays as the fallback. Log: `..., M hint
+  part(s) hidden, K before by the row detours`.
 - **Drone source** (`0x53520110`, after Silo, every target, while a link with a drone port is built):
   `GetSources` returns hidden storages (`sr2qstore`: `SiloStorage`, 8 slots, no type group, 999 each,
   own `AmmoModel`, active in hierarchy); catcher = the link's own `SiloCatcher`. Accepted cloud types
