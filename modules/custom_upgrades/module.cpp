@@ -2706,7 +2706,14 @@ bool CustomUpgrades::WorldStep(int step) {
         if (!feederLights_.Ready()) return false;
         {
             SR2_PERF_DETAIL("custom_upgrades.world: feeder lights");
-            feederLights_.Tick();
+            // The save's plot list (GameModel.landPlots) instead of a scene-wide search (round 18: 22-32 ms hitches).
+            Il2CppObject* gm = nullptr;
+            if (offScGameModel_) {
+                bool ok = false;
+                Il2CppObject* sc = Invoke(sceneCtxInstMi_, nullptr, {}, "SceneContext.Instance", &ok);
+                gm = ok && unity::IsAlive(sc) ? unity::Field<Il2CppObject*>(sc, offScGameModel_) : nullptr;
+            }
+            feederLights_.Tick(unity::IsAlive(gm) ? gm : nullptr);
         }
         return true;
     default:
@@ -3147,9 +3154,10 @@ void CustomUpgrades::SliderTick(float dt) {
 
 // Round 16 (user on the round 15 food picker: "No no no no no, it should be just a toggle, 'Leave last food
 // item in'"): while the corral's OWNED vanilla Auto-Feeder card is selected, an on/off switch sits in the
-// details panel (the cost row's slot, like the Hen Collector limits): a two-position PlotMenuSlider, half
-// the panel wide (off = handle left, on = handle right with the pink fill). Mouse: click / drag it; pad A /
-// Enter (the menu's Submit, which does nothing on an owned card) flips it. Saved per plot in the sidecar
+// details panel (the cost row's slot, like the Hen Collector limits): a two-position PlotMenuSlider in its
+// selector style since round 18 (the game's options selector "< Off >" right of the label; a bar without the
+// game's prefab). Mouse: click an arrow; pad A / Enter (the menu's Submit, which does nothing on an owned
+// card) flips it. Saved per plot in the sidecar
 // (PlotValue feeder::kKeepKey, "1" = on, "" = off; round 15's food names read as on), applied at once
 // (FeederLock::SetNow) and by the world tick.
 void CustomUpgrades::FeederCardBind(Il2CppObject* view, Il2CppObject* desc, Il2CppObject* plot, Il2CppObject* config) {
@@ -3176,9 +3184,11 @@ void CustomUpgrades::FeederCardBind(Il2CppObject* view, Il2CppObject* desc, Il2C
     spec.max = 1;
     spec.value = PlotValueOf(plot, fl::kKeepKey).empty() ? 0 : 1;
     spec.keys = false;  // left / right belong to the menu's grid; Submit flips it (OnFeederSubmit)
-    spec.column = 0;
-    spec.columns = 2;
-    spec.label = [](int v) { return std::string(v ? "Leave last food item in: On" : "Leave last food item in: Off"); };
+    // Round 18 ("use the same component as for drone modes, not a slider"): the game's options selector
+    // ("< On >", as the Programs dialog's mode) with the label left of it; the bar only without the game's prefab.
+    spec.selector = true;
+    spec.label = [](int) { return std::string("Leave last food item in"); };
+    spec.valueText = [](int v) { return std::string(v ? "On" : "Off"); };
     // By plot id (never a pointer into the state): the save may be reloaded while the menu is open.
     spec.onChange = [this, id, game = state_.game](int v) {
         if (!state_.loaded || state_.game != game) return;

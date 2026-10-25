@@ -251,15 +251,16 @@ menu so drones can be filtered to put specific food items in them not just every
 user said "No no no no no, it should be just a toggle, 'Leave last food item in'". RE: re/plots.md
 "SlimeFeeder", re/drones.md "Feeder sink".
 - **Menu**: in a corral's plot menu, while the OWNED vanilla Auto-Feeder card is selected, an on/off switch
-  sits in the cost row's slot: a two-position `PlotMenuSlider` ("FeederKeepLast", 0 = off, 1 = on), half
-  the panel wide (`columns = 2`), label "Leave last food item in: On / Off". The plot menu has no toggle
-  widget of its own (only the game's buttons, and our sliders), so the switch is our slider at two
-  positions: handle left = off, handle right with the pink fill = on. Mouse: click the other half or drag.
-  Pad A / Enter: `ListUI.Submit` (the list menus' submit listener; on an owned card its OnAction does
-  nothing) flips it while it is shown (`PlotMenuSlider::Flip`, one flip per frame, not under a PopupPrompt);
-  left / right stay with the menu's grid (`keys = false`). The card is found by its `_description`
-  instance among the corral menu's items (`_upgrade` FEEDER 9). Not offered for an unbought feeder (no
-  active SlimeFeeder, no storage).
+  sits in the cost row's slot: a two-position `PlotMenuSlider` ("FeederKeepLast", 0 = off, 1 = on) in its
+  selector style since round 18 (r17fl1: "use the same component as for drone modes, not a slider"): the
+  label "Leave last food item in" on the left, a clone of the game's options selector "< Off / On >" on the
+  right (the same prefab as the drone station Programs dialog's mode; `spec.selector`, plot_menu_slider.h).
+  Either arrow toggles. Without the game's prefab it falls back to the round 16 bar (handle left = off,
+  right = on, label "...: On / Off"). Pad A / Enter: `ListUI.Submit` (the list menus' submit listener; on an
+  owned card its OnAction does nothing) flips it while it is shown (`PlotMenuSlider::Flip`, one flip per
+  frame, not under a PopupPrompt); left / right stay with the menu's grid (`keys = false`). The card is found
+  by its `_description` instance among the corral menu's items (`_upgrade` FEEDER 9). Not offered for an
+  unbought feeder (no active SlimeFeeder, no storage).
 - **Save**: per plot `PlotValue` `custom_upgrades.feeder_lock` = "1" (on; "" = off, nothing stored). Round
   15 stored a food's asset name under the same key: it reads as on. Never in the vanilla save.
 - **Feeding out** (`feeder_lock.cpp`): every feed is `SlimeFeeder.ProcessFeedOperation(ejectFood)`
@@ -289,25 +290,37 @@ user said "No no no no no, it should be just a toggle, 'Leave last food item in'
   never showed. Fixed in round 17; the other names (SlimeFeeder, SiloStorage, Identifiable: global;
   UnityEngine.Component) were right.
 
-## Auto-Feeder fill lights (round 17)
+## Auto-Feeder fill lights (round 17, fixed round 18)
 
 User (r16fl6): "for the feeder models ingame, color them red -> yellow -> green based on how full the are
 (the smaller lights besides the button that are green)". `feeder_lights.cpp`; RE: re/plots.md "SlimeFeeder"
-(prefab).
+(prefab, LED material).
 - The lights: the LED arrows of the feeder's two depositor ports (input port beside the speed button,
-  output port at the distributor), material `TechDepositor_ArrowsLed`, green from `_EmissionGlowHigh` /
-  `_EmissionGlowLow`. Every MeshRenderer under the feeder's SiloStorage object whose material has both
-  properties gets a MaterialPropertyBlock with the two colours (GetPropertyBlock first, so the game's own
-  block entries stay). The port Animator animates other properties of that renderer, never these two.
-- Colour: fill = `SiloStorage.GetSlotCount(0) / GetSlotMaxCount(0)` in 20 steps; empty red (1, 0.04, 0),
-  half yellow (1, 0.85, 0), full vanilla green (0.368, 1, 0); any food at all is at least one step above
-  empty. Low = High * 0.6 + 0.15 (vanilla's softer tone). A block is written only when the step changes.
-- Finding feeders: `Resources.FindObjectsOfTypeAll(SlimeFeeder)` every 10 s (at once after a load or when a
-  cached one died): alive, active in hierarchy (bought) and `_storage` set. So a newly bought feeder turns
-  coloured within ~10 s. World tick part 13 (~1 Hz) reads the fills.
-- Setting `FeederFillLights` (group Corrals, default on). Off / module off: the material's own colours go
+  output port at the distributor): MeshRenderers under the feeder's SiloStorage object whose shared material
+  is `TechDepositor_ArrowsLed` (shader "SR/UI/Digital Monitor Gradient Animated") with `_Color`.
+- Round 17 bug (r17fl3 "Nope, doesnt change", r17fl5): it tinted `_EmissionGlowHigh` / `_EmissionGlowLow`,
+  stale values saved in the material that its shader does not declare, so `Material.HasProperty` was false,
+  no light was ever kept and the log never showed `auto-feeder fill lights: N feeder(s)`. The green is in
+  the texture (dif_techDepositor01, about (0.33, 0.94, 0.04)); the shader multiplies it by `_Color`
+  (white), which the port Animator does not animate.
+- Colour: a MaterialPropertyBlock `_Color` multiplier (GetPropertyBlock first, so the Animator's entries
+  stay). Fill = `SiloStorage.GetSlotCount(0) / GetSlotMaxCount(0)` in 20 steps: empty (3, 0.05, 0) -> red,
+  half (3, 0.9, 0) -> yellow, full (1, 1, 1) = vanilla green (gamma-space maths: SetColor linearises the
+  colour like the texture, and pow is multiplicative; >1 is fine in HDRP). Any food at all is at least one
+  step above empty. A block is written only when the step changes.
+- Finding feeders (round 18; round 17's `Resources.FindObjectsOfTypeAll(SlimeFeeder)` cost 22-32 ms every
+  10 s, a frame hitch each time): `GameModel.landPlots` (Dictionary entries read directly, 24-byte entries
+  checked with `il2cpp_class_array_element_size`) -> CORRAL models whose plot object (`gameObj`) is active
+  and whose `upgrades` HashSet contains FEEDER (`Contains` resolved on the live set's class) ->
+  `GetComponentInChildren(SlimeFeeder, false)` once per corral, cached by LandPlotModel; searched again only
+  when the cached feeder died or went inactive (sold). Every 3 s, plus at once after a load or a dead feeder.
+  A newly bought feeder turns coloured within ~3 s. World tick part 13 (~1 Hz) reads the fills.
+- Setting `FeederFillLights` (group "Plot upgrades": the Upgrades tab's Plot upgrades card, round 18
+  r17fl4; it was a "Corrals" card of its own; default on). Off / module off: the material's own `_Color` goes
   back into the block; load: the cache is dropped (its scene goes).
-- Logs: `auto-feeder fill lights: N feeder(s) (a new, b gone)`; debug: first tint per feeder.
+- Logs: `auto-feeder fill lights: N feeder(s) (a new, b gone; L light(s) on the newest)`, the first tint per
+  feeder `feeder c/m -> step s/20, _Color x(r, g, b) on L light(s)`; once `no 'TechDepositor_ArrowsLed' light
+  with _Color among N renderer(s) of a feeder` when the material is not found.
 
 ## Drone sources Hen Collector / Elder Collector
 

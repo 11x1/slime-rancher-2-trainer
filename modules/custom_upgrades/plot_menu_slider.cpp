@@ -60,6 +60,8 @@ constexpr uint64_t kSamePressMs = 150; // a navigation event and our poll this c
 constexpr int kImageSliced = 1;
 constexpr int kTmpAlignLeft = 513;     // TMPro.TextAlignmentOptions.Left
 constexpr int kFindExcludeInactive = 0;
+constexpr float kSelW = 240.0f;        // selector style: the options selector's width
+constexpr float kSelArrowPad = 30.0f;  // its arrow icons: centre this far from the pill's ends
 
 struct Vec2 {
     float x, y;
@@ -67,6 +69,7 @@ struct Vec2 {
 struct Color {
     float r, g, b, a;
 };
+constexpr Color kNavy{0.267f, 0.325f, 0.478f, 1.0f};  // the menus' text navy (selector background)
 
 }  // namespace
 
@@ -89,6 +92,15 @@ struct PlotMenuSlider::Impl {
     Il2CppClass* canvasClass = nullptr;  // UnityEngine.Canvas
     Il2CppClass* raycasterClass = nullptr;  // UnityEngine.UI.GraphicRaycaster
     Il2CppClass* sdfRectClass = nullptr;    // SDFRoundedRectangle (optional: the game's UI shapes)
+    // spec.selector (optional): the game's options selector
+    Il2CppClass* presetDefClass = nullptr;  // PresetOptionsItemDefinition
+    Il2CppClass* presetSelClass = nullptr;  // OptionsPresetSelector (null = no selector style)
+    Il2CppClass* toggleClass = nullptr;     // UnityEngine.UI.Toggle
+    size_t offDefPrefab = 0, offSelPrev = 0, offSelNext = 0, offSelText = 0;
+    const MethodInfo* behSetEnabled = nullptr, *tglGetOn = nullptr, *tglSetOnQuiet = nullptr,
+                    *selSetTransition = nullptr, *trFind = nullptr, *trSetLocalScale = nullptr, *rtGetRect = nullptr;
+    bool selSearched = false;
+    Il2CppObject* selPrefab = nullptr;  // pinned (never freed)
     size_t offDetailsText = 0, offCraftCost = 0, offStylerStyle = 0;
 
     // methods (all through Resolver::Invoke)
@@ -149,6 +161,11 @@ struct PlotMenuSlider::Impl {
     Il2CppObject* slider = nullptr;   // UnityEngine.UI.Slider
     Il2CppObject* sliderGo = nullptr; // its GameObject
     Il2CppObject* label = nullptr;    // TMP_Text (may be null)
+    // selector style (instead of slider / sliderGo)
+    Il2CppObject* selGo = nullptr;               // the clone's GameObject
+    Il2CppObject* selTgl[2] = {nullptr, nullptr};  // polled Toggles on the previous / next arrows
+    Il2CppObject* selArrowGo[2] = {nullptr, nullptr};
+    Il2CppObject* selText = nullptr;             // the value's TMP_Text
     Color labelColor{0.259f, 0.310f, 0.451f, 1.0f};  // the panel's description colour (game default)
     bool polling = true;              // pad / keyboard polled in Tick (SetPolling)
     bool styled = false;              // the last build got a SliderStyler
@@ -167,7 +184,7 @@ struct PlotMenuSlider::Impl {
     // EventSystem selection to hand back after a mouse drag
     Il2CppObject* prevSel = nullptr;
     Il2CppGCHandle prevSelHandle = nullptr;
-    bool loggedBuild = false, loggedFail = false;
+    bool loggedBuild = false, loggedFail = false, loggedSelector = false;
 
     // ---- helpers ----
     Il2CppObject* Call(const MethodInfo* m, void* obj, std::initializer_list<void*> args, const char* what,
@@ -300,6 +317,10 @@ struct PlotMenuSlider::Impl {
         const int step = std::max(spec.step, 1);
         if (spec.fastKeys && ctrl) return dir > 0 ? spec.max : spec.min;
         if (spec.fastKeys && shift) return Snap(v + dir * std::max(step, (spec.shiftStep + step - 1) / step * step));
+        if (selGo) {  // the game's selectors wrap around
+            const int n = v + dir * step;
+            return n > spec.max ? spec.min : n < spec.min ? spec.max : Snap(n);
+        }
         return Snap(v + dir * step * std::max(mult, 1));
     }
     bool PrimaryKeys() const { return spec.input == SliderInput::kPrimary; }
@@ -316,9 +337,28 @@ struct PlotMenuSlider::Impl {
     Il2CppObject* SliderStyle();
     const char* BuildBody(Il2CppObject* root, Il2CppObject* rootRt, int layer, Il2CppObject* labelSrc, float fontSize,
                           float fontScale);
+    std::string ValueText(int v) const { return spec.valueText ? spec.valueText(v) : std::to_string(v); }
     std::string LabelText(int v) const {
-        return spec.label ? spec.label(v) : std::to_string(v);
+        std::string t = spec.label ? spec.label(v) : std::to_string(v);
+        if (spec.selector && !selGo && spec.valueText) t += ": " + spec.valueText(v);  // the bar fallback
+        return t;
     }
+    // The body that takes input: the slider, or the selector clone.
+    bool BodyAlive() const { return selGo ? unity::IsAlive(selGo) : unity::IsAlive(slider); }
+    bool OwnSelectable(Il2CppObject* go) const {
+        return go && (go == sliderGo || go == selArrowGo[0] || go == selArrowGo[1]);
+    }
+    bool Clicked(Il2CppObject* toggle) {  // true once per click on a selector arrow
+        if (!unity::IsAlive(toggle)) return false;
+        bool ok = false;
+        const bool on = Unbox<bool>(Call(tglGetOn, toggle, {}, "Toggle.get_isOn", &ok));
+        if (!ok || !on) return false;
+        bool off = false;
+        Call(tglSetOnQuiet, toggle, {&off}, "Toggle.SetIsOnWithoutNotify");
+        return true;
+    }
+    Il2CppObject* SelectorPrefab();
+    bool BuildSelector(Il2CppObject* rootRt, int layer);
     int Snap(int v) const {
         const int step = std::max(spec.step, 1);
         v = std::clamp(v, spec.min, spec.max);
@@ -329,6 +369,10 @@ struct PlotMenuSlider::Impl {
         if (unity::IsAlive(label)) Call(tmpSetText, label, {unity::NewString(LabelText(v))}, "TMP_Text.set_text");
     }
     void SetSliderValue(int v) {
+        if (selGo) {
+            if (unity::IsAlive(selText)) Call(tmpSetText, selText, {unity::NewString(ValueText(v))}, "TMP_Text.set_text");
+            return;
+        }
         float f = static_cast<float>(v);
         if (unity::IsAlive(slider)) Call(sldSetValueQuiet, slider, {&f}, "Slider.SetValueWithoutNotify");
     }
@@ -349,6 +393,8 @@ struct PlotMenuSlider::Impl {
     }
     void Clear() {
         root = slider = sliderGo = label = row = nullptr;
+        selGo = selText = nullptr;
+        selTgl[0] = selTgl[1] = selArrowGo[0] = selArrowGo[1] = nullptr;
         ownsRow = false;
         std::vector<Il2CppGCHandle> doomed;
         doomed.swap(handles);
@@ -512,6 +558,35 @@ bool PlotMenuSlider::Setup(Resolver& R, const char* module, std::string& why) {
             if (!p->sdfSetRadius) p->sdfRectClass = nullptr;
         }
         if (!p->sdfRectClass) report += " SDF shapes: NOT available (plain images);";
+        // spec.selector: the game's options selector (drone_price_limit's programs dialog uses the same prefab).
+        p->presetDefClass = R.Class(kImage, "MonomiPark.SlimeRancher.Options", "PresetOptionsItemDefinition", &err);
+        p->presetSelClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Options", "OptionsPresetSelector", &err);
+        p->toggleClass = R.Class(kUi, "UnityEngine.UI", "Toggle", &err);
+        if (p->presetDefClass && p->presetSelClass && p->toggleClass) {
+            auto offOpt = [&](Il2CppClass* k, const char* field, size_t& out) {
+                std::string e;
+                for (Il2CppClass* c = k; c && !out; c = parentOf(c))
+                    if (auto o = R.FieldOffset(c, field, &e)) out = *o;
+            };
+            offOpt(p->presetDefClass, "_controlPrefab", p->offDefPrefab);
+            offOpt(p->presetSelClass, "_previousButton", p->offSelPrev);
+            offOpt(p->presetSelClass, "_nextButton", p->offSelNext);
+            offOpt(p->presetSelClass, "_currentSelectionText", p->offSelText);
+            Il2CppClass* behaviour = R.Class(kCore, "UnityEngine", "Behaviour", &err);
+            p->behSetEnabled = behaviour ? method(behaviour, "set_enabled", 1, false) : nullptr;
+            p->tglGetOn = method(p->toggleClass, "get_isOn", 0, false);
+            p->tglSetOnQuiet = method(p->toggleClass, "SetIsOnWithoutNotify", 1, false);
+            p->selSetTransition = method(selectable, "set_transition", 1, false);
+            p->trFind = byParams(transform, "Find", {"System.String"}, false);
+            p->trSetLocalScale = method(transform, "set_localScale", 1, false);
+            p->rtGetRect = method(p->rtClass, "get_rect", 0, false);
+        }
+        if (!p->presetDefClass || !p->toggleClass || !p->offDefPrefab || !p->offSelPrev || !p->offSelNext ||
+            !p->offSelText || !p->behSetEnabled || !p->tglGetOn || !p->tglSetOnQuiet || !p->selSetTransition ||
+            !p->trFind || !p->trSetLocalScale || !p->rtGetRect) {
+            p->presetSelClass = nullptr;
+            report += " the game's options selector: NOT available (switches drawn as bars);";
+        }
         p->styleClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.UIStyling", "SliderStyle", &err);
         p->stylerClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.UIStyling", "SliderStyler", &err);
         if (p->stylerClass) {
@@ -590,6 +665,129 @@ Il2CppObject* PlotMenuSlider::Impl::SliderStyle() {
     return style;
 }
 
+// The game's options-menu selector prefab ("< value >" of the Settings rows): the control prefab of a
+// PresetOptionsItemDefinition whose root component is exactly an OptionsPresetSelector with both arrows and the
+// value text. One asset scan per session (first selector built); re/ui.md "OptionsPresetSelector".
+Il2CppObject* PlotMenuSlider::Impl::SelectorPrefab() {
+    if (unity::IsAlive(selPrefab)) return selPrefab;
+    if (selSearched || !presetSelClass) return nullptr;
+    selSearched = true;
+    int defs = 0;
+    std::string defName;
+    for (Il2CppObject* def : unity::FindObjectsOfTypeAll(presetDefClass)) {
+        if (!unity::IsAlive(def) || !IsA(def, presetDefClass)) continue;
+        ++defs;
+        Il2CppObject* prefab = unity::Field<Il2CppObject*>(def, offDefPrefab);
+        if (!unity::IsAlive(prefab) || !IsA(prefab, goClass)) continue;
+        Il2CppObject* sel = unity::GetComponent(prefab, presetSelClass);
+        if (!unity::IsAlive(sel) || api().il2cpp_object_get_class(sel) != presetSelClass) continue;
+        if (!unity::IsAlive(unity::Field<Il2CppObject*>(sel, offSelPrev)) ||
+            !unity::IsAlive(unity::Field<Il2CppObject*>(sel, offSelNext)) ||
+            !unity::IsAlive(unity::Field<Il2CppObject*>(sel, offSelText)))
+            continue;
+        selPrefab = prefab;
+        defName = unity::GetName(def);
+        break;
+    }
+    if (selPrefab) {
+        unity::NewGCHandle(selPrefab);  // pinned for the session (never freed)
+        SR2_INFO("[{}] slider: options selector prefab '{}' (from the setting '{}', {} preset settings seen)", module,
+                 unity::GetName(selPrefab), defName, defs);
+    } else {
+        SR2_WARN("[{}] slider: no options selector prefab among {} preset settings - switches drawn as bars", module, defs);
+    }
+    return selPrefab;
+}
+
+// spec.selector: a clone of the game's selector at the right end of the (inactive) root, kSelW wide. Its
+// OptionsPresetSelector off (it would bind to a settings model; it never runs: the root is inactive while we build),
+// the value's LocalizeStringEvent off (our text), a polled Toggle (navigation None, no transition) on each arrow
+// next to its SRButton (kept for the hover look). Look as drone_price_limit's programs dialog (round 15): navy pill,
+// arrow icons kSelArrowPad from the outer ends, the value on one line. false = no selector (the bar is built).
+bool PlotMenuSlider::Impl::BuildSelector(Il2CppObject* rootRt, int layer) {
+    Il2CppObject* prefab = SelectorPrefab();
+    if (!prefab) return false;
+    Il2CppObject* clone = unity::Instantiate(prefab, rootRt);
+    Il2CppObject* go = clone && IsA(clone, goClass) ? clone : unity::GameObjectOf(clone);
+    if (!unity::IsAlive(go)) return false;
+    unity::SetName(go, "sr2mods_OptionsSelector");
+    Il2CppObject* sel = unity::GetComponent(go, presetSelClass);
+    Il2CppObject* lse = unity::IsAlive(sel) ? unity::Field<Il2CppObject*>(sel, offSelText) : nullptr;
+    Il2CppObject* btn[2] = {unity::IsAlive(sel) ? unity::Field<Il2CppObject*>(sel, offSelPrev) : nullptr,
+                            unity::IsAlive(sel) ? unity::Field<Il2CppObject*>(sel, offSelNext) : nullptr};
+    Il2CppObject* tmp = unity::IsAlive(lse) ? unity::GetComponent(lse, tmpTextClass) : nullptr;
+    if (!unity::IsAlive(sel) || !unity::IsAlive(tmp) || !unity::IsAlive(btn[0]) || !unity::IsAlive(btn[1])) {
+        Destroy(go);
+        return false;
+    }
+    (void)layer;  // the clone keeps the prefab's UI layer
+    bool off = false;
+    Call(behSetEnabled, sel, {&off}, "Behaviour.set_enabled");
+    Call(behSetEnabled, lse, {&off}, "Behaviour.set_enabled");
+    // Its own height (the Settings row's control), scaled down when taller than our row; our width.
+    Il2CppObject* rt = unity::TransformOf(go);
+    bool ok = false;
+    Il2CppObject* boxed = Call(rtGetRect, rt, {}, "RectTransform.get_rect", &ok);
+    float h = ok && boxed ? Unbox<Color>(boxed).a : 0.0f;  // Rect {x, y, width, height}: .a = height
+    if (!std::isfinite(h) || h < 20.0f || h > 240.0f) h = kTotalHeight - 12.0f;
+    const float sc = std::min(1.0f, (kTotalHeight - 8.0f) / h);
+    Rect(rt, {1, 0.5f}, {1, 0.5f}, {1, 0.5f}, {0, 0}, {kSelW, h});
+    float s3[3] = {sc, sc, 1.0f};
+    Call(trSetLocalScale, rt, {s3}, "Transform.set_localScale");
+    int restyled = 0;
+    Il2CppObject* bg = Call(trFind, rt, {unity::NewString("Background")}, "Transform.Find", &ok);
+    if (ok && unity::IsAlive(bg)) {
+        Il2CppObject* g = sdfRectClass ? unity::GetComponent(bg, sdfRectClass) : nullptr;
+        if (!unity::IsAlive(g)) g = unity::GetComponent(bg, imageClass);
+        if (unity::IsAlive(g)) {
+            Color navy = kNavy;
+            Call(gfxSetColor, g, {&navy}, "Graphic.set_color");
+            ++restyled;
+        }
+    }
+    for (int i = 0; i < 2; ++i) {
+        Il2CppObject* btr = unity::TransformOf(btn[i]);
+        Il2CppObject* icon = btr ? Call(trFind, btr, {unity::NewString("Icon")}, "Transform.Find", &ok) : nullptr;
+        if (ok && unity::IsAlive(icon) && IsA(icon, rtClass)) {
+            const float side = static_cast<float>(i);
+            SetVec(rtSetAnchorMin, icon, {side, 0.5f}, "RectTransform.set_anchorMin");
+            SetVec(rtSetAnchorMax, icon, {side, 0.5f}, "RectTransform.set_anchorMax");
+            SetVec(rtSetPos, icon, {i == 0 ? kSelArrowPad : -kSelArrowPad, 0.0f}, "RectTransform.set_anchoredPosition");
+            ++restyled;
+        }
+        Il2CppObject* arrowGo = unity::GameObjectOf(btn[i]);
+        Il2CppObject* t = AddComponent(arrowGo, toggleClass, "AddComponent(Toggle)");
+        if (!t) {
+            Destroy(go);
+            selTgl[0] = selTgl[1] = selArrowGo[0] = selArrowGo[1] = nullptr;
+            return false;
+        }
+        int32_t none = 0;                       // Selectable.Transition.None
+        alignas(8) unsigned char nav[64] = {};  // Navigation.Mode.None: a click never moves the EventSystem selection
+        Call(selSetTransition, t, {&none}, "Selectable.set_transition");
+        Call(selSetNav, t, {nav}, "Selectable.set_navigation");
+        Call(tglSetOnQuiet, t, {&off}, "Toggle.SetIsOnWithoutNotify");
+        Keep(t);
+        selTgl[i] = t;
+        selArrowGo[i] = arrowGo;
+    }
+    if (tmpSetWrap) {
+        int32_t noWrap = 0;  // TextWrappingModes.NoWrap (its auto size shrinks the text instead)
+        Call(tmpSetWrap, tmp, {&noWrap}, "TMP_Text.set_textWrappingMode");
+    }
+    Keep(go);
+    Keep(tmp);
+    selGo = go;
+    selText = tmp;
+    SetSliderValue(value);
+    if (!loggedSelector) {
+        loggedSelector = true;
+        SR2_INFO("[{}] slider '{}': options selector cloned (height {:.0f}, scale {:.2f}, {}/3 parts restyled)", module,
+                 spec.name, h, sc, restyled);
+    }
+    return !Faulted();
+}
+
 // The cost row's slot for `go` (a slider root, or the row of sliders side by side): with a LayoutGroup
 // a LayoutElement right after the cost row, else the cost row's RectTransform, else the panel bottom.
 void PlotMenuSlider::Impl::PlaceInSlot(Il2CppObject* go, Il2CppObject* craftTr, bool layout) {
@@ -647,10 +845,16 @@ bool PlotMenuSlider::Impl::AddRaycaster(Il2CppObject* go, Il2CppObject* parentTr
 // Label + uGUI slider under the (inactive) root; activates it. nullptr = ok, else what failed.
 const char* PlotMenuSlider::Impl::BuildBody(Il2CppObject* r, Il2CppObject* rootRt, int layer, Il2CppObject* labelSrc,
                                             float fontSize, float fontScale) {
+    // ---- selector style: the game's options selector on the right (else the bar below) ----
+    const bool sel = spec.selector && BuildSelector(rootRt, layer);
+    if (spec.selector && !sel && Faulted()) return "faulted";
     // ---- label ----
     Il2CppObject* labelGo = NewUi("Label", rootRt, layer);
     if (labelGo) {
-        Rect(unity::TransformOf(labelGo), {0, 1}, {1, 1}, {0.5f, 1}, {0, 0}, {0, kLabelHeight});
+        if (sel)  // left of the selector, vertically centred in the row
+            Rect(unity::TransformOf(labelGo), {0, 0}, {1, 1}, {0, 0.5f}, {0, 0}, {-(kSelW + 12.0f), 0});
+        else
+            Rect(unity::TransformOf(labelGo), {0, 1}, {1, 1}, {0.5f, 1}, {0, 0}, {0, kLabelHeight});
         Il2CppObject* tmp = AddComponent(labelGo, tmpUguiClass, "AddComponent(TextMeshProUGUI)");
         if (tmp) {
             Keep(tmp);
@@ -679,6 +883,12 @@ const char* PlotMenuSlider::Impl::BuildBody(Il2CppObject* r, Il2CppObject* rootR
             Call(gfxSetRaycast, tmp, {&off}, "Graphic.set_raycastTarget");
             SetLabel(value);
         }
+    }
+
+    if (sel) {
+        if (Faulted()) return "faulted";
+        unity::SetActive(r, true);
+        return nullptr;
     }
 
     // ---- slider: standard uGUI hierarchy (names are what SliderStyler looks for) ----
@@ -916,12 +1126,12 @@ void PlotMenuSlider::SetLabel(std::function<std::string(int)> label) {
 // ---------------------------------------------------------------- per frame --
 
 void PlotMenuSlider::Impl::HandBackSelection() {
-    if (!selectionOk || !sliderGo) return;
+    if (!selectionOk || (!sliderGo && !selArrowGo[0])) return;
     bool ok = false;
     Il2CppObject* es = Call(esCurrent, nullptr, {}, "EventSystem.get_current", &ok);
     if (!ok || !unity::IsAlive(es)) return;
     Il2CppObject* sel = Call(esGetSelected, es, {}, "EventSystem.get_currentSelectedGameObject", &ok);
-    if (!ok || sel != sliderGo) return;
+    if (!ok || !OwnSelectable(sel)) return;
     Il2CppObject* back = unity::IsAlive(prevSel) ? prevSel : nullptr;
     Call(esSetSelected, es, {back}, "EventSystem.SetSelectedGameObject");
 }
@@ -957,7 +1167,8 @@ int PlotMenuSlider::Impl::InputDirection() {
 
 bool PlotMenuSlider::Impl::InputBlocked() {
     bool ok = false;
-    const bool interactable = Unbox<bool>(Call(selInteractable, slider, {}, "Selectable.IsInteractable", &ok), true);
+    const bool interactable =
+        !unity::IsAlive(slider) || Unbox<bool>(Call(selInteractable, slider, {}, "Selectable.IsInteractable", &ok), true);
     Il2CppObject* found = nullptr;
     if (findAny && popupClass) {
         int32_t mode = kFindExcludeInactive;
@@ -977,7 +1188,7 @@ bool PlotMenuSlider::Impl::InputBlocked() {
 bool PlotMenuSlider::Step(int dir) {
     if (!impl_ || !impl_->root || dir == 0 || !main_thread::IsMainThread()) return false;
     Impl& p = *impl_;
-    if (p.Faulted() || !unity::IsAlive(p.root) || !unity::IsAlive(p.slider) || !unity::ActiveInHierarchy(p.root))
+    if (p.Faulted() || !unity::IsAlive(p.root) || !p.BodyAlive() || !unity::ActiveInHierarchy(p.root))
         return false;
     if (!p.spec.keys) return false;   // mouse only
     if (!p.OwnInput()) return false;  // the other slider's keys (Shift held or not)
@@ -1006,7 +1217,7 @@ bool PlotMenuSlider::Step(int dir) {
 bool PlotMenuSlider::Flip() {
     if (!impl_ || !impl_->root || !main_thread::IsMainThread()) return false;
     Impl& p = *impl_;
-    if (p.Faulted() || !unity::IsAlive(p.root) || !unity::IsAlive(p.slider) || !unity::ActiveInHierarchy(p.root))
+    if (p.Faulted() || !unity::IsAlive(p.root) || !p.BodyAlive() || !unity::ActiveInHierarchy(p.root))
         return false;
     if (p.InputBlocked()) return false;
     const int v = p.value >= p.spec.max ? p.spec.min : p.spec.max;
@@ -1015,6 +1226,8 @@ bool PlotMenuSlider::Flip() {
     return true;
 }
 
+bool PlotMenuSlider::IsSelector() const { return impl_ && impl_->selGo; }
+
 void PlotMenuSlider::Tick(float dt) {
     if (!impl_ || !impl_->root || !main_thread::IsMainThread()) return;
     Impl& p = *impl_;
@@ -1022,7 +1235,7 @@ void PlotMenuSlider::Tick(float dt) {
         p.Clear();  // no game calls after a fault (handles freed by the posted job)
         return;
     }
-    if (!unity::IsAlive(p.root) || !unity::IsAlive(p.slider)) {
+    if (!unity::IsAlive(p.root) || !p.BodyAlive()) {
         p.Clear();  // died with the menu
         return;
     }
@@ -1039,14 +1252,14 @@ void PlotMenuSlider::Tick(float dt) {
         bool ok = false;
         Il2CppObject* es = p.Call(p.esCurrent, nullptr, {}, "EventSystem.get_current", &ok);
         Il2CppObject* sel = (ok && unity::IsAlive(es)) ? p.Call(p.esGetSelected, es, {}, "EventSystem.get_currentSelectedGameObject", &ok) : nullptr;
-        if (ok && sel == p.sliderGo) {
+        if (ok && p.OwnSelectable(sel)) {
             sliderSelected = true;
             Il2CppObject* mouse = p.Call(p.mouseCurrent, nullptr, {}, "Mouse.get_current", &ok);
             if (!(ok && mouse && p.Pressed(p.mouseLeft, mouse))) {
                 p.HandBackSelection();
                 sliderSelected = false;
             }
-        } else if (ok && sel && sel != p.prevSel && unity::IsAlive(sel)) {
+        } else if (ok && sel && sel != p.prevSel && !p.OwnSelectable(sel) && unity::IsAlive(sel)) {
             p.ForgetSelection();
             if (Il2CppGCHandle h = unity::NewGCHandle(sel)) {
                 p.prevSel = sel;
@@ -1085,6 +1298,19 @@ void PlotMenuSlider::Tick(float dt) {
             ++steps;
             p.nextRepeat += kRepeatRate;
         }
+    }
+
+    // Selector: its arrows' clicks and our steps (wrapping).
+    if (p.selGo) {
+        const bool prev = p.Clicked(p.selTgl[0]), next = p.Clicked(p.selTgl[1]);
+        int v = p.value;
+        if ((prev || next) && !p.InputBlocked()) v = p.Next(v, next ? 1 : -1, 1, false, false);
+        for (int i = 0; i < steps; ++i) v = p.Next(v, dir, 1, false, false);
+        if (v != p.value) {
+            p.SetSliderValue(v);
+            p.Apply(v, true);
+        }
+        return;
     }
 
     // Value: poll the slider (mouse drag / Unity's own move), apply our steps.
