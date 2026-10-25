@@ -516,6 +516,14 @@ GadgetItem, Fabricator categories), re/save.md (GetPersistenceId, `_reverseIndex
   after the original, in the same frame, while the link's menu is opening or open (`LinkMenu`: a cloud request or
   the watched list); every other row costs a pointer check. The sweep stays as the fallback. Log: `..., M hint
   part(s) hidden, K before by the row detours`.
+  Round 18 ("when going back from quantum cloud, fully visible doesnt go away"): the Quantum Cloud tab makes the drone
+  list page inactive, which `RowsFrame` took for a close: it gave the rows their parts back and ended the watch, so
+  the Drones tab came back with the hint. Now the watch ends only when the menu's display GameObject is gone or
+  inactive, or neither page (drone list, cloud) is active for 0.5 s (in case that GameObject stays on after a
+  close). While the list page is hidden the watch waits; the frame it is shown again `rowsDone` is cleared and every
+  row is checked anew. `RowsFrame` now runs its active checks every frame (two `activeInHierarchy` calls), the sweep
+  still every 0.25 s. Log: `drone list page hidden (another tab)` / `shown again`, then `back on the Drones tab, N row
+  hint part(s) hidden`.
 - **Drone source** (`0x53520110`, after Silo, every target, while a link with a drone port is built):
   `GetSources` returns hidden storages (`sr2qstore`: `SiloStorage`, 8 slots, no type group, 999 each,
   own `AmmoModel`, active in hierarchy); catcher = the link's own `SiloCatcher`. Accepted cloud types

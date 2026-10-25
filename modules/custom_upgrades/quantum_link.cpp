@@ -188,6 +188,7 @@ constexpr double kCloudSettleSeconds = 0.15;  // ... then be active this long be
 constexpr int kCloudTries = 3;               // UpdateShowData(null) tries before the legends are set anyway
 constexpr int kUseLines = 5;            // cloud types listed by Use
 constexpr double kRowsSeconds = 0.25;   // the link's open menu: new drone rows lose their Go To hint this often
+constexpr double kRowsClosedSeconds = 0.5;  // neither page of the link's menu active this long: the menu is closed
 
 struct Vec3 {
     float x, y, z;
@@ -415,8 +416,14 @@ struct Impl {
     // while the link's menu is open (RowsFrame); the drone list page watched here
     Il2CppClass* listButtonClass = nullptr;  // DroneListButton (optional)
     Il2CppGCHandle rowsList = nullptr;
+    // Round 18 ("when going back from quantum cloud, fully visible doesnt go away"): the menu's display GameObject;
+    // the watch ends when it closes, not when the drone list page goes inactive (the Quantum Cloud tab is shown)
+    Il2CppGCHandle rowsMenu = nullptr;
+    Il2CppGCHandle rowsCloud = nullptr;  // the menu's Quantum Cloud page (DroneCloudInventoryMenu)
+    bool rowsListShown = true;  // the drone list page was active at the last check
+    double rowsBothOffAt = 0.0;  // since when neither page is active (0 = one is)
     double rowsNext = 0.0;
-    std::unordered_set<Il2CppObject*> rowsDone;  // rows handled during this open
+    std::unordered_set<Il2CppObject*> rowsDone;  // rows handled since the drone list page was last shown
     // Round 17 ("Its there for a split second, like 200-500ms"): the rows' BindItem / OnFocusReceived detours hide the
     // hint the frame a row is bound or focused, while the link's menu opens or is open (LinkMenu); parts hidden so
     // far this open (for the log)
@@ -2095,6 +2102,10 @@ void Impl::CloudFrame() {
         const int hid = HideRowHints(list, &rows);
         rowHints = std::format("{} row(s), {} hint part(s) hidden, {} before by the row detours", rows, hid, rowsHookHid);
         rowsList = unity::NewGCHandle(list);
+        rowsMenu = unity::NewGCHandle(go);
+        rowsCloud = unity::IsAlive(cloud) ? unity::NewGCHandle(cloud) : nullptr;
+        rowsListShown = true;
+        rowsBothOffAt = 0.0;
         rowsNext = Now() + kRowsSeconds;
     }
     SR2_INFO("[{}] quantum link: Quantum Cloud menu open ({}; cloud legend: {}; drone list legend: {}; drone rows' Go To "
@@ -2138,13 +2149,38 @@ int Impl::HideRow(Il2CppObject* btn) {
 }
 
 // Every kRowsSeconds while the link's menu is open: rows added since (the list repopulates) lose the hint too.
-// The menu closed (gone or inactive): the watch ends; rows still alive get their hint parts back.
+// The menu closed (its display GameObject gone or inactive): the watch ends; rows still alive get their hint parts
+// back. Round 18: the drone list page alone inactive is the Quantum Cloud tab, not a close (until round 17 that
+// ended the watch and gave the rows their hint back, so it showed after going back to the Drones tab): the watch
+// waits, and the frame the page is shown again every row is checked anew (rows kept, rebound or refocused).
+// Closed also counts when both pages (drone list, Quantum Cloud) stay inactive for kRowsClosedSeconds, in case the
+// display GameObject itself stays active after a close.
 void Impl::RowsFrame() {
-    if (Now() < rowsNext) return;
-    rowsNext = Now() + kRowsSeconds;
     Il2CppObject* list = unity::GCHandleTarget(rowsList);
-    if (!unity::IsAlive(list) || !unity::ActiveInHierarchy(unity::GameObjectOf(list))) return EndRows(true);
-    HideRowHints(list, nullptr);
+    Il2CppObject* menuGo = rowsMenu ? unity::GCHandleTarget(rowsMenu) : nullptr;
+    if (!unity::IsAlive(list) || !unity::IsAlive(menuGo) || !unity::ActiveInHierarchy(menuGo)) {
+        if (Now() >= rowsNext) EndRows(true);
+        return;
+    }
+    const bool shown = unity::ActiveInHierarchy(unity::GameObjectOf(list));
+    if (!shown) {
+        Il2CppObject* cloudPage = rowsCloud ? unity::GCHandleTarget(rowsCloud) : nullptr;
+        const bool cloudShown = unity::IsAlive(cloudPage) && unity::ActiveInHierarchy(unity::GameObjectOf(cloudPage));
+        if (cloudShown) rowsBothOffAt = 0.0;
+        else if (rowsBothOffAt <= 0.0) rowsBothOffAt = Now();
+        else if (Now() - rowsBothOffAt >= kRowsClosedSeconds) return EndRows(true);
+    } else {
+        rowsBothOffAt = 0.0;
+    }
+    const bool back = shown && !rowsListShown;
+    if (shown != rowsListShown)
+        SR2_INFO("[{}] quantum link: drone list page {} in the link's menu", module, shown ? "shown again" : "hidden (another tab)");
+    rowsListShown = shown;
+    if (!shown || (!back && Now() < rowsNext)) return;
+    rowsNext = Now() + kRowsSeconds;
+    if (back) rowsDone.clear();
+    const int hid = HideRowHints(list, nullptr);
+    if (back) SR2_INFO("[{}] quantum link: back on the Drones tab, {} row hint part(s) hidden", module, hid);
 }
 
 void Impl::EndRows(bool restore) {
@@ -2157,7 +2193,13 @@ void Impl::EndRows(bool restore) {
                 unity::SetActive(unity::GameObjectOf(child), true);
         }
     if (rowsList) FreeLater({rowsList});
+    if (rowsMenu) FreeLater({rowsMenu});
+    if (rowsCloud) FreeLater({rowsCloud});
     rowsList = nullptr;
+    rowsMenu = nullptr;
+    rowsCloud = nullptr;
+    rowsListShown = true;
+    rowsBothOffAt = 0.0;
     rowsDone.clear();
 }
 
