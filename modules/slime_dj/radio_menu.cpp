@@ -7,8 +7,8 @@
 //   Songs (N)            1-11 of N        Playlist (M)          1-11 of M      (20 px lower with the warning)
 //   [ song buttons, virtual ] |scroll|  > [ entry buttons  (^) (v) (x) ] |scroll|
 //   feedback note (green / orange, a few seconds)
-//   [R Radio: on] [F Shuffle: off]                       [SPACE Queue] / [Z Remove] [SPACE Play now]
-//   [Esc Close]                                                                     [C Clear]
+//   [R Radio: on] [F Shuffle: off]                                  [SPACE Queue] / [Z Remove] [SPACE Play now]
+//   [Esc Close]                                                                                      [C Clear]
 // Round 14 moved the switches from the header to a key bar; round 15 made it two 2 x 2 grids whose row action
 // follows the cursor's list (Songs: Queue; Playlist: Remove, Play now) with the game's own key icons; see Bar.
 // No key hint bar and no action button row: every list row is a button in the game's button colours
@@ -107,9 +107,11 @@ constexpr float kMarkerW = 22.0f;           // the playing entry's '>' left of i
 constexpr float kMarqueeWait = 1.0f, kMarqueeSpeed = 80.0f, kMarqueeEndWait = 1.5f;
 
 // The key area at the bottom, two 2 x 2 grids (round 15: "from left->right top->bottom: [radio, shuffle, close,
-// <empty>] on bottom left / on the right we have (same logic) [remove/queue, play now, <empty>, clear]"). Queue
-// (Songs) and Remove (Playlist) share one cell; Play now shows only for the playlist ("space and enter do the
-// same thing on left column so those can be merged"). Each button shows the game's own key icon (`kBarControls`,
+// <empty>] on bottom left / on the right we have (same logic) [remove/queue, play now, <empty>, clear]"). Round 16
+// ("should be [<empty>, Queue, <empty>, Clear]"): Queue (Songs) shares the top-right cell with Play now
+// (Playlist), Remove (Playlist) sits left of it; the right grid's buttons are right-aligned in their cells, so
+// Clear lines up with Queue / Play now. Play now shows only for the playlist ("space and enter do the same thing
+// on left column so those can be merged"). Each button shows the game's own key icon (`kBarControls`,
 // game_button Spec.control; `kBarKeys` = the key cap text if the game has no icon for it).
 enum Bar { kBarRadio, kBarShuffle, kBarClose, kBarQueue, kBarRemove, kBarPlay, kBarClear, kBarCount };
 constexpr const char* kBarNames[kBarCount] = {"Radio", "Shuffle", "Close", "Queue", "Remove", "Play now", "Clear"};
@@ -118,7 +120,7 @@ constexpr const char* kBarControls[kBarCount] = {"<Keyboard>/r",     "<Keyboard>
                                                  "<Keyboard>/z",     "<Keyboard>/space", "<Keyboard>/c"};
 constexpr float kBarMinW[kBarCount] = {160, 180, 0, 110, 110, 0, 0};  // label widths that don't jump (on / off, Queue / Remove)
 // Grid cell of each button: column 0..3 (0-1 the left grid, 2-3 the right one), row 0..1.
-constexpr int kBarCol[kBarCount] = {0, 1, 0, 2, 2, 3, 3};
+constexpr int kBarCol[kBarCount] = {0, 1, 0, 3, 2, 3, 3};
 constexpr int kBarRow[kBarCount] = {0, 0, 1, 0, 0, 0, 1};
 // Header (round 15: "we have a lot of free space at the top so we can move the columns up by like 120px, when no
 // radio, move it down like 20px or so that the warning pill fits"): title, corral name and warning pill share one
@@ -749,7 +751,7 @@ bool RadioMenu::Setup(Resolver& R, std::string& why) {
 // The key area (round 14: "the key hints should be at the bottom"; round 15: two 2 x 2 grids, see `Bar`): the
 // game's popup button through game_button, scaled like the receipt's, with the game's own key icon of its key
 // (Spec.control: "[SPACE]" is a wide icon in the game, not a square cap; round 14's "ESC" cap text overflowed its
-// key). Left grid: Radio, Shuffle / Close; right grid: Queue or Remove, Play now / Clear. Our own pills if the
+// key). Left grid: Radio, Shuffle / Close; right grid: Remove, Queue or Play now / Clear. Our own pills if the
 // game's button can't be cloned. LayoutBar places them by their laid-out widths.
 namespace {
 constexpr const char* kBarIds[kBarCount] = {"RadioToggle", "RadioShuffle", "RadioClose", "RadioQueue",
@@ -809,8 +811,9 @@ bool RadioMenu::Impl::BuildBar(Il2CppObject* prt) {
 
 // Places the grids' buttons by their widths (the game's button: its laid-out rect, which follows the label and
 // the key icon; a guess until the first layout; a hidden button keeps its last width). Each grid column is as
-// wide as its widest button and its buttons start at its left edge; the left grid starts at the panel's left
-// padding, the right grid ends at the right padding. Cheap when nothing changed (one get_rect per shown game
+// wide as its widest button; the left grid's buttons start at their column's left edge, the right grid's end at
+// their column's right edge (round 16); the left grid starts at the panel's left padding, the right grid ends at
+// the right padding. Cheap when nothing changed (one get_rect per shown game
 // button).
 void RadioMenu::Impl::LayoutBar(bool force) {
     float w[kBarCount];
@@ -827,12 +830,14 @@ void RadioMenu::Impl::LayoutBar(bool force) {
                            kPanelW - kPad - colW[3]};
     for (int i = 0; i < kBarCount; ++i) {
         BarBtn& b = bar[i];
-        const float x = std::round(colX[kBarCol[i]]);
+        const int c = kBarCol[i];
+        const bool right = c >= 2;  // right grid: the button's right edge on its column's right edge
+        const float x = std::round(right ? colX[c] + colW[c] - w[i] : colX[c]);
         const float rowTop = barY + static_cast<float>(kBarRow[i]) * (kBarH + kBarRowGap);
         if (!force && std::fabs(x - b.px) < 0.5f && std::fabs(rowTop - b.py) < 0.5f) continue;
         b.px = x;
         b.py = rowTop;
-        if (b.game.Exists()) b.game.Place(x, rowTop + kBarH * 0.5f, 0.0f);
+        if (b.game.Exists()) b.game.Place(right ? std::round(colX[c] + colW[c]) : x, rowTop + kBarH * 0.5f, right ? 1.0f : 0.0f);
         else if (unity::IsAlive(b.bg)) At(unity::TransformOf(unity::GameObjectOf(b.bg)), x, rowTop, w[i], kBarH);
     }
 }

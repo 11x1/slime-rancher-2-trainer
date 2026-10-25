@@ -316,6 +316,10 @@ radio channel exists), then opens the menu.
     jumps when the list changes); left grid from the left padding, right grid ending at the right padding.
     Queue (Songs) and Remove (Playlist) are two buttons in one cell, the hidden one inactive; Play now only for
     the playlist. Keys move through the grids as one 4 x 2 grid (empty cells skipped, `BarMove`).
+    Round 16 (user: "should be [<empty>, Queue, <empty>, Clear]"; "Right bottom icons should be aligned right"):
+    Queue moved to the top-right cell, sharing it with Play now (never both shown); Remove keeps the cell left of
+    it, empty while the song list has the cursor. The right grid's buttons are right-aligned in their columns
+    (game button placed with pivot x 1 on the column's right edge), so Clear ends where Queue / Play now end.
   - Keys (user: "use [Z] to remove songs, [SPACE] to play now"; "space and enter do the same thing on left
     column so those can be merged"): Songs Space / Enter / pad A queue (Play now from the song list and its
     Enter / pad X are gone); Playlist Space / Enter / pad A play, Z / Delete / Backspace / pad X remove.
