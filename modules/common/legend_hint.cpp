@@ -27,12 +27,13 @@ T& F(void* obj, size_t off) {
 struct Sym {
     Il2CppClass *legend = nullptr, *hint = nullptr, *inputIcon = nullptr, *registrar = nullptr;
     Il2CppClass *eventDisplay = nullptr, *invokeOnClick = nullptr, *lse = nullptr, *selectable = nullptr;
+    Il2CppClass* srButton = nullptr;  // optional: the entry's SRButton (its enabled state = the entry's look)
     size_t ciObject = kNoOff, legendHints = kNoOff, regPassThrough = kNoOff;
     size_t hintConfig = kNoOff, cfgEvent = kNoOff, cfgEvent2 = kNoOff;  // InputHint._configuration, its events
     size_t hintEnabled = kNoOff;                                         // InputHint._inputEnabled
     size_t iconButton = kNoOff, iconKey = kNoOff, iconKeyText = kNoOff, iconKeyImage = kNoOff, iconKeyLse = kNoOff,
            iconDouble = kNoOff, iconButtonImage = kNoOff;
-    ugui::Fn behSetEnabled, setSiblingIndex, getSiblingIndex;
+    ugui::Fn behSetEnabled, setSiblingIndex, getSiblingIndex, srSetEnabled;
 };
 Sym s_;
 std::mutex g_mutex;
@@ -92,6 +93,13 @@ bool ResolveImpl(std::string& err) {
     s.iconButtonImage = fld(s.inputIcon, "_buttonImage");
     s.lse = cls("Unity.Localization", "UnityEngine.Localization.Components", "LocalizeStringEvent");
     s.selectable = cls("UnityEngine.UI", "UnityEngine.UI", "Selectable");
+    {  // optional, not reported as missing
+        std::string e;
+        s.srButton = r.Class(kAsm, "MonomiPark.SlimeRancher.UI.ButtonBehavior", "SRButton", &e);
+        const MethodInfo* m = s.srButton ? r.Method(s.srButton, "SetEnabled", 1, &e) : nullptr;
+        s.srSetEnabled = m ? ugui::BindFn(m) : ugui::Fn{};
+        if (!s.srSetEnabled) s.srButton = nullptr;
+    }
     s.behSetEnabled = bind(cls("UnityEngine.CoreModule", "UnityEngine", "Behaviour"), "set_enabled", 1);
     Il2CppClass* transform = cls("UnityEngine.CoreModule", "UnityEngine", "Transform");
     s.setSiblingIndex = bind(transform, "SetSiblingIndex", 1);
@@ -226,6 +234,17 @@ bool Clone::Create(Il2CppObject* tmpl, std::string_view name, std::string& why) 
     go_.Reset(go);
     unity::SetName(go, name);
     ugui::SetAsLastSibling(unity::TransformOf(go));
+    // Enabled look (round 14: "its grayed out by default"): a key bar entry whose action is unavailable has its
+    // SRButton disabled (SRButton.UpdateStyle greys it; InputHint.SetEnabled). A clone of such an entry (the
+    // drone page's Start Program before any change) stays grey: a disabled SRButton never runs Start, which
+    // would enable it. Enabled here, before the behaviours below are switched off (its OnEnable switches on its
+    // _enableDisableWith list).
+    if (s_.srButton)
+        ugui::ForEachInChildren(go, s_.srButton, true, [&](Il2CppObject* b) {
+            ugui::Call<void>(s_.srSetEnabled, b, true);  // before Start: the wish Start applies
+            SetEnabled(b, true);                          // now: OnEnable -> UpdateStyle
+            return true;
+        });
     // Behaviour off: the hint would configure itself from the template's input event and fire it on click.
     if (Il2CppObject* h = unity::GetComponent(go, s_.hint)) ugui::Destroy(h);
     if (s_.invokeOnClick)

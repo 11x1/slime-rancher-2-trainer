@@ -62,7 +62,15 @@ struct G {
     size_t offIconButton = 0, offIconKey = 0, offIconKeyText = 0, offIconKeyImage = 0, offIconKeyLse = 0,
            offIconDouble = 0;
     size_t offResizeMinW = 0;  // ResizeToPreferred._minWidth (Optional<float>: bool hasValue, float value)
-    bool glyphOk = false, tintOk = false, minWidthOk = false;
+    // The game's key icons (Spec.control): KeyboardMouseIconSet._items (List<KeyboardMouseIcon>), ._control,
+    // InputIcon.SetIcon(IInputIcon, InputDevice), Keyboard.current.
+    Il2CppClass* kmSetClass = nullptr;
+    size_t offKmItems = 0, offKmControl = 0;
+    const MethodInfo* iconSetIcon = nullptr, *kbCurrent = nullptr;
+    // Focus look: ButtonAnimator.OnPointerEnter / OnPointerExit / OnSubmit, its private mouseOver.
+    const MethodInfo* animEnter = nullptr, *animExit = nullptr, *animSubmit = nullptr;
+    size_t offAnimMouseOver = 0;
+    bool glyphOk = false, tintOk = false, minWidthOk = false, keyIconOk = false, focusOk = false;
 };
 G g;
 std::mutex g_mutex;
@@ -74,6 +82,20 @@ struct Tint {
     Il2CppGCHandle h;
 };
 std::vector<Tint> g_tints;
+
+// KeyboardMouseIcon entries looked up by control path (found or not), kept for the session.
+struct KeyIconEntry {
+    std::string control;
+    Il2CppObject* obj;
+    Il2CppGCHandle h;
+};
+std::vector<KeyIconEntry> g_keyIcons;
+
+std::string Lower(std::string_view s) {
+    std::string r(s);
+    for (char& c : r) c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    return r;
+}
 
 template <class T>
 T Unbox(Il2CppObject* boxed, T def = T{}) {
@@ -250,12 +272,52 @@ bool Resolve(Resolver& R, std::string& why) {
                          off(g.resizeClass, "_maxWidth", maxW) && maxW == g.offResizeMinW + 8)
         g.minWidthOk = true;  // Optional<float> = { bool _hasValue; float _value; } (8 bytes, dump)
     if (!g.minWidthOk) report += " minimum width: NOT available;";
+    {
+        g.kmSetClass = cls(kImage, "MonomiPark.SlimeRancher.Input", "KeyboardMouseIconSet");
+        Il2CppClass* kmIcon = cls(kImage, "MonomiPark.SlimeRancher.Input", "KeyboardMouseIcon");
+        Il2CppClass* keyboard = cls("Unity.InputSystem", "UnityEngine.InputSystem", "Keyboard");
+        g.iconSetIcon = g.iconClass ? R.Method(g.iconClass, "SetIcon", 2, &err) : nullptr;
+        g.kbCurrent = keyboard ? R.Method(keyboard, "get_current", 0, &err) : nullptr;
+        g.keyIconOk = g.glyphOk && g.kmSetClass && kmIcon && g.iconSetIcon && off(g.kmSetClass, "_items", g.offKmItems) &&
+                      off(kmIcon, "_control", g.offKmControl);
+        if (!g.keyIconOk) report += " the game's key icons: NOT available (key caps with our text);";
+    }
+    g.animEnter = method(g.animatorClass, "OnPointerEnter", 0);
+    g.animExit = method(g.animatorClass, "OnPointerExit", 0);
+    g.animSubmit = method(g.animatorClass, "OnSubmit", 0);
+    g.focusOk = g.animEnter && g.animExit && off(g.animatorClass, "mouseOver", g.offAnimMouseOver);
+    if (!g.focusOk) report += " focus look: NOT available;";
     g.why = report;
     why = report;
     return true;
 }
 
 bool Available() { return g.done && g.ok; }
+
+Il2CppObject* KeyIcon(std::string_view control) {
+    if (!Available() || !g.keyIconOk || control.empty()) return nullptr;
+    const std::string want = Lower(control);
+    for (const KeyIconEntry& e : g_keyIcons)
+        if (e.control == want) return e.obj && unity::IsAlive(e.obj) ? e.obj : nullptr;
+    // One scan of the icon set assets for this path (not per frame: only when a button asks for a new one).
+    Il2CppObject* found = nullptr;
+    for (Il2CppObject* set : unity::FindObjectsOfTypeAll(g.kmSetClass)) {
+        if (!IsA(set, g.kmSetClass) || !unity::IsAlive(set)) continue;
+        void* items = unity::Field<void*>(set, g.offKmItems);
+        const size_t n = items ? std::min<size_t>(unity::ListCount(items), 1024) : 0;
+        for (size_t i = 0; i < n && !found; ++i) {
+            auto* icon = static_cast<Il2CppObject*>(unity::ListAt(items, i));
+            auto* ctl = icon ? unity::Field<Il2CppString*>(icon, g.offKmControl) : nullptr;
+            if (ctl && Lower(unity::ToUtf8(ctl)) == want) found = icon;
+        }
+        if (found) break;
+    }
+    Il2CppGCHandle h = found ? unity::NewGCHandle(found) : nullptr;
+    if (!h) found = nullptr;
+    g_keyIcons.push_back({want, found, h});
+    SR2_INFO("game button: key icon for '{}': {}", want, found ? "the game's KeyboardMouseIcon entry" : "none (key cap text)");
+    return found;
+}
 
 // ---------------------------------------------------------------- button --
 
@@ -284,6 +346,10 @@ Button& Button::operator=(Button&& o) noexcept {
     o.handles_.clear();
     label_text_ = std::move(o.label_text_);
     key_ = std::move(o.key_);
+    control_ = std::move(o.control_);
+    keyIcon_ = std::exchange(o.keyIcon_, nullptr);
+    focused_ = o.focused_;
+    focusShown_ = o.focusShown_;
     padGlyph_ = o.padGlyph_;
     popupGlyph_ = o.popupGlyph_;
     interactable_ = o.interactable_;
@@ -300,7 +366,8 @@ Button& Button::operator=(Button&& o) noexcept {
 }
 
 void Button::Release() {
-    slot_ = go_ = button_ = animator_ = label_ = iconBg_ = display_ = padKeyText_ = padKeyRoot_ = nullptr;
+    slot_ = go_ = button_ = animator_ = label_ = iconBg_ = display_ = padKeyText_ = padKeyRoot_ = keyIcon_ = nullptr;
+    focused_ = focusShown_ = false;
     origNormal_ = origSelected_ = nullptr;
     icons_.clear();
     FreeLater(handles_);
@@ -436,6 +503,9 @@ bool Button::Create(Il2CppObject* parentTr, const Spec& spec, std::string& why) 
 
     label_text_ = spec.label;
     key_ = spec.key;
+    control_ = spec.control;
+    keyIcon_ = control_.empty() ? nullptr : KeyIcon(control_);
+    focused_ = focusShown_ = false;
     padGlyph_ = spec.padGlyph;
     popupGlyph_ = spec.popupGlyph;
     interactable_ = true;
@@ -528,6 +598,30 @@ void Button::SetActive(bool on) {
     }
 }
 
+void Button::SetFocused(bool on) {
+    if (on == focused_) return;
+    focused_ = on;
+    if (!on && focusShown_ && Alive()) FocusTick(Hovered());
+}
+
+void Button::PlayPress() {
+    if (Alive() && animator_ && g.animSubmit && interactable_) Call(module_, g.animSubmit, animator_, {}, "ButtonAnimator.OnSubmit");
+}
+
+// Focused: the animator shows the hover look (it drops it when a pointer leaves; re-entered then). Not focused
+// any more: back to normal unless the pointer is really on it.
+void Button::FocusTick(bool inside) {
+    if (!g.focusOk || !animator_ || !interactable_) return;
+    const bool over = unity::Field<bool>(animator_, g.offAnimMouseOver);
+    if (focused_ && !over) {
+        Call(module_, g.animEnter, animator_, {}, "ButtonAnimator.OnPointerEnter");
+        focusShown_ = true;
+    } else if (!focused_ && focusShown_) {
+        focusShown_ = false;
+        if (over && !inside) Call(module_, g.animExit, animator_, {}, "ButtonAnimator.OnPointerExit");
+    }
+}
+
 void Button::Apply() {
     if (!Alive()) return;
     Call(module_, g.tmpSetText, label_, {unity::NewString(label_text_)}, "TMP_Text.set_text");
@@ -539,7 +633,8 @@ void Button::ApplyGlyph() {
     const bool show = !key_.empty() || popupGlyph_;
     unity::SetActive(iconBg_, show);
     if (!show) return;
-    if (key_.empty() || padGlyph_ || !g.glyphOk || icons_.empty()) {
+    const bool gameIcon = keyIcon_ && unity::IsAlive(keyIcon_) && g.keyIconOk && !icons_.empty();
+    if (!gameIcon && (key_.empty() || padGlyph_ || !g.glyphOk || icons_.empty())) {
         // The source binding's own display (padGlyph: the key text is replaced in PadGlyphTick).
         if (display_) {
             bool on = true;
@@ -578,6 +673,11 @@ void Button::ApplyGlyph() {
             continue;
         }
         unity::SetActive(iconGo, true);
+        if (gameIcon) {  // the game's own key icon, set as its InputEventDisplay would (InputIcon.SetIcon)
+            Il2CppObject* kb = g.kbCurrent ? Call(module_, g.kbCurrent, nullptr, {}, "Keyboard.get_current") : nullptr;
+            Call(module_, g.iconSetIcon, icon, {keyIcon_, kb}, "InputIcon.SetIcon");
+            continue;
+        }
         Il2CppObject* btn = unity::Field<Il2CppObject*>(icon, g.offIconButton);
         Il2CppObject* keyRoot = unity::Field<Il2CppObject*>(icon, g.offIconKey);
         Il2CppObject* dbl = unity::Field<Il2CppObject*>(icon, g.offIconDouble);
@@ -638,6 +738,7 @@ bool Button::Tick() {
     const bool inside = Unbox<bool>(Call(module_, g.selPointerInside, button_, {}, "Selectable.get_isPointerInside", &ok2)) && ok2;
     const bool click = wasPressed_ && !pressed && inside && interactable_;
     wasPressed_ = pressed;
+    if (focused_ || focusShown_) FocusTick(inside);
     return click;
 }
 
