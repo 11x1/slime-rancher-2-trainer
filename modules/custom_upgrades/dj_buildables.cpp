@@ -136,6 +136,13 @@ constexpr float kRadioDamping = 0.6f;  // the radio's Rigidbody linear damping (
 constexpr float kDeskTop = 1.22f, kDeck = 0.45f, kDeckZ = 0.05f, kSeatTop = 0.72f;
 constexpr StackBox kSeat{0.0f, 0.0f, -1.8f};
 
+// An emitter's hearing range and volume factors (slime_dj api.h RegisterEmitter; the record's volume x volume).
+struct EmitterScale {
+    float range = 1.0f, volume = 1.0f;
+};
+// Round 12 ("sound is pretty quiet for the table's size", "only the right speaker is playing"): every booth
+// speaker plays; the floor speakers louder and wider than a music box, the desk ones quieter.
+constexpr EmitterScale kBoothFloor{1.5f, 1.4f}, kBoothDesk{1.0f, 0.6f};
 struct Vec3 {
     float x, y, z;
 };
@@ -170,7 +177,7 @@ struct VariantSpec {
 constexpr VariantSpec kBoothSpec[] = {
     {"SlimeDJBooth", "Slime DJ Booth",
      "A DJ table with a deck, monitor speakers and two big speakers. Interact with it to switch it on: it plays your "
-     "Slime DJ song while a slime (largos too) sits on the pillow behind it, the corral music box tune otherwise. To place "
+     "Slime DJ song while a slime (largos and Tarrs too) sits on the pillow behind it, the corral music box tune otherwise. To place "
      "one: fabricate it, hold a Scientist Desk in gadget mode, press the Variant key until it shows Slime DJ Booth, "
      "then place it. Needs the Scientist Desk blueprint."},
 };
@@ -238,7 +245,7 @@ struct Impl : variant_ext::Extension {
     size_t offMembers = 0, offSubGroups = 0;
     size_t offGmpMusic = 0, offGmpCue = 0, offGmpCooldown = 0, offGmpNext = 0, offGdCurrentPlayer = 0;
     size_t offUiPrompt = 0, offUiInput = 0, offUiBlock = 0, offUiDeactivate = 0;
-    size_t offApAllowLargo = 0, offApSlime = 0, offApJointActive = 0, offApSpin = 0;
+    size_t offApAllowLargo = 0, offApAllowTarr = 0, offApSlime = 0, offApJointActive = 0, offApSpin = 0;
     size_t offVacHeld = 0;
     size_t offSrcVolume = 0, offSrcPitch = 0, offSrcCue = 0, offSrcLoop = 0, offSrcPlayOnStart = 0, offSrcRestart = 0;
     // methods
@@ -341,6 +348,7 @@ struct Impl : variant_ext::Extension {
         Il2CppObject* box = nullptr;           // radio: the toy's box collider (made the radio's size)
         Vec3 boxCenterWas{}, boxSizeWas{};
         std::vector<Il2CppObject*> emitters;
+        std::vector<EmitterScale> scales;      // per emitter (parallel to emitters; missing = 1, 1)
         float vol = -1.0f;                     // emitter volume scale registered (-1 = none yet)
         std::vector<Il2CppObject*> animators;
         std::vector<Il2CppObject*> fx;
@@ -645,6 +653,11 @@ struct Impl : variant_ext::Extension {
     const char* Label(const Rec& rec) const { return rec.kind < 0 ? "Boombox" : fams[rec.fam].label; }
     sdj::EmitterKind KindOf(const Rec& rec) const {
         return rec.fam == kBooth ? sdj::EmitterKind::kBooth : rec.fam == kRadio ? sdj::EmitterKind::kRadio : sdj::EmitterKind::kSpeaker;
+    }
+    // An emitter's factors: the booth's per speaker (BuildBooth), a radio 0.6x range, else 1 / 1.
+    static EmitterScale ScaleOf(const Rec& rec, size_t i) {
+        if (i < rec.scales.size()) return rec.scales[i];
+        return rec.fam == kRadio ? EmitterScale{0.6f, 1.0f} : EmitterScale{};
     }
     Rec* RecOfPlayer(Il2CppObject* player);
     bool Seated(const Rec& rec);
@@ -1317,16 +1330,21 @@ void Impl::BuildBooth(Rec& rec, std::string& what) {
                       "Point Light (1)", "SoundScientistDesk"});
     constexpr float kTop = kDeskTop;
     // Big speakers on the floor beside the desk; they carry the song.
+    auto emit = [&](Il2CppObject* spk, EmitterScale sc) {
+        if (!spk) return false;
+        rec.emitters.push_back(spk);
+        rec.scales.push_back(sc);
+        return true;
+    };
     for (float side : {-1.0f, 1.0f})
-        if (Il2CppObject* spk = CloneBoombox(rec, holder, {side * 1.75f, 0.0f, 0.1f}, AxisY(-side * 12.0f), 1.35f))
-            rec.emitters.push_back(spk);
+        emit(CloneBoombox(rec, holder, {side * 1.75f, 0.0f, 0.1f}, AxisY(-side * 12.0f), 1.35f), kBoothFloor);
     // Small monitor speakers on the front corners of the desk, facing the same way.
     int parts = 0;
     for (float side : {-1.0f, 1.0f})
-        parts += CloneBoombox(rec, holder, {side * 0.8f, kTop, 0.3f}, AxisY(-side * 12.0f), 0.4f) ? 1 : 0;
+        parts += emit(CloneBoombox(rec, holder, {side * 0.8f, kTop, 0.3f}, AxisY(-side * 12.0f), 0.4f), kBoothDesk) ? 1 : 0;
     // The middle speaker: upright on the desk, facing the audience like the others. It used to lie face up as
     // a "deck" (round 11: "the middle small speaker is looking up").
-    parts += CloneBoombox(rec, holder, {0.0f, kTop, kDeckZ}, {0, 0, 0, 1}, kDeck) ? 1 : 0;
+    parts += emit(CloneBoombox(rec, holder, {0.0f, kTop, kDeckZ}, {0, 0, 0, 1}, kDeck), kBoothDesk) ? 1 : 0;
     // The DJ's seat: the Boombox's bench (its colliders kept) with the Flower Pillow on top - mesh,
     // colliders and the game's slime attachment point with its scripts - so the slime sits high enough to
     // be seen over the desk. Largos allowed (larger trigger), far enough back not to clip into the desk.
@@ -1352,6 +1370,9 @@ void Impl::BuildBooth(Rec& rec, std::string& what) {
             if (p == "SlimeAttachmentPoint") {
                 if (Il2CppObject* ap = unity::GetComponent(c, attachClass)) {
                     unity::Field<bool>(ap, offApAllowLargo) = true;  // still inactive: set before its Awake
+                    // Round 12 ("Tarrs should be able to go behind the DJ table"): OnTriggerEnter takes a Tarr
+                    // (TarrTypeGroup member) only with _allowTarr; it then sits on the largo joint like a largo.
+                    if (offApAllowTarr) unity::Field<bool>(ap, offApAllowTarr) = true;
                     rec.attach = ap;
                     rec.spinWas = offApSpin ? unity::Field<float>(ap, offApSpin) : 0.0f;
                     Keep(rec, ap);
@@ -1370,9 +1391,9 @@ void Impl::BuildBooth(Rec& rec, std::string& what) {
     }
     AddBoothInteraction(rec);
     AddStandby(rec, {0.0f, kTop + 0.3f, 0.0f});
-    what = std::format("{} part(s) hidden, 2 floor speakers, {} desk / seat part(s), slime seat {}{} (spin {:.0f}), interact {}, "
+    what = std::format("{} part(s) hidden, 2 floor speakers, {} desk / seat part(s) (every speaker plays), slime seat {}{} (spin {:.0f}), interact {}, "
                        "standby tune {}", rec.hidden.size(), parts, spot == 3 ? "ready" : "missing",
-                       rec.attach ? " (largos allowed)" : "", rec.spinWas, rec.addedUi ? "on" : "NOT available",
+                       rec.attach ? " (largos and Tarrs allowed)" : "", rec.spinWas, rec.addedUi ? "on" : "NOT available",
                        rec.standby ? "ready" : "NOT available (the Boombox's track instead)");
 }
 
@@ -1428,7 +1449,10 @@ void Impl::AddStandby(Rec& rec, Vec3 at) {
     unity::Field<float>(c, offSrcPitch) = unity::Field<float>(standbySrc, offSrcPitch);
     unity::Field<bool>(c, offSrcLoop) = true;
     unity::Field<bool>(c, offSrcPlayOnStart) = false;
-    unity::Field<bool>(c, offSrcRestart) = true;
+    // Round 12 ("At spawn, when deactived, plays the default sound"): SECTR_AudioSource.OnEnable (0x4EE180)
+    // calls Play() on a looping source with RestartLoopsOnEnabled, so the switched-off booth played the tune
+    // as soon as its holder went active (placed, loaded, zone back). Apply starts it when it should play.
+    unity::Field<bool>(c, offSrcRestart) = false;
     rec.standby = c;
     Keep(rec, c);
 }
@@ -1683,7 +1707,10 @@ bool Impl::Build(int64_t id, Il2CppObject* root, Rec& rec) {
     // Booths and speakers stay silent until they are switched on (Apply sets the volume); radios always play.
     rec.vol = fam == kRadio ? 0.8f : 0.0f;
     int registered = 0;
-    for (Il2CppObject* e : rec.emitters) registered += sdj::RegisterEmitter(e, KindOf(rec), fam == kRadio ? 0.6f : 1.0f, rec.vol) ? 1 : 0;
+    for (size_t i = 0; i < rec.emitters.size(); ++i) {
+        const EmitterScale sc = ScaleOf(rec, i);
+        registered += sdj::RegisterEmitter(rec.emitters[i], KindOf(rec), sc.range, rec.vol * sc.volume) ? 1 : 0;
+    }
     SR2_INFO("[{}] dj buildables: {} actor {} dressed ({}; {} emitter(s){})", module, fams[fam].label, id, what, registered,
              fam == kRadio ? "" : rec.on ? "; switched on" : "; switched off");
     return true;
@@ -1790,8 +1817,10 @@ void Impl::ToggleVanilla(Il2CppObject* player) {
 void Impl::SetVolume(Rec& rec, float vol) {
     if (rec.vol == vol) return;
     rec.vol = vol;
-    for (Il2CppObject* e : rec.emitters)  // registering again only changes the scales
-        sdj::RegisterEmitter(e, KindOf(rec), 1.0f, vol);
+    for (size_t i = 0; i < rec.emitters.size(); ++i) {  // registering again only changes the scales
+        const EmitterScale sc = ScaleOf(rec, i);
+        sdj::RegisterEmitter(rec.emitters[i], KindOf(rec), sc.range, vol * sc.volume);
+    }
 }
 
 // The boomboxes dance and show their notes only while something plays from them.
@@ -2317,6 +2346,7 @@ bool DjBuildables::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& 
     off(p->uiClass, "_blockInteractInGadgetMode", p->offUiBlock);
     off(p->uiClass, "_deactivateInteractionPrompt", p->offUiDeactivate);
     off(p->attachClass, "_allowLargo", p->offApAllowLargo);
+    off(p->attachClass, "_allowTarr", p->offApAllowTarr);
     off(p->attachClass, "_slime", p->offApSlime);
     off(p->attachClass, "_isJointActive", p->offApJointActive);
     off(p->attachClass, "_rotationSpeed", p->offApSpin);
