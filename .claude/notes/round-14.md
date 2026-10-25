@@ -30,6 +30,7 @@ The user's main complaint: our buttons are not the game's. Clone the game's own 
 - "'[SPACE] Add program' can be renamed to '[SPACE] Add', use the game's key icons please".
 - "Next program mode selection doesnt align with options menu, rough style is there but the ingame select component looks different". Clone the game's own options-menu selector (the `< value >` component in the game's Settings), not ours.
 - Added while running: "rename 'Start Program' to 'Save Program' makes more sense imo how the button actually functions". The station page's [X] Start Program key bar entry (and the button, if there is one) reads "Save Program" while custom upgrades are on.
+- Added while running: "can't add multiple programs to a explorer mode drone as it has no source and destination, only one option". Make the programs feature work for a station in Explorer mode. Decide from the game's data what a program means there (e.g. explorer settings per program, or programs mixing explorer and source/destination programs). At least, adding a program must not be blocked or broken.
 - Key bar entry: "Move it to the leftmost position, its grayed out by default, even at 'program 1/2'". The [P] entry goes first in the key bar and must look enabled.
 
 ## C. Fabricator preview pictures still pixelated (`fix/card-pictures-r14`)
