@@ -129,6 +129,7 @@ struct PlotMenuSlider::Impl {
                     *dpadRight = nullptr, *stickLeft = nullptr, *stickRight = nullptr, *btnPressed = nullptr;
     const MethodInfo* kbCurrent = nullptr, *kbLeft = nullptr, *kbRight = nullptr;
     const MethodInfo* padRStick = nullptr, *kbShift = nullptr;  // SliderInput::kSecondary
+    const MethodInfo* kbCtrl = nullptr, *kbA = nullptr, *kbD = nullptr;  // spec.fastKeys (optional)
     const MethodInfo* mouseCurrent = nullptr, *mouseLeft = nullptr;
     bool inputOk = false, selectionOk = false;
 
@@ -277,8 +278,30 @@ struct PlotMenuSlider::Impl {
         Il2CppObject* kb = Call(kbCurrent, nullptr, {}, "Keyboard.get_current", &ok);
         return ok && kb && Pressed(kbShift, kb);
     }
-    // This press / event is for this slider's keys (SliderInput): Shift held <=> kSecondary.
-    bool OwnInput() { return (spec.input == SliderInput::kSecondary) == ShiftHeld(); }
+    bool CtrlHeld() {
+        if (!kbCurrent || !kbCtrl) return false;
+        bool ok = false;
+        Il2CppObject* kb = Call(kbCurrent, nullptr, {}, "Keyboard.get_current", &ok);
+        return ok && kb && Pressed(kbCtrl, kb);
+    }
+    // This press / event is for this slider's keys (SliderInput): Shift held <=> kSecondary. With fastKeys
+    // Shift is a modifier of the (only, primary) slider.
+    bool OwnInput() {
+        if (spec.fastKeys && spec.input == SliderInput::kPrimary) return true;
+        return (spec.input == SliderInput::kSecondary) == ShiftHeld();
+    }
+    // fastKeys: how many steps one repeat moves after the press was held `heldTime` seconds.
+    int HeldMultiplier() const {
+        if (!spec.fastKeys) return 1;
+        return heldTime < 1.0f ? 1 : heldTime < 2.0f ? 2 : heldTime < 3.0f ? 5 : 10;
+    }
+    // The value one step in `dir` from v: Ctrl = min / max, Shift = shiftStep (fastKeys only), else mult steps.
+    int Next(int v, int dir, int mult, bool shift, bool ctrl) const {
+        const int step = std::max(spec.step, 1);
+        if (spec.fastKeys && ctrl) return dir > 0 ? spec.max : spec.min;
+        if (spec.fastKeys && shift) return Snap(v + dir * std::max(step, (spec.shiftStep + step - 1) / step * step));
+        return Snap(v + dir * step * std::max(mult, 1));
+    }
     bool PrimaryKeys() const { return spec.input == SliderInput::kPrimary; }
     void PlaceInSlot(Il2CppObject* go, Il2CppObject* craftTr, bool layout);
     bool AddRaycaster(Il2CppObject* go, Il2CppObject* parentTr);
@@ -527,6 +550,10 @@ bool PlotMenuSlider::Setup(Resolver& R, const char* module, std::string& why) {
         p->kbRight = kb ? R.Method(kb, "get_rightArrowKey", 0, &err) : nullptr;
         p->padRStick = pad ? R.Method(pad, "get_rightStick", 0, &err) : nullptr;
         p->kbShift = kb ? R.Method(kb, "get_shiftKey", 0, &err) : nullptr;
+        p->kbCtrl = kb ? R.Method(kb, "get_ctrlKey", 0, &err) : nullptr;
+        p->kbA = kb ? R.Method(kb, "get_aKey", 0, &err) : nullptr;
+        p->kbD = kb ? R.Method(kb, "get_dKey", 0, &err) : nullptr;
+        if (!p->kbCtrl || !p->kbA || !p->kbD) report += " dialog slider keys (Ctrl, A / D): partly NOT available;";
         if (!p->padRStick || !p->kbShift) report += " second slider keys (right stick / Shift + arrows): partly NOT available;";
         p->inputOk = p->btnPressed && ((p->padCurrent && p->padDpad && p->dpadLeft && p->dpadRight) ||
                                        (p->kbCurrent && p->kbLeft && p->kbRight));
@@ -920,7 +947,10 @@ int PlotMenuSlider::Impl::InputDirection() {
     }
     if (dir == 0 && kbCurrent && OwnInput()) {  // arrows: Shift + arrows for the secondary slider
         Il2CppObject* kb = Call(kbCurrent, nullptr, {}, "Keyboard.get_current", &ok);
-        if (ok && kb) dir += (Pressed(kbRight, kb) ? 1 : 0) - (Pressed(kbLeft, kb) ? 1 : 0);
+        if (ok && kb) {
+            dir += (Pressed(kbRight, kb) ? 1 : 0) - (Pressed(kbLeft, kb) ? 1 : 0);
+            if (dir == 0 && spec.fastKeys) dir += (Pressed(kbD, kb) ? 1 : 0) - (Pressed(kbA, kb) ? 1 : 0);
+        }
     }
     return dir;
 }
@@ -955,6 +985,7 @@ bool PlotMenuSlider::Step(int dir) {
     dir = dir > 0 ? 1 : -1;
     const uint64_t now = Impl::NowMs();
     const bool samePress = p.heldDir == dir;
+    if (p.spec.fastKeys && samePress) return true;  // our poll repeats this press (with the speed-up)
     const bool pollStepped = samePress && !p.navDriven && now - p.lastPollStepMs < kSamePressMs;
     if (samePress) p.navDriven = true;  // the input module repeats it from now on, not our poll
     p.lastNavDir = dir;
@@ -964,7 +995,8 @@ bool PlotMenuSlider::Step(int dir) {
         SR2_INFO("[{}] slider '{}': left / right taken from the menu's grid navigation", p.module, p.spec.name);
     }
     if (!pollStepped) {
-        const int v = p.Snap(p.value + dir * p.spec.step);
+        const bool fast = p.spec.fastKeys;
+        const int v = p.Next(p.value, dir, 1, fast && p.ShiftHeld(), fast && p.CtrlHeld());
         p.SetSliderValue(v);
         p.Apply(v, true);
     }
@@ -1034,6 +1066,7 @@ void PlotMenuSlider::Tick(float dt) {
         p.navDriven = p.lastNavDir == dir && now - p.lastNavMs < kSamePressMs;
         steps = p.navDriven ? 0 : 1;
         if (steps) p.lastPollStepMs = now;
+        if (p.spec.fastKeys) p.navDriven = false;  // our poll repeats it (speed-up); Step() swallows the events
     } else if (!p.navDriven) {
         p.heldTime += dt;
         while (p.heldTime >= p.nextRepeat && steps < 8) {
@@ -1047,7 +1080,12 @@ void PlotMenuSlider::Tick(float dt) {
     const float f = p.Unbox<float>(p.Call(p.sldGetValue, p.slider, {}, "Slider.get_value", &ok));
     if (!ok || !std::isfinite(f)) return;
     int v = p.Snap(static_cast<int>(std::lround(f)));
-    if (steps) v = p.Snap(v + dir * steps * p.spec.step);
+    if (steps) {
+        const bool fast = p.spec.fastKeys;
+        const bool shift = fast && p.ShiftHeld(), ctrl = fast && p.CtrlHeld();
+        const int mult = p.HeldMultiplier();
+        for (int i = 0; i < steps; ++i) v = p.Next(v, dir, mult, shift, ctrl);
+    }
     if (static_cast<float>(v) != f) p.SetSliderValue(v);
     p.Apply(v, true);
 }
