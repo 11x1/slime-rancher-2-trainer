@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       autotest:
-        description: Compile in the test harness (modules/autotest); manual runs publish nothing
+        description: Compile in the test harness (modules/autotest); manual runs give a workflow artifact, no release
         type: boolean
         default: false
 
