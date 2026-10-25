@@ -566,6 +566,7 @@ bool Get(Il2CppObject* stationModel, View& out) {
     const int64_t id = drones::StationIdOf(stationModel);
     ProgramData live;
     if (!id || !drones::ReadProgram(stationModel, live)) return false;
+    out.explorer = drones::IsExplorer(stationModel);
     std::lock_guard lk(g->mu);
     if (Entry* e = g->Find(id)) {
         out.programs = e->progs;
@@ -583,7 +584,14 @@ bool Add(Il2CppObject* stationModel) {
     if (!Owned() || !main_thread::IsMainThread()) return false;
     const int64_t id = drones::StationIdOf(stationModel);
     ProgramData live;
-    if (!id || !drones::ReadProgram(stationModel, live) || !live.Valid()) return false;
+    const bool explorer = drones::IsExplorer(stationModel);
+    // Explorer mode (round 14: "can't add multiple programs to a explorer mode drone as it has no source and
+    // destination"): a program is its target only.
+    if (!id || !drones::ReadProgram(stationModel, live) || !live.ValidFor(explorer)) {
+        SR2_INFO("[{}] drone programs: station {}: no program added - the running one is incomplete ({})", g->module,
+                 id, explorer ? "explorer mode: no target" : "ranch mode: needs target, source and destination");
+        return false;
+    }
     Impl& p = *g;
     p.Pin(live.ident);
     Entry snapshot;
@@ -609,8 +617,8 @@ bool Add(Il2CppObject* stationModel) {
     }
     p.seen.insert(id);
     p.Persist(id, snapshot);
-    SR2_INFO("[{}] drone programs: station {}: program {} added (a copy of the running one; it runs now)", p.module, id,
-             snapshot.progs.size());
+    SR2_INFO("[{}] drone programs: station {}: program {} added (a copy of the running one; it runs now){}", p.module, id,
+             snapshot.progs.size(), explorer ? " - explorer mode: programs switch only from the menu" : "");
     return true;
 }
 

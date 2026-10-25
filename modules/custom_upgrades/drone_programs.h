@@ -16,6 +16,11 @@
 // has program 1. After a load the first ~1 Hz tick checks that the save's program is the sidecar's
 // program 1 (else the extra programs are dropped, logged) and runs program 1 with its true source.
 //
+// Explorer mode stations (DroneStationGadgetModel._type EXPLORER_DRONE): a program is its target only (what the
+// explorer drone gathers; source / sink NONE), set with DroneStation.AssignExplorerTask. The rotation never
+// switches them (it watches the RanchDrone, and an explorer drone gathers non-stop): the player picks the program
+// with Edit in the menu.
+//
 // Locked behind the "Drone Program Scheduler" vacpack upgrade (vacpack_upgrades.cpp, bought in the
 // Fabricator like the Battery Saver; per save). Without it every station runs program 1 only and the
 // UI hides its action; programs a save already stores stay in the sidecar (program 1 keeps running,
@@ -51,6 +56,8 @@ struct View {
     std::vector<drones::ProgramData> programs;  // at least one; [0] = the program the vanilla save keeps
     int running = 0;                            // index of the program the drone runs now
     Mode mode = Mode::kWhenIdle;
+    bool explorer = false;                      // Explorer mode station: programs are targets only and switch
+                                                // only from the menu (the explorer drone is never "idle")
 };
 
 // custom_upgrades on and the rotation set up.

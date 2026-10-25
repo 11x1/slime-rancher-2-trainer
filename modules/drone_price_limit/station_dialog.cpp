@@ -310,6 +310,7 @@ struct StationUi::Impl {
     int pFocus = 0, pCol = 0, pRunning = 0, pCount = 0, pHover = -1;
     int pLayoutFrames = 0;                 // Delete buttons follow their Edit button's laid-out width
     int pMode = 0;                         // progs::Mode shown by the selector
+    bool pExplorer = false;                // the station is in Explorer mode (programs = targets only)
     Il2CppObject* pHint = nullptr;         // the Add row's text (TMP)
     Il2CppObject* pModeText = nullptr;     // the selector's value (TMP)
     bool pDeletePending = false;           // the page's Clear All event (Z / its pad button) while open
@@ -2256,6 +2257,10 @@ bool StationUi::Impl::OpenPrograms(int focus) {
     pCount = n;
     pRunning = view.running;
     pMode = static_cast<int>(view.mode);
+    pExplorer = view.explorer;
+    // Explorer mode: a program is its target only and runs until another is chosen here (no rotation, so no
+    // "Next program" selector).
+    const bool withMode = n >= 2 && !view.explorer;
 
     // ---- layout ----
     const float titleY = 28.0f, subY = 84.0f;
@@ -2263,7 +2268,7 @@ bool StationUi::Impl::OpenPrograms(int focus) {
     const float addH = 72.0f, modeH = 72.0f, gap = 16.0f;
     const float addY = rowsY + n * (kProgRowH + kProgRowGap) + 6.0f;
     const float modeY = addY + (full ? kRowH : addH) + gap;
-    const float footY = (n >= 2 ? modeY + modeH : addY + (full ? kRowH : addH)) + 28.0f;
+    const float footY = (withMode ? modeY + modeH : addY + (full ? kRowH : addH)) + 28.0f;
     const float panelH = footY + kRowH + 26.0f;
     int layer = -1;
     if (!BuildShell("sr2mods_DroneProgramsDialog", panelH, layer)) return failOpen("dialog frame not built");
@@ -2273,10 +2278,15 @@ bool StationUi::Impl::OpenPrograms(int focus) {
 
     Text(prt, "Title", kPad, titleY, kPanelW - 2 * kPad, 50, "Drone programs", 40.0f, kNavy, kAlignLeft, titleSrc);
     Text(prt, "Subtitle", kPad, subY, kPanelW - 2 * kPad, 100,
-         std::format("This station's drone can have up to {} programs and runs them in turn. Edit: that program runs "
-                     "now and this page shows it - change it here and press Save Program. The game's save keeps "
-                     "program 1; the mod keeps the others.",
-                     progs::kMaxPrograms),
+         view.explorer
+             ? std::format("This explorer drone can have up to {} programs (what it gathers). Edit: that program runs "
+                           "now, until you pick another here, and this page shows it - change it here and press Save "
+                           "Program. The game's save keeps program 1; the mod keeps the others.",
+                           progs::kMaxPrograms)
+             : std::format("This station's drone can have up to {} programs and runs them in turn. Edit: that program "
+                           "runs now and this page shows it - change it here and press Save Program. The game's save "
+                           "keeps program 1; the mod keeps the others.",
+                           progs::kMaxPrograms),
          22.0f, kNavy, kAlignTopLeft, bodySrc, true);
 
     const float rowW = kPanelW - 2 * kPad;
@@ -2315,14 +2325,20 @@ bool StationUi::Impl::OpenPrograms(int focus) {
         if (running) Sprite(rrt, "Active", activeX, midY - 20.0f, 40, 40, activeSprite);
         const float cellsEnd = rowW - 20.0f;
         const float cellW = (cellsEnd - cellX0 - 2 * sepW) / 3.0f;
-        const Label cells3[3] = {TargetLabel(defs, pd), DefLabel(defs, "FindSourceDefinition", pd.source, "source"),
-                                 DefLabel(defs, "FindDestinationDefinition", pd.sink, "destination")};
-        for (int c = 0; c < 3; ++c) {
+        Label cells3[3] = {TargetLabel(defs, pd), {}, {}};
+        if (view.explorer) {
+            cells3[1].name = "Explorer drone";  // no source / destination
+        } else {
+            cells3[1] = DefLabel(defs, "FindSourceDefinition", pd.source, "source");
+            cells3[2] = DefLabel(defs, "FindDestinationDefinition", pd.sink, "destination");
+        }
+        for (int c = 0; c < (view.explorer ? 2 : 3); ++c) {
             const float cx = cellX0 + c * (cellW + sepW);
             float tx = cx;
             if (Sprite(rrt, "Icon", cx, 14, 52, 52, cells3[c].icon)) tx = cx + 58.0f;
             Text(rrt, "Name", tx, 4, cx + cellW - tx, kProgRowH - 8, cells3[c].name, 21.0f, kNavy, kAlignLeft, bodySrc, true, true);
-            if (c < 2) Text(rrt, "Arrow", cx + cellW, 0, sepW, kProgRowH, ">", 26.0f, kNavy, kAlignCenter, titleSrc);
+            if (c < 2 && !view.explorer)
+                Text(rrt, "Arrow", cx + cellW, 0, sepW, kProgRowH, ">", 26.0f, kNavy, kAlignCenter, titleSrc);
         }
         pItems.push_back(it);
     }
@@ -2347,7 +2363,7 @@ bool StationUi::Impl::OpenPrograms(int focus) {
     Keep(dialogHandles, pHint);
 
     // ---- when to take the next program: the game's own options selector (two or more programs) ----
-    if (n >= 2) {
+    if (withMode) {
         PItem it;
         it.kind = kItemMode;
         Il2CppObject* mrt = Row(prt, "Mode", kPad, modeY, rowW, modeH, false, layer, it);
@@ -2383,7 +2399,8 @@ bool StationUi::Impl::OpenPrograms(int focus) {
         loggedProgOpen = true;
         SR2_INFO("[{}] station ui: programs dialog opened for station {} ({} program(s), program {} runs, {}; {} rows, "
                  "{} game buttons)",
-                 module, station, n, view.running + 1, progs::ModeName(view.mode), pItems.size(), dialogButtons.size());
+                 module, station, n, view.running + 1, view.explorer ? "explorer mode" : progs::ModeName(view.mode),
+                 pItems.size(), dialogButtons.size());
     }
     return true;
 }
@@ -2472,7 +2489,8 @@ void StationUi::Impl::ProgAdd() {
     Il2CppObject* model = StationModel();
     if (!model) return;
     if (!progs::Add(model)) {
-        SetText(pHint, "Set up a complete program on this page first (target, source and destination).");
+        SetText(pHint, pExplorer ? "Choose what the explorer drone gathers on this page first."
+                                 : "Set up a complete program on this page first (target, source and destination).");
         return;
     }
     UpdateProgramsLabel();

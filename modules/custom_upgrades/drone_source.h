@@ -42,12 +42,16 @@ struct ProgramData {
     int32_t sink = 0;              // DroneTaskSinkType
     bool operator==(const ProgramData&) const = default;
     bool Valid() const { return target != 0 && source != 0 && sink != 0; }
+    // An Explorer mode station's program has a target only (what to gather; source / sink NONE).
+    bool ValidFor(bool explorer) const { return explorer ? target != 0 : Valid(); }
 };
 
 // Helpers for the several-programs rotation (drone_programs.cpp). Main thread unless noted; all of them
 // return false / null / 0 while the drone sources are not set up.
 int64_t StationIdOf(Il2CppObject* stationModel);                 // any thread (plain field read)
 bool ReadProgram(Il2CppObject* stationModel, ProgramData& out);  // any thread (plain field reads)
+// The station is in Explorer mode (DroneStationGadgetModel._type == DroneType.EXPLORER_DRONE). Any thread.
+bool IsExplorer(Il2CppObject* stationModel);
 bool StationModels(std::vector<Il2CppObject*>& out);             // the save's DroneStationGadgetModels
 Il2CppObject* DroneOf(Il2CppObject* stationModel);               // its live RanchDrone (verified) or null
 // The station's program -> `p`: with its drone the game's own DroneStation.AssignRanchTask (our source

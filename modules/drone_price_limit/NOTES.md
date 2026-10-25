@@ -57,35 +57,59 @@ per address). It shows only while custom_upgrades is on and the save owns the Dr
 upgrade (`drone_programs::Owned`; round 12: hidden without it, the station has one program as vanilla).
 
 - Programming page (round 13: "Move the 'Program X/Y' to the same row as '[X] Start Program', '[Z] Clear
-  All', '[ESC] Close'"): an entry `[P] Programs` (one program) / `[P] Program 2/3` in the page's own key
-  bar (`DroneProgramMenu._inputLegend` +0xE0), a `modules/common/legend_hint.h` clone of one of the bar's
-  entries placed before the bar's last entry (Close). A transparent raycast Image + Toggle child
+  All', '[ESC] Close'"; round 14: "Move it to the leftmost position, its grayed out by default"): an entry
+  `[P] Programs` (one program) / `[P] Program 2/3` in the page's own key bar (`DroneProgramMenu._inputLegend`
+  +0xE0), a `modules/common/legend_hint.h` clone of one of the bar's entries placed **before the bar's first
+  entry**. The grey came from the template: the Start Program entry's SRButton is disabled while there is
+  nothing to apply, and a clone of a disabled SRButton never runs Start, so it stayed grey; legend_hint now
+  enables the clone's SRButtons (re/ui.md "InputHint.SetEnabled"). A transparent raycast Image + Toggle child
   (`LayoutElement.ignoreLayout`) makes it clickable like the game's own entries. Log `[P] Programs entry
   cloned from the page's key bar entry '...'`. The bar can rebuild its entries; a dead clone is made again on
   the next state read (~10 frames). When the bar has no entry to clone for 3 s (or legend_hint is
   unavailable): the old game-button pill right of the **target's** Change prompt (log `no [P] Programs entry
   in the page's key bar (...) - pill instead`). Opens with **P**, the pad's **left stick click** or a click.
-- Dialog (same frame as the price-limit one; round 13: "make the programs menu like long buttons ... on the
-  left showing '[SPACE] edit' and on the right '[Z] Delete'", "Add program should be a game button aswell",
-  "make next program like in settings, the '< option1 >'", help line removed): one vertical list of long
-  buttons, each a rounded row with its own click Toggle and a teal focus frame (drawn last, above the row):
-  - one per program (80 high, as before): `[SPACE] Edit` key hint, number, the page's "active" icon on the
-    running one (the running row is also tinted), target (icon + name), source, destination (names / icons
-    from the menu's `DroneUIDefinitionSource`), with 2+ programs `[Z] Delete` at the right end (its own
-    click area);
-  - **Add program** (`[SPACE] Add program` + what it does; a copy of the running one, which then runs; the
-    dialog closes so it can be changed on the page; up to 3; when full a text line instead);
-  - with 2+ programs **Next program** with a `<  When idle  >` / `<  After each delivery  >` selector (white
-    pill, teal arrows; wraps).
-  - Input: Up / Down move the focus (the game's navigation through the FocusManager detour: arrows, WASD,
-    d-pad, stick); Submit (Space / Enter / A) = Edit / Add / next mode; Left / Right step the selector; **Z**
-    (polled) or the page's Clear All event (`HandleClearAllOptions` detour, so also its pad button) deletes the
-    focused program (at most one per 300 ms, both may fire). The pointer: moving onto a row focuses it
-    (`Selectable.isPointerInside`), a click on the row presses it, on `[Z] Delete` deletes, on an arrow steps.
-    P / Esc / Close / backdrop close. The dialog opens with the running program focused.
-  - Round 12 "cant navigate with wasd/arrow keys": the focus moved, but the frame was one object created
-    before the rows, so the opaque rows covered it (only visible on the Add / mode buttons). Now each row
-    has its own frame above its contents.
+- **Save Program** (round 14: "rename 'Start Program' to 'Save Program' makes more sense imo how the button
+  actually functions"): while custom upgrades are on (`drone_programs::Available`) the key bar entry bound to
+  `DroneProgramMenu._activateEvent` (found with `legend_hint::HintFor`) reads "Save Program": its
+  `InputHintConfiguration.Label` LocalizedString is registered in `core/text_override` (the game's own
+  LocalizeStringEvent then writes our text on every refresh), and its `_labelText` TMP is set at once. Off
+  again (custom upgrades off / module shutdown): the override is removed and the old text put back. Log
+  `key bar entry 'Start Program' reads "Save Program" (text override active)`. There is no separate Start
+  Program button on the page (the key bar entry is the button).
+- Dialog (same frame as the price-limit one). Round 14: "Not using the game's buttons as rows ... separate the
+  Edit and delete buttons to the start of each program row ... as the game's buttons", "'[SPACE] Add program'
+  can be renamed to '[SPACE] Add', use the game's key icons please", "Next program mode selection doesnt align
+  with options menu". Rows (rounded boxes, 80 high for programs, 72 for Add / Next program):
+  - one per program: two game buttons at the start, **[Space] Edit** and **[Z] Delete** (Delete greyed and
+    not a focus stop with one program; it is placed after Edit's laid-out width for ~40 frames), then the
+    number, the page's "active" icon on the running one (that row is tinted), target (icon + name), source,
+    destination (names / icons from the menu's `DroneUIDefinitionSource`). Explorer mode stations: target and
+    "Explorer drone" only;
+  - **[Space] Add** (a game button) + what it does (a copy of the running one, which then runs; the dialog
+    closes so it can be changed on the page; up to 3; when full a text line instead);
+  - with 2+ programs (not in Explorer mode) **Next program** with a clone of the game's own options-menu
+    selector (`PresetOptionsItemDefinition._controlPrefab` with an `OptionsPresetSelector`, found once per
+    session, cloned with the behaviour and the value's LocalizeStringEvent off, a polled Toggle on each arrow;
+    re/ui.md "OptionsPresetSelector"); logs `options selector prefab '...'` and `Next program selector cloned
+    ... (rect W x H -> ..., scale S)`. Without it: the drawn white pill with teal arrows.
+  - Key icons: game_button `Spec.control` (`<Keyboard>/space`, `/z`, `/p`): the game's KeyboardMouseIcon entry
+    handed to `InputIcon.SetIcon`, as the key bar draws it (log `game button: key icon for '<keyboard>/space':
+    the game's KeyboardMouseIcon entry`); key cap text if no entry.
+  - Focus: the focused button has the game's hover look (game_button `SetFocused` = ButtonAnimator.OnPointerEnter:
+    DeepBlue + bounce; re-entered after a pointer leaves it); Submit plays the press animation (OnSubmit). The
+    selector row (and rows of fallback buttons) shows an opaque teal ring behind the row.
+  - Input: Up / Down move between rows, Left / Right between Edit and Delete (on Next program: step the
+    selector); Submit (Space / Enter / A) presses the focused button; **Z** (polled) or the page's Clear All
+    event (`HandleClearAllOptions` detour, so also its pad button) deletes the focused program (at most one per
+    300 ms). The pointer: hovering a button focuses it, a click presses it, an arrow click steps. P / Esc /
+    Close / backdrop close. The dialog opens with the running program's Edit focused.
+  - Why arrows / WASD "did not work" in rounds 12 and 13: the input arrived (FocusManagerBehaviour's move
+    action -> `FocusManager.NavigateInDirection` -> our detour, re/ui.md "FocusManagerBehaviour") and the focus
+    index moved, but the focus frame was an SDF shape with a fully transparent fill, which the runtime
+    CanvasRenderer culls (`cullTransparentMesh`, re/unity.md), so nothing ever showed (round 12 behind the
+    rows, round 13 above them). The price-limit dialog's frame had the same problem; it is opaque (light teal
+    with a teal border, behind the row) now. Log `navigation input reached the programs dialog (direction N)`
+    once per session.
 - Edit = `drone_programs::Run` + `DroneProgramViewModel.RevertChangesToLastAppliedProgram`, so the page
   shows the program that now runs; the dialog closes. Delete rebuilds the dialog in place (focus stays on
   that row or the one above; log `program N deleted in the programs dialog`); the selector applies at once
@@ -97,7 +121,7 @@ upgrade (`drone_programs::Owned`; round 12: hidden without it, the station has o
   left. Pills: scale 0.8, key cap C / P, placed 12 px right of the option's Change prompt in its anchor space
   (log `... action is a game popup button (key C)`). Dialog buttons: scale 0.72, selected states teal
   through our own ScriptableColor (hover stays the game's blue); Close shows C (limit dialog) / P (programs
-  dialog). The programs dialog's key hints are drawn key caps (white, navy border) as in the key bar. Without
+  dialog). The programs dialog's buttons show the game's own key icons (Spec.control). Without
   the popup template: the earlier Change-prompt clones (with the receipt's glyph via `UsePopupGlyph`), then
   drawn buttons.
 - While the station menu is open (any tab; a tab other than the program page counts for 2 min after the

@@ -109,6 +109,11 @@
 
 ## From the slime_dj, spawn_scaling, hl2_movement, quick_start, free_placement, misc_tweaks, plot_upgrades, drone_price_limit notes
 
+### Explorer mode stations (dump + IDA names; round 14, custom_upgrades drone_programs)
+- `DroneStationGadgetModel._type` +0x80 (DroneType: RANCH_DRONE 0, EXPLORER_DRONE 1); `_taskData` +0xA0 (DroneTaskData: TargetType +0x10, TargetIdentType +0x18, SourceType +0x20, SinkType +0x24; explorer: source / sink NONE); `_program` +0xA8 (ExplorerDroneProgram, keeps its own `_taskData`, re-plans in `TaskUpdated(newTaskData, worldTime)` 0xA11120)
+- `DroneStation` (scene object): `_model` +0xC0, `_droneTaskConfig` +0x40, `_ranchDrone` +0xE0, `_explorerDrone` +0xE8; `AssignExplorerTask(DroneTaskTarget, bool sendAnalytics)` 0x9FE1A0 (vs `AssignRanchTask(target, source, sink, bool)` 0x9FE4E0); `DroneTaskTarget(DroneTaskConfig, DroneTaskTargetType, IdentifiableType)` 0xA07EC0
+- mod: drone_source `Impl::AssignExplorer` finds the DroneStation by `_model` (cached, one scan per miss) and calls AssignExplorerTask; the programs rotation never switches explorer stations (it watches the RanchDrone)
+
 ### ExplorerDroneConfig (MonomiPark.SlimeRancher.Drone)  [: ScriptableObject]
 - fields: `_defaultLootConfig` LootTableEntry (inline struct) +0x20, `_lootTable` List<LootTableEntry> +0x48 (dump)
 - nested `LootTableEntry` (struct): `Item` 0x0, `Weight`, `MaxSourcesConsidered`, `GenerationIntervalHours` Range, `OutputQuantity` 0x18 (`MonomiPark.SlimeRancher.Util.RangeInt`, a class, not UnityEngine.RangeInt), `MinimumTimeFactor`; element size 0x28 (unboxed) (dump)
