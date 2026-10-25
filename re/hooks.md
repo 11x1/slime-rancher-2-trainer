@@ -50,7 +50,7 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | DeathObscurer.StartObscuring(3) | 0x8670C0 | quick_travel.DeathObscurer.StartObscuring | quick_travel/module.cpp | shorten death fade |
 | DetailsMoreButtonView.BindData(1) | 0x839F00 | sell_upgrades.DetailsMoreButtonView.BindData | sell_upgrades/module.cpp | Sell button on plot card |
 | DroneProgramMenu.HandleActivateDrone(1) | 0x81AA20 | drone_price_limit.DroneProgramMenu.HandleActivateDrone | drone_price_limit/station_dialog.cpp | station menu dialog / programs |
-| DroneProgramMenu.HandleClearAllOptions(1) | 0x81AF90 | drone_price_limit.DroneProgramMenu.HandleClearAllOptions | drone_price_limit/station_dialog.cpp | station menu dialog / programs |
+| DroneProgramMenu.HandleClearAllOptions(1) | 0x81AF90 | drone_price_limit.DroneProgramMenu.HandleClearAllOptions | drone_price_limit/station_dialog.cpp | blocked while a dialog is open; in the programs dialog it is Delete (Z / its pad button) |
 | DroneProgramMenu.SetViewModel(1) | 0x81BE10 | drone_price_limit.DroneProgramMenu.SetViewModel | drone_price_limit/station_dialog.cpp | inject Price limit / Programs actions |
 | DroneStationGadgetModel.Pull(9) | 0xA8D550 | custom_upgrades.DroneStationGadgetModel.Pull | custom_upgrades/drone_source.cpp | vanilla-safe save of custom sources / program 1 |
 | DroneUIDefinitionSource.FindSourceDefinition(1) | 0x83ABF0 | custom_upgrades.DroneUIDefinitionSource.FindSourceDefinition | custom_upgrades/drone_source.cpp | UI definition of custom sources |

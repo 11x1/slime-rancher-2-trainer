@@ -39,17 +39,19 @@
 //     PriceEntry shows item icon + coin icon + amount, so a cell is icon, name, coin + base price. Coin =
 //     LookupDirector._currencyList._currencies[0]._icon (the default currency, Newbucks).
 //
-// Programs dialog (custom_upgrades drone_programs.h): the second prompt is a clone of the TARGET's
-// "Change" prompt (DroneProgramMenu._targetButton), placed right of it, key P / pad left stick click.
+// Programs dialog (custom_upgrades drone_programs.h): opened by a "[P] Programs" / "[P] Program 2/3" entry
+// in the page's own key bar (DroneProgramMenu._inputLegend, next to Start Program / Clear All / Close; a
+// legend_hint clone with a transparent click target), key P / pad left stick click. Fallback when the bar
+// can't take it: a game button right of the TARGET's "Change" prompt (DroneProgramMenu._targetButton).
 // Its dialog shares the frame (BuildShell), the input routing (dialogKind) and the click toggles with
-// the price-limit dialog. Edit calls drone_programs::Run (DroneStation.AssignRanchTask) and then
+// the price-limit dialog; it is a list of long buttons (see "programs dialog" below). The page's Clear All
+// event (Z) is its Delete. Edit calls drone_programs::Run (DroneStation.AssignRanchTask) and then
 // DroneProgramViewModel.RevertChangesToLastAppliedProgram (0x822E80): it compares the page's target /
 // source / destination with the station's task data and resets the ones that differ, so the page shows
 // the program that runs now. Names / icons: the view model's _definitionSource
 // (DroneUIDefinitionSource.FindTargetDefinition / FindSourceDefinition / FindDestinationDefinition ->
 // DroneUIProgramDefinition<T> _displayName / _icon; our sources' names through text_override), a
-// SINGLE target shows its IdentifiableType's icon and localized name. The dialog's buttons are clones of
-// the same game prompt (PillButton). While the station menu is open drone_programs::NoteMenuOpen pauses
+// SINGLE target shows its IdentifiableType's icon and localized name. While the station menu is open drone_programs::NoteMenuOpen pauses
 // that station's rotation, and FollowStation keeps the page on the station's program: closing the menu
 // asks to discard "changes" (DroneUIDisplay.OnCancel -> _unappliedChangesConfirm) whenever the page
 // differs from the station's task data, also when the station changed and not the page.
@@ -82,8 +84,10 @@
 #include "core/text_override.h"
 #include "core/unity.h"
 #include "modules/common/game_button.h"
+#include "modules/common/legend_hint.h"
 #include "modules/custom_upgrades/drone_programs.h"
 #include "modules/custom_upgrades/plot_menu_slider.h"
+#include "modules/minimap/ugui.h"
 
 namespace sr2::modules::drone_price_limit {
 
@@ -252,7 +256,7 @@ struct StationUi::Impl {
     };
     Pill limitPill, progPill;
     std::vector<Pill> dialogPills;  // fallback dialog buttons: clones of the Change prompt
-    std::vector<gbn::Button> dialogButtons;  // the dialogs' game buttons (index = PBtn.gbi / closeGb / modeGb)
+    std::vector<gbn::Button> dialogButtons;  // the dialogs' game buttons (index = closeGb / modeGb / PillButton fallbacks)
     std::vector<char> dialogClicks;          // their clicks this frame (Tick polls every one once per frame)
     int closeGb = -1, modeGb[2] = {-1, -1};
     Held menuDisplay;               // the menu's DroneUIDisplay (open = any tab of the station menu shown)
@@ -288,19 +292,37 @@ struct StationUi::Impl {
     int focusRow = 1;  // 0 = mode, 1 = value
     int maxPrice = 100;
 
-    // programs dialog
-    enum Action { kActEdit = 1, kActRemove, kActAdd, kActModeIdle, kActModeDelivery };
-    struct PBtn {
-        Il2CppObject* toggle = nullptr;
-        int gbi = -1;  // index into dialogButtons (the game's button), -1 = toggle
-        bool right = false;  // a game button placed by its right edge (x + w)
-        int action = 0, index = 0;
-        float x = 0, y = 0, w = 0, h = 0;  // in the panel
+    // programs dialog (round 13): a vertical list of long buttons - one per program, Add program, the
+    // "Next program" selector. The focused one shows its frame; Up / Down (arrows, WASD, d-pad) move it.
+    enum ItemKind { kItemProgram = 1, kItemAdd, kItemMode };
+    struct PItem {
+        int kind = 0, index = 0;           // index: the program (kItemProgram)
+        Il2CppObject* toggle = nullptr;    // the whole row: click = Edit / Add / next mode
+        Il2CppObject* frame = nullptr;     // focus frame (GameObject, shown while focused)
+        Il2CppObject* del = nullptr;       // "[Z] Delete" click area (programs, 2+)
+        Il2CppObject* prev = nullptr, *next = nullptr;  // the selector's arrows (mode)
     };
-    std::vector<std::vector<PBtn>> pRows;  // focus grid: one row per program, Add, mode
-    int pRow = 0, pCol = 0, pRunning = 0, pCount = 0;
-    int focusRefresh = 0;  // frames left to re-fit the focus frame to the laid-out game button
-    Il2CppObject* pHint = nullptr;  // the Add row's text (TMP)
+    std::vector<PItem> pItems;
+    int pFocus = 0, pRunning = 0, pCount = 0, pHover = -1;
+    int pMode = 0;                         // progs::Mode shown by the selector
+    Il2CppObject* pHint = nullptr;         // the Add row's text (TMP)
+    Il2CppObject* pModeText = nullptr;     // the selector's value (TMP)
+    bool pDeletePending = false;           // the page's Clear All event (Z / its pad button) while open
+    uint64_t pLastDeleteMs = 0;
+    const MethodInfo* selPointerInside = nullptr, *kbZ = nullptr;
+
+    // ---- the [P] Programs entry in the page's key bar (round 13: "Move the 'Program X/Y' to the same row as
+    // '[X] Start Program', '[Z] Clear All', '[ESC] Close'") ----
+    bool legendOk = false;                 // legend_hint resolved and DroneProgramMenu._inputLegend known
+    size_t offMenuLegend = 0;
+    Il2CppClass* layoutElemClass = nullptr;
+    const MethodInfo* leSetIgnore = nullptr;
+    legend_hint::Clone progHint;
+    Il2CppObject* progHintToggle = nullptr;  // click target over the entry (child of the clone)
+    std::vector<Il2CppGCHandle> progHintHandles;
+    std::string progHintText;
+    uint64_t progHintSince = 0;            // wanted since (no bar entry to clone yet)
+    bool progHintFailed = false, progHintLogged = false;
 
     // ---- helpers ----
     bool Faulted() const { return sr2::core::ModuleFaulted(module); }
@@ -575,12 +597,24 @@ struct StationUi::Impl {
     std::string LocalizedText(Il2CppObject* ls);
     Label DefLabel(Il2CppObject* defs, const char* method, int32_t type, const char* what);
     Label TargetLabel(Il2CppObject* defs, const ProgramData& p);
-    bool OpenPrograms(int row, int col);
-    void ProgFocus();
+    bool OpenPrograms(int focus);
+    float KeyCap(Il2CppObject* parentRt, float x, float cy, const char* key);
+    float KeyHint(Il2CppObject* parentRt, float x, float cy, const char* key, const char* label, float labelSize);
+    PItem LongButton(Il2CppObject* prt, const char* name, float x, float y, float w, float h, bool running, int layer,
+                     Il2CppObject*& rowRt);
+    Il2CppObject* ClickArea(Il2CppObject* parentRt, const char* name, float x, float y, float w, float h, int layer);
+    void ProgFocus(int i);
     void ProgNavigate(int dir);
-    void ProgActivate(const PBtn& b);
-    void ProgClicks();
+    void ProgSubmit();
+    void ProgEdit(int index);
+    void ProgDelete(int index);
+    void ProgAdd();
+    void ProgStepMode(int dir);
+    void ProgInput();
+    bool PointerInside(Il2CppObject* selectable);
     void RevertPage();
+    void SyncProgHint(bool want);
+    void DropProgHint();
     void Close(const char* why);
     void BuildSlider();
     void SetMode(LimitMode m);
@@ -650,9 +684,13 @@ bool CancelDetour(Il2CppObject* action, const MethodInfo* mi) {
     return handled ? true : g_origCancel(action, mi);
 }
 
-// The page's own hotkeys do nothing while the dialog covers the page.
+// The page's own hotkeys do nothing while the dialog covers the page. Clear All (Z, or its pad button) is
+// the programs dialog's Delete: the next Tick deletes the focused program.
 void ClearAllDetour(Il2CppObject* self, void* evt, const MethodInfo* mi) {
-    if (g_open.load(std::memory_order_relaxed) && g_hotkeyGuard.Active()) return;
+    if (g_open.load(std::memory_order_relaxed) && g_hotkeyGuard.Active()) {
+        if (g_ui && g_ui->dialogKind == kDlgPrograms) g_ui->pDeletePending = true;
+        return;
+    }
     g_origClearAll(self, evt, mi);
 }
 
@@ -887,6 +925,21 @@ bool StationUi::Setup(sr2::core::ModuleContext& ctx, const char* module, DialogH
         // Programs: P and the pad's left stick click.
         p->kbP = kb ? R.Method(kb, "get_pKey", 0, &err) : nullptr;
         p->padL3 = pad ? R.Method(pad, "get_leftStickButton", 0, &err) : nullptr;
+        p->kbZ = kb ? R.Method(kb, "get_zKey", 0, &err) : nullptr;  // Delete (also the page's Clear All event)
+        p->selPointerInside = method(selectable, "get_isPointerInside", 0, false);
+        if (!p->selPointerInside) report += " programs dialog hover: NOT available;";
+        // The [P] Programs entry in the page's key bar (else the old pill right of the target's Change).
+        {
+            std::string lerr;
+            if (sr2::modules::minimap::ugui::Resolve(lerr) && legend_hint::Resolve(lerr)) {
+                if (auto o = R.FieldOffset(p->menuClass, "_inputLegend", &lerr)) p->offMenuLegend = *o;
+                p->legendOk = p->offMenuLegend != 0;
+            }
+            if (!p->legendOk) report += " programs key bar entry: NOT available (" + lerr + "; pill instead);";
+            p->layoutElemClass = R.Class(kUi, "UnityEngine.UI", "LayoutElement", &err);
+            p->leSetIgnore = p->layoutElemClass ? R.Method(p->layoutElemClass, "set_ignoreLayout", 1, &err) : nullptr;
+            if (p->legendOk && !p->leSetIgnore) report += " programs key bar entry: not clickable (no LayoutElement);";
+        }
         p->vmRevert = R.Method(p->vmClass, "RevertChangesToLastAppliedProgram", 0, &err);
         if (!p->vmRevert) report += " page refresh after a program switch: NOT available;";
         p->vmHasChanges = R.Method(p->vmClass, "HasAnyChanges", 0, &err);
@@ -950,6 +1003,8 @@ void StationUi::Impl::ForgetMenu() {
     if (g_open.load()) Close("menu gone");
     DestroyPill(limitPill);
     DestroyPill(progPill);
+    DropProgHint();
+    progHintSince = 0;
     Release(menu);
     Release(menuDisplay);
     marketSelected = pageActive = menuActive = displayActive = haveStation = false;
@@ -1269,12 +1324,95 @@ void StationUi::Impl::UpdatePillLabel() {
 }
 
 void StationUi::Impl::UpdateProgramsLabel() {
-    if (!progPill.label && !progPill.gb.Exists()) return;
+    const bool hint = progHint.Alive();
+    if (!hint && !progPill.label && !progPill.gb.Exists()) return;
     progs::View v;
     Il2CppObject* model = StationModel();
     if (!model || !progs::Get(model, v)) return;
     const size_t n = v.programs.size();
-    SetPillText(progPill, n < 2 ? std::string("Programs") : std::format("Program {}/{}", v.running + 1, n));
+    const std::string text = n < 2 ? std::string("Programs") : std::format("Program {}/{}", v.running + 1, n);
+    if (hint) {
+        if (text != progHintText) {
+            progHint.SetLook("P", text);
+            progHintText = text;
+        }
+        return;
+    }
+    SetPillText(progPill, text);
+}
+
+// ---------------------------------------------------------------- key bar entry --
+
+// The [P] Programs entry: a clone of one of the page's key bar hints (modules/common/legend_hint.h), placed
+// before the bar's last entry (Close), with a transparent click target over it (the game's own entries are
+// clickable too). The bar may rebuild its entries: a dead clone is made again on the next state read.
+void StationUi::Impl::SyncProgHint(bool want) {
+    if (progHint.Exists() && !progHint.Alive()) DropProgHint();  // died with the bar / the menu
+    if (!want) {
+        if (progHint.Exists()) DropProgHint();
+        progHintSince = 0;
+        return;
+    }
+    std::string chain;
+    Il2CppObject* legend = legend_hint::FollowLegend(unity::Field<Il2CppObject*>(menu.p, offMenuLegend), menu.p,
+                                                     "DroneProgramMenu._inputLegend", chain);
+    const std::vector<Il2CppObject*> hints = legend_hint::Hints(legend, true);
+    Il2CppObject* last = hints.empty() ? nullptr : hints.back();
+    if (progHint.Alive()) {
+        progHint.PlaceBefore(last);
+        return;
+    }
+    const uint64_t now = GetTickCount64();
+    if (!progHintSince) progHintSince = now;
+    Il2CppObject* tmpl = legend_hint::Template(legend);
+    std::string why = !legend ? "no InputLegend (" + chain + ")"
+                      : !tmpl ? "none of the bar's entries is shown (" + chain + ")"
+                              : "";
+    if (!tmpl || !progHint.Create(tmpl, "sr2mods_ProgramsKeyHint", why)) {
+        if (now - progHintSince >= 3000) {  // the old pill instead, for this session
+            progHintFailed = true;
+            SR2_WARN("[{}] station ui: no [P] Programs entry in the page's key bar ({}) - pill instead", module, why);
+        }
+        return;
+    }
+    progHintText.clear();
+    UpdateProgramsLabel();
+    if (progHintText.empty()) {
+        progHint.SetLook("P", "Programs");
+        progHintText = "Programs";
+    }
+    progHint.PlaceBefore(last);
+    // Click target: a transparent raycast image over the whole entry, outside the entry's layout.
+    if (leSetIgnore && layoutElemClass) {
+        if (Il2CppObject* go = NewUi("Click", unity::TransformOf(progHint.GameObject()), -1)) {
+            Rect(unity::TransformOf(go), {0, 0}, {1, 1}, {0.5f, 0.5f}, {0, 0}, {0, 0});
+            if (Il2CppObject* le = AddComponent(go, layoutElemClass, "AddComponent(LayoutElement)")) {
+                bool on = true;
+                Call(leSetIgnore, le, {&on}, "LayoutElement.set_ignoreLayout");
+            }
+            Il2CppObject* img = AddComponent(go, imageClass, "AddComponent(Image)");
+            SetColor(img, Color{1, 1, 1, 0});
+            SetRaycast(img, true);
+            progHintToggle = Clickable(go);
+            Keep(progHintHandles, progHintToggle);
+        }
+    }
+    if (!progHintLogged) {
+        progHintLogged = true;
+        SR2_INFO("[{}] station ui: [P] Programs entry cloned from the page's key bar entry '{}' ({} key icon(s), label {}, "
+                 "click {}; placed before '{}')",
+                 module, unity::GetName(unity::GameObjectOf(tmpl)), progHint.IconCount(),
+                 progHint.HasLabel() ? "ok" : "MISSING", progHintToggle ? "ok" : "NOT available",
+                 last ? unity::GetName(unity::GameObjectOf(last)) : std::string("-"));
+    }
+}
+
+void StationUi::Impl::DropProgHint() {
+    if (Faulted()) progHint.Abandon();
+    else progHint.Destroy();  // the click target goes with it
+    progHintToggle = nullptr;
+    progHintText.clear();
+    FreeLater(progHintHandles);
 }
 
 void StationUi::Impl::PlacePill(Pill& P) {
@@ -1629,11 +1767,13 @@ void StationUi::Impl::Close(const char* why) {
     dialogKind = 0;
     if (sliderReady) slider.Destroy();
     if (root && !Faulted()) Destroy(root);
-    root = panelRt = blockerToggle = closeToggle = focusFrame = noteText = pHint = nullptr;
+    root = panelRt = blockerToggle = closeToggle = focusFrame = noteText = pHint = pModeText = nullptr;
+    pHover = -1;
+    pDeletePending = false;
     modeToggle[0] = modeToggle[1] = modeBg[0] = modeBg[1] = modeText[0] = modeText[1] = nullptr;
     titleSrc = bodySrc = nullptr;
     cells.clear();
-    pRows.clear();
+    pItems.clear();
     for (Pill& P : dialogPills) FreeLater(P.handles);  // destroyed with root
     dialogPills.clear();
     for (gbn::Button& b : dialogButtons) b.Forget();  // destroyed with root
@@ -1749,10 +1889,7 @@ void StationUi::Impl::Navigate(int dir) {
 void StationUi::Impl::Submit() {
     if (!g_open.load()) return;
     if (dialogKind == kDlgPrograms) {
-        if (pRow >= 0 && pRow < static_cast<int>(pRows.size()) && pCol >= 0 && pCol < static_cast<int>(pRows[pRow].size())) {
-            const PBtn b = pRows[pRow][pCol];
-            ProgActivate(b);
-        }
+        ProgSubmit();
         return;
     }
     if (focusRow == 0) SetMode(mode == LimitMode::kPrice ? LimitMode::kFraction : LimitMode::kPrice);
@@ -1794,7 +1931,11 @@ void StationUi::Impl::Tick(float dt) {
         // Programs: only with the Drone Program Scheduler upgrade (custom_upgrades; vanilla one program without).
         const bool wantProg = pageActive && haveStation && progs::Owned();
         SyncPill(limitPill, wantLimit, offMenuDest, "sr2mods_PriceLimitPrompt", "price-limit", "C");
-        SyncPill(progPill, wantProg, offMenuTarget, "sr2mods_ProgramsPrompt", "programs", "P");
+        // The [P] Programs entry sits in the page's key bar; the old pill right of the target's Change prompt
+        // only when the bar can't take it.
+        const bool useHint = legendOk && !progHintFailed;
+        if (useHint) SyncProgHint(wantProg);
+        SyncPill(progPill, wantProg && !useHint, offMenuTarget, "sr2mods_ProgramsPrompt", "programs", "P");
         // No program switch while the station menu is open (any tab: closing it from the Drone List tab
         // also asks about unapplied page changes); and the page follows the station's program.
         if ((menuActive || displayActive) && haveStation && progs::Available()) {
@@ -1805,7 +1946,7 @@ void StationUi::Impl::Tick(float dt) {
             labelStation = station;
             UpdatePillLabel();
         }
-        if (progPill.shown) UpdateProgramsLabel();
+        if (progPill.shown || progHint.Alive()) UpdateProgramsLabel();
         // The page went away (tab switch, picker, destination changed, other station): close.
         if (g_open.load()) {
             const bool want = dialogKind == kDlgPrograms ? wantProg : wantLimit;
@@ -1822,6 +1963,8 @@ void StationUi::Impl::Tick(float dt) {
         ApplyPillLook(progPill, "P");
         UpdateProgramsLabel();
     }
+    if (progHint.Alive()) progHint.Tick();
+    const bool progShown = progPill.shown || progHint.Alive();
     for (Pill& P : dialogPills)  // the dialog's pill buttons: key and label again for a few frames
         if (P.reapply > 0 && unity::IsAlive(P.go)) {
             --P.reapply;
@@ -1834,10 +1977,10 @@ void StationUi::Impl::Tick(float dt) {
     const bool open = g_open.load();
     const bool hotC = (limitPill.shown || (open && dialogKind == kDlgLimit)) &&
                       (KeyPressed(kbCurrent, kbC) || KeyPressed(padCurrent, padR3));
-    const bool hotP = (progPill.shown || (open && dialogKind == kDlgPrograms)) &&
+    const bool hotP = (progShown || (open && dialogKind == kDlgPrograms)) &&
                       (KeyPressed(kbCurrent, kbP) || KeyPressed(padCurrent, padL3));
     const bool clickedLimit = limitPill.shown && PillClicked(limitPill);
-    const bool clickedProg = progPill.shown && PillClicked(progPill);
+    const bool clickedProg = (progPill.shown && PillClicked(progPill)) || (progHint.Alive() && Clicked(progHintToggle));
     if (open) {
         // Every game button once per frame (its press / release edge and the reapplied look).
         dialogClicks.resize(dialogButtons.size());
@@ -1848,8 +1991,7 @@ void StationUi::Impl::Tick(float dt) {
             return;
         }
         if (dialogKind == kDlgPrograms) {
-            if (focusRefresh > 0 && --focusRefresh % 5 == 0) ProgFocus();
-            ProgClicks();
+            ProgInput();
             return;
         }
         for (int i = 0; i < 2; ++i)
@@ -1860,8 +2002,8 @@ void StationUi::Impl::Tick(float dt) {
         if (sliderReady) slider.Tick(dt);
     } else if ((hotC || clickedLimit) && limitPill.shown) {
         Open();
-    } else if ((hotP || clickedProg) && progPill.shown) {
-        OpenPrograms(0, 0);
+    } else if ((hotP || clickedProg) && progShown) {
+        OpenPrograms(-1);
     }
 }
 
@@ -1907,7 +2049,63 @@ StationUi::Impl::Label StationUi::Impl::TargetLabel(Il2CppObject* defs, const Pr
     return DefLabel(defs, "FindTargetDefinition", p.target, "target");
 }
 
-bool StationUi::Impl::OpenPrograms(int row, int col) {
+// Round 13 (r12gb3): "make the programs menu like long buttons ... they should function as buttons (same
+// height as right now), by on the left showing '[SPACE] edit' and on the right '[Z] Delete'", "Add program
+// should be a game button aswell", "make next program like in settings, the '< option1 >'", no help text.
+// The dialog is one vertical list of long buttons (program rows, Add program, the Next program selector);
+// Up / Down (the game's navigation: arrows, WASD, d-pad, stick) move the focus frame, Submit (Space /
+// Enter / A) presses the focused one, Left / Right step the selector, Z (the page's Clear All event, so also
+// its pad button) deletes the focused program. The pointer: hovering a row focuses it, a click presses it.
+
+// A key cap like the key bar's: white rounded box, navy border and letters. Returns its width.
+float StationUi::Impl::KeyCap(Il2CppObject* parentRt, float x, float cy, const char* key) {
+    const float h = 38.0f;
+    const float w = std::max(40.0f, 18.0f + 12.5f * static_cast<float>(std::char_traits<char>::length(key)));
+    if (Il2CppObject* cap = Box(parentRt, "KeyCap", x, cy - h * 0.5f, w, h, kWhite, 9.0f, 2.5f, kNavy))
+        Text(unity::TransformOf(cap), "Key", 0, 0, w, h, key, 19.0f, kNavy, kAlignCenter, titleSrc);
+    return w;
+}
+
+// "[KEY] Label" at (x, centre cy). Returns the total width.
+float StationUi::Impl::KeyHint(Il2CppObject* parentRt, float x, float cy, const char* key, const char* label,
+                               float labelSize) {
+    const float cw = KeyCap(parentRt, x, cy, key);
+    const float lw = 8.0f + labelSize * 0.56f * static_cast<float>(std::char_traits<char>::length(label));
+    Text(parentRt, "KeyLabel", x + cw + 10.0f, cy - 25.0f, lw, 50.0f, label, labelSize, kNavy, kAlignLeft, titleSrc);
+    return cw + 10.0f + lw;
+}
+
+// A long button (the row's rounded box catches the pointer; its Toggle is the click). `rowRt` = the row's
+// transform for its contents; the caller adds the focus frame (FinishItem) after them.
+StationUi::Impl::PItem StationUi::Impl::LongButton(Il2CppObject* prt, const char* name, float x, float y, float w, float h,
+                                                   bool running, int layer, Il2CppObject*& rowRt) {
+    PItem it;
+    rowRt = nullptr;
+    Il2CppObject* go = NewUi(name, prt, layer);
+    if (!go) return it;
+    rowRt = unity::TransformOf(go);
+    At(rowRt, x, y, w, h);
+    SetRaycast(Shape(go, running ? Color{0.80f, 0.93f, 0.95f, 1.0f} : kBacker, 16.0f, running ? 3.0f : 0.0f, kTeal), true);
+    it.toggle = Clickable(go);
+    Keep(dialogHandles, it.toggle);
+    return it;
+}
+
+// A transparent click target inside a row (above the row's own click). Returns its Toggle.
+Il2CppObject* StationUi::Impl::ClickArea(Il2CppObject* parentRt, const char* name, float x, float y, float w, float h,
+                                         int layer) {
+    Il2CppObject* go = NewUi(name, parentRt, layer);
+    if (!go) return nullptr;
+    At(unity::TransformOf(go), x, y, w, h);
+    Il2CppObject* img = AddComponent(go, imageClass, "AddComponent(Image)");
+    SetColor(img, Color{1, 1, 1, 0});
+    SetRaycast(img, true);
+    Il2CppObject* t = Clickable(go);
+    Keep(dialogHandles, t);
+    return t;
+}
+
+bool StationUi::Impl::OpenPrograms(int focus) {
     if (g_open.load() || !haveStation) return false;
     Il2CppObject* model = StationModel();
     progs::View view;
@@ -1922,19 +2120,21 @@ bool StationUi::Impl::OpenPrograms(int row, int col) {
     const bool full = n >= progs::kMaxPrograms;
     pCount = n;
     pRunning = view.running;
+    pMode = static_cast<int>(view.mode);
 
     // ---- layout ----
     const float titleY = 28.0f, subY = 84.0f;
     const float rowsY = 196.0f;
-    const float addY = rowsY + n * (kProgRowH + kProgRowGap) + 6.0f;
-    const float modeY = addY + kRowH + 24.0f;
-    const float footY = (n >= 2 ? modeY + kRowH : addY + kRowH) + 30.0f;
+    const float addH = 64.0f, modeH = 64.0f, gap = 14.0f;
+    const float addY = rowsY + n * (kProgRowH + kProgRowGap) + 4.0f;
+    const float modeY = addY + (full ? kRowH : addH) + gap;
+    const float footY = (n >= 2 ? modeY + modeH : addY + (full ? kRowH : addH)) + 28.0f;
     const float panelH = footY + kRowH + 26.0f;
     int layer = -1;
     if (!BuildShell("sr2mods_DroneProgramsDialog", panelH, layer)) return failOpen("dialog frame not built");
     Il2CppObject* prt = panelRt;
     openStation = station;
-    pRows.clear();
+    pItems.clear();
 
     Text(prt, "Title", kPad, titleY, kPanelW - 2 * kPad, 50, "Drone programs", 40.0f, kNavy, kAlignLeft, titleSrc);
     Text(prt, "Subtitle", kPad, subY, kPanelW - 2 * kPad, 100,
@@ -1943,28 +2143,43 @@ bool StationUi::Impl::OpenPrograms(int row, int col) {
                      "program 1; the mod keeps the others.",
                      progs::kMaxPrograms),
          22.0f, kNavy, kAlignTopLeft, bodySrc, true);
-    focusFrame = Box(prt, "Focus", 0, 0, 10, 10, Color{0, 0, 0, 0}, 20.0f, 4.0f, kTeal);
-    Keep(dialogHandles, focusFrame);
 
-    // ---- one row per program ----
+    const float rowW = kPanelW - 2 * kPad;
+    // The focus frame of an item: a teal outline around its row, drawn last (above the row's contents).
+    auto finish = [&](PItem& it, Il2CppObject* rowRt, float w, float h) {
+        it.frame = Box(rowRt, "Focus", -8, -8, w + 16, h + 16, Color{0, 0, 0, 0}, 22.0f, 4.0f, kTeal);
+        Keep(dialogHandles, it.frame);
+        if (it.frame) unity::SetActive(it.frame, false);
+        pItems.push_back(it);
+    };
+
+    // ---- one long button per program ----
     Il2CppObject* defs = offVmDefs ? unity::Field<Il2CppObject*>(unity::Field<Il2CppObject*>(menu.p, offMenuVm), offVmDefs)
                                    : nullptr;
-    const float rowW = kPanelW - 2 * kPad;
-    const float btnW = 150.0f, btnH = 56.0f;
-    const float removeX = rowW - 16.0f - btnW, editX = removeX - 12.0f - btnW;
-    const float cellX0 = 70.0f, sepW = 24.0f;
-    const float activeW = 48.0f;  // the page's own "active" icon left of the running program's pill
-    const float cellW = (editX - 16.0f - activeW - cellX0 - 2 * sepW) / 3.0f;
     Il2CppObject* activeSprite = offMenuActiveSprite ? unity::Field<Il2CppObject*>(menu.p, offMenuActiveSprite) : nullptr;
+    const float midY = kProgRowH * 0.5f;
+    const float numX = 196.0f, activeX = 238.0f, cellX0 = 288.0f, sepW = 24.0f;
     for (int i = 0; i < n; ++i) {
         const ProgramData& pd = view.programs[i];
         const float ry = rowsY + i * (kProgRowH + kProgRowGap);
         const bool running = i == view.running;
-        Il2CppObject* rowGo = Box(prt, "Program", kPad, ry, rowW, kProgRowH, running ? Color{0.80f, 0.93f, 0.95f, 1.0f} : kBacker,
-                                  16.0f, running ? 3.0f : 0.0f, kTeal);
-        if (!rowGo) return failOpen("row");
-        Il2CppObject* rrt = unity::TransformOf(rowGo);
-        Text(rrt, "Number", 12, 0, 46, kProgRowH, std::to_string(i + 1), 34.0f, kNavy, kAlignCenter, titleSrc);
+        Il2CppObject* rrt = nullptr;
+        PItem it = LongButton(prt, "Program", kPad, ry, rowW, kProgRowH, running, layer, rrt);
+        if (!rrt) return failOpen("row");
+        it.kind = kItemProgram;
+        it.index = i;
+        KeyHint(rrt, 18.0f, midY, "SPACE", "Edit", 24.0f);
+        Text(rrt, "Number", numX, 0, 40, kProgRowH, std::to_string(i + 1), 34.0f, kNavy, kAlignCenter, titleSrc);
+        if (running) Sprite(rrt, "Active", activeX, midY - 20.0f, 40, 40, activeSprite);
+        float cellsEnd = rowW - 24.0f;
+        if (n >= 2) {  // "[Z] Delete" at the right end: its own click target
+            const float delW = 40.0f + 10.0f + 8.0f + 24.0f * 0.56f * 6.0f;
+            const float delX = rowW - 18.0f - delW;
+            KeyHint(rrt, delX, midY, "Z", "Delete", 24.0f);
+            it.del = ClickArea(rrt, "Delete", delX - 10.0f, 6.0f, delW + 20.0f, kProgRowH - 12.0f, layer);
+            cellsEnd = delX - 24.0f;
+        }
+        const float cellW = (cellsEnd - cellX0 - 2 * sepW) / 3.0f;
         const Label cells3[3] = {TargetLabel(defs, pd), DefLabel(defs, "FindSourceDefinition", pd.source, "source"),
                                  DefLabel(defs, "FindDestinationDefinition", pd.sink, "destination")};
         for (int c = 0; c < 3; ++c) {
@@ -1974,120 +2189,85 @@ bool StationUi::Impl::OpenPrograms(int row, int col) {
             Text(rrt, "Name", tx, 4, cx + cellW - tx, kProgRowH - 8, cells3[c].name, 21.0f, kNavy, kAlignLeft, bodySrc, true, true);
             if (c < 2) Text(rrt, "Arrow", cx + cellW, 0, sepW, kProgRowH, ">", 26.0f, kNavy, kAlignCenter, titleSrc);
         }
-        if (running) Sprite(rrt, "Active", editX - activeW, (kProgRowH - 40.0f) * 0.5f, 40, 40, activeSprite);
-        std::vector<PBtn> btns;
-        PBtn edit;
-        edit.action = kActEdit;
-        edit.index = i;
-        edit.x = kPad + editX;
-        edit.y = ry + (kProgRowH - btnH) * 0.5f;
-        edit.w = btnW;
-        edit.h = btnH;
-        edit.right = true;  // grows to the left ("Running" is wider), Remove to the right: no overlap
-        edit.toggle = DialogButton(prt, "Edit", edit.x, edit.y, btnW, btnH, nullptr, running ? "Running" : "Edit", running,
-                                   layer, edit.gbi, true);
-        btns.push_back(edit);
-        if (n >= 2) {
-            PBtn rem = edit;
-            rem.action = kActRemove;
-            rem.right = false;
-            rem.x = kPad + removeX;
-            rem.toggle = DialogButton(prt, "Remove", rem.x, rem.y, btnW, btnH, nullptr, "Remove", false, layer, rem.gbi, false,
-                                      &kWhite, &kNavy);
-            btns.push_back(rem);
-        }
-        pRows.push_back(btns);
+        finish(it, rrt, rowW, kProgRowH);
     }
 
-    // ---- add ----
+    // ---- add program (a long button as well) ----
     if (!full) {
-        PBtn add;
-        add.action = kActAdd;
-        add.x = kPad;
-        add.y = addY;
-        add.w = 380.0f;
-        add.h = kRowH;
-        add.toggle = DialogButton(prt, "Add", add.x, add.y, add.w, add.h, nullptr, "Add program", false, layer, add.gbi);
-        pRows.push_back({add});
-        pHint = Text(prt, "AddHint", kPad + 400.0f, addY, kPanelW - 2 * kPad - 400.0f, kRowH,
+        Il2CppObject* art = nullptr;
+        PItem it = LongButton(prt, "Add", kPad, addY, rowW, addH, false, layer, art);
+        if (!art) return failOpen("add row");
+        it.kind = kItemAdd;
+        const float hw = KeyHint(art, 18.0f, addH * 0.5f, "SPACE", "Add program", 26.0f);
+        pHint = Text(art, "AddHint", 18.0f + hw + 24.0f, 0, rowW - hw - 66.0f, addH,
                      "A copy of the running program; it runs now - change it on this page and press Start Program.", 20.0f,
                      kNavy, kAlignLeft, bodySrc, true);
+        finish(it, art, rowW, addH);
     } else {
-        pHint = Text(prt, "AddHint", kPad, addY, kPanelW - 2 * kPad, kRowH,
+        pHint = Text(prt, "AddHint", kPad, addY, rowW, kRowH,
                      std::format("A station can have up to {} programs.", progs::kMaxPrograms), 22.0f, kNavy, kAlignLeft,
                      bodySrc, true);
     }
     Keep(dialogHandles, pHint);
 
-    // ---- when to take the next program (two or more) ----
+    // ---- when to take the next program: a "< option >" selector as in the game's settings (two or more) ----
     if (n >= 2) {
-        Text(prt, "ModeLabel", kPad, modeY, 230, kRowH, "Next program", 26.0f, kNavy, kAlignLeft, bodySrc);
-        const char* names[2] = {"When idle", "After each delivery"};
-        std::vector<PBtn> btns;
-        for (int i = 0; i < 2; ++i) {
-            const bool sel = static_cast<int>(view.mode) == i;
-            PBtn b;
-            b.action = i == 0 ? kActModeIdle : kActModeDelivery;
-            b.x = kPad + 240.0f + i * 360.0f;
-            b.y = modeY;
-            b.w = 340.0f;
-            b.h = kRowH;
-            b.toggle = DialogButton(prt, i == 0 ? "ModeIdle" : "ModeDelivery", b.x, b.y, b.w, b.h, nullptr, names[i], sel,
-                                    layer, b.gbi, false, &kBacker, &kNavy);
-            btns.push_back(b);
-        }
-        pRows.push_back(btns);
+        Il2CppObject* mrt = nullptr;
+        PItem it = LongButton(prt, "Mode", kPad, modeY, rowW, modeH, false, layer, mrt);
+        if (!mrt) return failOpen("mode row");
+        it.kind = kItemMode;
+        Text(mrt, "ModeLabel", 24.0f, 0, 400.0f, modeH, "Next program", 26.0f, kNavy, kAlignLeft, titleSrc);
+        const float selW = 480.0f, arrowW = 64.0f, sx = rowW - 18.0f - selW;
+        Box(mrt, "Selector", sx, 8.0f, selW, modeH - 16.0f, kWhite, (modeH - 16.0f) * 0.5f);
+        Text(mrt, "Prev", sx, 0, arrowW, modeH, "<", 34.0f, kTeal, kAlignCenter, titleSrc);
+        Text(mrt, "Next", sx + selW - arrowW, 0, arrowW, modeH, ">", 34.0f, kTeal, kAlignCenter, titleSrc);
+        pModeText = Text(mrt, "Value", sx + arrowW, 0, selW - 2 * arrowW, modeH,
+                         pMode == 0 ? "When idle" : "After each delivery", 26.0f, kNavy, kAlignCenter, titleSrc);
+        Keep(dialogHandles, pModeText);
+        it.prev = ClickArea(mrt, "PrevClick", sx, 0, arrowW, modeH, layer);
+        it.next = ClickArea(mrt, "NextClick", sx + selW - arrowW, 0, arrowW, modeH, layer);
+        finish(it, mrt, rowW, modeH);
     }
 
-    // ---- footer ----
-    Text(prt, "Help", kPad, footY, kPanelW - 2 * kPad - 240, kRowH,
-         "Arrows: choose    Enter: select    Esc: close", 22.0f, kNavy, kAlignLeft, bodySrc);
+    // ---- footer: Close only (round 13: no "Arrows: choose / Enter: select / Esc: close" line) ----
     closeToggle = DialogButton(prt, "Close", kPanelW - kPad - 220, footY, 220, kRowH, "P", "Close", false, layer, closeGb, true);
     if (Faulted()) return failOpen("faulted");
 
     unity::SetActive(root, true);
     dialogKind = kDlgPrograms;
     g_open.store(true);
-    pRow = std::clamp(row, 0, std::max(0, static_cast<int>(pRows.size()) - 1));
-    pCol = pRows.empty() ? 0 : std::clamp(col, 0, static_cast<int>(pRows[pRow].size()) - 1);
-    ProgFocus();
-    focusRefresh = 30;
+    pHover = -1;
+    ProgFocus(focus < 0 ? view.running : focus);
     if (!loggedProgOpen) {
         loggedProgOpen = true;
-        SR2_INFO("[{}] station ui: programs dialog opened for station {} ({} program(s), program {} runs, {})", module,
-                 station, n, view.running + 1, progs::ModeName(view.mode));
+        SR2_INFO("[{}] station ui: programs dialog opened for station {} ({} program(s), program {} runs, {}; {} items)",
+                 module, station, n, view.running + 1, progs::ModeName(view.mode), pItems.size());
     }
     return true;
 }
 
-void StationUi::Impl::ProgFocus() {
-    if (!unity::IsAlive(focusFrame) || pRow < 0 || pRow >= static_cast<int>(pRows.size())) return;
-    const auto& r = pRows[pRow];
-    if (pCol < 0 || pCol >= static_cast<int>(r.size())) return;
-    const PBtn& b = r[pCol];
-    float x = b.x, w = b.w, h = b.h, y = b.y;
-    if (b.gbi >= 0 && b.gbi < static_cast<int>(dialogButtons.size())) {  // the game button's laid-out size
-        float gw = 0, gh = 0;
-        dialogButtons[static_cast<size_t>(b.gbi)].Size(gw, gh);
-        if (gw > 1.0f && gh > 1.0f) {
-            if (b.right) x = b.x + b.w - gw;
-            w = gw;
-            y = b.y + (b.h - gh) * 0.5f;
-            h = gh;
-        }
-    }
-    At(unity::TransformOf(focusFrame), x - 8.0f, y - 8.0f, w + 16.0f, h + 16.0f);
+void StationUi::Impl::ProgFocus(int i) {
+    if (pItems.empty()) return;
+    pFocus = std::clamp(i, 0, static_cast<int>(pItems.size()) - 1);
+    for (int j = 0; j < static_cast<int>(pItems.size()); ++j)
+        if (unity::IsAlive(pItems[j].frame)) unity::SetActive(pItems[j].frame, j == pFocus);
 }
 
 void StationUi::Impl::ProgNavigate(int dir) {
-    if (pRows.empty()) return;
+    if (pItems.empty()) return;
     if (dir == kMoveUp || dir == kMoveDown) {
-        pRow = std::clamp(pRow + (dir == kMoveDown ? 1 : -1), 0, static_cast<int>(pRows.size()) - 1);
-        pCol = std::clamp(pCol, 0, static_cast<int>(pRows[pRow].size()) - 1);
-    } else if (dir == kMoveLeft || dir == kMoveRight) {
-        pCol = std::clamp(pCol + (dir == kMoveRight ? 1 : -1), 0, static_cast<int>(pRows[pRow].size()) - 1);
+        ProgFocus(pFocus + (dir == kMoveDown ? 1 : -1));
+        return;
     }
-    ProgFocus();
+    if ((dir == kMoveLeft || dir == kMoveRight) && pItems[pFocus].kind == kItemMode) ProgStepMode(dir == kMoveRight ? 1 : -1);
+}
+
+void StationUi::Impl::ProgSubmit() {
+    if (pFocus < 0 || pFocus >= static_cast<int>(pItems.size())) return;
+    const PItem it = pItems[pFocus];
+    if (it.kind == kItemProgram) ProgEdit(it.index);
+    else if (it.kind == kItemAdd) ProgAdd();
+    else if (it.kind == kItemMode) ProgStepMode(1);
 }
 
 // The page shows the station's program again (after we changed which one runs).
@@ -2096,57 +2276,101 @@ void StationUi::Impl::RevertPage() {
     if (vmRevert && IsA(vm, vmClass)) Call(vmRevert, vm, {}, "DroneProgramViewModel.RevertChangesToLastAppliedProgram");
 }
 
-void StationUi::Impl::ProgActivate(const PBtn& b) {
+// Edit: that program runs now and the page shows it; the dialog closes.
+void StationUi::Impl::ProgEdit(int index) {
     Il2CppObject* model = StationModel();
     if (!model) return;
-    const int row = pRow, col = pCol;
-    switch (b.action) {
-    case kActEdit:
-        if (b.index != pRunning && !progs::Run(model, b.index)) {
-            SetText(pHint, "That program could not be started (see the log).");
-            return;
-        }
-        if (b.index != pRunning) RevertPage();  // the running one: keep what the page has (maybe not applied yet)
-        UpdateProgramsLabel();
-        Close(b.index != pRunning ? "program chosen" : "edit the running program");
-        return;
-    case kActRemove:
-        if (!progs::Remove(model, b.index)) return;
-        if (b.index == pRunning) RevertPage();  // another program runs now
-        UpdateProgramsLabel();
-        Close(nullptr);
-        OpenPrograms(std::min(row, pCount - 2), col);
-        return;
-    case kActAdd:
-        if (!progs::Add(model)) {
-            SetText(pHint, "Set up a complete program on this page first (target, source and destination).");
-            return;
-        }
-        UpdateProgramsLabel();
-        Close("program added");
-        return;
-    case kActModeIdle:
-    case kActModeDelivery:
-        progs::SetMode(model, b.action == kActModeIdle ? progs::Mode::kWhenIdle : progs::Mode::kAfterDelivery);
-        Close(nullptr);
-        OpenPrograms(row, col);
-        return;
-    default:
+    if (index != pRunning && !progs::Run(model, index)) {
+        SetText(pHint, "That program could not be started (see the log).");
         return;
     }
+    if (index != pRunning) RevertPage();  // the running one: keep what the page has (maybe not applied yet)
+    UpdateProgramsLabel();
+    Close(index != pRunning ? "program chosen" : "edit the running program");
 }
 
-void StationUi::Impl::ProgClicks() {
-    for (int r = 0; r < static_cast<int>(pRows.size()); ++r)
-        for (int c = 0; c < static_cast<int>(pRows[r].size()); ++c)
-            if (Clicked(pRows[r][c].toggle, pRows[r][c].gbi)) {
-                pRow = r;
-                pCol = c;
-                ProgFocus();
-                const PBtn b = pRows[r][c];
-                ProgActivate(b);  // may rebuild the dialog: stop here
-                return;
-            }
+// Delete (2+ programs): the dialog is rebuilt in place, the focus stays on that row (or the one above).
+void StationUi::Impl::ProgDelete(int index) {
+    Il2CppObject* model = StationModel();
+    if (!model || pCount < 2) return;
+    const int focus = pFocus;
+    if (!progs::Remove(model, index)) return;
+    if (index == pRunning) RevertPage();  // another program runs now
+    UpdateProgramsLabel();
+    SR2_INFO("[{}] station ui: station {}: program {} deleted in the programs dialog", module, openStation, index + 1);
+    Close(nullptr);
+    OpenPrograms(std::min(focus, pCount - 2));
+}
+
+void StationUi::Impl::ProgAdd() {
+    Il2CppObject* model = StationModel();
+    if (!model) return;
+    if (!progs::Add(model)) {
+        SetText(pHint, "Set up a complete program on this page first (target, source and destination).");
+        return;
+    }
+    UpdateProgramsLabel();
+    Close("program added");
+}
+
+// The selector: the next / previous mode (wraps, as the game's settings selectors); applied at once.
+void StationUi::Impl::ProgStepMode(int dir) {
+    Il2CppObject* model = StationModel();
+    if (!model || pCount < 2) return;
+    const int m = ((pMode + dir) % 2 + 2) % 2;
+    if (!progs::SetMode(model, static_cast<progs::Mode>(m))) return;
+    pMode = m;
+    SetText(pModeText, m == 0 ? "When idle" : "After each delivery");
+}
+
+bool StationUi::Impl::PointerInside(Il2CppObject* selectable) {
+    if (!selPointerInside || !unity::IsAlive(selectable)) return false;
+    bool ok = false;
+    return Unbox<bool>(Call(selPointerInside, selectable, {}, "Selectable.get_isPointerInside", &ok)) && ok;
+}
+
+// Every frame while the programs dialog is open: clicks, hover focus, the Delete key.
+void StationUi::Impl::ProgInput() {
+    for (int i = 0; i < static_cast<int>(pItems.size()); ++i) {
+        const PItem it = pItems[i];
+        if (Clicked(it.del)) {
+            ProgFocus(i);
+            ProgDelete(it.index);  // rebuilds the dialog: stop here
+            return;
+        }
+        const bool prev = Clicked(it.prev), next = Clicked(it.next);
+        if (prev || next) {  // the selector's arrows (the arrow's own click, not the row's)
+            ProgFocus(i);
+            ProgStepMode(prev ? -1 : 1);
+            return;
+        }
+        if (Clicked(it.toggle)) {
+            ProgFocus(i);
+            ProgSubmit();  // Edit / Add close the dialog, the selector steps on
+            return;
+        }
+    }
+    // Hover: the row under the pointer takes the focus when the pointer moves onto it.
+    if (selPointerInside) {
+        int h = -1;
+        for (int i = 0; i < static_cast<int>(pItems.size()) && h < 0; ++i)
+            if (PointerInside(pItems[i].toggle)) h = i;
+        if (h != pHover) {
+            pHover = h;
+            if (h >= 0 && h != pFocus) ProgFocus(h);
+        }
+    }
+    // Delete: Z (polled) or the page's Clear All event (its pad button); one per 300 ms (both may fire).
+    const bool z = KeyPressed(kbCurrent, kbZ);
+    if (z || pDeletePending) {
+        pDeletePending = false;
+        const uint64_t now = GetTickCount64();
+        if (now - pLastDeleteMs > 300 && pFocus >= 0 && pFocus < static_cast<int>(pItems.size()) &&
+            pItems[pFocus].kind == kItemProgram && pCount >= 2) {
+            pLastDeleteMs = now;
+            ProgDelete(pItems[pFocus].index);
+        }
+    }
 }
 
 // ---------------------------------------------------------------- public --
@@ -2173,6 +2397,10 @@ void StationUi::Shutdown() {
         p.dialogButtons.clear();
         p.limitPill.gb.Forget();
         p.progPill.gb.Forget();
+        p.progHint.Abandon();
+        p.progHintToggle = nullptr;
+        p.pItems.clear();
+        Impl::FreeLater(p.progHintHandles);
         Impl::Release(p.menu);
         Impl::Release(p.menuDisplay);
         return;

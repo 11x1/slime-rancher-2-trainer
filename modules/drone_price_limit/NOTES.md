@@ -56,29 +56,50 @@ The data and the rotation are custom_upgrades' (`modules/custom_upgrades/drone_p
 per address). It shows only while custom_upgrades is on and the save owns the Drone Program Scheduler
 upgrade (`drone_programs::Owned`; round 12: hidden without it, the station has one program as vanilla).
 
-- Programming page: a second pill `[P] Programs` (one program) / `[P] Program 2/3` right of the
-  **target's** Change pill (a clone of the target's PromptContainer, no wrap, fitted to the label).
-  Opens with **P**, the pad's **left stick click** or a click.
-- Dialog (same frame as the price-limit one): one row per program: number, target (icon + name),
-  source, destination (names / icons from the menu's `DroneUIDefinitionSource`), **Edit** (the running
-  one says **Running**) and **Remove** (with 2+ programs); **Add program** (a copy of the running one,
-  which then runs; the dialog closes so it can be changed on the page; up to 3); with 2+ programs a
-  "Next program" row: **When idle** | **After each delivery**. Arrows move the focus frame, Enter
-  selects, P / Esc / Close / backdrop close.
+- Programming page (round 13: "Move the 'Program X/Y' to the same row as '[X] Start Program', '[Z] Clear
+  All', '[ESC] Close'"): an entry `[P] Programs` (one program) / `[P] Program 2/3` in the page's own key
+  bar (`DroneProgramMenu._inputLegend` +0xE0), a `modules/common/legend_hint.h` clone of one of the bar's
+  entries placed before the bar's last entry (Close). A transparent raycast Image + Toggle child
+  (`LayoutElement.ignoreLayout`) makes it clickable like the game's own entries. Log `[P] Programs entry
+  cloned from the page's key bar entry '...'`. The bar can rebuild its entries; a dead clone is made again on
+  the next state read (~10 frames). When the bar has no entry to clone for 3 s (or legend_hint is
+  unavailable): the old game-button pill right of the **target's** Change prompt (log `no [P] Programs entry
+  in the page's key bar (...) - pill instead`). Opens with **P**, the pad's **left stick click** or a click.
+- Dialog (same frame as the price-limit one; round 13: "make the programs menu like long buttons ... on the
+  left showing '[SPACE] edit' and on the right '[Z] Delete'", "Add program should be a game button aswell",
+  "make next program like in settings, the '< option1 >'", help line removed): one vertical list of long
+  buttons, each a rounded row with its own click Toggle and a teal focus frame (drawn last, above the row):
+  - one per program (80 high, as before): `[SPACE] Edit` key hint, number, the page's "active" icon on the
+    running one (the running row is also tinted), target (icon + name), source, destination (names / icons
+    from the menu's `DroneUIDefinitionSource`), with 2+ programs `[Z] Delete` at the right end (its own
+    click area);
+  - **Add program** (`[SPACE] Add program` + what it does; a copy of the running one, which then runs; the
+    dialog closes so it can be changed on the page; up to 3; when full a text line instead);
+  - with 2+ programs **Next program** with a `<  When idle  >` / `<  After each delivery  >` selector (white
+    pill, teal arrows; wraps).
+  - Input: Up / Down move the focus (the game's navigation through the FocusManager detour: arrows, WASD,
+    d-pad, stick); Submit (Space / Enter / A) = Edit / Add / next mode; Left / Right step the selector; **Z**
+    (polled) or the page's Clear All event (`HandleClearAllOptions` detour, so also its pad button) deletes the
+    focused program (at most one per 300 ms, both may fire). The pointer: moving onto a row focuses it
+    (`Selectable.isPointerInside`), a click on the row presses it, on `[Z] Delete` deletes, on an arrow steps.
+    P / Esc / Close / backdrop close. The dialog opens with the running program focused.
+  - Round 12 "cant navigate with wasd/arrow keys": the focus moved, but the frame was one object created
+    before the rows, so the opaque rows covered it (only visible on the Add / mode buttons). Now each row
+    has its own frame above its contents.
 - Edit = `drone_programs::Run` + `DroneProgramViewModel.RevertChangesToLastAppliedProgram`, so the page
-  shows the program that now runs; the dialog closes. Remove / mode rebuild the dialog in place.
+  shows the program that now runs; the dialog closes. Delete rebuilds the dialog in place (focus stays on
+  that row or the one above; log `program N deleted in the programs dialog`); the selector applies at once
+  and only changes its text.
 - Look (round 11: "use Silo's GUI buttons, theyre the best ones we have rn that look similiar to SR2's
-  style"): the `[C] Limit` / `[P] Programs` pills and every dialog button (Edit / Running, Remove, Add
-  program, the mode buttons of both dialogs, Close) are the shared game button
-  (`modules/common/game_button.h`), the same clone of the game's popup button as the silo receipt's: pink
-  pill, the game's hover colour / bounce / hover sound, key glyph on the left. Pills: scale 0.8, key cap C /
-  P, placed 12 px right of the option's Change prompt in its anchor space (log `... action is a game popup
-  button (key C)`). Dialog buttons: scale 0.72, label at least the old button width, selected states
-  (Running, the chosen mode) teal through our own ScriptableColor (hover stays the game's blue); Close shows
-  C (limit dialog) / P (programs dialog). The focus frame follows the laid-out size. The running program
-  also shows the page's own "active" icon (`DroneProgramMenu._activeStateSprite`). Without the popup
-  template: the earlier Change-prompt clones (with the receipt's glyph via `UsePopupGlyph`), then drawn
-  buttons.
+  style"): the `[C] Limit` pill, the fallback `[P] Programs` pill and the dialogs' Close and limit-mode
+  buttons are the shared game button (`modules/common/game_button.h`), the same clone of the game's popup
+  button as the silo receipt's: pink pill, the game's hover colour / bounce / hover sound, key glyph on the
+  left. Pills: scale 0.8, key cap C / P, placed 12 px right of the option's Change prompt in its anchor space
+  (log `... action is a game popup button (key C)`). Dialog buttons: scale 0.72, selected states teal
+  through our own ScriptableColor (hover stays the game's blue); Close shows C (limit dialog) / P (programs
+  dialog). The programs dialog's key hints are drawn key caps (white, navy border) as in the key bar. Without
+  the popup template: the earlier Change-prompt clones (with the receipt's glyph via `UsePopupGlyph`), then
+  drawn buttons.
 - While the station menu is open (any tab; a tab other than the program page counts for 2 min after the
   page was last seen, so a closed display that stays loaded can't hold it) the station's rotation waits
   (`NoteMenuOpen`).
@@ -97,26 +118,25 @@ To check in game (programs):
 
 1. Log: `[custom_upgrades] drone programs ready (up to 3 per station)`, `station ui ready` without
    "page refresh ... NOT available" / "program names: NOT available".
-2. Custom upgrades on, open a station: `[P] Programs` right of the target's Change pill (position, no
-   overlap with the source option, key glyph). Custom upgrades off: no pill.
-3. P / click: the dialog with program 1 (names and icons right, Running). Add program: closes, pill
+2. Custom upgrades on, open a station: `[P] Programs` in the key bar between Clear All and Close. Custom
+   upgrades off: no entry.
+3. P / click: the dialog with program 1 (names and icons right, active icon). Add program: closes, entry
    `Program 2/2`, page unchanged; change the target / source / destination, Start Program: log
    `program 2 changed`.
-4. Reopen: two rows, Edit on program 1 -> page shows program 1, pill `Program 1/2`.
+4. Reopen: two rows, Edit on program 1 -> page shows program 1, entry `Program 1/2`.
 5. Close the menu: the drone works program 1; when it has nothing to do (rests at the station), log
    `program 1 -> 2 (nothing to do)` and it works program 2; and back.
 6. "After each delivery": with two programs that both have work, the drone alternates after each load.
    A drone carrying something never switches (no dumped cargo).
-7. Remove the running program: the other one runs, the page shows it; down to one program: pill
+7. Delete the running program: the other one runs, the page shows it; down to one program: entry
    `Programs`, sidecar entry gone.
 8. Save while program 2 runs, reload: log `2 programs restored from the sidecar`, program 1 runs. Load
    the save without the mod (or with custom upgrades off): the station has program 1.
 9. Program 1 with the Hen Collector / Quantum Storage Link source: saved as Coop / Silo, restored with
    the true source after a load.
 10. Pick the station up: log `extra programs dropped (the station is gone ...)`.
-11. Round 11: the pills and the dialog's buttons look like the silo receipt's (pink, hover turns blue and
-    bounces); Close shows the P key; the running row has the page's "active" icon. Switching programs (Edit, or the rotation) and closing the
-    menu without touching the page: no "discard" prompt.
+11. Close shows the P key; the running row has the page's "active" icon. Switching programs (Edit, or the
+    rotation) and closing the menu without touching the page: no "discard" prompt.
 12. A program that never gets cargo (e.g. Meats, Outside Plots, with chickens running around): after 90 s
     the next program runs and the log says what the drone was doing.
 

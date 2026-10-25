@@ -1,6 +1,7 @@
 #pragma once
 // Extra entries in the game's own key bar (InputLegend), shared by map_tools ("[RMB] Teleport" on the full
-// map) and sandbox ("[G] Add materials" in the Fabricator).
+// map), sandbox ("[G] Add materials" in the Fabricator) and drone_price_limit ("[P] Programs" in the drone
+// station's program page; it adds its own click target as a child of the clone).
 //
 // Game 1.3.0 (dump + IDA, see modules/map_tools/NOTES.md "[RMB] Teleport in the key bar"):
 //   * InputLegend._hints (InputHint[]) are the bar's entries, children of one layout. Each InputHint has an

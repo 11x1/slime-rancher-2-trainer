@@ -5,9 +5,10 @@
 // game-styled dialog: limit mode (minimum price / minimum fraction of the base price), a slider for
 // the value (0 = no limit) and a base-price cheat sheet of every plort in the market terminal's order.
 // Built at runtime from uGUI parts and clones of the menu's own prompt; no managed code of ours.
-// Also the UI of custom_upgrades' several programs per station (drone_programs.h): a "Programs" action
-// next to the target's "Change" action (P key / left stick click) opens a dialog listing the station's
-// programs (Edit = run it now and show it on the page, Remove, Add program, when to take the next one).
+// Also the UI of custom_upgrades' several programs per station (drone_programs.h): a "[P] Programs" entry
+// in the page's key bar (P key / left stick click / click) opens a dialog listing the station's programs as
+// long buttons (Space = Edit: run it now and show it on the page, Z = Delete, Add program, a "< option >"
+// selector for when to take the next one).
 // It lives here because this file owns the menu hooks (one hook per address); it shows only while
 // custom_upgrades is on.
 // Findings and layout: see station_dialog.cpp and modules/drone_price_limit/NOTES.md.
