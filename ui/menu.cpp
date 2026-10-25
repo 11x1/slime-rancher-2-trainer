@@ -3719,8 +3719,8 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv, layout::SandboxPage pa
     sbx::MarkViewed();
     const auto snap = sbx::Get();
     // The module only refreshes the snapshot while the page is viewed, so after reopening it is as old
-    // as the time the overlay was closed: draw it anyway for the first seconds (a fresh one follows
-    // within 250 ms) instead of a short "Reading..." page, which clamped the scroll for a frame.
+    // as the time the overlay was closed: no short "Reading..." page for it (that clamped the scroll for
+    // a frame); the page is hidden below until the fresh one is in (sbx::Current).
     const bool justShown = ImGui::GetTime() - g_sbxShownSince < 3.0;
     if (!snap || (h.nowMs - snap->tick > 10000 && !justShown)) {
         OffNote("Reading your character...");
@@ -3730,6 +3730,15 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv, layout::SandboxPage pa
         OffNote(snap->why.empty() ? std::string("Load a save to use the sandbox.") : snap->why);
         SandboxStatus(h);
         return;
+    }
+    // Reopened (or switched back to): the snapshot is from before the overlay closed, and slots emptied
+    // meanwhile showed full for a frame (round 17). The module refreshes in its next frame; until then
+    // the page is laid out as usual (its height and scroll stay) but clipped away: nothing drawn or
+    // hoverable, child cards included (a child's clip rect is cut by its parent's).
+    const bool stale = !sbx::Current(*snap);
+    if (stale) {
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        ImGui::PushClipRect(at, at, false);
     }
     const float full = ImGui::GetContentRegionAvail().x, w = ColumnWidth();
     // The grid under the mouse, for the key hint bar under the page (drawn after it, this frame). Kept
@@ -3778,6 +3787,7 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv, layout::SandboxPage pa
             break;
     }
     g_sbxRoom = 0;
+    if (stale) ImGui::PopClipRect();
     if (!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) && !ImGui::GetDragDropPayload() &&
         !ImGui::IsMouseHoveringRect(g_sbxBarMin, g_sbxBarMax, false)) {
         const double now = ImGui::GetTime();

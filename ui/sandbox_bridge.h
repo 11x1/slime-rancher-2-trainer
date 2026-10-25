@@ -163,6 +163,7 @@ struct Snapshot {
     int upgradeLevelsLeft = -1;                           // levels until all are at their last one (-1: unknown)
     std::string upgradeWhy;                               // why "Max all upgrades" is unavailable ("" = it is not)
     int upgradesHidden = -1;                              // upgrades the Fabricator hides until found (-1: unknown)
+    unsigned view = 0;                                    // ViewSession() when it was read (Current)
 };
 
 enum class Op {
@@ -213,6 +214,10 @@ void SetStatus(std::string text, bool error);
 void SetHandler(void (*fn)(const Action&));
 // The tab was drawn within the last ~0.6 s.
 bool WantsSnapshot();
+// Counts the times the tab was shown again after a gap (overlay reopened, switched back to it). The
+// module stamps it into Snapshot::view and refreshes at once when it changes, not on its next 250 ms
+// tick. Any thread.
+unsigned ViewSession();
 // The loaded save is marked as cheated (Sandbox was used in it): achievements stay blocked in it,
 // also with Sandbox off (modules/sandbox/cheated_save.cpp). Any thread.
 void SetSaveCheated(bool cheated);
@@ -221,7 +226,11 @@ bool SaveCheated();
 // ---- render thread ----
 std::shared_ptr<const Snapshot> Get();  // nullptr until the first publish
 Status GetStatus();
-void MarkViewed();  // call every frame the tab is drawn
+void MarkViewed();  // call every frame the tab is drawn (before Get)
+// The snapshot was read since the tab was shown again, or the module has not answered within
+// ~0.4 s (then the old one is all there is). False on the first frame(s) after reopening: the
+// snapshot is from before the overlay closed (round 17: emptied slots showed full for a frame).
+bool Current(const Snapshot& s);
 // Posts the action to the main thread. False (and a status line) if the
 // main-thread dispatcher is not running.
 bool Request(const Action& a);

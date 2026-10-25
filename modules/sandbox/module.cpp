@@ -421,6 +421,7 @@ private:
     unsigned togglesSeen_ = 0;           // SaveTogglesVersion() applied last (0: apply again)
     int frameCb_ = 0;
     unsigned long long lastSnap_ = 0, lastEnergy_ = 0;
+    unsigned snapSession_ = 0;  // bridge::ViewSession() of the last refresh (a new one: refresh now)
 
     // catalog (main thread)
     std::shared_ptr<const std::vector<bridge::Item>> catalog_;
@@ -2930,6 +2931,7 @@ bool Sandbox::EnsureMaterials() {
 void Sandbox::Refresh() {
     bridge::Snapshot s;
     s.tick = GetTickCount64();
+    s.view = bridge::ViewSession();  // read before the data, so the tab never takes older data as current
     s.infiniteEnergy = infinite_.load();
     Ctx c;
     if (!Live()) {
@@ -3051,9 +3053,12 @@ void Sandbox::Tick(float dt) {
         FlushNotices();
         batchIdx_ = batchSize_ = 0;
     }
-    const bool snap = bridge::WantsSnapshot() && now - lastSnap_ >= kSnapshotMs;
+    // The tab shown again (overlay reopened): refresh in this frame, as it hides the old snapshot until then.
+    const unsigned session = bridge::ViewSession();
+    const bool snap = bridge::WantsSnapshot() && (now - lastSnap_ >= kSnapshotMs || session != snapSession_);
     if (snap) {
         lastSnap_ = now;
+        snapSession_ = session;
         Refresh();
     }
     sandbox::PlayerExtrasTick(snap);
