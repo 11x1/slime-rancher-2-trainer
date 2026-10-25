@@ -59,7 +59,7 @@ Other files:
 
 ## Where things live in the repo
 
-Modules (`modules/<name>/`, each with `NOTES.md` when it has design worth writing down): collectibles, custom_upgrades (also sidecar owner), debug_tools, discord_rpc, drone_price_limit, free_placement, hl2_movement, instant_build, map_tools, minimap, misc_tweaks, plot_upgrades, quick_start, quick_travel, sandbox, sell_upgrades, slime_dj, spawn_scaling, wall_markers; `modules/common/` shared module code. UI: `ui/` (overlay + Options tab, `ui/NOTES.md`). Loader/proxy: `proxy/`.
+Modules (`modules/<name>/`, each with `NOTES.md` when it has design worth writing down): collectibles, custom_upgrades (also sidecar owner), debug_tools, discord_rpc, drone_price_limit, free_placement, gadget_stacking, hl2_movement, instant_build, map_tools, minimap, misc_tweaks, plot_upgrades, quick_start, quick_travel, sandbox, sell_upgrades, slime_dj, spawn_scaling, wall_markers; `modules/common/` shared module code. UI: `ui/` (overlay + Options tab, `ui/NOTES.md`). Loader/proxy: `proxy/`.
 
 Core helpers (`core/`):
 - `resolver.h` `il2cpp::Resolver::Get()`: `Class`, `Method(k, name, argc)`, `MethodByParams(k, name, {type names})` (overload-exact, searches parents), `Field/FieldOffset`, `MethodPointer`, guarded `Invoke`, `ToUtf8`, `Rva(p)`.
