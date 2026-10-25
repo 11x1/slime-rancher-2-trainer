@@ -69,17 +69,33 @@ struct Metadata {
 Metadata CurrentMetadata();                       // AutoSaveDirector._currentGameMetadata
 Metadata MetadataOf(Il2CppObject* autoSaveDirector);  // the same from a given director (save guard)
 
-// One save file of a game (AutoSaveDirector.AvailableGamesByGameName).
+// One save file of a game. The save folder's file names are the source of truth (which games exist, their
+// slot, game name and files); AutoSaveDirector.AvailableGamesByGameName's summaries add the display name,
+// save number, save time and the invalid flag when they can be read (hasSummary).
 struct SaveInfo {
-    std::string gameName, displayName, saveName;
-    int slotIndex = -1;
-    unsigned long long saveNumber = 0;
-    std::string timeLocal, timeUtc;  // "YYYY-MM-DD HH:MM:SS"
+    std::string gameName, displayName, saveName;  // saveName = file name without ".sav"
+    int slotIndex = -1;                           // from the game name "<yyyyMMddHHmmss>_<slot>": slot - 1
+    unsigned long long saveNumber = 0;            // 0 = unknown (no summary)
+    std::string timeLocal, timeUtc;               // "YYYY-MM-DD HH:MM:SS": the summary's save time, else the file's
     long long unixUtc = 0;
     bool invalid = false, gameOver = false;
+    std::string fileName;                         // "<saveName>.sav" ("" = only in the summaries: folder unknown)
+    long long fileUnixUtc = 0;                    // the file's last write time
+    std::string fileTimeLocal;                    // the same, "YYYY-MM-DD HH:MM:SS" local
+    bool hasSummary = false;
 };
-std::vector<SaveInfo> Saves();  // every save of every game, newest save number first per game
-// Loads a save (AutoSaveDirector.BeginLoad with its Summary.SaveIdentifier).
+struct SaveList {
+    std::vector<SaveInfo> saves;  // by slot, then game name, newest save first (NewerThan)
+    std::string folder;           // the save folder ("" = not found)
+    std::string folderFrom;       // "storage provider" / "LocalLow" / ""
+    std::string summaryError;     // why the summaries could not be read ("" = read fine)
+};
+SaveList ListSaves();
+std::vector<SaveInfo> Saves();  // ListSaves().saves
+// The newer of two saves of a game: by save number when both have one, else by file (or save) time.
+bool NewerThan(const SaveInfo& a, const SaveInfo& b);
+// Loads a save: AutoSaveDirector.BeginLoad(GameSaveIdentifier { GameName, SaveName }), the same pair
+// Summary.get_SaveIdentifier returns, built from the file name.
 void BeginLoad(const SaveInfo& s);
 void DeleteGame(const std::string& gameName);
 bool SaveNow();                                   // AutoSaveDirector.SaveAllNow(false, null)

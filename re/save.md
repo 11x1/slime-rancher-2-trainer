@@ -33,8 +33,20 @@ Custom ids (`0x5352xxxx`, "SR" << 16; `custom_upgrades::IsCustomUpgrade`) never 
 - `Summary` (MP.SR.Persist): `Name` +0x10 (GameName), `DisplayName` +0x18, `SaveSlotIndex` +0x20, `SaveTimestamp`
   DateTimeOffset +0x48 (`_dateTime` UTC ticks in the low 62 bits, `_offsetMinutes` short at +8), `SaveName` +0x58,
   `SaveNumber` +0x60, `IsInvalid` +0x44, `GameOver` +0x45; `get_SaveIdentifier()` -> `GameSaveIdentifier`.
-  `AvailableGamesByGameName()` returns a fresh `Dictionary<string, List<Summary>>` (corefx layout: `_entries` of
-  `{uint hashCode; int next; string key; List value}` = 24 bytes, `_count`). autotest reads it (game.cpp).
+  `AvailableGamesByGameName()` 0x5CD0E0 returns a fresh `Dictionary<string, List<Summary>>` (dump il2cpp-types.h:
+  fields `_buckets` int[], `_entries` Entry[], `_count`, `_freeList`, `_freeCount`, `_version`, `_comparer`, `_keys`,
+  `_values`, `_syncRoot`; `Entry { int hashCode; int next; String* key; List<Summary>* value }` = 24 bytes, key +8,
+  value +16). autotest reads it (game.cpp). Gotcha: to check the entry stride, pass the ELEMENT class
+  (`il2cpp_class_get_element_class(array class)`) to `il2cpp_class_array_element_size`; the array class itself
+  gives `sizeof(void*)` = 8 (cost autotest its first live run: "unexpected Dictionary entry size 8").
+- `Summary.get_SaveIdentifier` 0x963BD0 (IDA) = `new GameSaveIdentifier(Name, SaveName)`: so a load needs only the
+  game name and the file name; `AutoSaveDirector.BeginLoad(GameSaveIdentifier*, Stream)` 0x5CDB50 copies the 16-byte
+  struct into its closure and the `LoadSave_Coroutine` at once (logs "Attempted to begin load during loadingGame or
+  IsSceneLoadingInProgress" and does nothing while a load runs). autotest builds the identifier from the file name.
+- The save list without internals: the file names in `FileStorageProvider.savePath` (+0x18; the director's
+  `_storageProvider` +0x28). `<GameName>_<i>.sav`, `GameName = <yyyyMMddHHmmss>_<slot>` (rarely `..._<slot>_<k>`):
+  game name = before the last `_`. The user's folder also holds `slimerancher.cfg`, `slimerancher.prf`,
+  `steam_autocloud.vdf`. Rotation indices go up to 5 (e.g. `_1_0, _1_2.._1_5`: the gap is a deleted old save).
 - Quit without saving (autotest `quit_to_title`): `PauseMenuDirector.Quit` = `SaveAllNow()` then
   `SceneContext.OnSessionEnded()` and `SystemContext.SceneLoader.LoadMainMenuSceneGroup(null)`; the harness makes the
   last two calls only. `AutoSaveDirector.OnSessionEnded` 0x5D08E0 clears `_currentGameMetadata` (hasValue false on the

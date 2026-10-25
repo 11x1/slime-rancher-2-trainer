@@ -57,14 +57,14 @@ The contract from the plan (unchanged) plus additions (marked +). Slots are the 
 | `log_mark` | | `{mark}`: the exact text written to sr2mods.log (`[autotest] autotest mark N-tick`) |
 | `settings_get` | `key` = `"<module>.<key>"` | `{key, value, locked, lock_reason, tooltip, label, kind, default, min, max, options?}` (also free-text values) |
 | `settings_set` | `key`, `value` (bool / number) | as settings_get, after `settings::Set` on the main thread (module switches apply a tick later; `sandbox.enabled` needs no dialog). Refused for a locked setting |
-| `saves_list` | | list, one entry per game: `{game_name, display_name, slot, slot_index, last_save, last_save_utc, save_number, saves: [{save_name, save_number, time, invalid}]}` (newest first) |
+| `saves_list` | | list, one entry per game: `{game_name, display_name, slot, slot_index, last_save, last_save_utc, save_number, summaries+, folder+, saves: [{save_name, file+, file_time+, save_number, time, invalid, has_summary+}]}` (newest first); see "Save list" below. `save_number` is null without a summary |
 | `load_slot` | `slot` (5/6) | quits a running game to the title (no save), waits there 1.5 s, loads the slot's newest save (`BeginLoad`), waits until in game + 1 s; returns `state` |
-| `load_save`+ | `slot` (5/6), `save_number` | the same for one given save of that slot |
+| `load_save`+ | `slot` (5/6), `save_name` (file name, `.sav` optional) or `save_number` | the same for one given save of that slot (`save_number` needs the summaries) |
 | `new_game` | `slot` (5/6), `name` (ignored), `replace`+ | same flow, then `StartNewGame(slot - 1, settings)`; refused if the slot has a game unless `replace: true` (then it is deleted first). The game names new games itself (`<time>_<slot>`, display name = the slot number), so `name` is only logged |
 | `save` | | `SaveAllNow` when the game in play is in slot 5 or 6 (refused otherwise); `{save_number, slot}` |
 | `quit_to_title` | | `SceneContext.OnSessionEnded` + `LoadMainMenuSceneGroup` (what the pause menu's Quit does, minus its save); waits at the title + 1 s; returns `state` |
 | `quit_game`+ | | `Application.Quit` 0.5 s later; only on the title screen |
-| `delete_slot` | `slot` (5/6) | `AutoSaveDirector.DeleteGame` for every game in that slot; refused while that game is loaded; `{deleted: [names]}` |
+| `delete_slot` | `slot` (5/6) | `AutoSaveDirector.DeleteGame` for every game in that slot; refused while that game is loaded; `{deleted: [names], files_left+: [files still in the folder]}` |
 | `teleport` | `pos` [x,y,z] (exact) or [x,z] (onto the ground), `rot` (yaw or [x,y,z]), or `to` (a saved place) | `{pos}`; exact = `ground_teleport::TeleportExact` (new, same `TeleportablePlayer.TeleportTo`), ground = map_tools' ground teleport (region loading, floor search) |
 | `find` | `type`, `name`, `near`, `radius` (30 with near), `limit` (50), `fields`, `include_inactive`+ | `{objects: [{id, name, class, pos, distance, fields}], matched, scanned}`; `FindObjectsOfTypeAll` on request only; fields by name (instance fields, else a `get_<name>` getter): numbers, bools, strings, enums (int), Vector2/3, Quaternion/Color, objects as `{class, ptr, name}` |
 | `probe` / `exec` | `name`, `args` | the registered function's result |
@@ -115,6 +115,32 @@ One log line per shot that changed something: `screenshot '<name>': menu sandbox
   `save` only saves a game in slot 5 or 6. The client has a third check.
 - Slot mapping (re/save.md): the slot the user sees = `GameMetadata.SlotIndex` / `Summary.SaveSlotIndex` + 1; the
   game name ends in `_<slot>`. Checked against the user's saves (games `_1` to `_4` in slots 1-4).
+- A last check (`GuardTestSlot`) right before `BeginLoad` and before each `DeleteGame` refuses a save whose
+  file-name slot is not 5 or 6, whatever picked it.
+
+## Save list (`game::ListSaves`)
+
+- **Source of truth: the save folder's file names.** `FileStorageProvider.savePath` (read from
+  `AutoSaveDirector._storageProvider` by the field name `savePath`; if that fails, the one account folder under
+  `%USERPROFILE%\AppData\LocalLow\MonomiPark\SlimeRancher2\Steam\`; several accounts = no guess). Found once, logged
+  (`save folder (storage provider): ...`). Every `*.sav` named `<yyyyMMddHHmmss>_<slot>[_<k>]_<i>.sav` is a save:
+  game name = the part before the last `_`, slot = the number after the 14 digits. Other files (`.cfg`, `.prf`,
+  `.vdf`) are ignored. This decides which slots are occupied, and gives file names and file times without any
+  internal layout.
+- **Extras from the summaries.** `AutoSaveDirector.AvailableGamesByGameName()` (a `Dictionary<string,
+  List<Summary>>`, walked by its `_entries`) adds display name, save number, save time and `IsInvalid`, matched by
+  save name. If reading them fails, the list still works (`summaries: false`, WARN line); a summary without a file is
+  dropped (the file wins).
+- **Newest save** (`game::NewerThan`): the higher save number when both saves have one, else the newer file time
+  (the rotation index `_<i>` is reused and says nothing about age).
+- **Loading** builds the `GameSaveIdentifier { GameName, SaveName }` itself (what `Summary.get_SaveIdentifier`
+  returns, IDA 0x963BD0) from the file name, so `load_slot` needs no summary. `BeginLoad` copies the struct into its
+  closure at once.
+- First live run (2026-10-25): `saves_list` / `new_game` failed with "unexpected Dictionary entry size 8". The layout
+  was right (dump: `Entry { int hashCode; int next; String* key; List* value }` = 24 bytes, `_entries` after
+  `_buckets`); the stride check was wrong: it passed the array's class to `il2cpp_class_array_element_size`, which
+  wants the element class (for an SZARRAY class it answers `sizeof(void*)` = 8; same lesson as minimap/ugui.cpp
+  `ElementLayout`). It now asks `il2cpp_class_get_element_class` first.
 
 ## Ask the user
 

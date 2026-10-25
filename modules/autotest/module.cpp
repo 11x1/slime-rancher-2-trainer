@@ -231,6 +231,14 @@ int SlotArg(const Value& args, const char* cmd) {
 
 Value NullOr(bool has, Value v) { return has ? std::move(v) : Value(); }
 
+// The last check before a load or delete reaches the game: the save's slot (from its file / game name)
+// must be 5 or 6, whatever picked it.
+void GuardTestSlot(const game::SaveInfo& s, const char* what) {
+    const int slot = s.slotIndex + 1;
+    if (slot != 5 && slot != 6)
+        throw Error(std::format("{} refused: '{}' is in slot {} (only slots 5 and 6 are for tests)", what, s.saveName, slot));
+}
+
 // ----------------------------------------------------------------- state ----
 Value State() {
     Value r = Obj();
@@ -273,9 +281,15 @@ Value State() {
 }
 
 // ----------------------------------------------------------------- saves ----
+// Every game, from the save folder's file names (slot, game name, files, file times), with the summaries'
+// display name / save number / save time / invalid flag where they could be read. The result is the
+// games array; the folder and a summary error go to the log.
 Value SavesList() {
     Value games = Arr();
-    std::vector<game::SaveInfo> all = game::Saves();
+    const game::SaveList list = game::ListSaves();
+    if (!list.summaryError.empty())
+        SR2_WARN("[{}] saves_list: summaries unavailable ({}); listing from the files only", kModule, list.summaryError);
+    const std::vector<game::SaveInfo>& all = list.saves;
     for (size_t i = 0; i < all.size();) {
         const std::string name = all[i].gameName;
         Value g = Obj();
@@ -285,14 +299,19 @@ Value SavesList() {
         g.set("slot_index", Num(all[i].slotIndex));
         g.set("last_save", Str(all[i].timeLocal));
         g.set("last_save_utc", Str(all[i].timeUtc));
-        g.set("save_number", Num(static_cast<double>(all[i].saveNumber)));
+        g.set("save_number", NullOr(all[i].saveNumber != 0, Num(static_cast<double>(all[i].saveNumber))));
+        g.set("summaries", Bool(list.summaryError.empty()));
+        g.set("folder", Str(list.folder));
         Value saves = Arr();
         for (; i < all.size() && all[i].gameName == name; ++i) {
             Value s = Obj();
             s.set("save_name", Str(all[i].saveName));
-            s.set("save_number", Num(static_cast<double>(all[i].saveNumber)));
+            s.set("file", NullOr(!all[i].fileName.empty(), Str(all[i].fileName)));
+            s.set("file_time", NullOr(all[i].fileUnixUtc != 0, Str(all[i].fileTimeLocal)));
+            s.set("save_number", NullOr(all[i].saveNumber != 0, Num(static_cast<double>(all[i].saveNumber))));
             s.set("time", Str(all[i].timeLocal));
             s.set("invalid", Bool(all[i].invalid));
+            s.set("has_summary", Bool(all[i].hasSummary));
             saves.push(std::move(s));
         }
         g.set("saves", std::move(saves));
@@ -307,6 +326,7 @@ struct LoadJob {
     bool newGame = false;
     int slot = 0;
     unsigned long long saveNumber = 0;  // 0 = newest
+    std::string saveName;               // load_save by file name ("" = by number / newest)
     bool replace = false;
     int phase = 0;
     game::SaveInfo target;
@@ -329,14 +349,25 @@ Value LoadStep(LoadJob& j, int) {
                     throw Error(std::format("slot {} already has a game ({}): delete_slot first, or pass \"replace\": true",
                                             j.slot, j.deleteFirst.front()));
             } else {
+                // The newest save of the slot (save number when the summaries were read, else the file time),
+                // or the one asked for by save number / save name.
                 const game::SaveInfo* best = nullptr;
                 for (const auto& s : all) {
                     if (s.slotIndex != index || s.invalid) continue;
-                    if (j.saveNumber ? s.saveNumber == j.saveNumber : (!best || s.saveNumber > best->saveNumber)) best = &s;
+                    if (!j.saveName.empty()) {
+                        if (s.saveName == j.saveName) best = &s;
+                    } else if (j.saveNumber) {
+                        if (s.saveNumber == j.saveNumber) best = &s;
+                    } else if (!best || game::NewerThan(s, *best)) {
+                        best = &s;
+                    }
                 }
                 if (!best)
-                    throw Error(j.saveNumber ? std::format("slot {} has no save number {}", j.slot, j.saveNumber)
-                                             : std::format("slot {} is empty", j.slot));
+                    throw Error(!j.saveName.empty() ? std::format("slot {} has no save '{}'", j.slot, j.saveName)
+                                : j.saveNumber      ? std::format("slot {} has no save number {} (save numbers need the "
+                                                                  "summaries; pass \"save_name\" instead)",
+                                                                  j.slot, j.saveNumber)
+                                                    : std::format("slot {} is empty", j.slot));
                 j.target = *best;
             }
             if (game::InGame()) {
@@ -366,6 +397,7 @@ Value LoadStep(LoadJob& j, int) {
             } else {
                 SR2_INFO("[{}] load: '{}' ({}, save {}) from slot {}", kModule, j.target.displayName, j.target.saveName,
                          j.target.saveNumber, j.slot);
+                GuardTestSlot(j.target, "load");
                 game::BeginLoad(j.target);
             }
             j.phase = 3;
@@ -1155,9 +1187,14 @@ Value Handle(const std::string& cmd, const Value& args, const std::atomic<bool>&
         job->slot = SlotArg(args, cmd.c_str());
         job->replace = args["replace"].asBool(false);
         if (cmd == "load_save") {
-            if (!args["save_number"].isNumber() || args["save_number"].asInt() <= 0)
-                throw Error("load_save needs \"save_number\" (from saves_list)");
-            job->saveNumber = static_cast<unsigned long long>(args["save_number"].asInt());
+            if (args["save_name"].isString() && !args["save_name"].asString().empty()) {
+                job->saveName = args["save_name"].asString();
+                if (job->saveName.size() > 4 && job->saveName.ends_with(".sav")) job->saveName.resize(job->saveName.size() - 4);
+            } else if (args["save_number"].isNumber() && args["save_number"].asInt() > 0) {
+                job->saveNumber = static_cast<unsigned long long>(args["save_number"].asInt());
+            } else {
+                throw Error("load_save needs \"save_name\" or \"save_number\" (from saves_list)");
+            }
         }
         if (job->newGame && args["name"].isString())
             SR2_INFO("[{}] new_game: \"name\" is not applied (the game names new games itself)", kModule);
@@ -1223,8 +1260,10 @@ Value Handle(const std::string& cmd, const Value& args, const std::atomic<bool>&
                 const game::Metadata m = game::CurrentMetadata();
                 std::vector<std::string> names;
                 for (const auto& s : game::Saves())
-                    if (s.slotIndex == slot - 1 && std::find(names.begin(), names.end(), s.gameName) == names.end())
+                    if (s.slotIndex == slot - 1 && std::find(names.begin(), names.end(), s.gameName) == names.end()) {
+                        GuardTestSlot(s, "delete_slot");
                         names.push_back(s.gameName);
+                    }
                 for (const auto& n : names)
                     if (game::InGame() && m.has && m.gameName == n)
                         throw Error(std::format("delete_slot refused: slot {}'s game is the one loaded (quit_to_title first)", slot));
@@ -1234,8 +1273,16 @@ Value Handle(const std::string& cmd, const Value& args, const std::atomic<bool>&
                     game::DeleteGame(n);
                     del.push(Str(n));
                 }
+                // AutoSaveDirector.DeleteGame finds the files through its own summaries: check the folder.
+                Value left = Arr();
+                for (const auto& s : game::Saves())
+                    if (!s.fileName.empty() && std::find(names.begin(), names.end(), s.gameName) != names.end())
+                        left.push(Str(s.fileName));
+                if (left.size())
+                    SR2_WARN("[{}] delete_slot {}: {} save file(s) still there after DeleteGame", kModule, slot, left.size());
                 Value r = Obj();
                 r.set("deleted", std::move(del));
+                r.set("files_left", std::move(left));
                 return r;
             },
             deadline, cancel);
