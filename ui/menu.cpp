@@ -156,6 +156,21 @@ void PopFloatingStyle() {
     ImGui::PopStyleColor();
 }
 
+// A submenu row's arrow (round 16: "rounded ... plus the arrow a bit smaller" than ImGui's sharp one): an
+// equilateral triangle pointing right, its corners rounded. `c` is its centre, `r` the distance from the centre
+// line to the tip as in ImGui::RenderArrow (the triangle is 1.5 r wide, 1.73 r tall).
+void SubmenuArrow(ImDrawList* dl, ImVec2 c, float r, ImU32 col) {
+    // The rounded triangle is the triangle shrunk by `rr` about its centroid, each corner an arc of radius rr.
+    // The centroid sits 0.25 r left of the centre line, 0.5 r from each side (the inradius).
+    const float rr = r * 0.22f, k = (0.5f * r - rr) / (0.5f * r);
+    const ImVec2 g(c.x - 0.25f * r, c.y);
+    auto corner = [&](float x, float y) { return ImVec2(g.x + (c.x + x * r - g.x) * k, g.y + (c.y + y * r - g.y) * k); };
+    dl->PathArcTo(corner(0.75f, 0.0f), rr, -kPi / 3, kPi / 3);
+    dl->PathArcTo(corner(-0.75f, 0.866f), rr, kPi / 3, kPi);
+    dl->PathArcTo(corner(-0.75f, -0.866f), rr, kPi, 5 * kPi / 3);
+    dl->PathFillConvex(col);
+}
+
 // ---------------------------------------------------------- inline code ----
 // Console names (HL2 Movement's sv_gravity, hl2_walkspeed, ...) are shown as
 // inline code: monospace text on a small rounded chip.
@@ -2482,6 +2497,19 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                 ImGuiWindow* w = ImGui::GetCurrentWindow();
                 w->DC.CursorMaxPos.x = std::max(w->DC.CursorMaxPos.x, p.x + rowWidth(textW));
             };
+            // BeginMenu for a row at p, with ImGui's arrow hidden (Text transparent; the label is empty) and a
+            // smaller rounded one drawn in its place at the row's right end (round 16).
+            auto beginSubmenu = [&](const char* id, const ImVec2& p) {
+                ImDrawList* dl = ImGui::GetWindowDrawList();  // this window's: after BeginMenu it may be the submenu
+                const float right = p.x + ImGui::GetContentRegionAvail().x;
+                ImGui::PushFont(theme::Body(), 22.0f);  // the row is one font size high: as high as the entries
+                ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 0));
+                const bool open = ImGui::BeginMenu(id);
+                ImGui::PopStyleColor();
+                ImGui::PopFont();
+                SubmenuArrow(dl, ImVec2(right - U(9), p.y + e * 0.5f), U(5.5f), P.text);
+                return open;
+            };
             auto entry = [&](const Give& g) {
                 ImGui::PushID(++row);
                 const ImVec2 p = ImGui::GetCursorScreenPos();
@@ -2557,9 +2585,7 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                                    ImGui::IsMouseHoveringRect(p, ImVec2(p.x + ImGui::GetContentRegionAvail().x, p.y + e));
                 const ImVec2 ts = TextSize(theme::Body(), fs, g.label.c_str());
                 reserveRow(p, ts.x);
-                ImGui::PushFont(theme::Body(), 22.0f);  // the row is one font size high: as high as the entries
-                const bool open = ImGui::BeginMenu("##largo");
-                ImGui::PopFont();
+                const bool open = beginSubmenu("##largo", p);
                 item_grid::DrawIcons(dl, g.it->icon, g.it->icon2, p, ImVec2(p.x + e, p.y + e));
                 Text(dl, theme::Body(), fs, ImVec2(p.x + e + U(8), p.y + (e - ts.y) * 0.5f), P.text, g.label.c_str());
                 if (open) {
@@ -2595,15 +2621,13 @@ void ItemContextMenu(const sbx::Snapshot& s) {
             }
             for (const Give& g : gives) entry(g);
             if (!largos.empty()) {
-                // "Largos  >": the first largo's icon, the label and count, ImGui's submenu arrow.
+                // "Largos  >": the first largo's icon, the label and count, the submenu arrow.
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 const ImVec2 p = ImGui::GetCursorScreenPos();
                 const std::string label = std::format("Largos ({})", largos.size());
                 const ImVec2 ts = TextSize(theme::Body(), fs, label.c_str());
                 reserveRow(p, ts.x);
-                ImGui::PushFont(theme::Body(), 22.0f);  // the row is one font size high: as high as the entries
-                const bool open = ImGui::BeginMenu("##largos");
-                ImGui::PopFont();
+                const bool open = beginSubmenu("##largos", p);
                 const sbx::Item* first = largos.front().it;
                 item_grid::DrawIcons(dl, first->icon, first->icon2, p, ImVec2(p.x + e, p.y + e));
                 Text(dl, theme::Body(), fs, ImVec2(p.x + e + U(8), p.y + (e - ts.y) * 0.5f), P.text, label.c_str());

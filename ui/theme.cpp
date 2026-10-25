@@ -126,6 +126,7 @@ void SetMetrics(ImGuiStyle& st) {
     st.GrabRounding = 7;
     st.TabRounding = 10;
     st.SelectableRounding = 8;  // dropdown options; no contiguous multi-selections in this UI
+    st.MenuItemRounding = 8;    // context menu rows (MenuItem, BeginMenu), round 16
     st.SelectableTextAlign = ImVec2(0, 0.5f);
     st.WindowTitleAlign = ImVec2(0.5f, 0.5f);
     st.SeparatorTextBorderSize = 2;
