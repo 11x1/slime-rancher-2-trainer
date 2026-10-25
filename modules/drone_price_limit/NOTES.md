@@ -35,14 +35,25 @@ Status: built, not yet tested in game.
   the second Hen Collector slider; that is the plot menu, not this one), or a click on the pill. The
   dialog uses one primary slider (d-pad / left stick / arrows). The dialog:
   - title + one line of explanation;
-  - "Limit by": `Minimum price` | `Fraction of base price` (click, or Left / Right on that row,
-    Submit toggles);
+  - "Limit by" (round 15: "Change limit by to the same component as mode selection in programs"): the
+    same clone of the game's options selector as the programs dialog's Next program (see below),
+    `Minimum price` / `Fraction of base price`; Left / Right, Submit or a click on an arrow switches to the
+    other mode (two values, so every step toggles);
   - a slider (the reusable `PlotMenuSlider`, `CreateIn`): price 0..max (max = 2 x the highest base
     price rounded up to 10, at least 100; step 1 / 5 / 10), fraction 0..200 % (step 5); 0 shows
-    "no limit"; the label shows the unit (newbucks / % of the base price);
+    "no limit"; the label shows the unit (newbucks / % of the base price). Round 15 ("slider should have
+    a speed up if key held, holding shift scrolls by +-10, holding ctrl scrolls to start/end"):
+    `SliderSpec.fastKeys` - a held direction repeats with bigger steps the longer it is held (1 step for
+    the first second, then 2, 5, 10 per repeat after 1 / 2 / 3 s), Shift + direction moves 10 (in value
+    units, at least one step: 10 newbucks / 10 %), Ctrl + direction jumps to 0 / the maximum; A / D work as
+    well as the arrows, d-pad and left stick. The repeats come from the slider's own poll; the FocusManager
+    navigation events of a press the poll already holds are swallowed (Step), otherwise they would add
+    the input module's own repeats on top;
   - base-price cheat sheet: every plort of the market terminal's list (`MarketUIConfiguration` of the
     menu), icon, name, coin + base price; in fraction mode each cell also shows "min N";
-  - footer help + Close.
+  - footer: Close only (round 15: the "Up / Down: choose ..." help line is gone). Close and the page's
+    `[C] Limit` / fallback `[P] Programs` pills show the game's own key icon (game_button `Spec.control`
+    `<Keyboard>/c` / `/p`), the shared key-hint rule of round 15.
 - Input while open: Up / Down choose the row, Left / Right change it (the FocusManager detours, plus
   the slider's own arrow / d-pad polling on the focused row), C / Esc / pad B / Close / a click on
   the dimmed backdrop close it. The page's Start Program / Clear All hotkeys are blocked while it is
@@ -81,7 +92,11 @@ upgrade (`drone_programs::Owned`; round 12: hidden without it, the station has o
   can be renamed to '[SPACE] Add', use the game's key icons please", "Next program mode selection doesnt align
   with options menu". Rows (rounded boxes, 80 high for programs, 72 for Add / Next program):
   - one per program: two game buttons at the start, **[Space] Edit** and **[Z] Delete** (Delete greyed and
-    not a focus stop with one program; it is placed after Edit's laid-out width for ~40 frames), then the
+    not a focus stop with one program; it is placed after Edit's laid-out width for ~40 frames). Round 15:
+    "the programs row should only show the buttons enabled when in that row, otherwise gets confusing" -
+    Edit / Delete of every program row but the focused one have the game's disabled grey
+    (`SetInteractable(false)`); hovering one with the pointer focuses its row first (`isPointerInside` is
+    set on a disabled Selectable too), so a click still works. The Add button stays enabled. Then the
     number, the page's "active" icon on the running one (that row is tinted), target (icon + name), source,
     destination (names / icons from the menu's `DroneUIDefinitionSource`). Explorer mode stations: target and
     "Explorer drone" only;
@@ -90,8 +105,16 @@ upgrade (`drone_programs::Owned`; round 12: hidden without it, the station has o
   - with 2+ programs (not in Explorer mode) **Next program** with a clone of the game's own options-menu
     selector (`PresetOptionsItemDefinition._controlPrefab` with an `OptionsPresetSelector`, found once per
     session, cloned with the behaviour and the value's LocalizeStringEvent off, a polled Toggle on each arrow;
-    re/ui.md "OptionsPresetSelector"); logs `options selector prefab '...'` and `Next program selector cloned
-    ... (rect W x H -> ..., scale S)`. Without it: the drawn white pill with teal arrows.
+    re/ui.md "OptionsPresetSelector"); logs `options selector prefab '...'` and (once per session) `options
+    selector cloned from the game's (rect W x H -> ..., scale S; 3/3 parts restyled ...)`. Without it: the
+    drawn white pill with teal arrows. Round 15 ("the < > are too close to the option, should be at the edges
+    and then some side padding", "also looks disabled rn", "option pill can be made wider as 'After each
+    delivery' gets wrapped text"): the prefab (`OptionPresetControl`, bundle data) is 280 x 56 with a
+    HorizontalLayoutGroup (padding 64 + 64), a "Background" pill of black at 20 % alpha (white text on that
+    over our light row read as greyed out), arrow buttons "PreviousPreset" / "NextPreset" on its edges whose
+    "Icon" (27 x 17 SDFTriangle, white, hover cyan) sits 8.5 px from the INNER side, and a word-wrapping
+    auto-size (16..32) label. The clone is now 480 wide, its Background the menu's navy, both icons 30 px
+    from the pill's outer ends, the label NoWrap.
   - Key icons: game_button `Spec.control` (`<Keyboard>/space`, `/z`, `/p`): the game's KeyboardMouseIcon entry
     handed to `InputIcon.SetIcon`, as the key bar draws it (log `game button: key icon for '<keyboard>/space':
     the game's KeyboardMouseIcon entry`); key cap text if no entry.

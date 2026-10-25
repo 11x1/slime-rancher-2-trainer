@@ -69,6 +69,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <format>
 #include <initializer_list>
@@ -174,6 +175,9 @@ constexpr float kCellH = 62.0f;
 constexpr float kCellGap = 6.0f;
 constexpr float kProgRowH = 80.0f;  // programs dialog: one program
 constexpr float kProgRowGap = 10.0f;
+constexpr float kProgSelW = 480.0f;  // the options selector: programs dialog (prefab 280: "After each delivery" wrapped)
+constexpr float kLimitSelW = 480.0f; // price-limit dialog ("Fraction of base price")
+constexpr float kSelArrowPad = 30.0f;  // selector arrows: centre this far from the pill's ends
 constexpr int kTargetSingle = 1;    // DroneTaskTargetType.SINGLE
 constexpr int kDlgLimit = 1, kDlgPrograms = 2;  // which dialog is open
 
@@ -256,9 +260,9 @@ struct StationUi::Impl {
     };
     Pill limitPill, progPill;
     std::vector<Pill> dialogPills;  // fallback dialog buttons: clones of the Change prompt
-    std::vector<gbn::Button> dialogButtons;  // the dialogs' game buttons (index = closeGb / modeGb / PillButton fallbacks)
+    std::vector<gbn::Button> dialogButtons;  // the dialogs' game buttons (index = closeGb / PillButton fallbacks)
     std::vector<char> dialogClicks;          // their clicks this frame (Tick polls every one once per frame)
-    int closeGb = -1, modeGb[2] = {-1, -1};
+    int closeGb = -1;
     Held menuDisplay;               // the menu's DroneUIDisplay (open = any tab of the station menu shown)
     bool displayActive = false;
     uint64_t lastPageMs = 0;        // the program page was last seen active (GetTickCount64)
@@ -275,7 +279,7 @@ struct StationUi::Impl {
 
     // dialog
     Il2CppObject* root = nullptr, *panelRt = nullptr, *blockerToggle = nullptr, *closeToggle = nullptr;
-    Il2CppObject* modeToggle[2] = {}, *modeBg[2] = {}, *modeText[2] = {};
+    Il2CppObject* modePrev = nullptr, *modeNext = nullptr, *modeValue = nullptr;  // "Limit by" selector (toggles, TMP)
     Il2CppObject* focusFrame = nullptr, *noteText = nullptr;
     struct Cell {
         Il2CppObject* price = nullptr;  // TMP
@@ -323,7 +327,7 @@ struct StationUi::Impl {
     size_t offDefPrefab = 0, offSelPrev = 0, offSelNext = 0, offSelText = 0;
     const MethodInfo* trSetLocalScale = nullptr, *rtGetRect = nullptr;
     Held selPrefab;
-    bool selSearched = false;
+    bool selSearched = false, loggedSelector = false;
     // "Save Program" (round 14): the page's Start Program key bar entry while custom upgrades are on.
     size_t offMenuActivate = 0, offHintConfig = 0, offHintLabelText = 0, offCfgLabel = 0;
     Held saveLabel;                        // the entry's LocalizedString registered in text_override
@@ -623,7 +627,11 @@ struct StationUi::Impl {
                       PItem& it);
     Il2CppObject* ClickArea(Il2CppObject* parentRt, const char* name, float x, float y, float w, float h, int layer);
     Il2CppObject* SelectorPrefab();
-    bool CloneSelector(Il2CppObject* rowRt, float rowW, float rowH, PItem& it);
+    bool CloneSelector(Il2CppObject* rowRt, float selW, float rowH, Il2CppObject*& prev, Il2CppObject*& next,
+                       Il2CppObject*& text);
+    // The game's selector (else a drawn one) at the right end of a row, selW wide; prev / next = click toggles.
+    void Selector(Il2CppObject* rowRt, float rowW, float rowH, float selW, int layer, Il2CppObject*& prev,
+                  Il2CppObject*& next, Il2CppObject*& text);
     void SyncSaveLabel(bool want);
     void ProgFocus(int i, int col = -1);
     void ProgPress(const PItem& it, int col);
@@ -642,7 +650,7 @@ struct StationUi::Impl {
     void BuildSlider();
     void SetMode(LimitMode m);
     void SetFocus(int row);
-    void StyleModes();
+    void ShowMode();  // the "Limit by" selector's text
     void UpdateSheet();
     void Changed();
     void Navigate(int dir);
@@ -1283,6 +1291,8 @@ bool StationUi::Impl::GamePill(Pill& P, Il2CppObject* orig, Il2CppObject* parent
     spec.name = name;
     spec.label = std::string(what) == "programs" ? "Programs" : "Limit";
     spec.key = key ? key : "";
+    // The game's own key icon for the key (round 15 shared rule: our key hints match the game's icons).
+    if (key && key[0] && !key[1]) spec.control = std::string("<Keyboard>/") + static_cast<char>(std::tolower(key[0]));
     spec.scale = kPillScale;
     spec.module = module;
     std::string why;
@@ -1743,26 +1753,17 @@ bool StationUi::Impl::Open() {
                      20.0f, 4.0f, kTeal);
     Keep(dialogHandles, focusFrame);
 
-    // Mode row: label + two buttons.
+    // Mode row (round 15: "Change limit by to the same component as mode selection in programs"): label + the
+    // game's options selector, as the programs dialog's "Next program".
     Text(prt, "ModeLabel", kPad, modeRowY, 230, kRowH, "Limit by", 26.0f, kNavy, kAlignLeft, bodySrc);
-    const char* modeNames[2] = {"Minimum price", "Fraction of base price"};
-    const float modeX[2] = {kPad + 240.0f, kPad + 240.0f + 360.0f};
-    for (int i = 0; i < 2; ++i) {
-        if (gameButtonsOk) {
-            modeToggle[i] = DialogButton(prt, i == 0 ? "ModePrice" : "ModeFraction", modeX[i], modeRowY, 340, kRowH, nullptr,
-                                         modeNames[i], static_cast<int>(mode) == i, layer, modeGb[i]);
-            if (modeGb[i] >= 0 || modeToggle[i]) continue;
-        }
-        Il2CppObject* b = NewUi(i == 0 ? "ModePrice" : "ModeFraction", prt, layer);
-        if (!b) return failOpen("mode button failed");
-        At(unity::TransformOf(b), modeX[i], modeRowY, 340, kRowH);
-        modeBg[i] = Shape(b, kBacker, 28.0f);
-        SetRaycast(modeBg[i], true);
-        modeText[i] = Text(unity::TransformOf(b), "Label", 0, 0, 340, kRowH, modeNames[i], 24.0f, kNavy, kAlignCenter, bodySrc);
-        modeToggle[i] = Clickable(b);
-        Keep(dialogHandles, modeBg[i]);
-        Keep(dialogHandles, modeText[i]);
-        Keep(dialogHandles, modeToggle[i]);
+    {
+        constexpr float kModeRowW = 260.0f + kLimitSelW;
+        Il2CppObject* row = NewUi("ModeRow", prt, layer);
+        if (!row) return failOpen("mode row failed");
+        Il2CppObject* rowRt = unity::TransformOf(row);
+        At(rowRt, kPad, modeRowY, kModeRowW, kRowH);
+        Selector(rowRt, kModeRowW, kRowH, kLimitSelW, layer, modePrev, modeNext, modeValue);
+        if (!modeValue) return failOpen("mode selector failed");
     }
 
     // Base-price cheat sheet.
@@ -1788,12 +1789,10 @@ bool StationUi::Impl::Open() {
         }
     }
 
-    // Footer: input help + Close.
-    Text(prt, "Help", kPad, footY, kPanelW - 2 * kPad - 240, kRowH,
-         "Up / Down: choose    Left / Right: change    C or Esc: close", 22.0f, kNavy, kAlignLeft, bodySrc);
+    // Footer: Close only (round 15: the input help line is gone).
     if (gameButtonsOk)
         closeToggle = DialogButton(prt, "Close", kPanelW - kPad - 220, footY, 220, kRowH, "C", "Close", false, layer, closeGb,
-                                   true);
+                                   true, nullptr, nullptr, "<Keyboard>/c");
     Il2CppObject* cb = closeGb < 0 && !closeToggle ? NewUi("Close", prt, layer) : nullptr;
     if (cb) {
         At(unity::TransformOf(cb), kPanelW - kPad - 220, footY, 220, kRowH);
@@ -1808,7 +1807,7 @@ bool StationUi::Impl::Open() {
     dialogKind = kDlgLimit;
     g_open.store(true);
     BuildSlider();
-    StyleModes();
+    ShowMode();
     SetFocus(focusRow);
     UpdateSheet();
     if (!loggedOpen) {
@@ -1826,11 +1825,11 @@ void StationUi::Impl::Close(const char* why) {
     if (sliderReady) slider.Destroy();
     if (root && !Faulted()) Destroy(root);
     root = panelRt = blockerToggle = closeToggle = focusFrame = noteText = pHint = pModeText = nullptr;
+    modePrev = modeNext = modeValue = nullptr;
     pHover = -1;
     pCol = 0;
     pLayoutFrames = 0;
     pDeletePending = false;
-    modeToggle[0] = modeToggle[1] = modeBg[0] = modeBg[1] = modeText[0] = modeText[1] = nullptr;
     titleSrc = bodySrc = nullptr;
     cells.clear();
     pItems.clear();
@@ -1839,7 +1838,7 @@ void StationUi::Impl::Close(const char* why) {
     for (gbn::Button& b : dialogButtons) b.Forget();  // destroyed with root
     dialogButtons.clear();
     dialogClicks.clear();
-    closeGb = modeGb[0] = modeGb[1] = -1;
+    closeGb = -1;
     FreeLater(dialogHandles);
     if (!was || !why) return;  // why == nullptr: rebuilt in place, no line
     if (kind == kDlgPrograms) SR2_INFO("[{}] station ui: programs dialog closed ({}), station {}", module, why, openStation);
@@ -1857,6 +1856,10 @@ void StationUi::Impl::BuildSlider() {
     spec.max = fraction ? 200 : maxPrice;
     spec.step = fraction ? 5 : (maxPrice <= 200 ? 1 : maxPrice <= 1000 ? 5 : 10);
     spec.value = values[fraction ? 1 : 0];
+    // Round 15: "slider should have a speed up if key held, holding shift scrolls by +-10, holding ctrl scrolls to
+    // start/end".
+    spec.fastKeys = true;
+    spec.shiftStep = 10;
     spec.label = [fraction](int v) {
         if (v <= 0) return std::string(fraction ? "Minimum fraction of the base price: no limit" : "Minimum price: no limit");
         return fraction ? std::format("Minimum: {}% of the base price", v) : std::format("Minimum price: {} newbucks", v);
@@ -1890,23 +1893,12 @@ void StationUi::Impl::SetMode(LimitMode m) {
     if (slider.Active()) values[static_cast<int>(mode)] = slider.Value();
     mode = m;
     BuildSlider();
-    StyleModes();
+    ShowMode();
     Changed();
 }
 
-void StationUi::Impl::StyleModes() {
-    for (int i = 0; i < 2; ++i) {
-        const bool sel = static_cast<int>(mode) == i;
-        if (modeGb[i] >= 0 && modeGb[i] < static_cast<int>(dialogButtons.size())) {
-            dialogButtons[static_cast<size_t>(modeGb[i])].SetSelected(sel);
-            continue;
-        }
-        SetColor(modeBg[i], sel ? kTeal : kBacker);
-        if (unity::IsAlive(modeText[i])) {
-            Color c = sel ? kWhite : kNavy;
-            Call(tmpSetColor, modeText[i], {&c}, "TMP_Text.set_color");
-        }
-    }
+void StationUi::Impl::ShowMode() {
+    SetText(modeValue, mode == LimitMode::kFraction ? "Fraction of base price" : "Minimum price");
 }
 
 void StationUi::Impl::SetFocus(int row) {
@@ -1945,8 +1937,8 @@ void StationUi::Impl::Navigate(int dir) {
     }
     if (dir == kMoveUp) SetFocus(focusRow - 1);
     else if (dir == kMoveDown) SetFocus(focusRow + 1);
-    else if (dir == kMoveLeft || dir == kMoveRight) {
-        if (focusRow == 0) SetMode(dir == kMoveLeft ? LimitMode::kPrice : LimitMode::kFraction);
+    else if (dir == kMoveLeft || dir == kMoveRight) {  // two modes: the selector steps (wraps) to the other one
+        if (focusRow == 0) SetMode(mode == LimitMode::kPrice ? LimitMode::kFraction : LimitMode::kPrice);
         else if (sliderReady) slider.Step(dir == kMoveRight ? 1 : -1);
     }
 }
@@ -2060,11 +2052,11 @@ void StationUi::Impl::Tick(float dt) {
             ProgInput();
             return;
         }
-        for (int i = 0; i < 2; ++i)
-            if (Clicked(modeToggle[i], modeGb[i])) {
-                SetFocus(0);
-                SetMode(static_cast<LimitMode>(i));
-            }
+        const bool prev = Clicked(modePrev), next = Clicked(modeNext);
+        if (prev || next) {  // the selector's arrows: the other mode
+            SetFocus(0);
+            SetMode(mode == LimitMode::kPrice ? LimitMode::kFraction : LimitMode::kPrice);
+        }
         if (sliderReady) slider.Tick(dt);
     } else if ((hotC || clickedLimit) && limitPill.shown) {
         Open();
@@ -2194,26 +2186,37 @@ Il2CppObject* StationUi::Impl::SelectorPrefab() {
 // settings model), the value's LocalizeStringEvent off (our text), the arrows' SRButtons kept (their hover look)
 // with a polled Toggle each. The dialog root is still inactive here, so the clone never wakes up with its
 // behaviour on.
-bool StationUi::Impl::CloneSelector(Il2CppObject* rowRt, float rowW, float rowH, PItem& it) {
+//
+// Prefab OptionPresetControl (bundle data, round 15): root 280 x 56 with a HorizontalLayoutGroup (padding 64 left
+// and right, spacing 16, controls child sizes), "Background" (SDFRoundedRectangle, radius 200, black at 20 %
+// alpha, ignoreLayout), "PreviousPreset" / "NextPreset" (SRButton, anchored to the left / right edge, 64 / 70
+// wide, ignoreLayout; child "Icon" = a 27 x 17 SDFTriangle 8.5 px from the inner side, white, hover cyan through
+// the style asset OptionPresetStepButtonStyles) and "PresetDisplay/PresetLabel" (TMP, white, auto size 16..32,
+// word wrap). Round 15 feedback: "the < > are too close to the option, should be at the edges and then some side
+// padding", "also looks disabled rn" (white on 20 % black over our light row reads as greyed out), "option pill
+// can be made wider as 'After each delivery' gets wrapped text". So: selW wide (the text gets selW - 128), the
+// arrow icons kSelArrowPad from the pill's outer ends, the background the menu's navy, no word wrap.
+bool StationUi::Impl::CloneSelector(Il2CppObject* rowRt, float selW, float rowH, Il2CppObject*& prev,
+                                    Il2CppObject*& next, Il2CppObject*& text) {
     Il2CppObject* prefab = SelectorPrefab();
     if (!prefab) return false;
     Il2CppObject* clone = unity::Instantiate(prefab, rowRt);
     Il2CppObject* go = clone && IsA(clone, goClass) ? clone : unity::GameObjectOf(clone);
     if (!unity::IsAlive(go)) return false;
     Keep(dialogHandles, go);
-    unity::SetName(go, "sr2mods_NextProgramSelector");
+    unity::SetName(go, "sr2mods_OptionsSelector");
     Il2CppObject* sel = unity::GetComponent(go, presetSelClass);
     Il2CppObject* lse = unity::IsAlive(sel) ? unity::Field<Il2CppObject*>(sel, offSelText) : nullptr;
-    Il2CppObject* prev = unity::IsAlive(sel) ? unity::Field<Il2CppObject*>(sel, offSelPrev) : nullptr;
-    Il2CppObject* next = unity::IsAlive(sel) ? unity::Field<Il2CppObject*>(sel, offSelNext) : nullptr;
+    Il2CppObject* prevBtn = unity::IsAlive(sel) ? unity::Field<Il2CppObject*>(sel, offSelPrev) : nullptr;
+    Il2CppObject* nextBtn = unity::IsAlive(sel) ? unity::Field<Il2CppObject*>(sel, offSelNext) : nullptr;
     Il2CppObject* tmp = unity::IsAlive(lse) ? TmpOf(lse) : nullptr;
-    if (!unity::IsAlive(sel) || !tmp || !unity::IsAlive(prev) || !unity::IsAlive(next)) {
+    if (!unity::IsAlive(sel) || !tmp || !unity::IsAlive(prevBtn) || !unity::IsAlive(nextBtn)) {
         Destroy(go);
         return false;
     }
     SetEnabled(sel, false);
     SetEnabled(lse, false);
-    // Its own size (the Settings row's control), scaled down to the row's height when taller.
+    // Its own height (the Settings row's control), scaled down to the row's height when taller; our width.
     Il2CppObject* rt = unity::TransformOf(go);
     bool ok = false;
     Il2CppObject* boxed = Call(rtGetRect, rt, {}, "RectTransform.get_rect", &ok);
@@ -2224,21 +2227,64 @@ bool StationUi::Impl::CloneSelector(Il2CppObject* rowRt, float rowW, float rowH,
         h = r[3];
     }
     const float ow = w, oh = h;
-    if (w < 120.0f || w > 1000.0f) w = 520.0f;
     if (h < 20.0f || h > 240.0f) h = rowH - 8.0f;
+    w = std::max(selW, w < 120.0f || w > 1000.0f ? 0.0f : w);
     const float sc = std::min(1.0f, (rowH - 8.0f) / h);
     Rect(rt, {1, 0.5f}, {1, 0.5f}, {1, 0.5f}, {-18.0f, 0}, {w, h});
     float s3[3] = {sc, sc, 1.0f};
     Call(trSetLocalScale, rt, {s3}, "Transform.set_localScale");
-    it.prev = Clickable(unity::GameObjectOf(prev));
-    it.next = Clickable(unity::GameObjectOf(next));
-    Keep(dialogHandles, it.prev);
-    Keep(dialogHandles, it.next);
-    pModeText = tmp;
-    SR2_INFO("[{}] station ui: Next program selector cloned from the game's options selector (rect {:.0f} x {:.0f} -> "
-             "{:.0f} x {:.0f}, scale {:.2f}, row {:.0f} wide)",
-             module, ow, oh, w, h, sc, rowW);
+    // Look: navy pill, arrows at the outer ends, the value on one line.
+    int restyled = 0;
+    if (Il2CppObject* bg = Find(rt, "Background")) {
+        Il2CppObject* g = sdfRectClass ? unity::GetComponent(bg, sdfRectClass) : nullptr;
+        if (!unity::IsAlive(g)) g = unity::GetComponent(bg, imageClass);
+        if (unity::IsAlive(g)) {
+            SetColor(g, kNavy);
+            ++restyled;
+        }
+    }
+    const float side[2] = {0.0f, 1.0f};
+    Il2CppObject* btns[2] = {prevBtn, nextBtn};
+    for (int i = 0; i < 2; ++i) {
+        Il2CppObject* icon = Find(unity::TransformOf(btns[i]), "Icon");
+        if (!icon || !IsA(icon, rtClass)) continue;
+        // Icon centre kSelArrowPad from the pill's end (the buttons sit on the root's edges).
+        SetVec(rtSetAnchorMin, icon, {side[i], 0.5f}, "RectTransform.set_anchorMin");
+        SetVec(rtSetAnchorMax, icon, {side[i], 0.5f}, "RectTransform.set_anchorMax");
+        SetVec(rtSetPos, icon, {i == 0 ? kSelArrowPad : -kSelArrowPad, 0.0f}, "RectTransform.set_anchoredPosition");
+        ++restyled;
+    }
+    if (tmpSetWrap) {
+        int32_t noWrap = 0;  // TextWrappingModes.NoWrap (auto size shrinks it to the width instead)
+        Call(tmpSetWrap, tmp, {&noWrap}, "TMP_Text.set_textWrappingMode");
+    }
+    prev = Clickable(unity::GameObjectOf(prevBtn));
+    next = Clickable(unity::GameObjectOf(nextBtn));
+    Keep(dialogHandles, prev);
+    Keep(dialogHandles, next);
+    text = tmp;
+    if (!loggedSelector) {
+        loggedSelector = true;
+        SR2_INFO("[{}] station ui: options selector cloned from the game's (rect {:.0f} x {:.0f} -> {:.0f} x {:.0f}, scale "
+                 "{:.2f}; {}/3 parts restyled: navy background, arrows {:.0f} px from the ends)",
+                 module, ow, oh, w, h, sc, restyled, kSelArrowPad);
+    }
     return !Faulted();
+}
+
+void StationUi::Impl::Selector(Il2CppObject* rowRt, float rowW, float rowH, float selW, int layer, Il2CppObject*& prev,
+                               Il2CppObject*& next, Il2CppObject*& text) {
+    prev = next = text = nullptr;
+    if (!CloneSelector(rowRt, selW, rowH, prev, next, text)) {  // drawn fallback: white pill, teal arrows
+        const float arrowW = 64.0f, sx = rowW - 18.0f - selW;
+        Box(rowRt, "Selector", sx, 8.0f, selW, rowH - 16.0f, kWhite, (rowH - 16.0f) * 0.5f);
+        Text(rowRt, "Prev", sx, 0, arrowW, rowH, "<", 34.0f, kTeal, kAlignCenter, titleSrc);
+        Text(rowRt, "Next", sx + selW - arrowW, 0, arrowW, rowH, ">", 34.0f, kTeal, kAlignCenter, titleSrc);
+        text = Text(rowRt, "Value", sx + arrowW, 0, selW - 2 * arrowW, rowH, "", 26.0f, kNavy, kAlignCenter, titleSrc);
+        prev = ClickArea(rowRt, "PrevClick", sx, 0, arrowW, rowH, layer);
+        next = ClickArea(rowRt, "NextClick", sx + selW - arrowW, 0, arrowW, rowH, layer);
+    }
+    Keep(dialogHandles, text);
 }
 
 bool StationUi::Impl::OpenPrograms(int focus) {
@@ -2369,17 +2415,7 @@ bool StationUi::Impl::OpenPrograms(int focus) {
         Il2CppObject* mrt = Row(prt, "Mode", kPad, modeY, rowW, modeH, false, layer, it);
         if (!mrt) return failOpen("mode row");
         Text(mrt, "ModeLabel", 24.0f, 0, 400.0f, modeH, "Next program", 26.0f, kNavy, kAlignLeft, titleSrc);
-        if (!CloneSelector(mrt, rowW, modeH, it)) {  // drawn fallback: white pill, teal arrows
-            const float selW = 480.0f, arrowW = 64.0f, sx = rowW - 18.0f - selW;
-            Box(mrt, "Selector", sx, 8.0f, selW, modeH - 16.0f, kWhite, (modeH - 16.0f) * 0.5f);
-            Text(mrt, "Prev", sx, 0, arrowW, modeH, "<", 34.0f, kTeal, kAlignCenter, titleSrc);
-            Text(mrt, "Next", sx + selW - arrowW, 0, arrowW, modeH, ">", 34.0f, kTeal, kAlignCenter, titleSrc);
-            pModeText = Text(mrt, "Value", sx + arrowW, 0, selW - 2 * arrowW, modeH, "", 26.0f, kNavy, kAlignCenter,
-                             titleSrc);
-            it.prev = ClickArea(mrt, "PrevClick", sx, 0, arrowW, modeH, layer);
-            it.next = ClickArea(mrt, "NextClick", sx + selW - arrowW, 0, arrowW, modeH, layer);
-        }
-        Keep(dialogHandles, pModeText);
+        Selector(mrt, rowW, modeH, kProgSelW, layer, it.prev, it.next, pModeText);
         SetText(pModeText, pMode == 0 ? "When idle" : "After each delivery");
         pItems.push_back(it);
     }
@@ -2414,9 +2450,18 @@ void StationUi::Impl::ProgFocus(int i, int col) {
     pCol = std::clamp(col < 0 ? pCol : col, 0, f.Cols() - 1);
     for (int j = 0; j < static_cast<int>(pItems.size()); ++j) {
         const PItem& it = pItems[static_cast<size_t>(j)];
-        for (int c = 0; c < 2; ++c)
-            if (it.gb[c] >= 0 && it.gb[c] < static_cast<int>(dialogButtons.size()))
-                dialogButtons[static_cast<size_t>(it.gb[c])].SetFocused(j == pFocus && c == pCol);
+        // Round 15: "the programs row should only show the buttons enabled when in that row, otherwise gets
+        // confusing" - a program row's Edit / Delete have the game's disabled grey unless the row has the focus
+        // (a pointer on one still focuses its row first, see ProgInput, so a click works). The greyed Delete of a
+        // single program (not in gb[1]) stays disabled.
+        for (int c = 0; c < 2; ++c) {
+            if (it.gb[c] < 0 || it.gb[c] >= static_cast<int>(dialogButtons.size())) continue;
+            gbn::Button& b = dialogButtons[static_cast<size_t>(it.gb[c])];
+            const bool rowOn = it.kind != kItemProgram || j == pFocus;
+            if (!rowOn) b.SetFocused(false);  // before greying it: the hover look is dropped while it can still react
+            b.SetInteractable(rowOn);
+            if (rowOn) b.SetFocused(j == pFocus && c == pCol);
+        }
         const bool ring = j == pFocus && (it.kind == kItemMode || it.gb[pCol] < 0);
         if (unity::IsAlive(it.ring)) unity::SetActive(it.ring, ring);
     }

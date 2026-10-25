@@ -18,7 +18,8 @@
 // Canvas (sorting order one above the panel's) + GraphicRaycaster; mouse click (jump) / drag then go
 // to Unity's Slider (navigation Mode.None: a click does not move the EventSystem selection). With
 // spec.keys the slider also polls the gamepad / keyboard (which ones: spec.input; d-pad, left stick,
-// arrows / right stick, Shift + arrows) and a host can hand it left / right through Step(), e.g. from
+// arrows / right stick, Shift + arrows; spec.fastKeys: speed-up, Shift / Ctrl modifiers) and a host can hand
+// it left / right through Step(), e.g. from
 // its own navigation (de-duplicated per press). Steps only while the slider is interactable and no
 // PopupPrompt is open. spec.keys = false: mouse only, the keys stay with the menu. The value is read
 // by polling (no managed delegates).
@@ -72,6 +73,13 @@ struct SliderSpec {
     SliderInput input = SliderInput::kPrimary;
     // false: mouse only (no pad / keyboard polling, Step() refuses), the keys stay with the menu.
     bool keys = true;
+    // Dialog sliders (kPrimary only; the drone price-limit dialog): a held direction speeds up (bigger steps the
+    // longer it is held), Shift + direction steps by `shiftStep` (value units, at least one step), Ctrl +
+    // direction jumps to min / max, and the keyboard's A / D step too. Repeats then come from our poll, not
+    // from the host's navigation events (Step() swallows those while the poll holds the press). The plot menu
+    // keeps plain steps (Shift there belongs to its second slider).
+    bool fastKeys = false;
+    int shiftStep = 10;
 };
 
 // Where CreateIn() puts the slider.
