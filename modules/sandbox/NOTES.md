@@ -2,7 +2,7 @@
 
 Edits the character's resources and the world from the overlay's **Sandbox** category (`ui/NOTES.md`). Off by default. While it is on, achievements are paused, and a save it was used in is marked as cheated for good (achievements stay blocked there; see "Cheated saves").
 
-Code: `module.cpp` (snapshot, vacpack, spawner, crafter, Fabricator key), `player_extras.cpp` (infinite health, teleport, expansions), `upgrades.cpp` (upgrades manager), `weather.cpp` (time & weather), `prefab_icons.cpp` (rendered icons), `achievements.cpp`, `cheated_save.cpp`. UI: `ui/menu.cpp`, `ui/sandbox_upgrades.cpp`, `ui/sandbox_weather.cpp`; bridges `ui/sandbox_bridge.h` (main snapshot), `sandbox_extras_bridge.h`, `sandbox_upgrades_bridge.h`, `sandbox_weather_bridge.h`.
+Code: `module.cpp` (snapshot, vacpack, spawner, crafter, Fabricator key), `player_extras.cpp` (infinite health, teleport, expansions), `noclip.cpp` (noclip), `upgrades.cpp` (upgrades manager), `weather.cpp` (time & weather), `prefab_icons.cpp` (rendered icons), `achievements.cpp`, `cheated_save.cpp`. UI: `ui/menu.cpp`, `ui/sandbox_upgrades.cpp`, `ui/sandbox_weather.cpp`; bridges `ui/sandbox_bridge.h` (main snapshot), `sandbox_extras_bridge.h`, `sandbox_upgrades_bridge.h`, `sandbox_weather_bridge.h`.
 
 RE: re/vacpack.md (AmmoSlotManager, AmmoSlot, PlayerState), re/upgrades.md (UpgradeModel, ApplyUpgrade NRE chain), re/fabricator.md (GadgetDirector, Fabricator UI, gadget menu), re/time-weather.md (TimeDirector, WeatherRegistry), re/save.md (persistence ids, AutoSaveDirector, sidecar), re/world.md (InstantiateActor, type groups, AccessDoor, MetaGameDirector), re/ui.md (HUD notification list, UIDisplayManager, save list panel), re/unity.md (prefab rendering).
 
@@ -10,7 +10,7 @@ RE: re/vacpack.md (AmmoSlotManager, AmmoSlot, PlayerState), re/upgrades.md (Upgr
 
 | tab | contents |
 |---|---|
-| General | Player card: Newbucks set / add / subtract, refill health / energy, clear radiation, infinite energy, infinite health, teleport to map marker, unlock ranch expansions |
+| General | Newbucks set / add / subtract; Noclip (switch, key binds, speed); Player card: refill health / energy, clear radiation, infinite energy, infinite health, teleport to map marker, unlock ranch expansions |
 | Vacpack | slot row (amount set / fill / empty, move / swap, unlock a locked slot, right-click tier menu), item picker grid (Put, Put in slots) |
 | Spawn & Craft | spawner (items in front of the player) and "Refinery Crafter" (gadgets for free, variants, mod buildables, refinery materials) |
 | Upgrades | "Upgrades & Blueprints": every player upgrade raised / lowered / discovered, gadget blueprints locked / unlocked, mod buildable cards |
@@ -116,6 +116,17 @@ Types with no icon (crates, giant eggs, vine bulb, Mysterious Statues, Echo Net,
 - **Infinite health**: per save toggle. Hook `PlayerState.Damage` (DetourGuard, switched with the module) returns "not dead" without applying damage; plus a 10 Hz top-up for health lost other ways. Without the hook only the top-up runs (tooltip says so).
 - **Teleport to waypoint**: `MapDirector.TryGetPlayerNavigationMarkerLocation` with the current scene group and zone (asked every snapshot; disabled without a marker in this zone; another zone's map is not offered). Then the shared ground teleport `modules/map_tools/ground_teleport.h` (loads the target regions in place, picks a safe floor, waits up to 6 s, lands; refuses if nothing safe; never while knocked out or loading; heading kept). The result can come seconds later; button disabled meanwhile. Log `Teleported to the map marker: ...`; result also as a HUD pop-up (teleporter icon). RE: re/map.md (MapDirector).
 - **Unlock ranch expansions**: for every loaded `AccessDoorUIActivator` with a locked door, what the purchase result does minus spend / analytics / achievement / cue: door OPEN, linked locked doors CLOSED, `OnUnlockedEvent` raised (state saved in `AccessDoorModel`). Scan on the button and every 5 s while the page is open (count in the tooltip); asks for confirmation. Only at the ranch. Log `Unlocked N ranch expansion(s): ...`. RE: re/world.md (AccessDoor).
+
+## Noclip
+
+`noclip.cpp/.h` (round 12: "noclip would be nice to have aswell as a sandbox feature (bindable to a key)"). Card "Noclip" on the General page under Newbucks: switch "Fly through walls" (extras bridge `noclip` / `noclipWhy`, `extras::Op::Noclip`), then the settings of group `Noclip` (module `sandbox`, so neither profiles nor the Options tab carry them): **Noclip key** (default N), **Fly up** (Space), **Fly down** (Ctrl), **Noclip speed** (15 m/s, 1..200), **Shift speed multiplier** (3x). RE: re/player.md "Noclip".
+- **Toggle**: the key's edge (`GetAsyncKeyState`, game window in front, overlay closed, cursor locked = no game menu or text field) or the switch. Only while Sandbox is on (the switch is disabled with "Sandbox is off.").
+- **On**: the player's `SRCharacterController` (`SceneContext.player`, else `GetComponentInChildren`), its `KinematicCharacterMotor`. Saves `_solveMovementCollisions`, `_solveGrounding`, `<BypassGravity>`, then every frame: both solvers off, `BaseVelocity` 0, `BypassGravity` on, `GravityAmount` 0, and the motor's `_transientPosition` + this frame's move through `SetPosition(pos, true)`. The move: the controller's `<InputVector>` (the game's movement input, so rebinds and gamepads work; the WASD keys when it reads zero) along the main camera's forward / flattened right, the up / down keys straight up / down, `speed * Time.deltaTime` (nothing while paused, in a menu or with the overlay open). The motor keeps running, so mouse look, abilities and the KCC interpolation are untouched; what one KCC tick adds between frames (air control) is zeroed the next frame. Game teleports simply move the transient position, so they keep working.
+- **Off** (key, switch, Sandbox off or faulted, the player object gone or replaced, no scene context, a scene group change; checked every 0.25 s): the saved solver flags and gravity bypass written back, `BaseVelocity` and `GravityAmount` 0. Field writes only, so it also restores with the module faulted. Turning it off inside a wall leaves KCC's decollision to push you out.
+- **hl2_movement**: `modules/common/noclip_state.h` flag; its `UpdateVelocity` detour runs the vanilla tick while it is set and drops its fall-through reference (else "150 m below the last ground for 3 s" would teleport you back after flying down), the ramp projection and the HL2 sprint drain.
+- Space also starts jumps: in the air with the jetpack it may run (energy, sound) while you rise; rebind Fly up if that bothers.
+- HUD pop-ups "Noclip on" / "Noclip off" (`PlayerExtrasNotice`, teleporter icon). Logs: `noclip ready (...)` at setup, `noclip on at (x, y, z): ... (were: collisions .., grounding .., bypass ..), N m/s`, `noclip off (<reason>): collision and gravity back`.
+- Not stored: noclip is off after a load. A save made while inside a wall loads you there.
 
 ## Upgrades manager
 

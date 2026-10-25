@@ -39,6 +39,7 @@
 #include "modules/custom_upgrades/sale_notify.h"
 #include "modules/map_tools/ground_teleport.h"
 #include "modules/sandbox/cheated_save.h"
+#include "modules/sandbox/noclip.h"
 #include "ui/sandbox_bridge.h"
 #include "ui/sandbox_extras_bridge.h"
 
@@ -343,6 +344,8 @@ void Publish() {
     st.tick = GetTickCount64();
     st.infiniteHealth = g_infinite.load();
     st.healthHook = g_hookReady;
+    st.noclip = NoclipOn();
+    st.noclipWhy = NoclipWhy(Live());
     if (!Live()) {
         st.teleportWhy = st.expansionWhy = "Sandbox is off.";
         extras::Publish(std::move(st));
@@ -392,6 +395,7 @@ void Handle(extras::Op op, long long value) {
         }
         case extras::Op::TeleportToMarker: DoTeleport(); break;
         case extras::Op::UnlockExpansions: DoUnlockExpansions(); break;
+        case extras::Op::Noclip: NoclipRequest(value != 0); break;
     }
     Publish();
 }
@@ -508,6 +512,11 @@ void PlayerExtrasEnabled(bool on) {
         st.teleportWhy = st.expansionWhy = "Sandbox is off.";
         extras::Publish(std::move(st));
     }
+}
+
+void PlayerExtrasNotice(const std::string& text) {
+    if (!g_notices.TextReady() || !g_notices.QueueText(g_notices.TeleporterIcon(), text))
+        SR2_INFO("[{}] (no HUD pop-up) {}", kModule, text);
 }
 
 void PlayerExtrasTick(bool snapshot) {

@@ -105,7 +105,7 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | KFCCharacterController.HandleHorizontalAirborneMovement(3) | 0x5BC840 | hl2_movement.HandleHorizontalAirborneMovement | hl2_movement/module.cpp | air acceleration |
 | KFCCharacterController.HandleStablyGroundedDrag(2) | 0x5BCCA0 | hl2_movement.HandleStablyGroundedDrag | hl2_movement/module.cpp | ground friction |
 | KFCCharacterController.HandleStablyGroundedVelocity(2) | 0x5BCCF0 | hl2_movement.HandleStablyGroundedVelocity | hl2_movement/module.cpp | ground acceleration |
-| KFCCharacterController.UpdateVelocity(2) | 0x5BEF50 | hl2_movement.UpdateVelocity | hl2_movement/module.cpp | movement frame entry |
+| KFCCharacterController.UpdateVelocity(2) | 0x5BEF50 | hl2_movement.UpdateVelocity | hl2_movement/module.cpp | movement frame entry; vanilla pass-through while the Sandbox noclip is on (no own hook: sandbox/noclip.cpp writes motor fields and calls SetPosition per frame) |
 | KinematicCharacterMotor.HandleVelocityProjection(3) | 0x599AB0 | hl2_movement.KinematicCharacterMotor.HandleVelocityProjection | hl2_movement/module.cpp | ramp clip (opt); every KCC motor, filters player |
 | LandPlot.AddUpgrade(1) | 0x988750 | custom_upgrades.LandPlot.AddUpgrade | custom_upgrades/module.cpp | custom plot tiers |
 | LandPlot.HasUpgrade(1) | 0x989190 | custom_upgrades.LandPlot.HasUpgrade | custom_upgrades/module.cpp | custom plot tiers |

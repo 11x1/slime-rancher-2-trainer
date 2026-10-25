@@ -54,6 +54,7 @@
 #include "modules/minimap/ugui.h"
 #include "modules/sandbox/achievements.h"
 #include "modules/sandbox/cheated_save.h"
+#include "modules/sandbox/noclip.h"
 #include "modules/sandbox/player_extras.h"
 #include "modules/sandbox/prefab_icons.h"
 #include "modules/sandbox/upgrades.h"
@@ -807,6 +808,7 @@ bool Sandbox::Setup(sr2::core::ModuleContext& ctx) {
     SetupExtras(R);
     SetupUnlocks(R);
     sandbox::SetupPlayerExtras(ctx);  // optional tools on the Extras card (player_extras.cpp)
+    sandbox::SetupNoclip(ctx);        // the Noclip card (noclip.cpp)
     sandbox::SetupUpgrades(ctx, {[this](uintptr_t id) { return Lookup(recipeById_, id, gadgetDefClass_); },
                                  [this](bool rebuild) { RefreshFabricator(rebuild); },
                                  [this] { lastRecipeState_ = lastUpgState_ = lastSnap_ = 0; },
@@ -3001,6 +3003,7 @@ void Sandbox::TopUpEnergy() {
 
 void Sandbox::Tick(float dt) {
     GadgetMenuTick(GetTickCount64());
+    sandbox::NoclipTick(Live());  // also with Sandbox off: then it only gives collision and gravity back
     if (!Live()) {
         if (fabHint_.Exists()) DropFabricatorHint();  // Sandbox off: the key bar entry goes
         if (pinPreload_ && !sr2::core::ModuleFaulted(kModule)) PinPreloadRelease("Sandbox off");

@@ -92,7 +92,7 @@ const char* PageKeywords(const Tab& t) {
             switch (t.sandboxPage) {
                 case layout::SandboxPage::General:
                     return "cheats newbucks money health energy radiation infinite player teleport waypoint marker ranch "
-                           "expansions achievements";
+                           "expansions achievements noclip fly walls";
                 case layout::SandboxPage::Vacpack: return "cheats vacpack slots inventory items fill empty give put";
                 case layout::SandboxPage::SpawnCraft:
                     return "cheats spawn spawner items slimes largos food crates toys crafter refinery fabricator craft "

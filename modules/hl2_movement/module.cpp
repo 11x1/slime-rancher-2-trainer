@@ -84,6 +84,7 @@
 #include "core/resolver.h"
 #include "core/settings.h"
 #include "core/unity.h"
+#include "modules/common/noclip_state.h"
 #include "modules/hl2_movement/source_movement.h"
 #include "ui/momentum_hud.h"
 #include "ui/overlay.h"
@@ -1133,6 +1134,17 @@ bool PreTick(Il2CppObject* self, float dt) {
 
 void D_UpdateVelocity(Il2CppObject* self, V3* vel, float dt, const MethodInfo* mi) {
     if (!g_active.load(std::memory_order_relaxed) || !self || !vel || !R.srcc || unity::ClassOf(self) != R.srcc) {
+        o_UpdateVelocity(self, vel, dt, mi);
+        return;
+    }
+    if (sr2::modules::common::NoclipActive()) {
+        // Sandbox noclip moves the player itself (modules/sandbox/noclip.cpp): vanilla tick, and nothing of ours
+        // carries over: no fall-through recovery afterwards (the last ground may be far above), no ramp projection,
+        // no HL2 sprint drain.
+        g_tick.active = false;
+        g_haveGround = false;
+        g_hl2Sprinting = false;
+        g_rampMotor.store(nullptr, std::memory_order_relaxed);
         o_UpdateVelocity(self, vel, dt, mi);
         return;
     }

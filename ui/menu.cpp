@@ -3436,9 +3436,38 @@ void SandboxPlayer(const Host& h, const sbx::Snapshot& s, float w) {
     SandboxExpansionsConfirm(*st);
 }
 
+// Noclip (modules/sandbox/noclip.cpp): its switch (state from the extras bridge), then its settings as normal
+// rows (the key binds use the shared key capture). The settings are the module's own Defs, found once.
+void SandboxNoclip(const Host& h, float w) {
+    const Palette& P = theme::Colors();
+    static std::vector<settings::Def> defs;
+    if (defs.empty())
+        for (const settings::Def& d : settings::All())
+            if (d.module == sbx::kModule && d.group == "Noclip") defs.push_back(d);
+    BeginCard("sbx_noclip", w);
+    CardHeading("Noclip", P.head);
+    const auto st = sbxx::Get();
+    const bool on = st && st->noclip;
+    const std::string why = !st || h.nowMs - st->tick > 10000 ? std::string("Reading...") : st->noclipWhy;
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float x0 = SbxRowStart("Fly through walls");
+    ImGui::SameLine(x0 + avail - U(kSwitchW));
+    ImGui::BeginDisabled(!on && !why.empty());
+    if (Switch("##noclip", on)) sbxx::Request(sbxx::Op::Noclip, on ? 0 : 1);
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        Tooltip(!on && !why.empty() ? why
+                                    : "No collision and no gravity: your movement keys fly you where you look. Off gives "
+                                      "collision and gravity back (also when Sandbox goes off or the scene changes).");
+    for (const settings::Def& d : defs) DrawRow(h, d, d.label, false);
+    DimText("Move keys fly where you look, Fly up / Fly down straight up and down. Not while a menu or this overlay is "
+            "open. Space also jumps, so with the jetpack it may run while you rise.");
+    EndCard();
+}
+
 // The Sandbox category (module "sandbox"): one tab per page, each with its own scroll position. The
 // off card, the "Enable sandbox?" dialog and the snapshot checks are the same on every page.
-//   General: the achievements banner, Newbucks | Player.
+//   General: the achievements banner, Newbucks and Noclip | Player.
 //   Vacpack: the slots and the item picker, across both columns.
 //   Spawn & Craft: Spawner | Refinery Crafter.
 //   Upgrades: the Upgrades & Blueprints card (sandbox_upgrades.cpp).
@@ -3507,7 +3536,12 @@ void DrawSandboxPage(const Host& h, const ModuleView& mv, layout::SandboxPage pa
     auto room = [] { g_sbxRoom = ImGui::GetWindowHeight() - ImGui::GetCursorPosY(); };
     switch (page) {
         case SandboxPage::General:
+            // Left column: Newbucks, Noclip under it; right column: Player.
+            ImGui::BeginGroup();
             SandboxNewbucks(*snap, w);
+            ImGui::Dummy(ImVec2(0, U(kGap) - ImGui::GetStyle().ItemSpacing.y));
+            SandboxNoclip(h, w);
+            ImGui::EndGroup();
             ImGui::SameLine(0, U(kGap));
             SandboxPlayer(h, *snap, w);
             break;

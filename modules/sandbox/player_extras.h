@@ -8,6 +8,8 @@
 // for infinite health) is created in Setup and switched on and off with the
 // module like the achievement-pause hooks.
 
+#include <string>
+
 namespace sr2::core {
 class ModuleContext;
 }
@@ -20,5 +22,7 @@ void SetupPlayerExtras(sr2::core::ModuleContext& ctx);
 void PlayerExtrasEnabled(bool on);
 // Main thread, every frame while the module is live. `snapshot`: the page wants a fresh state now.
 void PlayerExtrasTick(bool snapshot);
+// Main thread: a HUD pop-up in the game's notification list (teleporter icon); only logged when the HUD can't.
+void PlayerExtrasNotice(const std::string& text);
 
 }  // namespace sr2::modules::sandbox
