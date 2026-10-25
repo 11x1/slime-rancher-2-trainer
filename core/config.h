@@ -11,6 +11,13 @@
 
 namespace sr2::core {
 
+// Module on/off defaults generation, stored as "defaults_rev" in sr2mods.json.
+//   rev 0/1 (no key): most feature modules defaulted to on.
+//   rev 2: stripped defaults, every feature module starts off (module.h DefaultEnabled).
+// A config file from before rev 2 keeps the old default for each module it does not
+// list (module_manager.cpp writes those once, explicitly), then gets stamped rev 2.
+inline constexpr int kDefaultsRev = 2;
+
 struct Config {
     log::Level logLevel = log::Level::Info;
 #ifdef _DEBUG
@@ -24,6 +31,13 @@ struct Config {
     bool versionGuardInvoke = true;      // actually call Application getters
     std::string expectedGameVersion = "1.3.0";
     std::string expectedUnityVersion = "6000.0.73f1";
+
+    int defaultsRev = 0;          // "defaults_rev" of the file (0: absent)
+    // The file predates kDefaultsRev (or could not be read / parsed): modules it does not
+    // list keep their pre-rev-2 default. False for a missing file (brand-new install).
+    bool legacyDefaults = false;
+    // Write "defaults_rev": kDefaultsRev back (file missing or older; not when it failed to parse).
+    bool stampDefaultsRev = false;
 
     json::Value root;  // whole document, for module-specific sections
 

@@ -50,6 +50,7 @@ bool g_saverStarted = false;
 bool g_parseErrorLogged = false;
 std::string g_saveError;            // why the last save failed ("" = it succeeded)
 std::map<std::string, std::string> g_rootStrings;  // top-level strings to write ("active_profile")
+std::map<std::string, double> g_rootNumbers;       // top-level numbers to write ("defaults_rev")
 struct ModuleString {
     std::string module, key, value;
 };
@@ -142,6 +143,7 @@ void SaveNow() {
     json::Value doc;
     std::vector<std::pair<std::string, std::pair<std::string, json::Value>>> values;  // module, key, value
     std::map<std::string, std::string> rootStrings;
+    std::map<std::string, double> rootNumbers;
     {
         std::lock_guard lock(g_mutex);
         if (!g_dirty || g_file.empty()) return;
@@ -154,6 +156,7 @@ void SaveNow() {
         for (const auto& [pk, st] : g_stashed) values.push_back({st.module, {st.key, st.value}});
         for (const auto& [pk, ms] : g_moduleStrings) values.push_back({ms.module, {ms.key, json::Value(ms.value)}});
         rootStrings = g_rootStrings;
+        rootNumbers = g_rootNumbers;
     }
 
     std::string text, perr;
@@ -178,6 +181,7 @@ void SaveNow() {
 
     for (auto& [module, kv] : values) doc.child("modules").child(module).set(kv.first, kv.second);
     for (auto& [k, v] : rootStrings) doc.set(k, json::Value(v));
+    for (auto& [k, v] : rootNumbers) doc.set(k, json::Value(v));
 
     std::string out = json::Serialize(doc);
     std::filesystem::path tmp = file;
@@ -515,6 +519,19 @@ void SetRootString(std::string_view key, std::string value) {
     const std::string cur = it != g_rootStrings.end() ? it->second : g_doc[key].asString();
     if (present && cur == value) return;
     g_rootStrings[k] = std::move(value);
+    g_dirty = true;
+    g_lastChange = Clock::now();
+    if (g_wake) SetEvent(g_wake);
+}
+
+void SetRootNumber(std::string_view key, double value) {
+    std::lock_guard lock(g_mutex);
+    std::string k(key);
+    auto it = g_rootNumbers.find(k);
+    if (it != g_rootNumbers.end() ? it->second == value
+                                  : g_doc[key].isNumber() && g_doc[key].asNumber() == value)
+        return;
+    g_rootNumbers[k] = value;
     g_dirty = true;
     g_lastChange = Clock::now();
     if (g_wake) SetEvent(g_wake);

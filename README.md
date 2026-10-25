@@ -89,7 +89,13 @@ To install by hand instead, back up your saves and copy two files from `dist\Rel
 
 The default game folder is `C:\Program Files (x86)\Steam\steamapps\common\Slime Rancher 2\`.
 
-Start the game. The log is written to `sr2mods.log` in the same folder. On each launch the previous log is renamed to `sr2mods.prev.log` (replacing the older one), so the log of a crashed run survives one restart.
+Start the game. The log is written to `sr2mods.log` in the same folder.
+
+### First start: every feature is off
+
+A new install changes nothing in the game at first: every feature module (minimap, spawn scaling, quick start, Slime DJ, custom upgrades, ...) starts off. The overlay, its hotkey, the "Press F8 for mod settings" note at startup (with "All features start off; enable what you want" while nothing is on), the Options > Mods tab and the "[modded]" title-screen label are always there. Press **F8** (or open Options > Mods) and switch on the modules you want; each one's settings appear once it is on. The only exception is Custom Upgrades' "Tier effects" switch (`plot_upgrades`), which is on but does nothing until Custom Upgrades itself is on. Custom Upgrades also turns itself on for a save that owns custom upgrades, so such a save always loads correctly.
+
+Updating keeps your `sr2mods.json` exactly as it is. A config from before this change (no `"defaults_rev": 2`) keeps the old defaults: on the first start, every module that used to be on by default and is not listed in the file is written into it as `"enabled": true`, and the file gets `"defaults_rev": 2`. On each launch the previous log is renamed to `sr2mods.prev.log` (replacing the older one), so the log of a crashed run survives one restart.
 
 ### Songs for Slime DJ
 
@@ -122,7 +128,8 @@ The file is JSON, but `//` and `/* */` comments and trailing commas are allowed.
 | `dump_assemblies` | `true` | logs every image and its class count |
 | `version_guard_invoke` | `true` | calls `Application.unityVersion` and `Application.version` |
 | `expected_game_version` / `expected_unity_version` | `1.3.0` / `6000.0.73f1` | a mismatch only logs a warning |
-| `modules.<name>.enabled` | module default | turns one module on or off (also switchable at runtime) |
+| `defaults_rev` | `2` (written by the mod) | module defaults generation. `2`: modules missing from the file start off. Missing (an older config): the modules that were on by default before are written into the file as `"enabled": true` once, then `2` is stored |
+| `modules.<name>.enabled` | `false` (`plot_upgrades`: `true`) | turns one module on or off (also switchable at runtime) |
 | `modules.<name>.<key>` | module default | one runtime setting of a module (see below) |
 | `modules.discord_rpc.application_id` | `""` | your Discord application id (a string) for Discord Rich Presence |
 | `modules.autotest.enabled` | `false` | Misc > General > Debug Tools > **Test harness**: opens the local pipe `\\.\pipe\sr2mods-autotest` for the test client (`modules/autotest/NOTES.md`); while a client is connected only save slots 5 and 6 can be saved |
@@ -136,7 +143,7 @@ Modules register their settings with `sr2::core::settings::Register` (`core/sett
 - If the file on disk is not valid JSON at save time, it is left untouched and an error is logged.
 - A value is written only if it was already in the file or was changed at runtime, so later changes to a module's defaults still take effect.
 - The write is atomic (`sr2mods.json.tmp`, then rename).
-- Every module automatically gets an `enabled` setting (label "Enabled", default `Module::DefaultEnabled()`). Toggling it calls `ModuleManager::SetEnabled`. A module that was disabled at startup runs `Setup()` the first time it is enabled.
+- Every module automatically gets an `enabled` setting (label "Enabled", default `Module::DefaultEnabled()`, which is `false` unless a module overrides it; see [First start](#first-start-every-feature-is-off)). Toggling it calls `ModuleManager::SetEnabled`. A module that was disabled at startup runs `Setup()` the first time it is enabled.
 - A setting can name a visibility parent in the same module (`Def::parent`, optional `parentValue` for an Enum index or 0 = "while off"; `settings::SetParent` sets it after registering). Both UIs hide it while the parent does not allow it, and hide every setting of a module except `enabled` while the module is off. `settings::Visible(module, key)` applies the rule.
 - A setting can also list "any of these on" parents (`Def::anyOf`, or `settings::SetAnyParent` after registering): it shows only while at least one of them is on and itself shown. Spawn Scaling uses it for the "Per resource (advanced)" multipliers (any source in advanced mode) and for the ore amount multiplier and its cap (any source applied).
 - A module can also keep a free-text value under its section (`settings::GetString` / `SetString`): not a `Def`, so no generic UI row, no callbacks and not in profiles. Discord Rich Presence keeps its application id that way.

@@ -52,7 +52,11 @@ class Module {
 public:
     virtual ~Module() = default;
     virtual const char* Name() const = 0;  // also the key under "modules" in sr2mods.json
-    virtual bool DefaultEnabled() const { return true; }
+    // Default of modules.<name>.enabled. Off: a new install starts with every feature off and
+    // the player turns on what they want (config.h kDefaultsRev; configs from before keep the
+    // old defaults, module_manager.cpp kLegacyDefaultOn). Override only for a module that does
+    // nothing by itself.
+    virtual bool DefaultEnabled() const { return false; }
     // True: Setup() also runs at startup while the module is switched off; its hooks stay
     // disabled (state Disabled) until it is enabled. For a module that must watch something
     // (from a frame callback) while off, e.g. custom_upgrades turning itself on for a save

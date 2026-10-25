@@ -732,6 +732,24 @@ bool HintVisible() {
     return settings::GetBool(kUiModule, kKeyOverlayHint);
 }
 
+// No module that defaults to off is switched on (a new install: every feature starts off;
+// plot_upgrades, on by default, is only a sub-switch of Custom Upgrades). Render thread;
+// re-read once a second (settings only, never the module manager's lock: Setup may hold it).
+bool AllModulesOff() {
+    static unsigned long long checked = 0;
+    static bool off = false;
+    const unsigned long long now = GetTickCount64();
+    if (checked != 0 && now - checked < 1000) return off;
+    checked = now;
+    off = true;
+    for (const settings::Def& d : settings::All())
+        if (d.key == kKeyEnabled && d.def < 0.5 && settings::GetBool(d.module, d.key)) {
+            off = false;
+            break;
+        }
+    return off;
+}
+
 void RenderFrame() {
     PollHotkey();
     PollCapture();
@@ -829,6 +847,7 @@ void RenderFrame() {
         } else if (hint && !editing) {
             menu::Host h = MakeHost();
             h.menuHint = menuHint;
+            h.allOff = menuHint && AllModulesOff();
             h.quickHint = static_cast<int>(quick.phase);  // Hidden 0, Pending 1, Staying 2
             h.quickSeconds = quick.secondsLeft;
             menu::DrawHint(h);

@@ -1,5 +1,6 @@
 #include "config.h"
 
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 
@@ -16,11 +17,13 @@ ConfigStatus LoadConfig(const std::filesystem::path& file, Config& cfg, std::str
     std::error_code ec;
     if (!std::filesystem::exists(file, ec)) {
         error = "not found, using defaults";
+        cfg.stampDefaultsRev = true;  // brand-new config: stripped defaults
         return ConfigStatus::Missing;
     }
     std::ifstream in(file, std::ios::binary);
     if (!in) {
         error = "cannot open file, using defaults";
+        cfg.legacyDefaults = true;  // an existing config: never strip its modules for the session
         return ConfigStatus::ReadError;
     }
     std::stringstream ss;
@@ -28,6 +31,7 @@ ConfigStatus LoadConfig(const std::filesystem::path& file, Config& cfg, std::str
     std::string text = ss.str();
 
     json::Value root;
+    cfg.legacyDefaults = true;  // until "defaults_rev" says otherwise (also on a parse error)
     if (!json::Parse(text, root, error)) return ConfigStatus::ParseError;
     if (!root.isObject()) {
         error = "top level must be an object, using defaults";
@@ -45,6 +49,10 @@ ConfigStatus LoadConfig(const std::filesystem::path& file, Config& cfg, std::str
     cfg.versionGuardInvoke = root["version_guard_invoke"].asBool(cfg.versionGuardInvoke);
     cfg.expectedGameVersion = root["expected_game_version"].asString(cfg.expectedGameVersion);
     cfg.expectedUnityVersion = root["expected_unity_version"].asString(cfg.expectedUnityVersion);
+    const json::Value& rev = root["defaults_rev"];
+    cfg.defaultsRev = rev.isNumber() && rev.asNumber() >= 0 ? static_cast<int>(std::min(rev.asNumber(), 1000.0)) : 0;
+    cfg.legacyDefaults = cfg.defaultsRev < kDefaultsRev;
+    cfg.stampDefaultsRev = cfg.defaultsRev < kDefaultsRev;
     cfg.root = std::move(root);
     return ConfigStatus::Loaded;
 }

@@ -7,6 +7,7 @@
 #include "log.h"
 #include "main_thread.h"
 #include "settings.h"
+#include "settings_internal.h"
 
 namespace sr2::core {
 
@@ -124,6 +125,61 @@ bool ModuleManager::SetupLocked(Entry& e, bool enable) {
     return true;
 }
 
+namespace {
+
+// Modules that defaulted to on before defaults_rev 2 (config.h kDefaultsRev). Frozen: a module
+// added later has no old default. Only used for config files older than rev 2.
+constexpr std::string_view kLegacyDefaultOn[] = {
+    "spawn_scaling", "minimap",       "collectibles",      "map_tools", "quick_start",
+    "quick_travel",  "instant_build", "wall_markers",      "plot_upgrades", "sell_upgrades",
+    "drone_price_limit", "slime_dj",  "gadget_stacking",   "misc_tweaks", "debug_tools",
+};
+
+bool LegacyDefaultOn(std::string_view name) {
+    for (std::string_view n : kLegacyDefaultOn)
+        if (n == name) return true;
+    return false;
+}
+
+std::vector<std::string> g_migrated;  // modules given their old default explicitly (logged once)
+
+// Registers modules.<name>.enabled (picks up the saved value from sr2mods.json). A config from
+// before defaults_rev 2 that does not list the module gets the old default written into it
+// (StashSaved: persisted with the next save), so the stripped defaults never switch off a
+// feature an existing user had on.
+void RegisterEnabled(const Module& m, const Config& cfg) {
+    const std::string name = m.Name();
+    if (cfg.legacyDefaults && LegacyDefaultOn(name) && !settings::Has(name, "enabled") &&
+        !settings::Saved(name, "enabled")) {
+        settings::StashSaved(name, "enabled", json::Value(true));
+        g_migrated.push_back(name);
+    }
+    settings::Def d;
+    d.module = name;
+    d.key = "enabled";
+    d.label = "Enabled";
+    d.kind = settings::Kind::Bool;
+    d.def = m.DefaultEnabled() ? 1 : 0;
+    d.tooltip = "Turns this module on or off.";
+    settings::Register(d);
+}
+
+// After every module's "enabled" is registered: log, and stamp the file with kDefaultsRev.
+void FinishDefaults(const Config& cfg) {
+    if (!g_migrated.empty()) {
+        std::string list;
+        for (const auto& n : g_migrated) list += (list.empty() ? "" : ", ") + n;
+        SR2_INFO("config: older than defaults_rev {} - kept the old default (on) for {} module(s) it did not list: {}",
+                 kDefaultsRev, g_migrated.size(), list);
+        g_migrated.clear();
+    } else if (!cfg.legacyDefaults && cfg.defaultsRev < kDefaultsRev) {
+        SR2_INFO("config: new sr2mods.json - every feature module starts off");
+    }
+    if (cfg.stampDefaultsRev) settings::SetRootNumber("defaults_rev", kDefaultsRev);
+}
+
+}  // namespace
+
 void ModuleManager::SetupAll(const Config& cfg) {
     std::lock_guard lock(mutex_);
     cfg_ = cfg;
@@ -131,17 +187,12 @@ void ModuleManager::SetupAll(const Config& cfg) {
         SR2_INFO("modules: none registered");
         return;
     }
+    // Every "enabled" first, so a defaults migration is complete before any module runs.
+    for (Entry& e : entries_) RegisterEnabled(*e.module, cfg);
+    FinishDefaults(cfg);
     for (Entry& e : entries_) {
         const std::string name = e.module->Name();
 
-        settings::Def d;
-        d.module = name;
-        d.key = "enabled";
-        d.label = "Enabled";
-        d.kind = settings::Kind::Bool;
-        d.def = e.module->DefaultEnabled() ? 1 : 0;
-        d.tooltip = "Turns this module on or off.";
-        settings::Register(d);  // picks up modules.<name>.enabled from sr2mods.json
         settings::OnChange(name, [name](const std::string& key) {
             if (key == "enabled") ModuleManager::Get().SetEnabled(name, settings::GetBool(name, "enabled"));
         });
@@ -258,17 +309,12 @@ void ModuleManager::MarkFaulted(std::string_view name, std::string reason) {
 void ModuleManager::FailAll(const Config& cfg, const std::string& reason) {
     std::lock_guard lock(mutex_);
     cfg_ = cfg;
+    for (Entry& e : entries_) RegisterEnabled(*e.module, cfg);
+    FinishDefaults(cfg);
     for (Entry& e : entries_) {
-        settings::Def d;
-        d.module = e.module->Name();
-        d.key = "enabled";
-        d.label = "Enabled";
-        d.kind = settings::Kind::Bool;
-        d.def = e.module->DefaultEnabled() ? 1 : 0;
-        settings::Register(d);
         e.state = ModuleState::Failed;
         e.reason = reason;
-        SR2_ERROR("module {}: DISABLED - {}", d.module, reason);
+        SR2_ERROR("module {}: DISABLED - {}", e.module->Name(), reason);
     }
 }
 
