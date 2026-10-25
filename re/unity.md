@@ -154,6 +154,9 @@ Patch data instead of hooking a shared getter. Small getters may also be inlined
 ### Texture2D / Sprite creation (UnityEngine, CoreModule)
 - methods: `Texture2D..ctor(int, int, TextureFormat, bool mipChain)` (resolve by params), `SetPixels32(Color32[])`, `Apply(bool updateMips, bool makeNoLongerReadable)`, `Texture.set_filterMode` (Trilinear = 2), `set_wrapMode` (Clamp = 1), `Sprite.Create(Texture2D, Rect, Vector2, float)`, `Object.set_hideFlags` (DontUnloadUnusedAsset = 32), `Object.set_name`
 - gotchas: SetPixels32 expects the bottom row first (flip stb_image output); construct with `il2cpp_object_new` + ctor via invoke
+- gotchas: the script ctors (`Texture2D(int,int,TextureFormat,bool[,bool])` 0x340E380 -> 0x340DE80, IDA) pass a default `MipmapLimitDescriptor` -> `Internal_Create(..., ignoreMipmapLimit = !useMipmapLimit = true)`: runtime textures are NOT cut by the game's Texture Quality (`OptionsDirector.SetTextureQuality` 0x9C6210: LOW `QualitySettings.globalTextureMipmapLimit` 2 + aniso off, MEDIUM 1 + aniso on, HIGH 0 + ForceEnable)
+- gotchas: sharpness in UI: `Texture.set_mipMapBias` (0x3413EB0). The game's full art uses -1 (data, below); with 0 and trilinear a 512 px sprite in the 440 px Fabricator details box blends ~20 % of mip 1 (round 12 "blurry"). mod_icons and gadget_look `TintedSprite` set mips + trilinear + bias -1
+- data (UnityPy, `fullarticons_..._icondecorboombox.png` bundle): full art `iconDecorBoombox` = Texture2D 512x512 DXT5 (fmt 12), 10 mips, filter Trilinear, aniso 1, **mip bias -1**, clamp, sRGB, `m_IgnoreMipmapLimit` 1; Sprite rect 512x512, 50 px/unit
 - mod: ui/mod_icons.cpp
 
 ### Cursor (UnityEngine, CoreModule)

@@ -339,6 +339,13 @@ than the icon = the art) recolours it with `TintedSprite`, keeps it for the sess
 so later opens show the copy at once. Used by the DJ buildables (not for a user drawing) and the Quantum
 Storage Link. Logs `'<def>' card picture = its full art '<sprite>' recoloured (after N s)` / `... stays the
 icon (<why>)`.
+Round 13 ("pixelated asf on the right pane", "blurry" even with the 512 px DJ Booth drawing): the box is
+440 px (re/fabricator.md); the game's full art is 512 px with mips, trilinear and **mip bias -1** (re/unity.md),
+so it samples mip 0 only. Ours had bias 0 (mod_icons) or no mips (TintedSprite); now both match the game.
+`ArtFrame` also waits past the loader's 160 px `iconEmpty` placeholder (round 12's Slime Radio picture was that
+placeholder recoloured): only a sprite of 256 px or more, not named `iconEmpty`, counts as the loaded art.
+Each card logs once `'<def>' details picture shown = '<sprite>' (WxH px of a TWxTH texture)` (with a warning
+note when it is under 256 px).
 
 ## Slime DJ buildables
 

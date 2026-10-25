@@ -41,6 +41,10 @@ struct EmbeddedPng {
 constexpr const char* kCore = "UnityEngine.CoreModule";
 constexpr int32_t kTextureFormatRGBA32 = 4;
 constexpr int32_t kFilterTrilinear = 2;
+// The game's own Fabricator full art (e.g. iconDecorBoombox: 512 px DXT5, 10 mips, trilinear) has mip bias -1:
+// the 440 px details box samples mip 0 only. With bias 0 a 512 px drawing there blends ~20 % of its half-size
+// mip in (round 12: "blurry").
+constexpr float kMipBias = -1.0f;
 constexpr int32_t kWrapClamp = 1;
 constexpr int32_t kHideFlagsDontUnloadUnusedAsset = 32;
 constexpr float kDefaultPpu = 100.0f;
@@ -53,7 +57,7 @@ struct Api {
     bool tried = false, ok = false;
     Il2CppClass *texture2d = nullptr, *sprite = nullptr, *color32 = nullptr;
     const MethodInfo *texCtor = nullptr, *setPixels32 = nullptr, *apply = nullptr, *setFilter = nullptr,
-                     *setWrap = nullptr, *spriteCreate = nullptr, *spriteRect = nullptr, *spritePpu = nullptr,
+                     *setWrap = nullptr, *setMipBias = nullptr, *spriteCreate = nullptr, *spriteRect = nullptr, *spritePpu = nullptr,
                      *setHideFlags = nullptr, *setName = nullptr;
     using ArrayNew = Il2CppArray* (*)(Il2CppClass*, uintptr_t);
     ArrayNew arrayNew = nullptr;
@@ -95,6 +99,7 @@ bool Resolve() {
     if (texture) {
         A.setFilter = r.Method(texture, "set_filterMode", 1, &err);
         A.setWrap = r.Method(texture, "set_wrapMode", 1, &err);
+        A.setMipBias = r.Method(texture, "set_mipMapBias", 1, &err);         // optional (sharpness)
     }
     if (A.sprite) {
         A.spriteCreate = r.MethodByParams(
@@ -214,6 +219,8 @@ Il2CppObject* Create(const EmbeddedPng& png, Il2CppObject* sizeLike, bool greyed
     int32_t filter = kFilterTrilinear, wrap = kWrapClamp, flags = kHideFlagsDontUnloadUnusedAsset;
     Call(A.setFilter, tex, {&filter}, "Texture.set_filterMode");
     Call(A.setWrap, tex, {&wrap}, "Texture.set_wrapMode");
+    float bias = kMipBias;
+    const bool biased = A.setMipBias && Call(A.setMipBias, tex, {&bias}, "Texture.set_mipMapBias");
     bool updateMips = true, noLongerReadable = true;
     if (!Call(A.apply, tex, {&updateMips, &noLongerReadable}, "Texture2D.Apply")) return nullptr;
     Call(A.setHideFlags, tex, {&flags}, "Object.set_hideFlags");
@@ -230,7 +237,8 @@ Il2CppObject* Create(const EmbeddedPng& png, Il2CppObject* sizeLike, bool greyed
     Call(A.setHideFlags, sprite, {&flags}, "Object.set_hideFlags");
     Name(sprite, objName);
     if (g_faulted) return nullptr;
-    SR2_INFO("ui: mod icon '{}' created ({}x{}, {:.1f} px/unit)", objName, w, h, ppu);
+    SR2_INFO("ui: mod icon '{}' created ({}x{} RGBA32, mips, trilinear, mip bias {}, {:.1f} px/unit)", objName, w, h,
+             biased ? "-1" : "0 (set_mipMapBias missing)", ppu);
     return sprite;
 }
 
