@@ -61,3 +61,6 @@ assets/icons/game/
 
 # autotest run results (screenshots paths, log excerpts; never committed)
 /autotest/results/
+
+# showcase screenshots (game imagery; the user decides what goes public, never committed)
+/autotest/showcase_out/

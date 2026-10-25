@@ -12,9 +12,12 @@ Offline tooling: it lives in the repo, never in the game folder.
 | `sr2test.py` | the client: connects to the pipe, sends commands, matches replies, collects events; log helpers; the client-side slot guard |
 | `run.py` | the runner: backs up the saves, runs cases, writes `results/<date>_<time>.json` |
 | `cleanup.py` | deletes the slot 5 and 6 test games (after a backup) and the screenshot folder |
-| `mock_server.py` | a fake harness with a small simulated game; `--selftest` tests client, runner and cleanup |
+| `mock_server.py` | a fake harness with a small simulated game; `--selftest` tests client, runner, cleanup, showcase and gallery |
 | `tests/<case id>.py` | one test per checklist case |
 | `coverage.md` | every round 16 skipped case: auto / semi / manual, and the probes it needs |
+| `showcase.py` | showcase screenshots for a release page, from the shot definitions in `showcase/` |
+| `showcase/<id>.py` | one shot definition each (`_common.py`: helpers they share) |
+| `build_gallery.py` | one HTML page (cards: image, title, caption) from a showcase run's `manifest.json` |
 
 ## Safety rules
 
@@ -31,7 +34,8 @@ Offline tooling: it lives in the repo, never in the game folder.
   the title, or load slot 5 / 6). It never quits the user's game without saving.
 - Settings a test changes (`t.set_setting`) are put back after the case.
 - Screenshots stay in `<game folder>\sr2mods_autotest\shots\`; results in `autotest/results/`
-  (gitignored). Neither is ever committed or uploaded.
+  (gitignored). Neither is ever committed or uploaded. Showcase shots and their galleries go to
+  `autotest/showcase_out/` (gitignored): game imagery, published only when the user says so.
 
 ## Running
 
@@ -57,6 +61,61 @@ Offline tooling: it lives in the repo, never in the game folder.
    ```
 
 Test the tooling without the game: `python autotest/mock_server.py --selftest`.
+
+## Showcase screenshots
+
+Shots of the mod's headline features for a release page. Same safety as `run.py`: saves backed up
+first (`..._autotest-showcase`), slots 5 and 6 only, refused while another slot's game is loaded,
+settings put back after each shot.
+
+```
+python autotest/showcase.py --list                 # the shot definitions
+python autotest/showcase.py                        # every shot
+python autotest/showcase.py sandbox_menu slime_dj  # these
+python autotest/showcase.py --frame                # the user frames every shot by hand
+python autotest/showcase.py --no-ask               # never ask
+python autotest/showcase.py --save-place showcase_corral   # remember where the player stands
+python autotest/run.py --showcase r10cr3           # tests take their t.showcase(...) shots too
+python autotest/build_gallery.py                   # index.html for the newest showcase run
+python autotest/build_gallery.py <run> --embed --only sandbox_menu,slime_dj
+```
+
+Out: `autotest/showcase_out/<date>_<time>/<id>.png` and `manifest.json` (per shot: title, caption,
+feature, status, the settings it used, its options, slot / zone / time / position; the build's
+ping with its sha). A shot ends as `shot`, `skipped` (the user pressed Skip, or "needs harness: ...")
+or `error`.
+
+A shot definition, `showcase/<id>.py` (every constant is optional except the texts):
+
+```python
+TITLE = "Corral Radio"
+CAPTION = "One sentence for the card."
+FEATURE = "slime_dj"                       # module / feature (the gallery's tag)
+SLOT = 5                                   # 5 or 6, anything else is refused before connecting
+SETTINGS = {"slime_dj.enabled": True}      # set for the shot, put back after
+PLACE = "showcase_corral"                  # a saved place (exec place_save) or [x, y, z]
+PLACE_HINT = "Stand a few metres from the radio corral."   # asked when the place is not saved yet
+ROT = None                                 # yaw or [x, y, z] (default: the saved place's)
+TIME = 19.5                                # hour of day (forward only, as sleeping)
+MENU = {"cat": "ranch", "tab": "Slime DJ"} # a mod menu page (an overlay shot)
+PLOT_MENU = "corral"                       # open the first plot of this type's menu (or a plot id)
+HIDE_HUD = True                            # the game HUD (and the minimap) off for the frame
+HIDE_MINIMAP = False                       # only the minimap and the collectibles tracker
+OVERLAY = False                            # take the frame after the mod's overlay drew
+FRAME = False                              # always let the user frame it by hand
+def setup(t): ...                          # extra steps: t is the runner's Test (spawn, exec, ...)
+```
+
+Framing by hand: the game asks "Frame the shot, then press 1" (Shoot / Skip); the shot is taken
+after the answer, without the question panel and the "Test harness connected" tag. A place that is
+not saved yet is framed by hand and then saved, so the next run goes there by itself. Key 1 also
+reaches the game (it selects vacpack slot 1), so frame with the vacpack slot you want last.
+
+In a test: `t.showcase(id, title, caption, feature, hide_hud=..., menu=..., frame=...)` when it
+reaches a state worth showing; it does nothing unless `run.py --showcase`, and never fails the case.
+
+The gallery (`index.html` next to the manifest; `--embed` puts the images inside one file) is the base
+for the release artifact. Nothing is uploaded until the user picks the shots and says so.
 
 ## Writing a test
 
@@ -85,7 +144,7 @@ def run(t):
 
 `t` (the runner's `Test`): `step`, `note`, `uncovered`, `check`, `eq`, `state`, `wait_until`, `find`,
 `teleport`, `input`, `probe`, `exec`, `setting` / `set_setting`, `mark`, `log_since`, `wait_log`,
-`no_log`, `no_faults`, `screenshot`, `ask` / `confirm`, `game_in_slot`, `in_slot`, `save`, `reload`,
+`no_log`, `no_faults`, `screenshot`, `showcase`, `ask` / `confirm`, `game_in_slot`, `in_slot`, `save`, `reload`,
 and the wave-1 generic wrappers `give_newbucks`, `set_time`, `spawn`, `plots`, `open_plot_menu`,
 `set_upgrade_level`. `t.c` is the raw `sr2test.Client`.
 

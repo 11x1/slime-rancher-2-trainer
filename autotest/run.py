@@ -3,6 +3,7 @@
     python autotest/run.py r15sl5 r9wx3        # these cases
     python autotest/run.py --all-skipped        # every round 16 skipped case (no test file -> skipped)
     python autotest/run.py --list               # the cases that have a test file
+    python autotest/run.py --showcase r10cr3    # also take the tests' showcase shots (showcase.py)
 
 Before anything it backs up the saves folder (layout as deploy.ps1, folder name ends in _autotest)
 and refuses to run if the backup failed. It refuses to run while a game outside slots 5 and 6 is
@@ -133,7 +134,7 @@ class Test:
 
     YES, NO, CANT = "Yes", "No", "Can't tell"
 
-    def __init__(self, client: Client, case: str, module: Any, ask_timeout: float = 600.0):
+    def __init__(self, client: Client, case: str, module: Any, ask_timeout: float = 600.0, showcase: Any = None):
         self.c = client
         self.case = case
         self.module = module
@@ -146,6 +147,9 @@ class Test:
         self.screenshots: list[str] = []
         self.logs: list[dict] = []
         self._settings_before: dict[str, Any] = {}
+        self._settings_set: dict[str, Any] = {}   # what the case set (for showcase manifests)
+        self._showcase = showcase                 # a showcase.Showcase with run.py --showcase, else None
+        self.showcase_shots: list[str] = []
 
     # -- bookkeeping
     def step(self, n: int, text: str = "") -> None:
@@ -213,6 +217,7 @@ class Test:
         if key not in self._settings_before:
             self._settings_before[key] = self.setting(key)
         self.c.settings_set(key, value)
+        self._settings_set[key] = value
 
     def restore_settings(self) -> list[str]:
         failed = []
@@ -260,6 +265,25 @@ class Test:
         if path:
             self.screenshots.append(path)
         return path
+
+    def showcase(self, shot_id: str, title: str, caption: str, feature: str | None = None, **opts) -> dict | None:
+        """A showcase screenshot of what the test reached, only with run.py --showcase (else nothing).
+
+        opts: overlay, hide_hud, hide_minimap, menu {cat, tab}, frame (ask the user to frame it),
+        frame_hint. Never fails the case: a problem goes in the notes.
+        """
+        if not self._showcase:
+            return None
+        try:
+            e = self._showcase.take(shot_id, title, caption, feature or getattr(self.module, "FEATURE", "") or "",
+                                    source=f"test {self.case} step {self.cur_step}",
+                                    settings=dict(self._settings_set), **opts)
+        except (HarnessError, NeedsHarness) as e:
+            self.note(f"showcase {shot_id}: {e}")
+            return None
+        if e.get("status") == "shot":
+            self.showcase_shots.append(e.get("file", shot_id))
+        return e
 
     def ask(self, question: str, options: tuple[str, ...] | list[str] = (YES, NO, CANT), shot: bool = True) -> str:
         """Asks the user in the game (screen edges flash). Returns the chosen label or "timeout"."""
@@ -368,7 +392,7 @@ def load_test(case: str):
     return mod
 
 
-def run_case(client: Client, case: str, ask_timeout: float) -> dict:
+def run_case(client: Client, case: str, ask_timeout: float, showcase: Any = None) -> dict:
     t0 = time.time()
     res: dict = {"status": "error", "note": ""}
     try:
@@ -378,7 +402,7 @@ def run_case(client: Client, case: str, ask_timeout: float) -> dict:
     if mod is None:
         return {"status": "skipped", "note": "no test file yet", "duration_s": 0}
     print(f"\n== {case}: {getattr(mod, 'TITLE', '')}  [{getattr(mod, 'WHERE', '')}]")
-    t = Test(client, case, mod, ask_timeout)
+    t = Test(client, case, mod, ask_timeout, showcase)
     try:
         mod.run(t)
         res = {"status": "pass", "note": "ok"}
@@ -408,6 +432,8 @@ def run_case(client: Client, case: str, ask_timeout: float) -> dict:
         res["note"] += " | not covered: " + "; ".join(t.uncovered_parts)
     if t.notes:
         res["notes"] = t.notes
+    if t.showcase_shots:
+        res["showcase"] = t.showcase_shots
     res.update({"steps": t.steps, "answers": t.answers, "screenshots": t.screenshots, "logs": t.logs,
                 "duration_s": round(time.time() - t0, 1)})
     print(f"   -> {res['status']}: {res['note']}")
@@ -441,6 +467,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--results-dir", default=str(RESULTS_DIR))
     ap.add_argument("--ask-timeout", type=float, default=600.0, help="seconds the user has per question")
     ap.add_argument("--connect-timeout", type=float, default=5.0)
+    ap.add_argument("--showcase", action="store_true",
+                    help="take the tests' showcase shots (t.showcase) into autotest/showcase_out/")
+    ap.add_argument("--showcase-dir", default=None, help="where the showcase folders go (default autotest/showcase_out)")
+    ap.add_argument("--frame", action="store_true", help="with --showcase: ask the user to frame every shot")
     ap.add_argument("-v", "--verbose", action="store_true", help="print every request and reply")
     args = ap.parse_args(argv)
 
@@ -469,6 +499,7 @@ def main(argv: list[str] | None = None) -> int:
     started = datetime.now()
     report: dict = {"started": started.isoformat(timespec="seconds"), "backup": str(backup), "cases": {}}
     stopped = "run stopped"
+    sc = None
     try:
         report["ping"] = client.ping()
         why = check_start_state(client)
@@ -476,13 +507,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"REFUSED: {why}", file=sys.stderr)
             stopped = f"refused: {why}"
             return 4
+        if args.showcase:
+            import showcase
+            sc = showcase.Showcase(client, args.showcase_dir or showcase.OUT_DIR, frame_all=args.frame,
+                                   ask_timeout=args.ask_timeout)
         for case in cases:
-            res = run_case(client, case, args.ask_timeout)
+            res = run_case(client, case, args.ask_timeout, sc)
             report["cases"][case] = res
             if res.get("connection_lost"):
                 client.close()
                 try:
                     client = connect(args)
+                    if sc:
+                        sc.c = client
                     why = check_start_state(client)
                     if why:
                         print(f"Stopped: {why}", file=sys.stderr)
@@ -497,6 +534,8 @@ def main(argv: list[str] | None = None) -> int:
         for case in cases:
             report["cases"].setdefault(case, {"status": "error", "note": f"not run ({stopped})"})
         report["finished"] = datetime.now().isoformat(timespec="seconds")
+        if sc and sc.dir:
+            report["showcase_dir"] = str(sc.dir)
         out_dir = Path(args.results_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         out = out_dir / f"{started.strftime('%Y-%m-%d_%H%M%S')}.json"
@@ -510,6 +549,10 @@ def main(argv: list[str] | None = None) -> int:
         for case, r in report["cases"].items():
             print(f"  {case:8} {r['status']:10} {r['note'][:110]}")
         print(f"Results: {out}")
+        if sc and sc.dir:
+            sc.write_manifest()
+            print(f"Showcase: {len(sc.manifest['shots'])} shot(s) in {sc.dir} "
+                  f"(gallery: python autotest/build_gallery.py {sc.dir})")
     return 0 if all(r["status"] in ("pass", "skipped") for r in report["cases"].values()) else 1
 
 

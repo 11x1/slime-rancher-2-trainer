@@ -36,6 +36,8 @@ SLOT_COMMANDS = ("load_slot", "new_game", "delete_slot")
 # exec action names that look like they save, load or delete a game: never sent. Saving goes
 # through save() (guarded), loading through load_slot() / new_game().
 _BLOCKED_ACTION = re.compile(r"(^|[._])(save|autosave|load|delete_game|delete_slot|delete_save)($|[._])", re.I)
+# Harness actions whose names match that but touch no game save.
+_SAFE_ACTIONS = ("place_save",)  # writes sr2mods_autotest\places.json (teleport targets)
 # Commands that take long in the game; the client waits this long for the reply. The value is also
 # sent as args.timeout_s so the harness can use it (needs harness: honour timeout_s).
 LONG_COMMANDS = {"load_slot": 120.0, "new_game": 180.0, "quit_to_title": 60.0, "save": 30.0,
@@ -299,7 +301,7 @@ class Client:
             for d in (args, inner):
                 if "slot" in d and d["slot"] not in SAFE_SLOTS:
                     raise SlotGuardError(f"{cmd} refused: slot {d['slot']!r} in the args (only 5 and 6)")
-        if cmd == "exec" and _BLOCKED_ACTION.search(str(args.get("name", ""))):
+        if cmd == "exec" and args.get("name") not in _SAFE_ACTIONS and _BLOCKED_ACTION.search(str(args.get("name", ""))):
             raise SlotGuardError(f"exec {args.get('name')!r} refused: save / load / delete only through "
                                  "save(), load_slot(), new_game() and delete_slot()")
         if cmd == "save":
@@ -434,6 +436,37 @@ class Client:
         if isinstance(r, dict):
             return str(r.get("path", ""))
         return str(r or "")
+
+    def shot(self, name: str | None = None, *, overlay: bool = False, hide_hud: bool = False,
+             hide_minimap: bool = False, hide_harness: bool = True, menu: dict | None = None,
+             settle_ms: int | None = None) -> dict:
+        """A screenshot with the showcase options; returns {path, width, height}.
+
+        overlay: after the mod's overlay drew (else the game's frame only, which never has the mod's
+        ImGui bits). hide_hud: the game HUD (and the minimap under it) off for the shot.
+        hide_minimap: only the minimap and its collectibles tracker. hide_harness: no "Test harness
+        connected" tag / question panel in an overlay shot. menu {"cat", "tab"}: the mod menu open at
+        that page for the shot (closed again after if it was closed). All restored after the frame.
+        """
+        a: dict = {"overlay": overlay, "hide_hud": hide_hud, "hide_minimap": hide_minimap,
+                   "hide_harness": hide_harness}
+        if name:
+            a["name"] = name
+        if menu:
+            a["menu"] = dict(menu)
+        if settle_ms is not None:
+            a["settle_ms"] = settle_ms
+        r = self.call("screenshot", a, timeout=20.0)
+        return r if isinstance(r, dict) else {"path": str(r or "")}
+
+    def overlay(self, open: bool = True, cat: str | None = None, tab: str | int | None = None) -> dict:
+        """Opens (at a page: category id or title, tab title or index) or closes the mod menu."""
+        a: dict = {"open": open}
+        if cat is not None:
+            a["cat"] = cat
+        if tab is not None:
+            a["tab"] = tab
+        return self.call("overlay", a) or {}
 
     def ask(self, question: str, options: list[str], case: str | None = None, step: int | None = None,
             timeout_s: float = 600.0) -> dict:

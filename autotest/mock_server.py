@@ -21,11 +21,13 @@ import ctypes
 import json
 import os
 import shutil
+import struct
 import sys
 import tempfile
 import threading
 import time
 import uuid
+import zlib
 from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
@@ -120,6 +122,22 @@ TANK = [20, 30, 40, 50, 60, 70, 80, 90, 100, 125, 150, 175, 200]  # max per slot
 SONGS = ["Ranch Morning", "Plort Market", "Ember Valley", "Starlight Strand", "Powderfall Bluffs"]
 EJECT = 30.0
 FACTOR = [1.0, 1.2, 1.4, 1.6]
+# The mod menu's categories and tabs (ui/menu_layout.cpp), for screenshot {menu} / overlay {cat, tab}.
+PAGES = {"ranch": ("Ranch", ["Upgrades", "Slime DJ"]), "movement": ("Movement", ["Hl2 Movement"]),
+         "hud": ("HUD", ["Minimap", "Collectibles", "Full Map", "Speed Panel"]),
+         "world": ("World", ["Spawn Scaling", "Wall Markers"]), "misc": ("Misc", ["General"]),
+         "sandbox": ("Sandbox", ["General", "Vacpack", "Spawn & Craft", "Upgrades", "Weather"]),
+         "profiles": ("Profiles", ["Profiles"]), "settings": ("Settings", ["General"])}
+
+
+def tiny_png(w: int = 16, h: int = 9) -> bytes:
+    """A real (small, plain) PNG, so the gallery and image tools can open the mock's screenshots."""
+    raw = b"".join(b"\x00" + b"\xd6\x45\x7f" * w for _ in range(h))
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) +
+            chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
 
 def new_world() -> dict:
@@ -142,7 +160,8 @@ class MockGame:
             self.games[s] = {"game_name": f"2026102{s}120000", "display_name": f"User game {s}",
                              "saves": [{"save_number": 10 * s, "time": f"2026-10-2{s} 12:00", "world": new_world()}]}
         self.settings = {"custom_upgrades.enabled": True, "sandbox.enabled": False, "slime_dj.enabled": True,
-                         "autotest.enabled": True}
+                         "autotest.enabled": True, "minimap.enabled": True, "collectibles.enabled": True,
+                         "gadget_stacking.enabled": False}
         self.current: dict | None = None
         self.menus: list[str] = []
         self.answer = answer          # None = the first option
@@ -152,6 +171,10 @@ class MockGame:
         self.subscribed = False
         self._events: list[dict] = []
         self.save_counter = 100
+        self.overlay_open = False
+        self.page = ("ranch", "Upgrades")
+        self.places: dict[str, dict] = {}  # sr2mods_autotest\places.json
+        self.shots: list[dict] = []         # every screenshot's options and the state it was taken in
         if start_in_slot:
             self._load(start_in_slot)
 
@@ -207,7 +230,8 @@ class MockGame:
                 "slot": c["slot"] if c else None, "save_number": c["save_number"] if c else None,
                 "pos": self.w["pos"] if c else None, "rot": [0, 0, 0] if c else None,
                 "zone": "Ranch" if c else None, "time": self.w["time"] if c else None,
-                "newbucks": self.w["newbucks"] if c else None, "menus": list(self.menus), "overlay_open": False}
+                "newbucks": self.w["newbucks"] if c else None, "menus": list(self.menus),
+                "overlay_open": self.overlay_open}
 
     def cmd_log_mark(self, a):
         mark = f"autotest mark {uuid.uuid4().hex[:12]}"
@@ -302,9 +326,47 @@ class MockGame:
     def cmd_teleport(self, a):
         if "pos" in a:
             self.w["pos"] = list(a["pos"])
-        elif a.get("to"):
+        elif a.get("to") == "ranch":  # the pilot tests' ranch spot
             self.w["pos"] = [0.0, 15.0, 0.0]
+        elif a.get("to"):
+            if a["to"] not in self.places:
+                raise MockError(f"unknown place '{a['to']}' (save one with exec place_save {{name}})")
+            self.w["pos"] = list(self.places[a["to"]]["pos"])
+        else:
+            raise MockError("teleport needs \"pos\" [x, y, z] (exact) or [x, z] (onto the ground), or \"to\"")
         return {"pos": self.w["pos"]}
+
+    def exec_place_save(self, a):
+        if not a.get("name"):
+            raise MockError("place_save needs \"name\"")
+        self.places[a["name"]] = {"pos": list(self.w["pos"]), "rot": [0.0, 90.0, 0.0], "zone": "Ranch"}
+        return self.places[a["name"]]
+
+    def probe_places(self, a):
+        return copy.deepcopy(self.places)
+
+    def _page(self, cat, tab) -> tuple[str, str]:
+        """As the menu's ApplyPageRequest: category by id or title, tab by title or index."""
+        for cid, (ctitle, tabs) in PAGES.items():
+            if str(cat).lower() in (cid, ctitle.lower()):
+                if tab in (None, ""):
+                    return cid, tabs[0]
+                for i, t in enumerate(tabs):
+                    if str(tab).lower() == t.lower() or str(tab) == str(i):
+                        return cid, t
+                raise MockError(f"no tab '{tab}' in {cid}")
+        raise MockError(f"no category '{cat}'")
+
+    def cmd_overlay(self, a):
+        if not a.get("open", True):
+            self.overlay_open = False
+            return {"open": False}
+        self.overlay_open = True
+        r = {"open": True}
+        if a.get("cat") is not None or a.get("tab") is not None:
+            self.page = self._page(a.get("cat", self.page[0]), a.get("tab"))
+            r["page"] = " / ".join(self.page)
+        return r
 
     def cmd_find(self, a):
         return []
@@ -313,11 +375,20 @@ class MockGame:
         return {}
 
     def cmd_screenshot(self, a):
+        page = None
+        if isinstance(a.get("menu"), dict):
+            page = self._page(a["menu"].get("cat"), a["menu"].get("tab"))
         d = self.game_dir / "sr2mods_autotest" / "shots"
         d.mkdir(parents=True, exist_ok=True)
         p = d / f"{a.get('name') or 'shot'}_{int(time.time() * 1000)}.png"
-        p.write_bytes(b"\x89PNG\r\n\x1a\n")
-        return {"path": str(p)}
+        p.write_bytes(tiny_png())
+        self.shots.append({"name": a.get("name"), "overlay": bool(a.get("overlay")) or page is not None,
+                           "hide_hud": bool(a.get("hide_hud")), "hide_minimap": bool(a.get("hide_minimap")),
+                           "hide_harness": bool(a.get("hide_harness")), "page": page,
+                           "slot": self.current["slot"] if self.current else None,
+                           "pos": list(self.w["pos"]) if self.current else None,
+                           "time": self.w["time"] if self.current else None, "menus": list(self.menus)})
+        return {"path": str(p), "width": 16, "height": 9}
 
     def cmd_ask(self, a):
         opts = a.get("options") or []
@@ -696,6 +767,8 @@ def selftest() -> int:
     check(r["status"] == "skipped" and "needs harness" in r["note"], f"unknown probe -> skipped ({r['note']})")
     game.missing = set()
 
+    selftest_showcase(game, root, pipe, game_dir, saves, backups, common, results, check)
+
     print("cleanup:")
     shots = game_dir / "sr2mods_autotest" / "shots"
     check(shots.is_dir() and any(shots.iterdir()), "screenshots were taken")
@@ -717,6 +790,109 @@ def selftest() -> int:
     shutil.rmtree(root, ignore_errors=True)
     print(f"\n{'ALL OK' if not failures else f'{len(failures)} FAILED'}")
     return 1 if failures else 0
+
+
+def selftest_showcase(game: MockGame, root: Path, pipe: str, game_dir: Path, saves: Path, backups: Path,
+                      common: list[str], results: Path, check) -> None:
+    """showcase.py, run.py --showcase and build_gallery.py against the mock."""
+    import build_gallery
+    import run
+    import showcase
+
+    out = root / "showcase_out"
+    sc = ["--pipe", pipe, "--game-dir", str(game_dir), "--saves-root", str(saves), "--backup-root", str(backups),
+          "--out-dir", str(out), "--connect-timeout", "5"]
+
+    def latest() -> tuple[Path, dict]:
+        m = max(out.glob("*/manifest.json"), key=lambda p: p.stat().st_mtime_ns)
+        return m.parent, json.loads(m.read_text(encoding="utf-8"))
+
+    print("showcase:")
+    check(showcase.main(["--list"]) == 0, "showcase --list")
+    defs = showcase.load_defs()
+    check(len(defs) >= 7 and all(d.slot in SAFE for d in defs.values()),
+          f"{len(defs)} shot definitions, all in slot 5 or 6")
+    n_shots, jn = len(game.shots), len(game.journal)
+    rc = showcase.main(sc)  # the mock answers every framing question with the first option, Shoot
+    folder, man = latest()
+    by_id = {s["id"]: s for s in man["shots"]}
+    check(rc == 0 and set(by_id) == set(defs), f"every definition ran (rc {rc}: {sorted(by_id)})")
+    for i, s in sorted(by_id.items()):
+        check(s["status"] == "shot" and (folder / s.get("file", "-")).is_file(),
+              f"{i}: shot, copied to the run folder ({s['status']}: {s.get('note', '')[:120]})")
+    check(man["build"].get("sha") == "0000000", "manifest has the build sha")
+    check(by_id["sandbox_menu"]["settings"].get("sandbox.enabled") is True and
+          by_id["plort_glow"]["settings"].get("sandbox.enabled") is True, "manifest has the settings each shot used")
+    check(all(s.get("title") and s.get("caption") and s.get("feature") for s in man["shots"]),
+          "every shot has a title, caption and feature")
+    new = {s["name"]: s for s in game.shots[n_shots:]}
+    check(all(s["hide_harness"] for s in new.values()), "every showcase shot hides the harness tag and panel")
+    check(all(s["slot"] in SAFE for s in new.values()), "every showcase shot taken in slot 5 or 6")
+    check(new["showcase_sandbox_menu"]["page"] == ("sandbox", "Spawn & Craft") and new["showcase_sandbox_menu"]["overlay"],
+          "a MENU shot opens that mod menu page, with the overlay in the frame")
+    check(new["showcase_corral_radio"]["hide_hud"] and not new["showcase_minimap_tracker"]["hide_hud"],
+          "HIDE_HUD per shot")
+    check(new["showcase_upgrade_cards"]["menus"] == ["LandPlotUIRoot"], "PLOT_MENU: the plot menu is open for the shot")
+    check(not game.menus, "the plot menu is closed after its shot")
+    check(new["showcase_plort_glow"]["time"] == 22, "TIME is set before the shot")
+    asks = [j for j in game.journal[jn:] if j["cmd"] == "ask"]
+    check("showcase_corral" in game.places and len(asks) >= 4,
+          f"no saved place: the user frames it ({len(asks)} questions), then the place is saved")
+    check(game.settings["sandbox.enabled"] is False and game.settings["gadget_stacking.enabled"] is False,
+          "settings put back after the shots")
+    check(not game.overlay_open, "the mod menu is closed after the shots")
+
+    jn = len(game.journal)
+    rc = showcase.main(sc + ["--no-ask", "corral_radio", "sandbox_menu"])
+    tps = [j["args"] for j in game.journal[jn:] if j["cmd"] == "teleport"]
+    check(rc == 0 and any(a.get("pos") == game.places["showcase_corral"]["pos"] for a in tps) and
+          not any(j["cmd"] == "ask" for j in game.journal[jn:]), "a saved place: teleported there, nothing asked")
+
+    game.answer = "Skip"
+    showcase.main(sc + ["--frame", "sandbox_menu"])
+    _, man = latest()
+    check(man["shots"][0]["status"] == "skipped", "--frame: Skip leaves the shot out")
+    game.answer = None
+
+    game.missing = {"slime_dj.library"}
+    showcase.main(sc + ["corral_radio"])
+    _, man = latest()
+    check(man["shots"][0]["status"] == "skipped" and "needs harness" in man["shots"][0]["note"],
+          "a missing action: the shot is skipped (needs harness)")
+    game.missing = set()
+
+    bad = root / "bad_defs"
+    bad.mkdir()
+    (bad / "bad.py").write_text('TITLE = "x"\nSLOT = 2\n', encoding="utf-8")
+    jn = len(game.journal)
+    rc = showcase.main(sc + ["--defs-dir", str(bad)])
+    check(rc == 4 and len(game.journal) == jn, "a definition outside slots 5 and 6 is refused before connecting")
+
+    print("run.py --showcase:")
+    before = set(out.iterdir())
+    run.main(common + ["r10cr3"])
+    check(set(out.iterdir()) == before, "without --showcase a test takes no showcase shots")
+    run.main(common + ["--showcase", "--showcase-dir", str(out), "r10cr3"])
+    added = set(out.iterdir()) - before
+    man = json.loads((next(iter(added)) / "manifest.json").read_text(encoding="utf-8")) if len(added) == 1 else {}
+    ids = [s["id"] for s in man.get("shots", [])]
+    check(ids == ["corral_radio_test", "slime_dj_radios"] and
+          all(s["source"].startswith("test r10cr3") and s["status"] == "shot" for s in man["shots"]),
+          f"--showcase: the test's shots in a new run folder ({ids})")
+    rep = json.loads(max(results.glob("*.json"), key=lambda p: p.stat().st_mtime_ns).read_text(encoding="utf-8"))
+    check(rep["cases"]["r10cr3"]["status"] == "pass" and len(rep["cases"]["r10cr3"].get("showcase", [])) == 2 and
+          rep.get("showcase_dir"), "the run report lists the showcase shots and folder")
+
+    print("gallery:")
+    page = build_gallery.build(folder / "manifest.json")
+    text = page.read_text(encoding="utf-8")
+    check(page.name == "index.html" and all(d.title in text for d in defs.values()) and
+          'src="sandbox_menu.png"' in text, "index.html has a card per shot, images next to it")
+    emb = build_gallery.build(folder / "manifest.json", root / "embedded.html", embed=True)
+    text = emb.read_text(encoding="utf-8")
+    check("data:image/png;base64," in text and 'src="sandbox_menu.png"' not in text, "--embed: one self-contained file")
+    check(build_gallery.main([str(folder), "--only", "slime_dj,sandbox_menu", "--out", str(root / "only.html")]) == 0 and
+          (root / "only.html").read_text(encoding="utf-8").count('class="card"') == 2, "--only picks and orders cards")
 
 
 def main() -> int:
