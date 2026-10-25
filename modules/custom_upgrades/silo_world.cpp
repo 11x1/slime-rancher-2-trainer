@@ -62,10 +62,11 @@
 // whether a property block is set) so the log shows what draws it.
 //
 // Round 11: the same class builds the blue Corral Radio button (a second instance with another
-// ButtonLook: name "sr2mods_RadioButton#", corral plots, the corral's free (+x, -z) corner, blue). The
-// corral's own corners: plot menu terminal (-x, -z), Music Box speaker (-x, +z) up on the post, plort
-// collector button (+x, +z) outside at the ground, auto-feeder distributor (+x, -z) up on the post at
-// 2.5 m - so the ground outside the (+x, -z) post is free, the same plot-local spot as the silo button.
+// ButtonLook: name "sr2mods_RadioButton#", corral plots, blue). The corral's own corners: plot menu
+// terminal (-x, -z), Music Box speaker (-x, +z) up on the post, plort collector button (+x, +z) outside at
+// the ground, auto-feeder distributor (+x, -z) up on the post at 2.5 m. Round 11 stood the button below
+// the feeder (+x, -z); round 12 ("it should be in the opposite corner") moved it to the ground outside the
+// (-x, +z) post, below the Music Box speaker (-5.58, 1.20, 5.58), turned 315 deg.
 //
 // Silo plots: the plot ids module.cpp passes -> SceneContext.GameModel.GetLandPlotModel(id)
 // (a TryGetValue, null if unknown) -> LandPlotModel.gameObj (the LandPlotLocation object) ->
@@ -532,7 +533,7 @@ void SiloButtons::Impl::Create(Il2CppObject* plot, Il2CppObject* lookup, const s
     void** slot = reinterpret_cast<void**>(reinterpret_cast<char*>(act) + offActCollector);
     if (wbarrier) wbarrier(act, slot, nullptr);
     else *slot = nullptr;
-    // Silo: outer (+x, -z) corner, front side; 135 deg faces outwards (diagonal). Corral radio: the same.
+    // Silo: outer (+x, -z) corner, front side; 135 deg faces outwards (diagonal). Corral radio: (-x, +z), 315 deg.
     Vec3 one{1.0f, 1.0f, 1.0f};
     Call(trSetLocalPosition, root, {&pos}, "Transform.set_localPosition");
     Call(trSetLocalRotation, root, {&rot}, "Transform.set_localRotation");
