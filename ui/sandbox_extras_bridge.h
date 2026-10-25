@@ -25,14 +25,13 @@ struct State {
     int totalExpansions = 0;        // ranch expansions found (locked or not)
     std::string expansionWhy;       // lockedExpansions < 1: why the button is disabled
     bool noclip = false;            // noclip is on (modules/sandbox/noclip.cpp)
-    std::string noclipWhy;          // "" = noclip can be switched on; else why not (tooltip)
+    std::string noclipWhy;          // "" = noclip can be switched on (its key); else why not
 };
 
 enum class Op {
     InfiniteHealth,    // value = 0 / 1
     TeleportToMarker,  // the player's map marker (navigation waypoint)
     UnlockExpansions,  // every locked ranch expansion, as a purchase would
-    Noclip,            // value = 0 / 1 (also its key, polled by the module)
 };
 
 // ---- module side (Unity main thread) ----

@@ -47,7 +47,8 @@ Stack: `SRCharacterController : KFCCharacterController` implements the KCC `ICha
 - `UpdatePhase1` 0x59D490 copies `GroundingStatus` to `LastGroundingStatus` and zeroes it every tick, then probes only with `_solveGrounding`: with it off every tick takes UpdateVelocity's airborne branch. With `_solveMovementCollisions` off a pending `MoveCharacter` target is taken as is and the velocity move is a plain `transient += v * dt` (stock KCC 3.x).
 - `KFCCharacterController.HandleGravity` 0x5BC3D0 returns at once while `<BypassGravity>` (+0xAC) is set; otherwise `GravityAmount` (+0xA8) accumulates.
 - `SetPosition(Vector3, bool bypassInterpolation)` 0x59D190: `transform.position`, `_initialSimulationPosition`, `_transientPosition` (+0x110), and with bypass `InitialTickPosition` (+0x1D0).
-- Mod: modules/sandbox/noclip.cpp (no hooks); hl2_movement steps aside through `modules/common/noclip_state.h`.
+- Kill volumes still see the capsule with the solvers off (log, round 12: `knockout (KillOnTrigger)` 4 s after `noclip on` near the ranch's slime sea): the noclip hooks `DeathHandler.Kill` and `KillOnTrigger.OnTriggerEnter` (re/world.md "Hazard volumes").
+- Mod: modules/sandbox/noclip.cpp (kill-volume hooks only); hl2_movement steps aside through `modules/common/noclip_state.h`.
 
 ## From the minimap, map_tools, quick_travel, wall_markers, collectibles notes
 

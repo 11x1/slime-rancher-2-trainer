@@ -3436,8 +3436,9 @@ void SandboxPlayer(const Host& h, const sbx::Snapshot& s, float w) {
     SandboxExpansionsConfirm(*st);
 }
 
-// Noclip (modules/sandbox/noclip.cpp): its switch (state from the extras bridge), then its settings as normal
-// rows (the key binds use the shared key capture). The settings are the module's own Defs, found once.
+// Noclip (modules/sandbox/noclip.cpp): a status line (state from the extras bridge; its key is the only toggle),
+// then its settings as normal rows (the key binds use the shared key capture). The settings are the module's own
+// Defs, found once.
 void SandboxNoclip(const Host& h, float w) {
     const Palette& P = theme::Colors();
     static std::vector<settings::Def> defs;
@@ -3449,19 +3450,21 @@ void SandboxNoclip(const Host& h, float w) {
     const auto st = sbxx::Get();
     const bool on = st && st->noclip;
     const std::string why = !st || h.nowMs - st->tick > 10000 ? std::string("Reading...") : st->noclipWhy;
-    const float avail = ImGui::GetContentRegionAvail().x;
-    const float x0 = SbxRowStart("Fly through walls");
-    ImGui::SameLine(x0 + avail - U(kSwitchW));
-    ImGui::BeginDisabled(!on && !why.empty());
-    if (Switch("##noclip", on)) sbxx::Request(sbxx::Op::Noclip, on ? 0 : 1);
-    ImGui::EndDisabled();
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        Tooltip(!on && !why.empty() ? why
-                                    : "No collision and no gravity: your movement keys fly you where you look. Off gives "
-                                      "collision and gravity back (also when Sandbox goes off or the scene changes).");
+    if (on) {
+        FontScope f(theme::Body(), theme::kSmallSize);
+        ImGui::TextUnformatted("Noclip is on: press the Noclip key again to land.");
+    } else if (!why.empty()) {
+        DimText(why);
+    } else if (settings::GetInt(sbx::kModule, "noclip_key") <= 0) {
+        DimText("Bind a Noclip key below; it switches noclip on and off.");
+    } else {
+        DimText("Noclip is off: press the Noclip key in game.");
+    }
     for (const settings::Def& d : defs) DrawRow(h, d, d.label, false);
-    DimText("Move keys fly where you look, Fly up / Fly down straight up and down. Not while a menu or this overlay is "
-            "open. Space also jumps, so with the jetpack it may run while you rise.");
+    DimText("No collision and no gravity: move keys fly where you look, Fly up / Fly down straight up and down; kill "
+            "volumes such as the slime sea leave you alone. Not while a menu or this overlay is open. Off gives "
+            "collision and gravity back (also when Sandbox goes off or the scene changes). Space also jumps, so with "
+            "the jetpack it may run while you rise.");
     EndCard();
 }
 
