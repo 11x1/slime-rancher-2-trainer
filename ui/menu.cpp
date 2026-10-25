@@ -160,7 +160,6 @@ void PopFloatingStyle() {
 // equilateral triangle pointing right, its corners rounded. `c` is its centre, `r` the distance from the centre
 // line to the tip as in ImGui::RenderArrow (the triangle is 1.5 r wide, 1.73 r tall).
 void SubmenuArrow(ImDrawList* dl, ImVec2 c, float r, ImU32 col) {
-    constexpr float kPi = 3.14159265f;
     // The rounded triangle is the triangle shrunk by `rr` about its centroid, each corner an arc of radius rr.
     // The centroid sits 0.25 r left of the centre line, 0.5 r from each side (the inradius).
     const float rr = r * 0.22f, k = (0.5f * r - rr) / (0.5f * r);
