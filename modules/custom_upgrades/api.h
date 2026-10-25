@@ -103,4 +103,15 @@ bool SetPlotValue(Il2CppObject* landPlot, const std::string& key, const std::str
 std::string SaveValue(const std::string& key);
 bool SetSaveValue(const std::string& key, const std::string& value);
 
+// ---- save veto (modules/autotest's save guard) ----------------------------------------------
+// The one AutoSaveDirector.SaveGameImpl hook belongs to this module (MinHook: one hook per target).
+// A veto set here is asked first on every game save (main thread), also while this module is off or
+// faulted, as long as the hook is enabled: a caller that needs it while the module is off enables the
+// hook by name (kSaveHookName) and disables it again afterwards. true = the save is skipped
+// (SaveGameImpl returns null, as it does without a running game; every caller handles that).
+// The veto runs outside this module's DetourGuard: it guards itself. nullptr removes it. Any thread.
+using SaveVeto = bool (*)(Il2CppObject* autoSaveDirector);
+void SetSaveVeto(SaveVeto fn);
+inline constexpr const char* kSaveHookName = "custom_upgrades.AutoSaveDirector.SaveGameImpl";
+
 }  // namespace sr2::modules::custom_upgrades

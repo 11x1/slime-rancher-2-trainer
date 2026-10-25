@@ -59,7 +59,8 @@ Other files:
 
 ## Where things live in the repo
 
-Modules (`modules/<name>/`, each with `NOTES.md` when it has design worth writing down): collectibles, custom_upgrades (also sidecar owner), debug_tools, discord_rpc, drone_price_limit, free_placement, gadget_stacking, hl2_movement, instant_build, map_tools, minimap, misc_tweaks, plot_upgrades, quick_start, quick_travel, sandbox, sell_upgrades, slime_dj, spawn_scaling, wall_markers; `modules/common/` shared module code. UI: `ui/` (overlay + Options tab, `ui/NOTES.md`). Loader/proxy: `proxy/`.
+Modules (`modules/<name>/`, each with `NOTES.md` when it has design worth writing down): autotest (test harness:
+pipe, probe / action registry `modules/autotest/api.h`), collectibles, custom_upgrades (also sidecar owner), debug_tools, discord_rpc, drone_price_limit, free_placement, gadget_stacking, hl2_movement, instant_build, map_tools, minimap, misc_tweaks, plot_upgrades, quick_start, quick_travel, sandbox, sell_upgrades, slime_dj, spawn_scaling, wall_markers; `modules/common/` shared module code. UI: `ui/` (overlay + Options tab, `ui/NOTES.md`). Loader/proxy: `proxy/`.
 
 Core helpers (`core/`):
 - `resolver.h` `il2cpp::Resolver::Get()`: `Class`, `Method(k, name, argc)`, `MethodByParams(k, name, {type names})` (overload-exact, searches parents), `Field/FieldOffset`, `MethodPointer`, guarded `Invoke`, `ToUtf8`, `Rva(p)`.
@@ -77,6 +78,7 @@ UI components to reuse (`ui/`; details in ui/NOTES.md):
 - `nav.h` keyboard focus for drawn widgets: `nav::Button` instead of `InvisibleButton` for anything clickable, `nav::Ring` after drawing it, `nav::TabGroup` for a grid / list (one Tab stop, arrows inside).
 - `theme.h` palettes and fonts; `menu.h` / `menu_layout.h` the overlay window and sidebar; `settings_view.h` shared settings rendering and posted writes; `spotlight.h` Ctrl/Alt+Space search.
 - `hud.h` world-space markers and line segments (`Publish(owner, Frame)` with `markers` / `lines`, `Clear`); `momentum_hud.h` speed panel; `hud_edit.h` HUD edit mode and keycaps (`DrawKeycap`, `DrawKeyCombo`).
+- `autotest_view.h` the test harness's overlay side (connected tag, question panel with flashing edges, screenshots).
 - `game_input.h` input lock while the overlay is open; `overlay.h` `IsOpen()` (modules polling keys skip while true).
 - `il2cpp_util.h` (`sr2::ui::il`) by-name lookups, guarded `Invoke`, `IsA`, `Keep/Release`.
 - `modded_label.h` `SetMenuEnableListener` (the single `MainMenuLandingRootUI.OnEnable` listener); `quick_start_hint.h`.

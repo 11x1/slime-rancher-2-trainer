@@ -29,8 +29,10 @@ constexpr const char* kSkipModule = "ui";  // never part of a profile
 constexpr const char* kSandboxModule = "sandbox";
 // Discord Rich Presence is personal (it needs your own application id and tells your friends where you are).
 constexpr const char* kDiscordModule = "discord_rpc";
+// The test harness opens a pipe that drives the game: only ever switched on by hand.
+constexpr const char* kAutotestModule = "autotest";
 bool Skipped(std::string_view module) {
-    return module == kSkipModule || module == kSandboxModule || module == kDiscordModule;
+    return module == kSkipModule || module == kSandboxModule || module == kDiscordModule || module == kAutotestModule;
 }
 
 // A settings::Snapshot without the modules profiles skip.

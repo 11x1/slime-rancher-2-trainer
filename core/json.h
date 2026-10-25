@@ -66,5 +66,7 @@ bool Parse(std::string_view text, Value& out, std::string& error);
 
 // Pretty-printed JSON (2-space indent, keys in insertion order, UTF-8).
 std::string Serialize(const Value& v);
+// The same on one line without spaces and without a trailing newline (line-delimited protocols).
+std::string SerializeCompact(const Value& v);
 
 }  // namespace sr2::json

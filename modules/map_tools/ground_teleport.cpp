@@ -967,6 +967,46 @@ bool PlayerUnavailable(std::string* why, bool* knockedOut) {
     return !r.empty();
 }
 
+bool TeleportExact(const char* owner, Vec3f pos, const Vec3f* euler, std::string* why) {
+    auto fail = [&](const std::string& w) {
+        if (why) *why = w;
+        return false;
+    };
+    if (!Resolved()) return fail("the teleport is not available (see the log)");
+    if (g_req.active) return fail("a teleport is still running");
+    if (!Finite(pos) || (euler && !Finite(*euler))) return fail("bad position");
+    if (core::ModuleFaulted(owner)) return fail("module faulted");
+    std::string err;
+    bool ok = false;
+    try {
+        Il2CppObject* sc = nullptr;
+        bool found = false;
+        if (!CallValue(g_s.tryGetSceneContext, nullptr, {&sc}, "SceneContextUtility.TryGetSceneContext", found) || !found ||
+            !sc || !unity::IsAlive(sc))
+            return fail("no player (load a save first)");
+        Il2CppObject* go = Call(g_s.scPlayer, sc, {}, "SceneContext.get_Player");
+        if (!go || !unity::IsAlive(go)) return fail("no player (load a save first)");
+        if (std::string busy = Unavailable(go); !busy.empty()) return fail(busy);
+        Il2CppObject* player = unity::GetComponent(go, g_s.teleportable);
+        if (!player) player = unity::FindObjectOfType(g_s.teleportable);
+        if (!player) return fail("no TeleportablePlayer");
+        Il2CppObject* group = Call(g_s.sceneGroup, player, {}, "TeleportablePlayer.get_SceneGroup");
+        if (!group) return fail("no scene group");
+        NullableVec3 rot;
+        if (euler) rot = {true, *euler};
+        ok = TeleportTo(player, group, pos, true, rot);
+        if (ok)
+            SR2_INFO("ground_teleport[{}]: exact teleport to ({:.2f}, {:.2f}, {:.2f}){}", owner, pos.x, pos.y, pos.z,
+                     euler ? std::format(" facing ({:.0f}, {:.0f}, {:.0f})", euler->x, euler->y, euler->z) : std::string());
+    } catch (const Fault&) {
+        g_dead = true;
+        core::MarkModuleFaulted(owner, "native fault in the exact teleport (see the line above)");
+        SR2_ERROR("ground_teleport: off for the rest of this session after a native fault ({})", owner);
+        return fail("internal error");
+    }
+    return ok ? true : fail("TeleportablePlayer.TeleportTo failed (see the log)");
+}
+
 bool Start(const char* owner, float x, float z, Done done, std::string* why) {
     auto fail = [&](const std::string& w) {
         if (why) *why = w;
