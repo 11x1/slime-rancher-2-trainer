@@ -16,6 +16,20 @@
 #include <string>
 #include <vector>
 
+#if !SR2MODS_AUTOTEST
+// Built without the harness (CMake SR2MODS_AUTOTEST=OFF, e.g. the GitHub releases): no module, no pipe,
+// no autotest_view.cpp. The overlay's input / draw checks are constant no-ops; the screenshot and
+// menu-page parts are compiled out where they are used (overlay.cpp, menu.cpp).
+namespace sr2::ui::autotest {
+inline bool HasContent() { return false; }
+inline bool WantsInput() { return false; }
+inline bool PointerOnPanel() { return false; }
+inline bool Typing() { return false; }
+inline bool WantsGameInputLock() { return false; }
+inline void Draw(float, bool, bool) {}
+}  // namespace sr2::ui::autotest
+#else
+
 namespace sr2::ui::autotest {
 
 // ---- connection tag (any thread) ----
@@ -93,3 +107,4 @@ bool ShotWanted(bool afterOverlay);
 void DeliverShot(Shot shot);
 
 }  // namespace sr2::ui::autotest
+#endif  // SR2MODS_AUTOTEST

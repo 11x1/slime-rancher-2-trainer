@@ -9,6 +9,21 @@ if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "sr2mods must be built for x64 (run from an x64 VS developer environment).")
 endif()
 
+# Version reported in the log and the overlay. Local builds use the project version; the release
+# workflow (.github/workflows/release.yml) sets the environment variable SR2MODS_VERSION_STRING
+# (e.g. 0.3 or dev-20261026-1412-315cf6f) before build.ps1, or pass -DSR2MODS_VERSION_STRING=...
+if(DEFINED ENV{SR2MODS_VERSION_STRING} AND NOT "$ENV{SR2MODS_VERSION_STRING}" STREQUAL "")
+  set(SR2_DEFAULT_VERSION "$ENV{SR2MODS_VERSION_STRING}")
+else()
+  set(SR2_DEFAULT_VERSION "${PROJECT_VERSION}")
+endif()
+set(SR2MODS_VERSION_STRING "${SR2_DEFAULT_VERSION}" CACHE STRING "Version string compiled into the DLL")
+
+# The in-game test harness (modules/autotest: named pipe, probes, question panel, screenshots, the
+# "Test harness" switch). build.ps1 turns it on for local builds (-Autotest:$false to leave it out);
+# the GitHub release builds leave it out. OFF = no pipe code in the DLL at all.
+option(SR2MODS_AUTOTEST "Compile in the test harness (modules/autotest)" OFF)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -68,6 +83,13 @@ file(GLOB_RECURSE SR2_MODULE_SOURCES CONFIGURE_DEPENDS
 file(GLOB_RECURSE SR2_UI_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/ui/*.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/ui/*.h")
+if(SR2MODS_AUTOTEST)
+  message(STATUS "sr2mods: test harness compiled in (SR2MODS_AUTOTEST=ON)")
+else()
+  list(FILTER SR2_MODULE_SOURCES EXCLUDE REGEX "/modules/autotest/")
+  list(FILTER SR2_UI_SOURCES EXCLUDE REGEX "/ui/autotest_view\\.cpp$")
+  message(STATUS "sr2mods: no test harness (SR2MODS_AUTOTEST=OFF)")
+endif()
 
 add_library(sr2mods SHARED
   proxy/dllmain.cpp
@@ -165,7 +187,8 @@ target_compile_definitions(sr2mods PRIVATE
   NOMINMAX
   UNICODE
   _UNICODE
-  SR2MODS_VERSION="${PROJECT_VERSION}"
+  SR2MODS_VERSION="${SR2MODS_VERSION_STRING}"
+  SR2MODS_AUTOTEST=$<BOOL:${SR2MODS_AUTOTEST}>
 )
 
 target_compile_options(sr2mods PRIVATE

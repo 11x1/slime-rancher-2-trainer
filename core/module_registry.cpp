@@ -27,7 +27,9 @@ std::unique_ptr<sr2::core::Module> CreateGadgetStacking();   // modules/gadget_s
 std::unique_ptr<sr2::core::Module> CreateDiscordRpc();       // modules/discord_rpc/module.cpp
 std::unique_ptr<sr2::core::Module> CreateMiscTweaks();       // modules/misc_tweaks/module.cpp
 std::unique_ptr<sr2::core::Module> CreateDebugTools();       // modules/debug_tools/module.cpp
-std::unique_ptr<sr2::core::Module> CreateAutotest();         // modules/autotest/module.cpp
+#if SR2MODS_AUTOTEST
+std::unique_ptr<sr2::core::Module> CreateAutotest();         // modules/autotest/module.cpp (CMake SR2MODS_AUTOTEST)
+#endif
 }  // namespace sr2::modules
 
 namespace sr2::core {
@@ -53,7 +55,9 @@ void RegisterBuiltinModules(ModuleManager& mm) {
     mm.Register(modules::CreateDiscordRpc());
     mm.Register(modules::CreateMiscTweaks());
     mm.Register(modules::CreateDebugTools());
+#if SR2MODS_AUTOTEST
     mm.Register(modules::CreateAutotest());
+#endif
 }
 
 }  // namespace sr2::core

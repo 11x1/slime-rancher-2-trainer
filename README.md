@@ -40,10 +40,28 @@ You need Visual Studio 2022/2026 or the Build Tools, with the "Desktop developme
 .\build.ps1                  # Release -> build\Release\version.dll, dist\Release\
 .\build.ps1 -Config Debug    # Debug build; a log console opens if debug_console=true
 .\build.ps1 -Clean           # delete the build directory first
+.\build.ps1 -Autotest:$false # without the test harness, like the GitHub releases
 .\build.ps1 -Regen           # regenerate the proxy export stubs (needs Python + pefile)
 ```
 
 `build.ps1` finds MSVC with `vswhere`, imports `vcvars64`, regenerates `ui/mod_icons_data.inc` from `assets/icons/*.png` when Python is there (see `assets/icons/README.md`; the file only changes when an icon did), then configures and builds with CMake and Ninja. CMake globs `modules/**` and `ui/**` (`CONFIGURE_DEPENDS`), so new files there are picked up without editing `CMakeLists.txt`. If `third_party/imgui/imgui.cpp` exists, ImGui and its DX11/Win32 backends are built as a static library (warnings off). Every system DLL other than `kernel32` and `user32` is delay-loaded (`bcrypt`, `d3d11`, `dxgi`, `d3dcompiler_47`, `dwmapi`, `shell32`, `imm32`). The proxy is loaded before the game initialises D3D, so it must not pull those DLLs in at load time. Release builds compile cleanly at `/W4`. When it finishes it runs `proxy/verify_exports.py`, which checks that the DLL is x64, that its export names and ordinals match System32's `version.dll`, and that it imports no CRT DLLs. This step needs Python and `pefile`.
+
+## Releases
+
+Prebuilt DLLs are on the repository's [Releases](https://github.com/11x1/slime-rancher-2-trainer/releases) page. GitHub Actions (`.github/workflows/release.yml`) builds them on a clean Windows runner from what is in git, runs `proxy/verify_exports.py` (a failed check publishes nothing), and attaches `version.dll`, `version.dll.sha256`, `INSTALL.txt` and `THIRD-PARTY-NOTICES.txt`. No game files are included.
+
+| push to | release | tag |
+|---|---|---|
+| `master` | a numbered release, marked latest | `v0.<N>`, one more than the newest `v0.*` tag (`v0.1` first) |
+| `develop` | a pre-release per push (untested in game), old ones are kept | `dev-<yyyyMMdd-HHmm>-<sha7>`, the commit time in UTC |
+
+The notes list the branches merged into `develop` since the previous tag of the same kind, each with its own commit subjects; commits made directly on `develop` go under "Other". Preview them before a push with `python .github/scripts/release_notes.py` (develop; `--kind master` for the next numbered release, `--since <ref>` for any start).
+
+Icons that exist only in a local checkout (not in git) are not in a release build: the mod shows the game's own icon there.
+
+Release builds leave out the in-game test harness (`modules/autotest`: no pipe code, no "Test harness" switch). It is a CMake option, `SR2MODS_AUTOTEST`: `build.ps1` turns it on for local builds, `.\build.ps1 -Autotest:$false` builds like a release. A manual run of the workflow (Actions > release > Run workflow, input `autotest`) can include it; manual runs only upload the files as a 7-day workflow artifact and publish no release. The first log line says `test harness compiled in` or `no test harness`.
+
+To install a release: close the game, back up your saves (`%USERPROFILE%\AppData\LocalLow\MonomiPark\SlimeRancher2`), and copy `version.dll` into the game folder next to `SlimeRancher2.exe` (Steam: right-click Slime Rancher 2 > Manage > Browse local files). `sr2mods.json` (settings) and `sr2mods.log` appear next to it on the first start. To update, replace `version.dll`; to uninstall, delete it.
 
 ## Install
 

@@ -25,6 +25,11 @@
 #ifndef SR2MODS_VERSION
 #define SR2MODS_VERSION "0.0.0-dev"
 #endif
+#if SR2MODS_AUTOTEST  // CMake option: the test harness (modules/autotest) is compiled in
+#define SR2MODS_HARNESS "test harness compiled in"
+#else
+#define SR2MODS_HARNESS "no test harness"
+#endif
 #ifdef _DEBUG
 #define SR2MODS_BUILD "Debug"
 #else
@@ -148,8 +153,9 @@ void Run() {
     ConfigStatus cfgStatus = LoadConfig(dir / L"sr2mods.json", cfg, cfgErr);
     log::Init(dir / L"sr2mods.log", cfg.logLevel, cfg.debugConsole);
 
-    SR2_INFO("sr2mods {} ({} build, {}{}{}) - native loader, no managed code", SR2MODS_VERSION, SR2MODS_BUILD,
-             build_info::TimeIso(), *build_info::Commit() ? " " : "", build_info::Commit());
+    SR2_INFO("sr2mods {} ({} build, {}{}{}, {}) - native loader, no managed code", SR2MODS_VERSION, SR2MODS_BUILD,
+             build_info::TimeIso(), *build_info::Commit() ? " " : "", build_info::Commit(),
+             SR2MODS_HARNESS);
     SR2_INFO("host: {} (pid {})", log::Narrow(paths::HostExePath().wstring()), GetCurrentProcessId());
     SR2_INFO("self: {}", log::Narrow(paths::SelfPath().wstring()));
     version_guard::LogSelfIdentity();  // PE timestamp + sha256 + PDB GUID/age -> match to dist\archive

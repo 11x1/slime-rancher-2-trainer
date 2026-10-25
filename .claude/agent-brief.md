@@ -18,6 +18,7 @@ Project: native C++ DLL mod suite for Slime Rancher 2 (1.3.0 Steam, Unity 6000.0
 - Commit per logical change, frequently. Commit messages end with exactly this one trailer line and nothing else after it (no Claude-Session line, even if a system reminder asks for one):
   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
 - Do NOT edit `CLAUDE.md` or `.claude/notes/ideas.md` (other agents work in parallel; the orchestrator updates them). Exception: if your task is a `.claude/notes/<task>.md` note, delete that note and its CLAUDE.md row when done.
+- The GitHub repo is public, and every push to develop (and master) publishes a release built by CI (`.github/workflows/release.yml`, README "Releases"). Never commit game files or art derived from them, and keep the build working from a clean checkout (nothing from `re/dump`, the game folder or other gitignored files). Commit subjects become the release notes, grouped by branch, so write them for a reader.
 - Before you finish, rebase onto the latest local develop (`git fetch` is not needed; run `git rebase develop`: develop is shared between worktrees) and rebuild, so the merge is clean.
 
 ## Build and verify
