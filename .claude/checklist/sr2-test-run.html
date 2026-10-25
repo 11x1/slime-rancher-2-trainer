@@ -147,7 +147,7 @@ body { padding-bottom: 260px; }
 <div class="wrap">
   <header>
     <h1>SR2 Mods Test Run</h1>
-    <p class="sub">Round 17: new and carried-over cases. Use the build whose Insert menu footer shows commit <code>744628c</code> or later. Mark each case; use Note to write something down. Results save as you go, and Claude can read them.</p>
+    <p class="sub">Round 18: new and carried-over cases. Use the build whose Insert menu footer shows commit <code>6a775b7</code> or later. Mark each case; use Note to write something down. Results save as you go, and Claude can read them.</p>
   </header>
 
   <div class="summary" aria-live="polite">
@@ -182,43 +182,35 @@ body { padding-bottom: 260px; }
 
 <script>
 const SECTIONS = [
-  { name: "Menu only (Sandbox on, save loaded)", cases: [
-    ["r17ov1", "Upgrade menus less rounded", ["Sandbox > Upgrades & Blueprints > Upgrades: right-click an entry, hover a row: corners only slightly rounded, like the slime spawner's right-click menu.", "Blueprint tab: right-click a tile, hover Unlock / Lock: same.", "Mod buildables: right-click a card: same.", "Spawner: right-click a slime: unchanged."]],
-    ["r17ov2", "Upgrade cost tooltip", ["Upgrades: hover Tank Booster's entry (not on - / +): the next tier's name, a \"Next level\" tag and \"Fabricator cost\" rows with icons and counts.", "Hover an upgrade at its last level: \"Fully upgraded\".", "Hover an upgrade not bought yet (e.g. Jetpack): \"First level\" and its cost, components with icons.", "Hover - / +, or with the right-click menu open: no cost tooltip.", "Is this the look you meant (\"like slimes in Slimepedia\")? Say in the note if not."]],
-    ["r17ir1", "Vacpack page shows fresh slots", ["Open Sandbox > Vacpack with some slots filled, close the overlay.", "Shoot out or empty a few slots.", "Reopen the overlay: the new contents show at once, no frame of the old ones (at most a brief blank).", "Scroll down a little, close and reopen: the scroll position stays."]],
-    ["r17ir2", "Switching back to the Sandbox tab", ["On Sandbox > Vacpack, switch to another overlay tab, close the overlay, vac some items, reopen and switch back to Sandbox: the current counts show, no flash of old ones."]],
+  { name: "Game launch (your normal config)", cases: [
+    ["r18cf1", "Your modules stay as they were", ["Start the game with your current sr2mods.json: the same modules are on in F8 as before this build.", "The top-left hint does not say \"All features start off\" (you have features on)."]],
   ]},
-  { name: "Main menu -> load a save", cases: [
-    ["r17vu1", "Extra Tank slots after loading", ["With Custom upgrades off in settings, load a save that owns Extra Tank IV: within about 1 s the HUD shows 8 slots plus water.", "Press 7 and 8: those slots are selected; water still works.", "Vac items into slots 7 and 8, save, quit to the menu, load: the items are back in 7 and 8.", "Sandbox > Upgrades: lower Extra Tank IV to II: slots 7 and 8 go; raise it to IV: they come back."]],
+  { name: "Menu only (Sandbox on, save loaded)", cases: [
+    ["r18tt1", "Upgrade tooltip text and Newbucks icon", ["Sandbox > Upgrades: hover Tank Booster (not on - / +): next level's title, tag, then its description text, then \"Fabricator cost\".", "The Newbucks cost line shows the game's Newbucks icon, not a plain yellow circle.", "Press Max, hover again: \"Fully upgraded\" with the last level's description.", "Hover a custom tier (Tank Booster above VIII): a sensible description, no stray \"!!\"."]],
+    ["r18tt2", "Newbucks icon elsewhere", ["Spawn & Craft > Refinery Crafter: hover a gadget that costs Newbucks: the game's Newbucks icon on its cost line.", "Player tab: the Newbucks card has the icon in front of the amount."]],
+    ["r18vd1", "Drag a slot onto the item list", ["Sandbox > Vacpack: fill slot 1, press on it and drag down over the item list: the icon follows, the list shows \"Drop to empty slot 1\".", "Let go over the list: slot 1 shows Empty.", "Again, letting go over a gap between tiles and near the list's bottom edge: it empties each time.", "If it still doesn't empty: mark Fail; the log now shows where the drag ended."]],
+    ["r18vd2", "Other slot drags", ["Drag slot 1 onto slot 2 (different items): they swap.", "Drag slot 1 and let go on the Fill / Empty row: nothing changes.", "Start dragging and press Esc: the slot keeps its item.", "Drag an item tile from the list onto an empty slot: it goes in."]],
+    ["r18fl4", "Fill lights setting", ["Ranch > Upgrades: \"Auto-Feeder fill lights\" is in the Plot upgrades card; no separate Corrals card.", "Turn it off: feeder lights back to vanilla green. On: the fill colours return."]],
   ]},
   { name: "Ranch: corral plot menu", cases: [
-    ["r17fl1", "Leave last food item in switch", ["Select the owned Auto-Feeder card: a \"Leave last food item in: Off\" switch in the cost row.", "Click it (or Enter / pad A): On.", "Close and reopen the menu: still On."]],
-    ["r17ic1", "Music Box icon in place", ["A corral without the Music Box: the card shows your drawing exactly where the vanilla Music Box icon sits, no shift compared to Music Box II."]],
+    ["r18fl1", "Feeder selector", ["Select the owned Auto-Feeder card: \"Leave last food item in\" on the left, a navy \"< Off >\" selector on the right (not a bar).", "Right arrow: On. Left arrow: Off.", "Enter / pad A: toggles. Close and reopen: kept."]],
   ]},
   { name: "Ranch: corral with Auto-Feeder", cases: [
-    ["r17fl2", "The last item stays", ["Switch On, put 3 of one food in the feeder.", "Wait for feedings: 1 stays in, never ejected.", "Shoot a different food in: it bounces off. The same food: goes in.", "Sleep to the next day: at least 1 still in.", "Save, quit, load: switch still On, the item still there.", "Switch Off: the last item feeds out at the next feeding."]],
-    ["r17fl3", "Fill lights", ["Look at the small arrow lights on the feeder ports (beside the speed button and at the top chute).", "Empty the feeder: red within about 1 s.", "Fill about half: yellow. Fill it up: green like vanilla.", "Let it feed down: the colour follows."]],
-    ["r17fl4", "Fill lights setting", ["Options > custom upgrades: turn \"Auto-Feeder fill lights\" Off: vanilla green within about 1 s. On again: the fill colours return."]],
-    ["r17fl5", "Newly bought feeder lights", ["Buy an Auto-Feeder on a corral without one: its lights turn red (empty) within about 10 s."]],
+    ["r18fl2", "Fill lights follow the fill", ["Empty the feeder: within about 3 s the arrow lights by the speed button and at the chute turn red.", "Fill about half: yellow. Fill up: vanilla green."]],
+    ["r18fl3", "Newly bought feeder", ["Buy an Auto-Feeder on a corral without one: its lights take the fill colour within about 3 s."]],
+    ["r18fl5", "No hitch every 10 s", ["Play a few minutes around the ranch: no regular stutter every 10 s."]],
   ]},
-  { name: "Ranch: garden plot menu", cases: [
-    ["r17ic2", "Sprinkler icons in place", ["A garden without the Sprinkler: your drawing sits low, where the vanilla icon's sprinkler base sits, not centred.", "Sprinkler II card: your drawing at the same height; the row lines up with Sprinkler III.", "Custom upgrades off: the vanilla icon, base in the same place."]],
-  ]},
-  { name: "Ranch: corral with Music Box and loose plorts", cases: [
-    ["r17pg1", "Plorts start at once, own glow replaced", ["Music stopped, loose plorts near the Music Box. Start a song: plorts glow to the beat within about a quarter second, with the lamps.", "A plain plort (Pink): no slow own glow on top, only the beat.", "Pause the song: normal look again, own glow included."]],
-    ["r17pg2", "New plorts join at once", ["Song playing: shoot a plort out next to the speaker: it glows at once.", "A slime near the speaker makes a plort: it joins at once."]],
-    ["r17pg3", "Phosphor and Shadow plorts", ["Song playing: a Phosphor plort's glow follows the beat instead of its slow fade.", "A Shadow plort pulses with the beat, its own glow gone.", "Stop the music: both look vanilla."]],
-    ["r17pg4", "Up to 256 plorts", ["Gather 150+ loose plorts near playing speakers: all of them glow.", "The plort setting's tooltip mentions the 256 cap.", "Frame rate stays smooth."]],
+  { name: "Ranch: coop and drone station", cases: [
+    ["r18ic1", "Collector icons still yours", ["Coop menu: the Hen Collector card shows your drawing.", "Drone station source list: Hen Collector and Elder Collector show your drawings."]],
   ]},
   { name: "Ranch: placed Quantum Storage Link", cases: [
-    ["r17ql1", "Drone row hint never flashes", ["With at least one drone, use the link: the Drones tab opens.", "Watch the first row as the menu appears: no magnifier / [SPACE], not even briefly.", "Move through the rows: none shows it. Close and reopen: same."]],
-    ["r17ql3", "See-through glitch", ["Wait up to about 30 s for a quantum moment: the glitch shows as faint see-through cyan scanlines, no solid white.", "Between moments the link looks normal."]],
+    ["r18ql1", "Hint stays hidden after Quantum Cloud", ["Use the link: Drones tab, no magnifier / [SPACE].", "Switch to Quantum Cloud, then back to Drones: still none, also on the focused row and while moving up and down.", "Repeat twice: same.", "Close it, open a real drone station: its rows show the hint as normal. The map's drone panel: Go To hint as normal."]],
   ]},
-  { name: "Ranch: drone station", cases: [
-    ["r17ql2", "Station rows keep their hint", ["After using the link's menu, open a drone station's menu, drone list: a focused row still shows its magnifier and [SPACE].", "Watch a ranch drone fly through a wall away from any quantum moment: its pass-through effect looks as bright as before."]],
+  { name: "Exploring (minimap tracker)", cases: [
+    ["r18ic2", "Tracker rows without placeholders", ["Turn on the map node, research drone and ghost drone rows under the minimap.", "Before the game sprites load: no drawn placeholder, just the count (with its short label when labels are off).", "After opening the map or a drone station: the game sprites show."]],
   ]},
-  { name: "Powderfall Bluffs: glowing ice", cases: [
-    ["r17lp1", "Ice pulses at once", ["With a song loaded, walk to the glowing ice cubes, place and start a speaker next to them: the ice pulses right away.", "Stop and start the music: the ice reacts at once.", "Teleport to Powderfall with a speaker already playing by the ice: it pulses about 3 s after arriving."]],
+  { name: "Optional: fresh install (back up sr2mods.json first)", cases: [
+    ["r18cf2", "Fresh install starts with everything off", ["Close the game, rename sr2mods.json in the game folder to sr2mods.json.bak.", "Start the game: the intro isn't skipped; top left shows \"Press F8 for mod settings\" and \"All features start off; enable what you want\".", "F8: every module switch is off.", "Turn on Minimap: its settings appear. Restart: only Minimap is on.", "Close the game, delete the new sr2mods.json and rename sr2mods.json.bak back."]],
   ]},
   { name: "Round 16", group: "Skipped", cases: [
     ["r16gs4", "Stacks save and pick up together", ["Stack one gadget on another.", "Save, quit to the menu, load: still on top, same spot and rotation.", "Pick up the bottom one: both go back into the inventory."]],

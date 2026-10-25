@@ -24,3 +24,6 @@ Not marked: r17ov1 (less-rounded upgrade menus); carry it over. The older Skippe
 
 ## D. Dropping to the inventory selection (`fix/vacpack-drop-r18`)
 - Note: "Dropping to inventory selection doesnt work, doesnt empty slot". Most likely the overlay's Sandbox > Vacpack page: dragging an item out of a slot (or dropping it onto the selection / outside) should empty that slot, but the slot stays filled. Check the item grid's drag-and-drop and the empty-slot action in `ui/item_grid.cpp` and the sandbox vacpack bridge. If the cause turns out to be in the game's own inventory, say so.
+
+## Status (2026-10-26)
+A-D merged and deployed (6a775b7, DLL 32fc64f7), together with the autotest save list / title fixes, stripped defaults (`feature/stripped-defaults`), CI releases (`feature/ci-release`, not pushed yet) and the icon cleanup (`chore/icons-custom-only`). Checklist: round 18 published (14 new cases in `.claude/checklist/r18-cases.json`). r17ov1 was actually marked pass. Next: the history rewrite with the user (`.claude/notes/history-rewrite.md`), then autotest wave 2 (`.claude/notes/autotest.md` section D).

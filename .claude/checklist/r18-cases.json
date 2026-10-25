@@ -1,0 +1,139 @@
+[
+[
+"Game launch (your normal config)",
+"r18cf1",
+"Your modules stay as they were",
+[
+"Start the game with your current sr2mods.json: the same modules are on in F8 as before this build.",
+"The top-left hint does not say \"All features start off\" (you have features on)."
+]
+],
+[
+"Menu only (Sandbox on, save loaded)",
+"r18tt1",
+"Upgrade tooltip text and Newbucks icon",
+[
+"Sandbox > Upgrades: hover Tank Booster (not on - / +): next level's title, tag, then its description text, then \"Fabricator cost\".",
+"The Newbucks cost line shows the game's Newbucks icon, not a plain yellow circle.",
+"Press Max, hover again: \"Fully upgraded\" with the last level's description.",
+"Hover a custom tier (Tank Booster above VIII): a sensible description, no stray \"!!\"."
+]
+],
+[
+"Menu only (Sandbox on, save loaded)",
+"r18tt2",
+"Newbucks icon elsewhere",
+[
+"Spawn & Craft > Refinery Crafter: hover a gadget that costs Newbucks: the game's Newbucks icon on its cost line.",
+"Player tab: the Newbucks card has the icon in front of the amount."
+]
+],
+[
+"Menu only (Sandbox on, save loaded)",
+"r18vd1",
+"Drag a slot onto the item list",
+[
+"Sandbox > Vacpack: fill slot 1, press on it and drag down over the item list: the icon follows, the list shows \"Drop to empty slot 1\".",
+"Let go over the list: slot 1 shows Empty.",
+"Again, letting go over a gap between tiles and near the list's bottom edge: it empties each time.",
+"If it still doesn't empty: mark Fail; the log now shows where the drag ended."
+]
+],
+[
+"Menu only (Sandbox on, save loaded)",
+"r18vd2",
+"Other slot drags",
+[
+"Drag slot 1 onto slot 2 (different items): they swap.",
+"Drag slot 1 and let go on the Fill / Empty row: nothing changes.",
+"Start dragging and press Esc: the slot keeps its item.",
+"Drag an item tile from the list onto an empty slot: it goes in."
+]
+],
+[
+"Menu only (Sandbox on, save loaded)",
+"r18fl4",
+"Fill lights setting",
+[
+"Ranch > Upgrades: \"Auto-Feeder fill lights\" is in the Plot upgrades card; no separate Corrals card.",
+"Turn it off: feeder lights back to vanilla green. On: the fill colours return."
+]
+],
+[
+"Ranch: corral plot menu",
+"r18fl1",
+"Feeder selector",
+[
+"Select the owned Auto-Feeder card: \"Leave last food item in\" on the left, a navy \"< Off >\" selector on the right (not a bar).",
+"Right arrow: On. Left arrow: Off.",
+"Enter / pad A: toggles. Close and reopen: kept."
+]
+],
+[
+"Ranch: corral with Auto-Feeder",
+"r18fl2",
+"Fill lights follow the fill",
+[
+"Empty the feeder: within about 3 s the arrow lights by the speed button and at the chute turn red.",
+"Fill about half: yellow. Fill up: vanilla green."
+]
+],
+[
+"Ranch: corral with Auto-Feeder",
+"r18fl3",
+"Newly bought feeder",
+[
+"Buy an Auto-Feeder on a corral without one: its lights take the fill colour within about 3 s."
+]
+],
+[
+"Ranch: corral with Auto-Feeder",
+"r18fl5",
+"No hitch every 10 s",
+[
+"Play a few minutes around the ranch: no regular stutter every 10 s."
+]
+],
+[
+"Ranch: coop and drone station",
+"r18ic1",
+"Collector icons still yours",
+[
+"Coop menu: the Hen Collector card shows your drawing.",
+"Drone station source list: Hen Collector and Elder Collector show your drawings."
+]
+],
+[
+"Ranch: placed Quantum Storage Link",
+"r18ql1",
+"Hint stays hidden after Quantum Cloud",
+[
+"Use the link: Drones tab, no magnifier / [SPACE].",
+"Switch to Quantum Cloud, then back to Drones: still none, also on the focused row and while moving up and down.",
+"Repeat twice: same.",
+"Close it, open a real drone station: its rows show the hint as normal. The map's drone panel: Go To hint as normal."
+]
+],
+[
+"Exploring (minimap tracker)",
+"r18ic2",
+"Tracker rows without placeholders",
+[
+"Turn on the map node, research drone and ghost drone rows under the minimap.",
+"Before the game sprites load: no drawn placeholder, just the count (with its short label when labels are off).",
+"After opening the map or a drone station: the game sprites show."
+]
+],
+[
+"Optional: fresh install (back up sr2mods.json first)",
+"r18cf2",
+"Fresh install starts with everything off",
+[
+"Close the game, rename sr2mods.json in the game folder to sr2mods.json.bak.",
+"Start the game: the intro isn't skipped; top left shows \"Press F8 for mod settings\" and \"All features start off; enable what you want\".",
+"F8: every module switch is off.",
+"Turn on Minimap: its settings appear. Restart: only Minimap is on.",
+"Close the game, delete the new sr2mods.json and rename sr2mods.json.bak back."
+]
+]
+]
