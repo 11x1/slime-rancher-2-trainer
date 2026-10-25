@@ -464,17 +464,19 @@ re/unity.md (RanchTech01, HDRP/Lit), re/custom-upgrades.md 2.2.
   left, Sell right. No plorts / market closed: opens empty with a note, Sell disabled. Height capped at
   the canvas minus 36 px each side: rows 56 -> 40 px, then a ScrollRect (wheel, Up / Down, W / S, d-pad,
   stick step one row).
-- **Buttons**: clones of the popup's `TextButton_NoneSelectable` (InputEventButton and label LSE off, own
-  `LayoutManager`, slot scaled 0.72, placed by the outer edge for 30 frames). Click polled from the Button
-  (`IsPressed` last frame, not now, pointer inside; a Toggle can't be added). A failed build logs `panel
-  build failed at: ...` and retries with our own SDF buttons.
+- **Buttons**: the shared game button (`modules/common/game_button.h`: a clone of the popup's
+  `TextButton_NoneSelectable`, scale 0.72, placed by the outer edge). Cancel shows the key cap "C" (the pad
+  button with a pad), Sell the popup's confirm glyph. Sell is non-interactable (the game's grey, no hover)
+  when there is nothing to sell or the market is closed; round 11's "Sell doesn't react to hover" was that
+  state without the grey (set before the clone's Awake, see re/ui.md "ButtonAnimator"). A failed build
+  logs `panel build failed at: ...` and retries with our own SDF buttons.
 - **Keys** (polled): Sell = the popup's positive InputEvent, Enter, pad A; Cancel = C, Esc, pad B (glyph
   shows "C" for keyboard). A key held at open is no press; input ignored 0.3 s after open / refresh; a
   backdrop click cancels.
 - **Input lock**: the game's `UIInputLocker` on the root; every close path deactivates the root first.
 - **What is sold**: Sell re-quotes; only an identical quote is sold (at most the shown count per type),
   else the receipt refreshes with an orange note.
-- Logs: `silo receipt: buttons cloned from the game's popup, rows fit|scroll (...)`, `sell all (plot
+- Logs: `silo receipt: buttons the game's popup buttons, rows fit|scroll (...)`, `Sell button laid out W x H on screen`, `sell all (plot
   '...'): receipt shown, ...`, `receipt cancelled, nothing sold`, `receipt changed before the sale (...) -
   refreshed`, `sell all (receipt, plot '...'): sold ...`; `sell-all receipt unavailable` -> sells at once.
 - `SaleNotices`: `Notice::kPlortSold` (Sell-All), `kCollected`, and `QueueText` free-text notices (used by

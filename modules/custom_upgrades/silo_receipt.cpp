@@ -13,28 +13,20 @@
 // shrink (56 -> 40 px) when there are many types, then the row list scrolls (uGUI ScrollRect in a
 // RectMask2D viewport, a thin Scrollbar on the right; mouse wheel / Up / Down / W / S / d-pad / left
 // stick up / down step one row). A silo has 12 slots, so 12 rows at most.
-// Buttons: clones of the game's own popup buttons (GameContext.UITemplates.popupPrompt ->
-// PopupPrompt._positiveActionButton / _negativeActionButton, the prefab TextButton_NoneSelectable,
-// gamecore_scenes bundle read with UnityPy: Button + ButtonAnimator (hover animation and colours) +
-// DetailsMoreButtonView (label = LocalizeStringEvent) + InputEventButton (performs the popup's
-// InputEvent on pointer down / up: disabled on the clone) + InputEventDisplay under "Icon Background"
-// (the key icon of the popup's positive / negative InputEvent, kept), self-sizing through
-// EncapsulateChildren). Our label goes into the TMP text (its LocalizeStringEvent disabled); the click
-// is polled from the clone's Button.
-// Layout (feedback round 4: "buttons ugly, very big, no padding on the right, the keys aren't on the
-// left side of the buttons like the game has them"). The prefab's layout behaviours (HorizontalLayout,
-// EncapsulateChildren, ResizeToPreferred) are driven by a LayoutManager higher up - in the popup it sits
-// on its Panel; the clone under our canvas had none, so nothing laid it out: the glyph stayed where the
-// prefab left it, over the label, and the button kept its prefab size. Each clone now gets its own
-// LayoutManager (the game's component; OnEnable / LateUpdate lay the button out as in the popup: key
-// glyph on the left inside the pill, label after it, the button sized to both). The popup's buttons are
-// 321 x 59 with a 42 pt label for a 55 pt title; the receipt's title is 40 pt, so the clones are scaled to
-// kGameButtonScale. They are placed by their outer edge (Cancel's left edge at kPad, Sell's right edge at
-// kPanelW - kPad), so the padding stays whatever width the layout gives them (re-placed for 30 frames).
-// Like the popup's buttons (TextButton_NoneSelectable) they are not focusable: no focus ring, the keys
-// shown on them act directly. Sell = the popup's positive InputEvent (its PollValue, the binding the
-// glyph shows; Enter / pad A too), Cancel = C (user request; the glyph's key text reads "C" while it
-// shows a keyboard key), Esc, pad B and the popup's negative InputEvent.
+// Buttons: the game's own popup buttons through the shared helper modules/common/game_button.h (a clone
+// of PopupPrompt._positiveActionButton / _negativeActionButton, TextButton_NoneSelectable: the game's pink
+// pill, hover colour and bounce, key glyph on the left, laid out by its own LayoutManager, scaled by
+// kGameButtonScale; the popup's buttons are 321 x 59 with a 42 pt label for a 55 pt title, ours sit under a
+// 40 pt title). They are placed by their outer edge (Cancel's left edge at kPad, Sell's right edge at
+// kPanelW - kPad), so the padding stays whatever width the layout gives them.
+// Like the popup's buttons they are not focusable: no focus ring, the keys shown on them act directly.
+// Sell = the popup's positive InputEvent (its PollValue, the binding the glyph shows; Enter / pad A too),
+// Cancel = C (user request; the glyph's key cap reads "C" while it shows a keyboard key, the pad button
+// otherwise), Esc, pad B and the popup's negative InputEvent.
+// Round 11: "Sell button in silo's Sell All doesnt react to hover, cancel does" - the receipt had no rows,
+// so Sell was made non-interactable before the clone's first activation: ButtonAnimator took that state in
+// Awake and never showed its grey, so Sell looked normal but ignored the pointer. The helper now tells the
+// animator (OnInteractableChanged) once the button is live: an empty / closed receipt shows a grey Sell.
 // Without the prefab: our own SDF buttons with the keys in the label, as before.
 // The palette is the game's menu one (drone station / plot menu scene data): navy text, white
 // content, lavender border, light blue inner boxes, teal focus, pink accent (the plot menu's scroll
@@ -59,6 +51,7 @@
 #include "core/module.h"
 #include "core/resolver.h"
 #include "core/unity.h"
+#include "modules/common/game_button.h"
 
 namespace sr2::modules::custom_upgrades::ui {
 
@@ -170,21 +163,11 @@ struct SiloReceipt::Impl {
                     *srSetScrollbarVis = nullptr;
     const MethodInfo* sbSetHandle = nullptr, *sbSetDirection = nullptr, *selSetTarget = nullptr;
     bool scrollOk = false;
-    // optional: the game's popup buttons
-    const MethodInfo* gcGetTemplates = nullptr, *rtGetRect = nullptr, *behSetEnabled = nullptr,
-                    *selSetInteractable = nullptr;
-    // The clone already has a Button (a Selectable: DisallowMultipleComponent), so no Toggle can go on it
-    // (Player.log: "Can't add 'Toggle' to Cancel because a 'Button' is already added"). Its click is
-    // polled from the Button's own state: Selectable.IsPressed() (protected), get_isPointerInside (private).
-    const MethodInfo* selIsPressed = nullptr, *selPointerInside = nullptr;
-    Il2CppClass* popupClass = nullptr, *ieButtonClass = nullptr, *moreViewClass = nullptr, *uiButtonClass = nullptr;
-    size_t offTplPopup = 0, offPopupPositive = 0, offPopupNegative = 0, offMoreLabel = 0;
+    // optional: the game's popup buttons (game_button) and the popup's InputEvents, the C key
     bool gameButtonsOk = false;
-    // optional: laying the clones out like the popup, the popup's InputEvents, the C key
-    Il2CppClass* layoutMgrClass = nullptr, *lseClass = nullptr;
-    const MethodInfo* trFind = nullptr, *trSetLocalScale = nullptr, *tmpGetText = nullptr, *kbC = nullptr;
-    const MethodInfo* trGetChildCount = nullptr, *trGetChild = nullptr;
-    size_t offPopupPosInput = 0, offPopupNegInput = 0, offEvtPoll = 0;
+    const MethodInfo* gcGetTemplates = nullptr, *kbC = nullptr;
+    Il2CppClass* popupClass = nullptr;
+    size_t offTplPopup = 0, offPopupPosInput = 0, offPopupNegInput = 0, offEvtPoll = 0;
     Il2CppClass* pollClass = nullptr;          // class of the last PollValue delegate seen
     const MethodInfo* pollInvoke = nullptr;    // ... and its Invoke()
     using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
@@ -200,22 +183,16 @@ struct SiloReceipt::Impl {
     Il2CppObject* root = nullptr, *rootRt = nullptr, *backdropToggle = nullptr;
     Il2CppObject* panel = nullptr;
     Il2CppObject* btnBg[2] = {}, *btnText[2] = {}, *btnToggle[2] = {};
-    Il2CppObject* btnGame[2] = {};  // the cloned game button's root (nullptr: our own button)
-    bool btnWasPressed[2] = {};     // a game button's IsPressed() in the last frame
-    Vec2 btnAnchor[2] = {};         // a game button's position in its slot (the slot sits on the outer edge point)
-    float btnPivotX[2] = {};        // ... and its pivot x (1 = right edge)
-    int placeFrames = 0;            // frames left to re-place the game buttons after their layout
+    game_button::Button gbtn[2];    // the game's buttons (gbtn[i].Exists(): in use, else our own button)
+    int sizeLogFrames = 0;          // frames until the laid-out button sizes are logged (once)
     // The popup's InputEvents (0 = negative / Cancel, 1 = positive / Sell), polled through PollValue.
     Il2CppObject* evt[2] = {};
     bool evtHeld[2] = {};           // held last frame (a press = not held -> held)
-    // Cancel's key glyph: the first InputIcon's key text (set to "C" while it shows a keyboard key), its
-    // Key root and the other icons of the group (hidden then: the glyph shows C alone).
-    Il2CppObject* cancelKeyText = nullptr, *cancelKeyRoot = nullptr, *cancelExtraIcons[3] = {};
     bool loggedEvents = false;
     Il2CppObject* scrollRect = nullptr;
     float scrollStep = 0.0f;        // one row in normalized scroll units (0 = no scrolling)
     Il2CppObject* font = nullptr;  // TMP_FontAsset of a HUD text (this open only)
-    bool loggedOpen = false, loggedFail = false, loggedButtons = false, loggedButtonMiss = false;
+    bool loggedOpen = false, loggedFail = false, loggedButtons = false, loggedButtonMiss = false, loggedSizes = false;
 
     // ---- helpers ----
     bool Faulted() const { return sr2::core::ModuleFaulted(module); }
@@ -375,16 +352,6 @@ struct SiloReceipt::Impl {
         Call(tglSetOnQuiet, t, {&off}, "Toggle.SetIsOnWithoutNotify");
         return t;
     }
-    // A game button's click: pressed in the last frame, released now with the pointer still on it.
-    bool GameClicked(int i) {
-        if (!btnGame[i] || !unity::IsAlive(btnBg[i])) return false;
-        bool ok = false, ok2 = false;
-        const bool pressed = Unbox<bool>(Call(selIsPressed, btnBg[i], {}, "Selectable.IsPressed", &ok)) && ok;
-        const bool inside = Unbox<bool>(Call(selPointerInside, btnBg[i], {}, "Selectable.get_isPointerInside", &ok2)) && ok2;
-        const bool click = btnWasPressed[i] && !pressed && inside;
-        btnWasPressed[i] = pressed;
-        return click;
-    }
     bool Clicked(Il2CppObject* toggle) {  // true once per click
         if (!unity::IsAlive(toggle)) return false;
         bool ok = false;
@@ -430,22 +397,15 @@ struct SiloReceipt::Impl {
     }
 
     float CanvasHeight();
-    Il2CppObject* GameButton(Il2CppObject* parentRt, bool positive, const char* label);
-    void PlaceGameButtons();
-    void FindCancelGlyph(Il2CppObject* button);
-    void CancelGlyphTick();
+    bool GameButton(Il2CppObject* parentRt, int i);
+    void FindEvents();
+    void LogButtonSizes();
     bool EventHeld(int i);
     bool EventPressed(int i) {  // held now, not held last frame
         const bool held = EventHeld(i);
         const bool press = held && !evtHeld[i];
         evtHeld[i] = held;
         return press;
-    }
-    Il2CppObject* Child(Il2CppObject* tr, const char* path) {
-        if (!trFind || !unity::IsAlive(tr)) return nullptr;
-        bool ok = false;
-        Il2CppObject* c = Call(trFind, tr, {unity::NewString(path)}, "Transform.Find", &ok);
-        return ok && unity::IsAlive(c) ? c : nullptr;
     }
     void ScrollBy(int rows);
     bool BuildPanel(const Receipt& r, const std::string& note);
@@ -669,43 +629,23 @@ bool SiloReceipt::Setup(Resolver& R, const char* module, std::string& why) {
         if (!p->scrollOk) report += " scrolling rows: NOT available (rows only shrink);";
         if (!p->screenW || !p->screenH) report += " screen size: NOT available (1080 assumed);";
 
-        // The game's popup buttons.
+        // The game's popup buttons (shared helper) and the popup's keys / the C key (each optional).
+        {
+            std::string gerr;
+            p->gameButtonsOk = game_button::Resolve(R, gerr);
+            if (!p->gameButtonsOk) report += " game buttons: NOT available (own buttons: " + gerr + ");";
+            else if (!gerr.empty()) report += " game buttons:" + gerr;
+        }
         Il2CppClass* templates = R.Class(kImage, "MonomiPark.SlimeRancher.UI", "UITemplates", &err);
         p->popupClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Popup", "PopupPrompt", &err);
-        p->ieButtonClass = R.Class(kImage, "MonomiPark.SlimeRancher.Input", "InputEventButton", &err);
-        p->moreViewClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Adapter", "DetailsMoreButtonView", &err);
-        p->uiButtonClass = R.Class(kUi, "UnityEngine.UI", "Button", &err);
-        Il2CppClass* behaviour = R.Class(kCore, "UnityEngine", "Behaviour", &err);
         p->gcGetTemplates = opt(gameCtx, "get_UITemplates", 0);
-        p->rtGetRect = opt(p->rtClass, "get_rect", 0);
-        p->behSetEnabled = opt(behaviour, "set_enabled", 1);
-        p->selSetInteractable = opt(selectable, "set_interactable", 1);
-        p->selIsPressed = opt(selectable, "IsPressed", 0);
-        p->selPointerInside = opt(selectable, "get_isPointerInside", 0);
-        p->gameButtonsOk = p->gcInstance && templates && p->popupClass && p->ieButtonClass && p->moreViewClass &&
-                           p->uiButtonClass && p->gcGetTemplates && p->rtGetRect && p->behSetEnabled &&
-                           p->selIsPressed && p->selPointerInside &&
-                           optOff(templates, "popupPrompt", p->offTplPopup) &&
-                           optOff(p->popupClass, "_positiveActionButton", p->offPopupPositive) &&
-                           optOff(p->popupClass, "_negativeActionButton", p->offPopupNegative) &&
-                           optOff(p->moreViewClass, "label", p->offMoreLabel);
-        if (!p->gameButtonsOk) report += " game buttons: NOT available (own buttons);";
-        // Their layout, the popup's keys and the C key (each optional).
-        p->layoutMgrClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Framework.Layout", "LayoutManager", &err);
-        p->lseClass = R.Class("Unity.Localization", "UnityEngine.Localization.Components", "LocalizeStringEvent", &err);
-        p->trFind = R.MethodByParams(transform, "Find", {"System.String"}, &err);
-        p->trSetLocalScale = opt(transform, "set_localScale", 1);
-        p->trGetChildCount = opt(transform, "get_childCount", 0);
-        p->trGetChild = opt(transform, "GetChild", 1);
-        p->tmpGetText = opt(p->tmpTextClass, "get_text", 0);
         p->kbC = opt(kb, "get_cKey", 0);
         Il2CppClass* inputEvent = R.Class(kImage, "MonomiPark.SlimeRancher.Input", "InputEvent", &err);
-        if (p->popupClass && inputEvent && optOff(p->popupClass, "_positiveInput", p->offPopupPosInput) &&
+        if (templates && p->popupClass && inputEvent && optOff(templates, "popupPrompt", p->offTplPopup) &&
+            optOff(p->popupClass, "_positiveInput", p->offPopupPosInput) &&
             optOff(p->popupClass, "_negativeInput", p->offPopupNegInput))
             optOff(inputEvent, "PollValue", p->offEvtPoll);
-        if (p->gameButtonsOk && (!p->layoutMgrClass || !p->trSetLocalScale))
-            report += " game button layout: NOT available (prefab layout, unscaled);";
-        if (!p->offEvtPoll) report += " popup keys: NOT available (Enter / A sell);";
+        if (!p->offEvtPoll || !p->gcGetTemplates) report += " popup keys: NOT available (Enter / A sell);";
         if (!p->kbC) report += " C key: NOT available;";
     }
     impl_ = p;
@@ -729,114 +669,66 @@ float SiloReceipt::Impl::CanvasHeight() {
     return std::clamp(static_cast<float>(h) / scale, 400.0f, 4000.0f);
 }
 
-// A clone of the game's popup button (positive = Accept, else Cancel) under `parentRt`, labelled
-// `label`; its centre is set by the caller. nullptr: not available (the caller builds its own).
-Il2CppObject* SiloReceipt::Impl::GameButton(Il2CppObject* parentRt, bool positive, const char* label) {
-    if (!gameButtonsOk) return nullptr;
-    auto miss = [&](const char* what) -> Il2CppObject* {
-        if (!loggedButtonMiss) SR2_WARN("[{}] silo receipt: game button not cloned ({}) - own buttons", module, what);
+// Game button i (0 = Cancel, 1 = Sell) under `parentRt` through game_button: Cancel is a clone of the popup's
+// negative button with the key cap "C" (the pad's own glyph while a pad is used), Sell of the positive one
+// with the popup's confirm glyph. The caller places it. false: our own button instead.
+bool SiloReceipt::Impl::GameButton(Il2CppObject* parentRt, int i) {
+    game_button::Spec spec;
+    spec.name = i == 0 ? "Cancel" : "Sell";
+    spec.label = i == 0 ? "Cancel" : "Sell";
+    spec.source = i == 0 ? game_button::Source::kNegative : game_button::Source::kPositive;
+    if (i == 0 && kbC) {
+        spec.key = "C";
+        spec.padGlyph = true;
+    } else {
+        spec.popupGlyph = true;
+    }
+    spec.scale = kGameButtonScale;
+    spec.module = module;
+    std::string why;
+    if (!gbtn[i].Create(parentRt, spec, why)) {
+        if (!loggedButtonMiss) SR2_WARN("[{}] silo receipt: game button not cloned ({}) - own buttons", module, why);
         loggedButtonMiss = true;
-        return nullptr;
-    };
+        return false;
+    }
+    return true;
+}
+
+// The popup's InputEvents (0 = negative / Cancel, 1 = positive / Sell), polled through PollValue.
+void SiloReceipt::Impl::FindEvents() {
+    evt[0] = evt[1] = nullptr;
+    if (!offEvtPoll || !gcGetTemplates || !popupClass) return;
     bool ok = false;
     Il2CppObject* gc = Call(gcInstance, nullptr, {}, "GameContext.Instance", &ok);
-    if (!ok || !unity::IsAlive(gc)) return miss("no GameContext");
-    Il2CppObject* tpl = Call(gcGetTemplates, gc, {}, "GameContext.get_UITemplates", &ok);
-    if (!ok || !unity::IsAlive(tpl)) return miss("no UITemplates");
-    Il2CppObject* popupGo = unity::Field<Il2CppObject*>(tpl, offTplPopup);
+    Il2CppObject* tpl = ok && unity::IsAlive(gc) ? Call(gcGetTemplates, gc, {}, "GameContext.get_UITemplates", &ok) : nullptr;
+    Il2CppObject* popupGo = ok && unity::IsAlive(tpl) ? unity::Field<Il2CppObject*>(tpl, offTplPopup) : nullptr;
     Il2CppObject* popup = unity::IsAlive(popupGo) ? unity::GetComponent(popupGo, popupClass) : nullptr;
-    if (!unity::IsAlive(popup)) return miss("no PopupPrompt template");
-    Il2CppObject* src = unity::Field<Il2CppObject*>(popup, positive ? offPopupPositive : offPopupNegative);
-    if (!unity::IsAlive(src) || !IsA(src, goClass)) return miss("popup button is not a GameObject");
-    Il2CppObject* go = unity::Instantiate(src, parentRt);
-    if (!unity::IsAlive(go)) return miss("Instantiate failed");
-    // The click is polled from its Button (GameClicked): without one there is nothing to poll.
-    if (!unity::IsAlive(unity::GetComponent(go, uiButtonClass))) {
-        Destroy(go);
-        return miss("no Button on the clone");
-    }
-    unity::SetName(go, positive ? "Sell" : "Cancel");
-    // Its pointer down / up would perform the popup's InputEvent (a menu submit / cancel elsewhere).
-    if (Il2CppObject* ieb = unity::GetComponent(go, ieButtonClass); unity::IsAlive(ieb)) {
-        bool off = false;
-        Call(behSetEnabled, ieb, {&off}, "Behaviour.set_enabled(InputEventButton)");
-    }
-    // Label: the LocalizeStringEvent off (it would write "Confirm" / "Cancel" back), our text in.
-    Il2CppObject* view = unity::GetComponent(go, moreViewClass);
-    Il2CppObject* lse = unity::IsAlive(view) ? unity::Field<Il2CppObject*>(view, offMoreLabel) : nullptr;
-    Il2CppObject* tmp = nullptr;
-    if (unity::IsAlive(lse)) {
-        bool off = false;
-        Call(behSetEnabled, lse, {&off}, "Behaviour.set_enabled(LocalizeStringEvent)");
-        tmp = unity::GetComponent(lse, tmpTextClass);
-    }
-    if (!unity::IsAlive(tmp)) {
-        Destroy(go);
-        return miss("no label text on the clone");
-    }
-    SetText(tmp, label);
-    Keep(panelHandles, go);
-    Keep(panelHandles, tmp);
-    // The popup's key for this button (its glyph shows that binding).
-    if (const size_t o = positive ? offPopupPosInput : offPopupNegInput; o && offEvtPoll) {
-        Il2CppObject* e = unity::Field<Il2CppObject*>(popup, o);
+    if (!unity::IsAlive(popup)) return;
+    for (int i = 0; i < 2; ++i) {
+        Il2CppObject* e = unity::Field<Il2CppObject*>(popup, i == 1 ? offPopupPosInput : offPopupNegInput);
         if (e && unity::IsAlive(e)) {
-            evt[positive ? 1 : 0] = e;
+            evt[i] = e;
             Keep(handles, e);
         }
     }
-    // Laid out like in the popup (see the header). Text first: the LayoutManager lays the button out in
-    // its OnEnable (now, or when the dialog is activated). The caller's slot scales it (not the button
-    // itself: its ButtonAnimator may animate the button's own scale on hover / press).
-    if (layoutMgrClass) AddComponent(go, layoutMgrClass, "AddComponent(LayoutManager)");
-    if (!positive) FindCancelGlyph(go);
-    return go;
 }
 
-// Cancel's key glyph (the popup's negative key, Esc): Icon Background / InputEventDisplay / Icon Group,
-// whose InputIcons each have a "Key" root (keyboard: border, background, the key name text) and a
-// "Button" image (gamepad). The display keeps working (pad B shows as B); CancelGlyphTick writes "C"
-// into the key text while a keyboard key is shown.
-void SiloReceipt::Impl::FindCancelGlyph(Il2CppObject* button) {
-    cancelKeyText = cancelKeyRoot = nullptr;
-    for (Il2CppObject*& o : cancelExtraIcons) o = nullptr;
-    if (!kbC || !tmpGetText) return;
-    Il2CppObject* group = Child(unity::TransformOf(button), "Icon Background/InputEventDisplay/Icon Group");
-    if (!group) return;
-    Il2CppObject* first = nullptr;
-    int extra = 0;
-    bool ok = false;
-    const int n = Unbox<int32_t>(Call(trGetChildCount, group, {}, "Transform.get_childCount", &ok));
-    for (int32_t i = 0; ok && i < n && i < 8; ++i) {
-        Il2CppObject* c = Call(trGetChild, group, {&i}, "Transform.GetChild");
-        if (!unity::IsAlive(c)) continue;
-        if (!first) first = c;
-        else if (extra < 3) cancelExtraIcons[extra++] = unity::GameObjectOf(c);
+// Once, a few frames after the first build: the laid-out sizes and the keys (log).
+void SiloReceipt::Impl::LogButtonSizes() {
+    if (loggedSizes || sizeLogFrames <= 0 || --sizeLogFrames > 0) return;
+    loggedSizes = true;
+    for (int i = 0; i < 2; ++i) {
+        float w = 0, h = 0;
+        gbtn[i].Size(w, h);
+        if (gbtn[i].Exists())
+            SR2_INFO("[{}] silo receipt: {} button laid out {:.0f} x {:.0f} on screen", module, i == 1 ? "Sell" : "Cancel", w, h);
     }
-    Il2CppObject* key = first ? Child(first, "Key") : nullptr;
-    Il2CppObject* text = key ? Child(key, "Text") : nullptr;
-    Il2CppObject* tmp = text ? unity::GetComponent(text, tmpTextClass) : nullptr;
-    if (!unity::IsAlive(tmp)) return;
-    // Its LocalizeStringEvent would write the bound key's localized name back.
-    if (Il2CppObject* lse = lseClass ? unity::GetComponent(text, lseClass) : nullptr; unity::IsAlive(lse)) {
-        bool off = false;
-        Call(behSetEnabled, lse, {&off}, "Behaviour.set_enabled(LocalizeStringEvent)");
+    if (!loggedEvents) {
+        loggedEvents = true;
+        SR2_INFO("[{}] silo receipt: keys - Sell: {}, Cancel: C / Esc / pad B{}", module,
+                 evt[1] ? "the popup's confirm key (its glyph) / Enter / pad A" : "Enter / pad A",
+                 evt[0] ? " / the popup's cancel key" : "");
     }
-    cancelKeyText = tmp;
-    cancelKeyRoot = unity::GameObjectOf(key);
-    Keep(panelHandles, cancelKeyText);
-    Keep(panelHandles, cancelKeyRoot);
-    for (Il2CppObject* o : cancelExtraIcons) Keep(panelHandles, o);
-}
-
-void SiloReceipt::Impl::CancelGlyphTick() {
-    if (!unity::IsAlive(cancelKeyText) || !unity::IsAlive(cancelKeyRoot) || !unity::ActiveInHierarchy(cancelKeyRoot))
-        return;  // gamepad glyph (or none): the display's own
-    bool ok = false;
-    Il2CppObject* s = Call(tmpGetText, cancelKeyText, {}, "TMP_Text.get_text", &ok);
-    if (ok && unity::ToUtf8(reinterpret_cast<Il2CppString*>(s)) != "C") SetText(cancelKeyText, "C");
-    for (Il2CppObject* o : cancelExtraIcons)
-        if (unity::IsAlive(o) && unity::ActiveInHierarchy(o)) unity::SetActive(o, false);
 }
 
 // The popup's InputEvent i is held: its PollValue (Func<float>, set by the game's InputEventBinding to
@@ -856,33 +748,6 @@ bool SiloReceipt::Impl::EventHeld(int i) {
     bool ok = false;
     const float v = Unbox<float>(Call(pollInvoke, fn, {}, "InputEvent.PollValue", &ok));
     return ok && std::isfinite(v) && v > 0.5f;
-}
-
-// The game buttons by their outer edge: pivot (0 or 1, 0.5) on the anchor point. Their layout sizes them
-// around that pivot (EncapsulateChildren, SetSizeWithCurrentAnchors); re-applied for a few frames after a
-// build in case a layout pass moved them. Logs the laid-out size once.
-void SiloReceipt::Impl::PlaceGameButtons() {
-    for (int i = 0; i < 2; ++i) {
-        if (!unity::IsAlive(btnGame[i])) continue;
-        Il2CppObject* rt = unity::TransformOf(btnGame[i]);
-        SetVec(rtSetPivot, rt, {btnPivotX[i], 0.5f}, "RectTransform.set_pivot");
-        SetVec(rtSetPos, rt, {btnAnchor[i].x, -btnAnchor[i].y}, "RectTransform.set_anchoredPosition");
-        if (placeFrames == 1 && !loggedEvents) {
-            bool ok = false;
-            Il2CppObject* boxed = Call(rtGetRect, rt, {}, "RectTransform.get_rect", &ok);
-            if (ok && boxed) {
-                const float* r = reinterpret_cast<const float*>(reinterpret_cast<char*>(boxed) + 2 * sizeof(void*));
-                SR2_INFO("[{}] silo receipt: {} button laid out {:.0f} x {:.0f} (x{:.2f} on screen)", module,
-                         i == 1 ? "Sell" : "Cancel", r[2], r[3], layoutMgrClass && trSetLocalScale ? kGameButtonScale : 1.0f);
-            }
-        }
-    }
-    if (placeFrames == 1 && !loggedEvents) {
-        loggedEvents = true;
-        SR2_INFO("[{}] silo receipt: keys - Sell: {}, Cancel: C / Esc / pad B{}{}", module,
-                 evt[1] ? "the popup's confirm key (its glyph) / Enter / pad A" : "Enter / pad A",
-                 evt[0] ? " / the popup's cancel key" : "", cancelKeyText ? ", Cancel glyph shows C" : "");
-    }
 }
 
 void SiloReceipt::Impl::ScrollBy(int rows) {
@@ -1038,29 +903,11 @@ bool SiloReceipt::Impl::BuildPanel(const Receipt& r, const std::string& note) {
     // by its outer edge.
     const float bx[2] = {kPad, kPanelW - kPad - kButtonW};
     for (int i = 0; i < 2; ++i) {
-        // A zero-size slot on the button's outer edge point carries the scale; the button hangs off its
-        // pivot (0 = left edge, 1 = right edge) at the slot's centre.
-        Il2CppObject* slot = gameButtonsOk ? NewUi(i == 0 ? "CancelSlot" : "SellSlot", prt) : nullptr;
-        Il2CppObject* slotRt = slot ? unity::TransformOf(slot) : nullptr;
-        Il2CppObject* game = slotRt ? GameButton(slotRt, i == 1, i == 0 ? "Cancel" : "Sell") : nullptr;
-        if (game) {
-            btnPivotX[i] = i == 0 ? 0.0f : 1.0f;
-            const Vec2 edge{i == 0 ? kPad : kPanelW - kPad, btnY + kGameButtonRowH * 0.5f};
-            Rect(slotRt, {0, 1}, {0, 1}, {0.5f, 0.5f}, {edge.x, -edge.y}, {0, 0});
-            if (layoutMgrClass && trSetLocalScale) {
-                float scale[3] = {kGameButtonScale, kGameButtonScale, 1.0f};
-                Call(trSetLocalScale, slotRt, {scale}, "Transform.set_localScale");
-            }
-            btnAnchor[i] = Vec2{0, 0};
-            Rect(unity::TransformOf(game), {0.5f, 0.5f}, {0.5f, 0.5f}, {btnPivotX[i], 0.5f}, {0, 0}, {kButtonW, 59.0f});
-            btnGame[i] = game;
-            btnBg[i] = unity::GetComponent(game, uiButtonClass);  // its Selectable: the click, interactable
-            btnToggle[i] = nullptr;
-            btnWasPressed[i] = false;
-            Keep(panelHandles, btnBg[i]);
+        if (gameButtonsOk && GameButton(prt, i)) {
+            gbtn[i].Place(i == 0 ? kPad : kPanelW - kPad, btnY + kGameButtonRowH * 0.5f, i == 0 ? 0.0f : 1.0f);
+            btnBg[i] = btnToggle[i] = nullptr;
             continue;
         }
-        if (slot) Destroy(slot);
         const char* labels[2] = {"Cancel  (C / B)", "Sell  (Enter / A)"};
         Il2CppObject* b = NewUi(i == 0 ? "Cancel" : "Sell", prt);
         if (!b) return BuildFail("own button object");
@@ -1074,11 +921,13 @@ bool SiloReceipt::Impl::BuildPanel(const Receipt& r, const std::string& note) {
         Keep(panelHandles, btnToggle[i]);
         if (!btnBg[i] || !btnToggle[i]) return BuildFail(!btnBg[i] ? "own button shape" : "own button Toggle");
     }
-    placeFrames = 30;
+    if (!loggedSizes) sizeLogFrames = 30;
     if (!loggedButtons) {
         loggedButtons = true;
         SR2_INFO("[{}] silo receipt: buttons {}, rows {} ({} px, canvas {:.0f} high)", module,
-                 btnGame[0] && btnGame[1] ? "cloned from the game's popup" : btnGame[0] || btnGame[1] ? "mixed" : "own",
+                 gbtn[0].Exists() && gbtn[1].Exists() ? "the game's popup buttons"
+                 : gbtn[0].Exists() || gbtn[1].Exists() ? "mixed"
+                                                        : "own",
                  scrolls ? "scroll" : "fit", static_cast<int>(rowH), CanvasHeight());
     }
     StyleButtons();
@@ -1105,11 +954,9 @@ void SiloReceipt::Impl::ClearPanel() {
     if (unity::IsAlive(panel)) Destroy(panel);
     panel = nullptr;
     for (int i = 0; i < 2; ++i) {
-        btnBg[i] = btnText[i] = btnToggle[i] = btnGame[i] = nullptr;
-        btnWasPressed[i] = false;
+        btnBg[i] = btnText[i] = btnToggle[i] = nullptr;
+        gbtn[i].Forget();  // destroyed with the panel
     }
-    cancelKeyText = cancelKeyRoot = nullptr;
-    for (Il2CppObject*& o : cancelExtraIcons) o = nullptr;
     scrollRect = nullptr;
     scrollStep = 0.0f;
     FreeLater(panelHandles);
@@ -1120,12 +967,9 @@ void SiloReceipt::Impl::StyleButtons() {
     for (int i = 0; i < 2; ++i) {
         const bool focused = focus == i;
         const bool disabled = i == 1 && !canSell;
-        if (btnGame[i]) {
-            // The game's button keeps its own look (hover / disabled colours); not focusable, like the popup's.
-            if (selSetInteractable && unity::IsAlive(btnBg[i])) {
-                bool on = !disabled;
-                Call(selSetInteractable, btnBg[i], {&on}, "Selectable.set_interactable");
-            }
+        if (gbtn[i].Exists()) {
+            // The game's button keeps its own look (hover / disabled grey); not focusable, like the popup's.
+            gbtn[i].SetInteractable(!disabled);
             continue;
         }
         const Color fill = disabled ? kGrey : focused ? (i == 1 ? kPink : kTeal) : kBacker;
@@ -1148,14 +992,13 @@ void SiloReceipt::Impl::Teardown() {
     open = false;
     root = rootRt = backdropToggle = panel = scrollRect = nullptr;
     for (int i = 0; i < 2; ++i) {
-        btnBg[i] = btnText[i] = btnToggle[i] = btnGame[i] = nullptr;
+        btnBg[i] = btnText[i] = btnToggle[i] = nullptr;
+        gbtn[i].Forget();
         evt[i] = nullptr;
         evtHeld[i] = false;
     }
-    cancelKeyText = cancelKeyRoot = nullptr;
-    for (Il2CppObject*& o : cancelExtraIcons) o = nullptr;
     scrollStep = 0.0f;
-    placeFrames = 0;
+    sizeLogFrames = 0;
     font = nullptr;
     FreeLater(panelHandles);
     FreeLater(handles);
@@ -1211,6 +1054,7 @@ bool SiloReceipt::Open(const Receipt& r, const std::string& note) {
     }
     p.canSell = r.marketAvailable && !r.marketClosed && !r.lines.empty();
     p.focus = p.canSell ? 1 : 0;
+    p.FindEvents();  // the popup's confirm / cancel keys (polled, see EventHeld)
     if (!p.Build(r, note)) return failOpen("panel failed");
     // The game's own lock: pauses time, swaps to the UI action map, frees the cursor.
     if (!p.AddComponent(go, p.lockerClass, "AddComponent(UIInputLocker)")) return failOpen("UIInputLocker failed");
@@ -1251,15 +1095,11 @@ SiloReceipt::Result SiloReceipt::Tick(float unscaledDt) {
     }
     // Clicks first (reset every frame, also during the grace time).
     const bool clickBackdrop = p.Clicked(p.backdropToggle);
-    const bool clickCancel = p.btnGame[0] ? p.GameClicked(0) : p.Clicked(p.btnToggle[0]);
-    const bool clickSell = p.btnGame[1] ? p.GameClicked(1) : p.Clicked(p.btnToggle[1]);
+    const bool clickCancel = p.gbtn[0].Exists() ? p.gbtn[0].Tick() : p.Clicked(p.btnToggle[0]);
+    const bool clickSell = p.gbtn[1].Exists() ? p.gbtn[1].Tick() : p.Clicked(p.btnToggle[1]);
     // The popup's keys: polled every frame (also in the grace time) so a press is an edge.
     const bool evtCancel = p.EventPressed(0), evtSell = p.EventPressed(1);
-    if (p.placeFrames > 0) {
-        p.PlaceGameButtons();
-        --p.placeFrames;
-    }
-    p.CancelGlyphTick();
+    p.LogButtonSizes();
     if (std::isfinite(unscaledDt) && unscaledDt > 0.0f) p.grace -= std::min(unscaledDt, 0.25f);
     if (p.grace > 0.0f) return Result::kNone;
     if (clickCancel || clickBackdrop) return Result::kCancel;
@@ -1272,7 +1112,7 @@ SiloReceipt::Result SiloReceipt::Tick(float unscaledDt) {
     Il2CppObject* kb = p.Device(p.kbCurrent);
     Il2CppObject* pad = p.Device(p.padCurrent);
     if (evtCancel || p.Pressed(kb, p.kbC) || p.Pressed(kb, p.kbEsc) || p.Pressed(pad, p.padEast)) return Result::kCancel;
-    const bool gameButtons = p.btnGame[0] && p.btnGame[1];
+    const bool gameButtons = p.gbtn[0].Exists() && p.gbtn[1].Exists();
     if (gameButtons) {
         // Not focusable (like the popup): the keys on the buttons act directly; Enter / pad A sell too.
         const bool sell = evtSell || p.Pressed(kb, p.kbEnter) || p.Pressed(kb, p.kbNumEnter) || p.Pressed(pad, p.padSouth);
