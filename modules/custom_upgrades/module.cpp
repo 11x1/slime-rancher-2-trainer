@@ -86,6 +86,8 @@
 //   card is selected in a corral's purchase menu, an on/off switch there (mouse, or Submit = pad A /
 //   Enter) keeps the feeder's last food item in, so it keeps that food and drones / shots add only more of
 //   it. Per plot value "custom_upgrades.feeder_lock" in the sidecar (non-empty = on).
+//   Auto-Feeder fill lights (feeder_lights.cpp, round 17): the feeder's port LEDs red / yellow / green by
+//   fill (setting FeederFillLights, world tick part 13).
 //
 //   Hen Collector save safety: its storage is a LOCAL AmmoSlotManager (never linked to the
 //   plot's LandPlotModel, so never in the vanilla save; the vanilla elder slots would not
@@ -253,6 +255,7 @@
 #include "modules/custom_upgrades/sale_notify.h"
 #include "modules/custom_upgrades/silo_receipt.h"
 #include "modules/custom_upgrades/silo_world.h"
+#include "modules/custom_upgrades/feeder_lights.h"
 #include "modules/custom_upgrades/feeder_lock.h"
 #include "modules/custom_upgrades/shadow_catcher.h"
 #include "modules/custom_upgrades/slime_launcher.h"
@@ -303,7 +306,7 @@ constexpr int32_t kUpgStorageCapacity = 20;  // template preference
 constexpr int32_t kUpgStorageSections[] = {3, 4, 5};
 constexpr unsigned long long kTierCacheFrames = 900;
 constexpr float kWorldTickSeconds = 1.0f;  // coop world objects: create / fit / remove
-constexpr int kWorldSteps = 13;            // WorldStep parts, one per frame (round 13: all in one frame took 2-3.5 ms)
+constexpr int kWorldSteps = 14;            // WorldStep parts, one per frame (round 13: all in one frame took 2-3.5 ms)
 
 using custom_upgrades::Family;
 constexpr int kFamilies = static_cast<int>(Family::kCount);
@@ -762,6 +765,7 @@ private:
     custom_upgrades::ui::PlotMenuSlider sliderRoosters_;  // at a time; the hens slider builds the row)
     custom_upgrades::ui::PlotMenuSlider sliderFeeder_;    // Auto-Feeder "Leave last food item in" switch
     custom_upgrades::feeder::FeederLock feeder_;          // its effect (feeder_lock.h)
+    custom_upgrades::feeder::FeederLights feederLights_;  // Auto-Feeder fill lights (feeder_lights.h)
     unsigned long long feederSubmitTick_ = ~0ull;         // frame of the last Submit the switch took
     custom_upgrades::ui::SaleNotices notices_;    // Sell-All: per-plort HUD notifications
     custom_upgrades::ui::SiloReceipt receipt_;    // Sell-All: confirmation dialog (silo_receipt.h)
@@ -1147,6 +1151,7 @@ void CustomUpgrades::ResetState(const char* why) {
     radioButtons_.Reset();
     props_.Reset();
     feeder_.Cleanup(why);  // the loaded save's locks come from its sidecar at the next tick
+    feederLights_.Reset();  // its feeders are found again at the next tick
     notices_.Clear();
     DestroySliders();  // their value callbacks belong to the old state
     if (receipt_.IsOpen() && main_thread::IsMainThread()) CloseReceipt(why);  // its silo belongs to the old game
@@ -2385,6 +2390,7 @@ void CustomUpgrades::Cleanup(const char* why) {
     vacpack_.Cleanup(why);   // vacpack upgrade levels off, our definitions out of the game's lists
     shadow_.Cleanup(why);    // Shadow diet back to vanilla, kept shadow slimes behave as in vanilla again
     feeder_.Cleanup(why);    // locked auto-feeders take any food again
+    feederLights_.Cleanup(why);  // feeder lights back to the material's green
     int removed = 0, restored = 0;
     for (auto& inj : injections_) {
         for (Injected& in : inj->items) {
@@ -2694,6 +2700,13 @@ bool CustomUpgrades::WorldStep(int step) {
         {
             SR2_PERF_DETAIL("custom_upgrades.world: feeder locks");
             FeederLockTick();
+        }
+        return true;
+    case 13:
+        if (!feederLights_.Ready()) return false;
+        {
+            SR2_PERF_DETAIL("custom_upgrades.world: feeder lights");
+            feederLights_.Tick();
         }
         return true;
     default:
@@ -4090,6 +4103,12 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         else
             SR2_WARN("[{}] ListUI.Submit not hooked ({}) - the auto-feeder switch is mouse only", kModule,
                      kerr.empty() ? "hook failed" : kerr);
+    }
+    // Auto-Feeder fill lights (optional: without them the feeder lights stay vanilla green).
+    {
+        std::string lerr;
+        if (!feederLights_.Setup(R, kModule, lerr))
+            SR2_WARN("[{}] auto-feeder fill lights unavailable ({}) - feeder lights stay green", kModule, lerr);
     }
     // Slime Launcher effect (optional; the vacpack upgrades sell it and publish its level).
     if (vacpack_.Ready()) {
