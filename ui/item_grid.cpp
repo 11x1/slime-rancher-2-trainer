@@ -447,11 +447,16 @@ Result Draw(const char* id, const std::vector<Tile>& tiles, State& st, const Opt
         ImGui::PushID(reinterpret_cast<const void*>(t.id));
         tileNav.Item(t.id);
         if (nav::Button("##tile", ImVec2(cell, cell), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight)) {
-            if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) res.rightClicked = i;
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) res.rightClicked = i, res.menuAt = ImGui::GetMousePos();
             else res.clicked = i;  // also Space / Enter on the focused tile
         }
         tileNav.Done();
-        if (nav::ContextKey()) res.rightClicked = i;
+        if (nav::ContextKey()) res.rightClicked = i, res.menuAt = ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y);
+        if (res.rightClicked == i) {
+            // Kept inside the visible part of the grid (a tile scrolled half out of it).
+            const ImRect clip = ImGui::GetCurrentWindow()->InnerClipRect;
+            res.menuAt = ImVec2(std::clamp(res.menuAt.x, clip.Min.x, clip.Max.x), std::clamp(res.menuAt.y, clip.Min.y, clip.Max.y));
+        }
         // Hover also while another item (the search box being typed in) holds the
         // active id, so the tooltip and the wheel work without clicking the grid first.
         const bool hot = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
@@ -474,7 +479,7 @@ Result Draw(const char* id, const std::vector<Tile>& tiles, State& st, const Opt
         if (ImGui::IsRectVisible(a, b))
             DrawTile(dl, a, b, t, hot || ImGui::IsItemActive(), o.selected != 0 && t.id == o.selected, s);
         nav::Ring(a, b, 6.0f * s);
-        if (o.drag && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoPreviewTooltip)) {
+        if (o.drag && !t.noDrag && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoPreviewTooltip)) {
             ImGui::SetDragDropPayload(kDragType, &t.id, sizeof(t.id));
             ImGui::EndDragDropSource();
         }

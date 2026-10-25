@@ -61,6 +61,11 @@ struct Item {
     // first / second of SlimeDefinition.BaseSlimes, ids in radiantBase / radiantBase2). 0 = none.
     uint8_t radiant = 0;
     uintptr_t radiantBase = 0, radiantBase2 = 0;
+    // The radiant forms' icons (the Slimepedia's radiant icons: the radiant SlimeAppearance's _icon, which
+    // RadiantSlimePediaEntry.get_Icon returns), indexed by Op::SpawnRadiant's slot: 0 the slime's own, 1 / 2 a
+    // largo radiant from its first / second base (its RadiantLargo0 / 1 look, else that base's radiant icon).
+    // 0 = none (the context menu falls back to the item's icon).
+    uint32_t radiantIcon[3] = {};
 };
 inline constexpr uint8_t kRadiantSelf = 1, kRadiantBase0 = 2, kRadiantBase1 = 4;
 

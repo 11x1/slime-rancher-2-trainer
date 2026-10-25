@@ -273,12 +273,13 @@ bool HasConsoleName(const std::string& text) {
 // them (round 11), so the minimum is about the width of a tip with favourite rows.
 constexpr float kTipMinW = 160, kRichTipMinW = 280;
 
-void Tooltip(const std::string& text) {
+// `minW` (design px): the minimum width; 0 = as wide as the text (a one-word tip, e.g. a filter tab's).
+void Tooltip(const std::string& text, float minW) {
     if (text.empty()) return;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(12), U(9)));
     PushFloatingStyle();
     // A minimum width: a tooltip of a few words (a tile's name) looked squeezed.
-    ImGui::SetNextWindowSizeConstraints(ImVec2(U(kTipMinW), 0), ImVec2(FLT_MAX, FLT_MAX));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(U(minW), 0), ImVec2(FLT_MAX, FLT_MAX));
     if (ImGui::BeginTooltip()) {
         FloatingSurface(false);
         {
@@ -296,6 +297,8 @@ void Tooltip(const std::string& text) {
     PopFloatingStyle();
     ImGui::PopStyleVar();
 }
+
+void Tooltip(const std::string& text) { Tooltip(text, kTipMinW); }
 
 // The logo's Slimepedia entry: the slime's name as a heading, then each section's
 // title and text as the Slimepedia page shows them (the intro has no title).
@@ -1468,6 +1471,7 @@ enum class SbxGrid { Vacpack, Spawner };
 uintptr_t g_ctxItem = 0;
 SbxGrid g_ctxGrid = SbxGrid::Vacpack;
 int g_ctxSlot = -1;  // the vacpack slot the menu was opened on (its Fill / Empty entries); -1: a grid tile
+ImVec2 g_ctxAt;      // where the menu opens (the right-click; item_grid::Result::menuAt for a grid tile)
 constexpr const char* kSbxCtx = "##sbx_item_ctx";
 constexpr const char* kCraftCtx = "##sbx_craft_ctx";  // the crafter's right-click menu (variants)
 uintptr_t g_craftCtx = 0;                             // the recipe it was opened on
@@ -2150,8 +2154,10 @@ void SandboxHintBar(ImDrawList* dl, ImVec2 a, ImVec2 b) {
     dl->PopClipRect();
 }
 
+// A filter tab's tip is just its title ("Slimes"): as wide as the text, not the item tips' minimum width
+// (round 13: "the tooltips are like a mile long when 'Slimes' filter is hovered").
 void TabTip(const item_grid::Result& r, const std::vector<item_grid::Tab>& tabs) {
-    if (r.hoveredTab >= 0 && static_cast<size_t>(r.hoveredTab) < tabs.size()) Tooltip(tabs[static_cast<size_t>(r.hoveredTab)].tip);
+    if (r.hoveredTab >= 0 && static_cast<size_t>(r.hoveredTab) < tabs.size()) Tooltip(tabs[static_cast<size_t>(r.hoveredTab)].tip, 0);
 }
 
 // A slot's count as the tab last asked for it (quick wheel notches add up before the next snapshot).
@@ -2266,6 +2272,16 @@ void ItemContextMenu(const sbx::Snapshot& s) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(8), U(8)));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(6), U(4)));
     PushFloatingStyle();
+    {
+        // Anchored where it was opened, growing down and to the right, or up / left when there is more room on that
+        // side of the screen. Left to ImGui, a popup that does not fit below the cursor was clamped into the screen
+        // and could land far from the tile (round 13: Lucky Slime's menu opened under the search bar).
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        const ImVec2 at = g_ctxAt;
+        const ImVec2 pivot(at.x > vp->WorkPos.x + vp->WorkSize.x * 0.6f ? 1.0f : 0.0f,
+                           at.y > vp->WorkPos.y + vp->WorkSize.y * 0.5f ? 1.0f : 0.0f);
+        ImGui::SetNextWindowPos(at, ImGuiCond_Appearing, pivot);
+    }
     if (ImGui::BeginPopup(kSbxCtx)) {
         FloatingSurface(true);
         const sbx::Item* self = FindItem(s, g_ctxItem);
@@ -2318,6 +2334,7 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                 std::string sort;  // largos: the other slime's short name
                 const char* why = nullptr;  // grayed out: the tooltip (else the default reason)
                 int radiant = -1;  // >= 0: spawns a radiant form (Op::SpawnRadiant, slot = this)
+                uint32_t icon = 0;  // drawn instead of the item's icon (a radiant form: the Slimepedia's radiant icon)
             };
             std::vector<Give> gives, largos;
             auto spawnable = [&](uintptr_t id) -> const sbx::Item* {
@@ -2401,7 +2418,8 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                 const bool hit = ImGui::Selectable("##give", false, 0, ImVec2(rowW, e));
                 ImGui::EndDisabled();
                 ImDrawList* dl = ImGui::GetWindowDrawList();
-                item_grid::DrawIcons(dl, g.it->icon, g.it->icon2, p, ImVec2(p.x + e, p.y + e), g.can ? IM_COL32_WHITE : IM_COL32(255, 255, 255, 90));
+                item_grid::DrawIcons(dl, g.icon ? g.icon : g.it->icon, g.icon ? 0 : g.it->icon2, p, ImVec2(p.x + e, p.y + e),
+                                     g.can ? IM_COL32_WHITE : IM_COL32(255, 255, 255, 90));
                 const ImVec2 ts = TextSize(theme::Body(), fs, label.c_str());
                 Text(dl, theme::Body(), fs, ImVec2(p.x + e + U(8), p.y + (e - ts.y) * 0.5f), g.can ? P.text : P.dim, label.c_str());
                 if (!g.can && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -2417,38 +2435,75 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                 }
                 ImGui::PopID();
             };
-            // The game's radiant (rare, glowing) form of this slime: "Spawn: Radiant Pink Slime"; a largo has one per
+            // The game's radiant (rare, glowing) form of a slime: "Spawn: Radiant Pink Slime"; a largo has one per
             // base slime it can be radiant from: "Spawn: Radiant Pink Tabby Largo (radiant Pink)". Spawned in front of
-            // you like the spawner's tiles (Op::SpawnRadiant). Grayed with the reason when the game has none.
-            auto radiantEntries = [&] {
-                const sbx::Item* sp = spawnable(self->id);
-                const sbx::Item* it = sp ? sp : self;
+            // you like the spawner's tiles (Op::SpawnRadiant), with the Slimepedia's radiant icon (round 13). Grayed
+            // with the reason when the game has none.
+            auto radiantEntries = [&](const sbx::Item* of) {
+                const sbx::Item* sp = spawnable(of->id);
+                const sbx::Item* it = sp ? sp : of;
                 const bool can = sp && !(sp->tarr && s.tarrsOff);
                 const char* why = !sp ? "Not in the spawn list." : nullptr;
-                if (self->kind == sbx::Kind::Slime || !sp || !sp->radiant) {
-                    Give g{"Spawn: Radiant " + self->name, it, can && (sp->radiant & sbx::kRadiantSelf) != 0, true, {}, why, 0};
+                if (of->kind == sbx::Kind::Slime || !sp || !sp->radiant) {
+                    Give g{"Spawn: Radiant " + of->name, it, can && (sp->radiant & sbx::kRadiantSelf) != 0, true, {}, why, 0};
                     if (g.can) g.why = nullptr;
                     else if (!g.why && can) g.why = "The game has no radiant form of this slime.";
+                    if (sp) g.icon = sp->radiantIcon[0];
                     entry(g);
                     return;
                 }
                 const uintptr_t bases[2] = {sp->radiantBase, sp->radiantBase2};
                 for (int i = 0; i < 2; ++i) {
                     if (!(sp->radiant & (i == 0 ? sbx::kRadiantBase0 : sbx::kRadiantBase1))) continue;
-                    entry({std::format("Spawn: Radiant {} (radiant {})", self->name, shortName(bases[i], "?")), it, can,
-                           true, {}, nullptr, i + 1});
+                    entry({std::format("Spawn: Radiant {} (radiant {})", of->name, shortName(bases[i], "?")), it, can,
+                           true, {}, nullptr, i + 1, sp->radiantIcon[i + 1]});
                 }
             };
-            if (self->kind == sbx::Kind::Largo && !vac) radiantEntries();
+            // A largo row of the Largos submenu (round 13: "Clicking should result in crafting but another context menu
+            // should open to spawn a variant of a radiant slime of that largo (both slimes)"): a click spawns the largo
+            // like before; hovering opens one more submenu with the largo itself and its radiant forms (radiant from
+            // either base slime). A largo the game has no radiant form of stays a plain row.
+            auto largoEntry = [&](const Give& g) {
+                const sbx::Item* sp = spawnable(g.it->id);
+                if (!g.can || !sp || !(sp->radiant & (sbx::kRadiantBase0 | sbx::kRadiantBase1))) {
+                    entry(g);
+                    return;
+                }
+                ImGui::PushID(++row);
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                const ImVec2 p = ImGui::GetCursorScreenPos();
+                // The click is read before BeginMenu (which only opens the submenu on it): this window must be the
+                // hovered one (not the submenu over it) and the press inside the row.
+                const bool click = ImGui::IsWindowHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+                                   ImGui::IsMouseHoveringRect(p, ImVec2(p.x + ImGui::GetContentRegionAvail().x, p.y + e));
+                ImGui::PushFont(theme::Body(), 22.0f);  // the row is one font size high: as high as the entries
+                const bool open = ImGui::BeginMenu("##largo");
+                ImGui::PopFont();
+                item_grid::DrawIcons(dl, g.it->icon, g.it->icon2, p, ImVec2(p.x + e, p.y + e));
+                const ImVec2 ts = TextSize(theme::Body(), fs, g.label.c_str());
+                Text(dl, theme::Body(), fs, ImVec2(p.x + e + U(8), p.y + (e - ts.y) * 0.5f), P.text, g.label.c_str());
+                if (open) {
+                    FloatingSurface(true);
+                    entry({"Spawn: " + g.it->name, g.it, true, true, {}});
+                    radiantEntries(g.it);
+                    ImGui::EndMenu();
+                }
+                if (click) {
+                    SbxRequest(sbx::Op::Spawn, SpawnAmount(g.it->id), -1, g.it->id);
+                    ImGui::CloseCurrentPopup();  // closing a submenu closes its parents up to the item menu
+                }
+                ImGui::PopID();
+            };
+            if (self->kind == sbx::Kind::Largo && !vac) radiantEntries(self);
             if (self->kind == sbx::Kind::Slime) {
-                // The slime itself: spawned in front of you (vacpack; the spawner's click does that), then given
-                // into the vacpack like the Give entries.
-                if (vac) {
+                // The slime itself: spawned in front of you (also in the spawner, round 13: "context menu should also
+                // have an option to spawn the default slime"), then given into the vacpack like the Give entries.
+                {
                     const sbx::Item* sp = spawnable(self->id);
                     const bool can = sp && !(sp->tarr && s.tarrsOff);
                     entry({"Spawn: " + self->name, sp ? sp : self, can, true, {}});
                 }
-                radiantEntries();
+                radiantEntries(self);
                 const sbx::Item* ci = nullptr;
                 if (s.catalog)
                     for (const sbx::Item& c : *s.catalog)
@@ -2473,7 +2528,7 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                 Text(dl, theme::Body(), fs, ImVec2(p.x + e + U(8), p.y + (e - ts.y) * 0.5f), P.text, label.c_str());
                 if (open) {
                     FloatingSurface(true);
-                    for (const Give& g : largos) entry(g);
+                    for (const Give& g : largos) largoEntry(g);
                     ImGui::EndMenu();
                 }
             }
@@ -2487,7 +2542,8 @@ void ItemContextMenu(const sbx::Snapshot& s) {
     ImGui::PopStyleVar(2);
 }
 
-void OpenItemContext(uintptr_t id, SbxGrid grid, int slot = -1) {
+void OpenItemContext(uintptr_t id, SbxGrid grid, int slot = -1, const ImVec2* at = nullptr) {
+    g_ctxAt = at ? *at : ImGui::IsMousePosValid() ? ImGui::GetMousePos() : ImGui::GetItemRectMin();
     g_ctxItem = id;
     g_ctxGrid = grid;
     g_ctxSlot = slot;
@@ -2715,10 +2771,29 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     if (lastHover) hoverRel = FindRelation(s, lastHover);
     std::vector<item_grid::Tile> tiles;
     std::vector<const sbx::Item*> src;
+    std::vector<bool> holdable;  // per tile: false = a slime the vacpack can't hold (grayed, context menu only)
     if (s.catalog) {
-        tiles.reserve(s.catalog->size());
-        for (const sbx::Item& it : *s.catalog) {
-            if (!(it.slotMask & bit) || !InTab(it, vacGroup)) continue;
+        // What the selected slot accepts, plus (round 13: "show gold and lucky slime in inventory but gray them out,
+        // as they cant be in vacpack") every slime from the spawn list no slot takes (Gold, Lucky, Tarr), sorted in.
+        std::vector<std::pair<const sbx::Item*, bool>> list;
+        list.reserve(s.catalog->size() + 8);
+        for (const sbx::Item& it : *s.catalog)
+            if ((it.slotMask & bit) && InTab(it, vacGroup)) list.push_back({&it, true});
+        if (s.spawnables)
+            for (const sbx::Item& it : *s.spawnables) {
+                if (it.kind != sbx::Kind::Slime || it.mod || !InTab(it, vacGroup)) continue;
+                bool inCatalog = false;
+                for (const sbx::Item& c : *s.catalog)
+                    if (c.id == it.id) {
+                        inCatalog = true;
+                        break;
+                    }
+                if (!inCatalog) list.push_back({&it, false});
+            }
+        std::stable_sort(list.begin(), list.end(), [](const auto& a, const auto& b) { return a.first->name < b.first->name; });
+        tiles.reserve(list.size());
+        for (const auto& [ip, can] : list) {
+            const sbx::Item& it = *ip;
             item_grid::Tile t;
             t.id = it.id;
             t.name = &it.name;
@@ -2726,13 +2801,15 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
             t.icon2 = it.icon2;
             t.accent = KindAccent(it.kind);
             t.mod = it.mod;
-            if (const auto pk = g_vacPick.find(it.id); pk != g_vacPick.end()) {
+            t.dimmed = t.noDrag = !can;
+            if (const auto pk = g_vacPick.find(it.id); can && pk != g_vacPick.end()) {
                 t.selected = true;
                 t.amount = pk->second;
             }
             t.related = Related(hoverRel, it.id);
             tiles.push_back(t);
             src.push_back(&it);
+            holdable.push_back(can);
         }
     }
     // Selected items still in the list (a slot change can hide some).
@@ -2760,7 +2837,11 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
                 "in front of you.");
     if (r.hovered >= 0 && !ImGui::GetDragDropPayload() && !ImGui::IsPopupOpen(kSbxCtx)) {
         const sbx::Item& it = *src[static_cast<size_t>(r.hovered)];
-        ItemTooltip(s, it.name, it.kind, it.id, nullptr, nullptr, {{"LMB", "put in a slot"}, {"RMB", "context menu"}}, it.mod);
+        if (holdable[static_cast<size_t>(r.hovered)])
+            ItemTooltip(s, it.name, it.kind, it.id, nullptr, nullptr, {{"LMB", "put in a slot"}, {"RMB", "context menu"}}, it.mod);
+        else
+            ItemTooltip(s, it.name, it.kind, it.id, "The vacpack can't hold this slime. Spawn it from the context menu.",
+                        nullptr, {{"RMB", "context menu"}}, it.mod);
     }
     if (r.dropped && r.dropped->DataSize == sizeof(int)) {
         const int from = *static_cast<const int*>(r.dropped->Data);
@@ -2769,7 +2850,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
             SbxRequest(sbx::Op::SetSlotCount, 0, from);
         }
     }
-    if (r.wheelStep != 0 && r.hovered >= 0) {
+    if (r.wheelStep != 0 && r.hovered >= 0 && holdable[static_cast<size_t>(r.hovered)]) {
         // Shift / Ctrl + wheel on an item: its amount (adds it to the selection; 0 removes it). Up to
         // 999: more than the slots hold is dropped in front of you by "Put in slots".
         const sbx::Item& it = *src[static_cast<size_t>(r.hovered)];
@@ -2780,7 +2861,9 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
         else g_vacPick[it.id] = next;
         g_vacFocus = it.id;
     }
-    if (r.clicked >= 0) {
+    if (r.clicked >= 0 && !holdable[static_cast<size_t>(r.clicked)]) {
+        sbx::SetStatus(src[static_cast<size_t>(r.clicked)]->name + " can't go in the vacpack (right-click: spawn it)", true);
+    } else if (r.clicked >= 0) {
         const sbx::Item& it = *src[static_cast<size_t>(r.clicked)];
         g_vacFocus = it.id;
         if (io.KeyCtrl) {
@@ -2791,7 +2874,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
         }
     }
     if (r.clearSelection) g_vacPick.clear();
-    if (r.rightClicked >= 0) OpenItemContext(tiles[static_cast<size_t>(r.rightClicked)].id, SbxGrid::Vacpack);
+    if (r.rightClicked >= 0) OpenItemContext(tiles[static_cast<size_t>(r.rightClicked)].id, SbxGrid::Vacpack, -1, &r.menuAt);
     if (r.button) {
         // One StowItem per selected item, in the module's order: the first may replace what the
         // selected slot holds, the others go into the slots that hold them or are empty.
@@ -2963,7 +3046,7 @@ void SandboxSpawner(const sbx::Snapshot& s, float w) {
         SbxBatch(acts);
         g_spawnPick.clear();
     }
-    if (r.rightClicked >= 0) OpenItemContext(tiles[static_cast<size_t>(r.rightClicked)].id, SbxGrid::Spawner);
+    if (r.rightClicked >= 0) OpenItemContext(tiles[static_cast<size_t>(r.rightClicked)].id, SbxGrid::Spawner, -1, &r.menuAt);
     ItemContextMenu(s);
     EndCard();
 }
