@@ -131,6 +131,8 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | MetaGameDirector.SetAchievementProgress(Achievement, int) | 0x5F56D0 | sandbox_achievements.MetaGameDirector.SetAchievementProgress | sandbox/achievements.cpp | block achievements; overload by first param (AchievementData overload 0x5F5650 not hooked) |
 | MusicBoxRegion.OnTriggerEnter(1) | 0x98A580 | plot_upgrades.MusicBoxRegion.OnTriggerEnter | plot_upgrades/module.cpp | music box booster |
 | MusicBoxUpgrader.Apply(1) | 0x98A810 | slime_dj.MusicBoxUpgrader.Apply | slime_dj/module.cpp | track music boxes (opt) |
+| NewGadgetSelectionUI.OnDestroy(0) | 0x787530 | sandbox_gadget_menu.NewGadgetSelectionUI.OnDestroy | sandbox/module.cpp | gadget-mode menu tracking for the post-craft refresh (always on) |
+| NewGadgetSelectionUI.OnEnable(0) | 0x7880E0 | sandbox_gadget_menu.NewGadgetSelectionUI.OnEnable | sandbox/module.cpp | gadget-mode menu tracking for the post-craft refresh (always on) |
 | OptionsDetailsView.BindData(1) | 0x7183E0 | ui.options_details_bind | ui/options_tab.cpp | Mods tab details panel |
 | OptionsItemViewHolder.Activate(0) | 0x718640 | ui.options_row_activate | ui/options_tab.cpp | click toggles row (opt; skipped if folded) |
 | OptionsItemViewHolder.BindData(1) | 0x718690 | ui.options_row_bind | ui/options_tab.cpp | injected rows |
