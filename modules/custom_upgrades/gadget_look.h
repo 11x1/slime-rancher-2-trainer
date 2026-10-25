@@ -56,6 +56,7 @@ struct Look {
     // clears the definition's full-art reference (IdentifiableType._fullArt / _requiresFullArt) so the
     // details' UIImageDynamicLoader loads nothing over it. The grid tile and hotbar use
     // GadgetDefinition.icon: set that field yourself (get_Icon returns it when not null).
+    // The details image draws it (or the recoloured art) from a copy resampled to its on-screen size.
     Il2CppObject* icon = nullptr;
     // artAmount > 0 (with `icon` set): the details picture becomes the base's full art (the 512 px addressable
     // sprite, copied by Instantiate) recoloured `artAmount` towards `artTint` (TintedSprite), instead of
