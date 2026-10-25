@@ -36,7 +36,9 @@ struct EmbeddedPng {
     const unsigned char* data;
     size_t size;
 };
-#include "ui/mod_icons_data.inc"
+// Generated at build time (CMake runs assets/icons/src/gen_inc.py into build/generated); the
+// array ends with a {nullptr, nullptr, 0} entry.
+#include "sr2mods_icons_data.inc"
 
 constexpr const char* kCore = "UnityEngine.CoreModule";
 constexpr int32_t kTextureFormatRGBA32 = 4;
@@ -255,7 +257,7 @@ Il2CppObject* Get(std::string_view name, Il2CppObject* sizeLike, bool greyed) {
     if (!Resolve()) return nullptr;
     const EmbeddedPng* png = nullptr;
     for (const EmbeddedPng& p : kEmbeddedIcons)
-        if (name == p.name) png = &p;
+        if (p.name && name == p.name) png = &p;
     if (!png) {
         SR2_WARN("ui: mod icons: no embedded icon named '{}'", name);
         e.attempts = kMaxAttempts;
@@ -269,7 +271,7 @@ Il2CppObject* Get(std::string_view name, Il2CppObject* sizeLike, bool greyed) {
 
 bool Has(std::string_view name) {
     for (const EmbeddedPng& p : kEmbeddedIcons)
-        if (name == p.name) return true;
+        if (p.name && name == p.name) return true;
     return false;
 }
 

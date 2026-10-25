@@ -1822,7 +1822,8 @@ const char* ModIconName(int32_t id) {
         case GARDEN_GROWTH_2: name = "growth_2"; break;        // vanilla: Sprinkler
         case INCIN_ASH_BOOST: name = "ash_boost"; break;       // vanilla: Ash Trough
         case COOP_AIR_NET: name = "coop_air_net"; break;       // vanilla: the corral's Air Net
-        // The user's drawing (the Plort Collector with a hen coming out), also the drone source's icon.
+        // The user's edit of the Plort Collector with a hen coming out (local-only, assets/icons/local:
+        // game art, not in the repo), also the drone source's icon.
         case COOP_HEN_COLLECTOR: name = "hen_collector_source"; break;  // vanilla: Deluxe Coop
         default: return nullptr;
     }

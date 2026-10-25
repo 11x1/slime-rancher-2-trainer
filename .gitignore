@@ -31,7 +31,9 @@ __pycache__/
 *.til
 
 # ---- downloaded tooling (Cpp2IL, Il2CppInspectorRedux, .NET runtime) ------
-/tools/
+# (our own scripts in tools/ are re-included one by one)
+/tools/*
+!/tools/rewrite_icon_history.py
 
 # ---- user's personal game saves ------------------------------------------
 /save-backups/
@@ -58,6 +60,11 @@ venv/
 
 # Icons extracted from the game files (reference only, not ours to commit)
 assets/icons/game/
+# Local-only icons built on game art (the Hen / Elder Collector edits of the collector
+# body): embedded by gen_inc.py when present, never committed
+assets/icons/local/
+# Generated at build time into build/generated (an old copy here is ignored)
+ui/mod_icons_data.inc
 
 # autotest run results (screenshots paths, log excerpts; never committed)
 /autotest/results/

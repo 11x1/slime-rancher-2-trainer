@@ -52,7 +52,8 @@ corral Air Net's (`coop_air_net`), Silo Capacity the Storage Capacity's. The Mar
 definition named `MarketLink` in `_gadgetDefinitions` and its member groups (round 12: the card showed the
 cloned template's Storage Capacity icon; log `using the Market Link icon '<sprite>' ... (definition from the
 gadget groups)`). The Hen Collector has the user's
-`hen_collector_source.png`, Sprinkler II the user's `growth_1.png`. A drawing under one of those names takes
+`hen_collector_source.png` when it is in the local-only `assets/icons/local/` (an edit of the game's collector
+art, so not in the repo; a clean checkout shows the Deluxe Coop icon), Sprinkler II the user's `growth_1.png`. A drawing under one of those names takes
 over at the next build (`.claude/notes/custom-icons.md`).
 Vanilla cards with a drawing (`VanillaIconName`: Sprinkler `sprinkler_1`, Music Box `music_1`): the game's own
 menu item gets the drawing in its `_icon` while the module is on. `BuildInjection` remembers each such item
@@ -321,8 +322,9 @@ User (r16fl6): "for the feeder models ingame, color them red -> yellow -> green 
 - In memory the program has `0x53520101` / `0x53520102`. `GatherSourceTask(ours)` = one new
   `RanchDroneSourceProgramElderCollector` whose `GetSources` returns only that kind's slots;
   `FindSourceDefinition(ours)` = a copy of Coop's definition (sort index Coop + 1).
-- **Icons**: `hen_collector_source.png` / `elder_collector_source.png` when embedded (both are in
-  `assets/icons`), else `HenType.icon` / the elder hen; the card and the source share one cached sprite.
+- **Icons**: `hen_collector_source.png` / `elder_collector_source.png` when embedded (both live in the
+  gitignored `assets/icons/local/`: the user's edits of the game's collector art, never committed), else
+  `HenType.icon` / the elder hen; the card and the source share one cached sprite.
 - **Save**: the `Pull` detour gives the save a copy saying COOP (no copy possible -> the live data becomes
   Coop, logged). Sidecar `drone_hen_source.stations` / `drone_elder_source.stations` = station actor ids.
 - **Load**: the first tick that sees a listed station with a Coop program switches it back
