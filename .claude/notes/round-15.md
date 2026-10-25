@@ -107,3 +107,10 @@ Find the real cause before changing the picture path again. A useful check: writ
 ## Carry-over (untested, re-add under Skipped)
 - r12pg4, r12nc2, r12pg1, r12lp4, r11qs2-4, r11cr3
 - Earlier: r7sb8, r9wx3, r9wx4, r10cr3, r10cr4, r7bd6, r9rs3, r10dj6, r10dp3, r9dp4, r9dp5, r7dr2, r4dr3, r10sh2-5, r9sh4, r9sh5, r9sh7, r8tp3, r4mm4, r6vu4, hc4, p7, ug2, ug3, sv2, ut6
+
+## J. New Fabricator upgrade: slime shot distance (`feature/slime-launch-upgrade-r15`)
+User: "a new fabricator upgrade: Slime Punch or something (maybe less aggressive) to upgrade (max 3 tiers), shoots slimes further, in inventory and picked up largos".
+- A custom vacpack upgrade in the Fabricator with 3 tiers. Build it like the existing custom upgrades (Battery Saver, Drone Program Scheduler): ids, costs, card, sidecar, Sandbox raise and lower.
+- Each tier makes slimes shot from the vacpack fly further, both slimes from inventory slots and largos held in the vacuum (largos can't be stored, only held and shot).
+- Name: something gentler than "Slime Punch", e.g. "Slime Launcher", "Bounce Shot", "Slime Toss". Pick one that fits the game's upgrade names and say which one you chose. Use a vanilla icon until the user draws one (see custom-icons.md).
+- Find where the vacpack's shoot force or speed is applied (re/vacpack.md, re_lookup Vacuum / Shoot / launch speed). Scale it only for slimes (and largos), not for food, plorts or other items. Keep tier 0 vanilla.
