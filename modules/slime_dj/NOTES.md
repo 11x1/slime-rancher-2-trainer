@@ -72,17 +72,36 @@ speaker of a channel goes (you leave the ranch), the song pauses and resumes whe
   scene load's `Resources.UnloadUnusedAssets` destroyed it.
 
 **Amplify (`amplify`, default off; round 11).** Boxes in sync already add up physically where ranges
-overlap. The toggle adds, per speaker, for each other speaker within its hearing range (positions from
-`Transform.get_position` every box scan): +15 % volume (up to 1.6x, +4 dB) and +10 % range (up to 1.3x).
+overlap. The toggle adds, per speaker, for each other *audible* speaker of the same channel within its
+hearing range (positions from `Transform.get_position` every box scan; round 12: silent emitters and
+speakers of another radio no longer count): +15 % volume (up to 1.6x, +4 dB) and +10 % range (up to 1.3x).
 An amplified speaker has `minDistance` = a tenth of its range (instead of a fifth), so each speaker is
 loudest next to it and the song is heard from every speaker instead of one wide full-volume blob (round 10
 had +25 % range up to 2x, which made the full-volume zones overlap). Volume above 1 (Unity clamps
 `AudioSource.volume`): every channel has a PCM gain (`Current::gain`) baked into the chunks `Fill` writes,
-= the loudest wanted speaker volume of the channel (`vol x volScale x boost`, at most 1.6), moving at most
-0.05 per 0.5 s chunk, soft-limited above 0.89 (tanh knee); the gain per ring chunk is kept
-(`chunkGain[16]`) and every speaker's volume is divided by the gain of the chunk at the play head, so
-speakers that want less are not louder. Gain 1 (no change to the PCM) while Amplify is off or nothing wants
-more than full volume.
+= the loudest wanted speaker volume of the channel (`vol x volScale x boost x muffle x sum cap`, 1..2).
+
+*Round 12, "sound is crackling a bit"*. Two causes, both fixed:
+- The old gain was soft-limited above 0.89 by a tanh knee: on mastered songs (peaks near 0 dBFS) every
+  loud peak was bent (audible distortion), and the gain stepped at chunk edges while the speakers divided
+  it out a frame off. Now `Fill` holds one decoded chunk back (`pend`), so it sees the next chunk too:
+  the gain ramps linearly across the chunk from where the last one ended (`chunkG0` -> `chunkG1` per ring
+  slot) to a value that keeps this chunk and the next under 0.97 (`kPeakCeiling`), rises at most 0.05 per
+  chunk, falls as fast as needed, never below 1. No sample is shaped or clipped. Speakers divide by the
+  ramp's value at the exact play position (`GainAt`). A song mastered at full scale simply gets no gain.
+- Speakers of one channel play the same samples in sync, so at the listener they add up as amplitudes
+  (five speakers at full volume nearby = 5x; the mixer clips). *Listener sum cap*: every frame `TickMix`
+  estimates the sum at the camera (each speaker's wanted volume x Unity's linear rolloff at its distance,
+  panning ignored) per channel and scales all its speakers so the sum stays under 1 (`kSumMax`); the cut is
+  immediate, the release 0.6 s. Logged once: `N speaker(s) of '...' add up to X.XXx full scale here;
+  turned down to stay clean`.
+
+**Silent emitters stop (round 12).** An emitter registered with volume 0 (a booth or speaker stack
+switched off, a Boombox playing its own track) does not play at all (`Silent`): stopped, clip dropped,
+never the clock, not counted by Amplify, the sum cap or `SongPlaying`; it rejoins at the clock when it is
+registered with more (the register bumps the generation: next frame's box scan). Before, those speakers
+played at volume 0 and still boosted their neighbours ("sound seems to come from dj table only ... not
+enabled and has no slime but still plays").
 
 **3D settings.** `maxDistance` = `range` (default 60 m, 10-200) x emitter `rangeScale` x Amplify boost;
 `minDistance` = a fifth of it; rolloff Linear (Logarithmic never reaches silence), `spatialBlend` 1,
@@ -145,7 +164,8 @@ std::string why; dj::OpenRadioMenu(corralLandPlot, &why);       // main thread; 
 
 - `obj` is a GameObject or any Component on it. Slime DJ adds a child `sr2dj_Speaker` (same 3D setup as a
   box speaker) in sync with the boxes. Emitters play anywhere (also off the ranch).
-- `rangeScale` (0.1-4) x Hearing range, `volumeScale` (0-1) x volume. The kind is only logged.
+- `rangeScale` (0.1-4) x Hearing range, `volumeScale` (0-2; above 1 through the channel gain) x volume;
+  0 = the speaker stops. The kind is only logged.
 - Register again to change kind / scales. Destroyed objects are dropped at the next scan anyway.
 - Main thread, not inside a detour. Register takes a GC handle; Unregister only queues, the tick frees it.
   Registrations survive the module being off. Max 48 emitter speakers, 256 registrations.
@@ -181,7 +201,7 @@ that changes channel stops, drops its clip and joins the other channel at its cl
   skipped; none playable or three failures in a row -> the radio switches off.
 - *After a load*: with custom upgrades on, an Apply record triggers one probe scan even while idle, so a
   radio left on in the save starts.
-- Not per radio: walls dance and `SongPlaying` / `SongName` follow the global song only.
+- Not per radio: `SongPlaying` / `SongName` follow the global song only. Walls dance per channel (round 12).
 
 ### Corral Radio menu (round 11, `radio_menu.cpp`)
 
@@ -230,14 +250,23 @@ level (35-160 Hz, adaptive peak / floor window, 0 in breaks) and an onset streng
 rise above an adaptive threshold, at least 180 ms apart). Tuned offline on the user's hardtekk songs
 (170-205 onsets/min = the kick); a synthetic 120 BPM track gives every kick.
 
-*Reading it* (`TickDancer`, every frame): song frame = `base + playPos` minus 40 ms (`kDanceLagSeconds`;
-`timeSamples` runs ahead of what is heard); `Query(last, now)` gives the level at `now` and the strongest
-onset in between (no beat lost at low fps, none repeated while paused). Nothing read while paused or past
-the end: the walls settle and are restored.
+*Reading it* (`TickDancer` -> `DanceSample` per channel, every frame): song frame = `base + playPos` minus
+40 ms (`kDanceLagSeconds`; `timeSamples` runs ahead of what is heard); `Query(last, now)` gives the level at
+`now` and the strongest onset in between (no beat lost at low fps, none repeated while paused). Nothing
+read while paused or past the end: the walls settle and are restored.
 
 *Which corrals* (`SyncDancer`, every box scan and when the setting goes on): music box speakers (not
-emitters) playing the global clip whose box is within hearing range (Amplify included) of the camera.
+emitters) playing their channel's clip whose box is within hearing range (Amplify included) of the camera.
 Their `MusicBoxUpgrader` is the plot root, which also carries `WallUpgrader` / `AirNetUpgrader`. Max 12.
+Round 12 ("the walls dont dance to the corral's specific radio"): each corral follows its box's channel,
+the global queue or its own Corral Radio. `WallDancer::Target{up, group, boost}`: `group` = the channel's
+address (only compared, never dereferenced); the dancer keeps one `Groove` (level, pulse, chase, hue,
+energy, tempo) per group, so corrals of the same song move together and a radio corral has its own beat.
+*Speakers boost the walls* (round 12 idea: "If we add speaker buildables/toy to a plot, it should amplify
+the walls moving aswell"): every audible emitter inside the corral's footprint on the same channel
+(speaker stacks, Boomboxes, Slime Radios, DJ Booth speakers, the Music Box II prop) adds 0.2 to an
+intensity factor (max 2x); effective intensity = setting x factor, at most 2.5 (or the setting if
+higher).
 
 *Calm parts* (round 11; "on a chill part of the songs, the walls still freak out like its a BANGER part").
 The bass level is relative (falling peak / rising floor), so a quiet part swung 0..1 like a drop. The
@@ -254,8 +283,8 @@ renderers skipped and named in the log) and the active Air Net's "NetTrigger" re
 scaled: it carries the net's collider). `_Health` / `_HitTime` are never touched. Prefab and shader
 details: `re/plots.md`.
 
-On every beat: one ripple per animated corral (max 4 per beat, the global ring has 4 slots; more corrals ->
-round robin) through `CorralBarrierRipples.SpawnRippleHere` (found with `FindObjectOfType` at a box scan,
+On every beat of its song: one ripple per animated corral (max 4 per frame, the global ring has 4 slots;
+more corrals -> round robin) through `CorralBarrierRipples.SpawnRippleHere` (found with `FindObjectOfType` at a box scan,
 at most every 10 s while unknown, GC handle). Centre: middle of one side (between two neighbouring lower
 field corners), 1 m inside, 1.7 m up (3.4 m with High Walls), so the side bulges outwards; the side
 follows the chase angle (a quarter turn per beat). Without 4 lower fields the plot gets no ripples.
@@ -281,11 +310,11 @@ walls are left as they are.
 |---|---|---|
 | `volume` | 1.0 (100 %) | 0-100 %, on top of the game's music volume |
 | `range` | 60 m | hearing range: full volume to a fifth of it, silent at it (10-200 m) |
-| `amplify` | off | each other speaker in range: +15 % volume (to 1.6x) and +10 % range (to 1.3x); speakers loudest up close |
+| `amplify` | off | each other audible speaker of the channel in range: +15 % volume (to 1.6x) and +10 % range (to 1.3x); speakers loudest up close; capped at full scale at the listener |
 | `shuffle` | on | random songs when the queue is empty |
 | `mute_vanilla` | on | silence the music box's own tune while a song plays |
 | `muffle_walls` | on | music from a corral with High Walls (and/or Air Net) sounds muffled from outside |
-| `dance_walls` | off | a ripple runs round the corral walls on every beat; walls and Air Net glow and change colour (corrals within hearing range) |
+| `dance_walls` | off | a ripple runs round the corral walls on every beat of the song the corral plays (queue or its Corral Radio); walls and Air Net glow and change colour (corrals within hearing range); speakers in the corral make it stronger |
 | `dance_intensity` | 1.0 (100 %) | 10-200 %, steeper above 100 % (shown while `dance_walls` is on) |
 
 ## Log lines
@@ -302,8 +331,9 @@ All prefixed `slime_dj:`; grep for these when reading `sr2mods.log`:
 - walls dance: `walls dance at 'patchCorral…': N wall field(s) …, M net renderer(s) …; wall _Intensity … ;
   K ripple point(s)` (per corral built, first 24), `walls dance: first beat ripple(s) spawned …` (once),
   `… no CorralBarrierRipples in the scene yet`, `walls dance without beat ripples (…)`, `walls dance at N
-  corral(s)`, `walls dance stopped (setting off|no song); walls restored`, `'Walls dance to the music'
-  unavailable (…)`
+  corral(s) (M to their Corral Radio, K boosted by speakers inside)`, `walls dance stopped (setting off|no
+  song); walls restored`, `'Walls dance to the music' unavailable (…)`
+- mix: `N speaker(s) of '...' add up to X.XXx full scale here; turned down to stay clean (logged once)`
 - radio menu: `radio menu ready[; NOT available: ...]`, `radio menu for 'Corral NNNN' (plot '...')[: its radio is not
   found yet (scanning)]`, `radio menu opened (N rows per list, M song(s), font ...)` (first), `radio menu closed (why)`,
   `radio menu not opened: ...`
@@ -334,3 +364,5 @@ quiet parts, Amplify above full volume (PCM gain, no clipping / pumping at chunk
 - Corral Radio channels and Muffle behind High Walls (round 4 ideas).
 - Round 11: calm walls in quiet parts (energy), Amplify louder than full volume and spatial, the Corral Radio
   menu behind the blue corral button.
+- Round 12: crackle-free gain (look-ahead ramp, peak ceiling) and the listener sum cap; silent emitters stop;
+  walls dance to each corral's own Corral Radio; speakers in a corral boost its walls.

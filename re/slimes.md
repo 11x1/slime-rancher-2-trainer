@@ -95,7 +95,9 @@ Hen groups and coop breeding: re/world.md (groups), re/plots.md (Reproduce, dens
 
 ### SlimeAttachPoint (pillow seat)
 - methods: `OnTriggerEnter` 0x753480 (largo needs `_allowLargo`), `FixedUpdate` 0x752700 (rotates the joint bodies by `_rotationSpeed` while a slime is attached = the "dance"; keeps `_isJointActive` / `_slime`)
-- gotchas: set `_allowLargo` before the clone's Awake
+- fields (dump): +0x78 `TarrTypeGroup`, +0x80 `_rotationSpeed`, +0x8E `_allowLargo`, +0x8F `_allowBaseSlimes`, +0x90 `_allowTarr`, +0xB8 `_slime`, +0xC0 `_isJointActive`
+- `OnTriggerEnter` rules (**IDA**): the collider's `IdentifiableType` must be a `SlimeDefinition`; largo (`IsLargo`) -> needs `_allowLargo`; a `TarrTypeGroup` member -> needs `_allowTarr` (else rejected); base slime -> needs `_allowBaseSlimes`. Largos and Tarrs use `LargoJointBody`, others `JointBody`. `TarrTypeGroup` must be set (it is read for every non-largo; the Flower Pillow prefab has it).
+- gotchas: set `_allowLargo` / `_allowTarr` before the clone's Awake (dj_buildables sets both on the DJ Booth seat, round 12 for Tarrs)
 - mod: dj_buildables.cpp
 
 ## From the slime_dj, spawn_scaling, hl2_movement, quick_start, free_placement, misc_tweaks, plot_upgrades, drone_price_limit notes

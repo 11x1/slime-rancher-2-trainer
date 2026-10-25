@@ -30,7 +30,7 @@ float Clamp(float v, float lo, float hi, float def) { return std::isfinite(v) ? 
 
 bool RegisterEmitter(Il2CppObject* obj, EmitterKind kind, float rangeScale, float volumeScale) {
     if (!unity::IsAlive(obj)) return false;
-    const float range = Clamp(rangeScale, 0.1f, 4.0f, 1.0f), volume = Clamp(volumeScale, 0.0f, 1.0f, 1.0f);
+    const float range = Clamp(rangeScale, 0.1f, 4.0f, 1.0f), volume = Clamp(volumeScale, 0.0f, 2.0f, 1.0f);
     std::lock_guard lock(g_mu);
     for (emitters::Entry& e : g_live) {
         if (e.key != obj) continue;

@@ -112,18 +112,31 @@ constexpr float kFullFraction = 0.2f;
 // kAmpVolMax, +4 dB) and kAmpRangeStep range (up to kAmpRangeMax); an amplified speaker is at full
 // volume only up to kAmpFullFraction of its range, so each one is heard from where it stands instead of
 // one wide blob. Volume above 1 (AudioSource.volume tops out there) comes from a channel gain baked into
-// the PCM written into the clip ring (soft-limited above kLimitKnee); the speakers' volumes are divided
+// the PCM written into the clip ring (peak-limited, see kPeakCeiling); the speakers' volumes are divided
 // by the gain of the ring chunk being played.
 constexpr float kAmpVolStep = 0.15f, kAmpVolMax = 1.6f;
 constexpr float kAmpRangeStep = 0.1f, kAmpRangeMax = 1.3f;
 constexpr float kAmpFullFraction = 0.1f;
-constexpr float kGainStepPerChunk = 0.05f;  // the channel gain moves at most this much per 0.5 s chunk
-constexpr float kLimitKnee = 0.89f;
+constexpr float kGainStepPerChunk = 0.05f;  // the channel gain rises at most this much per 0.5 s chunk
+// Round 12 ("sound is crackling a bit"): the old tanh knee above 0.89 bent every loud peak of a
+// mastered song (distortion), and the gain stepped at chunk edges. Now the gain ramps across each
+// chunk and never takes a sample of this chunk or the next above kPeakCeiling (look-ahead).
+constexpr float kPeakCeiling = 0.97f;
+// Speakers of one channel play the same samples in sync, so at the listener they add up as
+// amplitudes: five speakers at full volume nearby = 5x, clipped by the mixer (crackle). Every
+// channel's speakers are scaled so the estimated sum at the camera stays under kSumMax; the cut
+// follows at once and lets go over kSumRelease seconds.
+constexpr float kSumMax = 1.0f;
+constexpr float kSumRelease = 0.6f;
+// Emitter volume scales above 1 (a DJ Booth's floor speakers) come from the channel gain as well.
+constexpr float kMaxGain = 2.0f;
 // Speakers more than this far from the clock speaker are moved back to it (two scans in a row).
 constexpr double kDriftSeconds = 0.03;
 // Walls dance: the analysis is read this far behind the play head (AudioSource.timeSamples runs
 // ahead of what is heard by about the output buffer).
 constexpr double kDanceLagSeconds = 0.04;
+// Walls dance: every audible emitter inside the corral adds this to its intensity factor, up to the max.
+constexpr float kDanceSpeakerStep = 0.2f, kDanceSpeakerMax = 2.0f;
 // Corral Radio: decoder streams that may run at once (the global queue not counted), radios kept.
 constexpr size_t kMaxRadioStreams = 4;
 constexpr size_t kMaxRadios = 32;
@@ -196,6 +209,9 @@ struct Speaker {
     // is off waits (no clock, no join) and rejoins when it is on again.
     bool live = true;
     int age = 0;           // box scans since it (re)joined the song
+    // World position (every box scan; Amplify and the listener sum cap).
+    Vec3 pos{};
+    bool posOk = false;
     // What it plays: the global queue or a Corral Radio (set every box scan by AssignSpeakers).
     Channel* ch = nullptr;
     int corral = -1;       // index into corrals_ of the last box scan (-1 = not in a corral)
@@ -223,9 +239,19 @@ struct Current {
     Il2CppObject* lastMaster = nullptr;  // identity only (never dereferenced)
     bool started = false, userPaused = false, buffering = false;
     std::vector<float> tmp;
-    // Amplify: gain baked into each ring chunk (by chunk index), the gain written last, the one wanted.
-    std::array<float, kRingChunks> chunkGain{};
+    // Channel gain (Amplify, emitters louder than full volume): baked into the PCM as a ramp from
+    // chunkG0 to chunkG1 over each ring chunk (by chunk index); the gain at the end of the last chunk
+    // written, the one wanted. One decoded chunk is held back (pend) so the ramp can look ahead.
+    std::array<float, kRingChunks> chunkG0{}, chunkG1{};
     float gain = 1.0f, wantGain = 1.0f;
+    std::vector<float> pend;
+    uint32_t pendFrames = 0;
+    float pendPeak = 0;
+    bool hasPend = false;
+    // Listener sum cap: factor on every speaker of the channel (smoothed; 1 = no cut).
+    float sumCap = 1.0f;
+    // Decoder finished, every chunk popped and the held-back one written.
+    bool Drained() const { return stream && stream->Done() && !hasPend; }
 };
 
 struct QueueItem {
@@ -251,6 +277,11 @@ struct Channel {
     Vec3 pos{};
     bool posOk = false;
     float dist = 1e9f;              // from the camera at the last box scan
+    // walls dance: analysis read up to this song frame, for this clip; this frame's sample
+    uint64_t danceLast = 0;
+    unsigned danceGen = 0;
+    dj::BeatTrack::Sample dance{};
+    bool danceHas = false;
     bool Radio() const { return !key.empty(); }
 };
 
@@ -1098,27 +1129,31 @@ private:
         }
     }
 
-    // Amplify: every speaker counts the others within its hearing range (positions every box scan).
+    // Every box scan: speaker positions (Amplify, the listener sum cap). Amplify: every speaker counts
+    // the other audible speakers of its channel within its hearing range (round 12: switched-off booths,
+    // silent Boomboxes and speakers of another radio used to count too).
     void UpdateBoost() {
-        const bool on = cfg_.amplify && trGetPosition_ && speakers_.size() > 1;
-        std::vector<Vec3> pos(speakers_.size());
-        std::vector<bool> known(speakers_.size(), false);
-        if (on)
-            for (size_t i = 0; i < speakers_.size(); ++i)
-                if (Il2CppObject* go = Target(speakers_[i].go); go && unity::IsAlive(unity::TransformOf(go))) {
-                    pos[i] = trGetPosition_.fn(unity::TransformOf(go), trGetPosition_.mi);
-                    known[i] = std::isfinite(pos[i].x) && std::isfinite(pos[i].y) && std::isfinite(pos[i].z);
-                }
+        for (Speaker& sp : speakers_) {
+            sp.posOk = false;
+            if (!trGetPosition_ || !sp.live) continue;
+            if (Il2CppObject* go = Target(sp.go); go && unity::IsAlive(unity::TransformOf(go))) {
+                sp.pos = trGetPosition_.fn(unity::TransformOf(go), trGetPosition_.mi);
+                sp.posOk = Finite(sp.pos);
+            }
+        }
+        const bool on = cfg_.amplify && speakers_.size() > 1;
         for (size_t i = 0; i < speakers_.size(); ++i) {
+            Speaker& a = speakers_[i];
             int n = 0;
-            const float r = cfg_.range * speakers_[i].rangeScale;
-            for (size_t j = 0; on && known[i] && j < speakers_.size(); ++j) {
-                if (j == i || !known[j]) continue;
-                const float dx = pos[i].x - pos[j].x, dy = pos[i].y - pos[j].y, dz = pos[i].z - pos[j].z;
+            const float r = cfg_.range * a.rangeScale;
+            for (size_t j = 0; on && a.posOk && j < speakers_.size(); ++j) {
+                const Speaker& b = speakers_[j];
+                if (j == i || !b.posOk || !Audible(b) || b.ch != a.ch) continue;
+                const float dx = a.pos.x - b.pos.x, dy = a.pos.y - b.pos.y, dz = a.pos.z - b.pos.z;
                 if (dx * dx + dy * dy + dz * dz <= r * r) ++n;
             }
-            speakers_[i].boost = std::min(1.0f + kAmpVolStep * static_cast<float>(n), kAmpVolMax);
-            speakers_[i].rangeBoost = std::min(1.0f + kAmpRangeStep * static_cast<float>(n), kAmpRangeMax);
+            a.boost = std::min(1.0f + kAmpVolStep * static_cast<float>(n), kAmpVolMax);
+            a.rangeBoost = std::min(1.0f + kAmpRangeStep * static_cast<float>(n), kAmpRangeMax);
         }
     }
 
@@ -1156,6 +1191,12 @@ private:
                 SR2_INFO("slime_dj: speaker {:.0f} ms off the others, moved back in sync", 1000.0 * static_cast<double>(d) / c.rate);
         }
     }
+
+    // A speaker its owner turned down to volume 0 (an emitter: a DJ Booth or Speaker Stack switched
+    // off, a Boombox playing its own track). Round 12: such speakers stop instead of playing silently,
+    // so they free their voice, never count for Amplify and are never the clock.
+    static bool Silent(const Speaker& sp) { return sp.volScale <= 0.0f; }
+    static bool Audible(const Speaker& sp) { return sp.live && !Silent(sp); }
 
     // --------------------------------------------------------------- songs ----
     bool AnySong() const {
@@ -1358,6 +1399,9 @@ private:
     }
 
     // Copies chunks into the ring ahead of the play head (never into the chunk being played).
+    // One decoded chunk is held back so the channel gain can look one chunk ahead: the gain ramps
+    // from where the last chunk ended to a value that keeps this chunk and the next one under
+    // kPeakCeiling, so no sample is bent or clipped and there is no step at a chunk edge.
     // False when the song was dropped (ch.cur replaced or gone).
     bool Fill(Channel& ch, int maxWrites) {
         Current& c = *ch.cur;
@@ -1371,22 +1415,48 @@ private:
         const size_t n = static_cast<size_t>(c.chunk) * c.channels;
         const uint64_t playChunkStart = c.playPos / c.chunk * c.chunk;
         for (int i = 0; i < maxWrites && c.writeHead + c.chunk <= playChunkStart + c.ring; ++i) {
-            uint32_t frames = 0;
-            if (c.stream->Pop(c.tmp, frames) && c.tmp.size() == n) {
-                // Amplify's channel gain, moved towards the wanted one a step per chunk.
-                c.gain = std::clamp(c.wantGain, c.gain - kGainStepPerChunk, c.gain + kGainStepPerChunk);
-                if (c.gain > 1.0005f) ApplyGain(c.tmp, c.gain);
-                else c.gain = 1.0f;
-                std::memcpy(dst, c.tmp.data(), n * sizeof(float));
-                c.realWritten += frames;
-            } else if (c.stream->Done()) {
+            if (!c.hasPend) {
+                if (c.stream->Pop(c.pend, c.pendFrames) && c.pend.size() == n) {
+                    c.hasPend = true;
+                    c.pendPeak = Peak(c.pend);
+                } else if (!c.stream->Done()) {
+                    break;  // the decoder is behind
+                }
+            }
+            const size_t slot = (c.writeHead / c.chunk) % kRingChunks;
+            if (c.hasPend) {
+                uint32_t frames = 0;
+                float nextPeak = 0;
+                bool next = false;
+                if (c.stream->Pop(c.tmp, frames) && c.tmp.size() == n) next = true;
+                else if (!c.stream->Done()) break;  // wait for the look-ahead chunk (or the end)
+                const float g0 = c.gain;
+                float g1 = std::min(c.wantGain, g0 + kGainStepPerChunk);
+                if (c.pendPeak > 0) g1 = std::min(g1, kPeakCeiling / c.pendPeak);
+                if (next) {
+                    nextPeak = Peak(c.tmp);
+                    if (nextPeak > 0) g1 = std::min(g1, kPeakCeiling / nextPeak);
+                }
+                g1 = std::max(g1, 1.0f);
+                if (g0 > 1.0005f || g1 > 1.0005f) ApplyRamp(c.pend, c.channels, g0, g1);
+                std::memcpy(dst, c.pend.data(), n * sizeof(float));
+                c.realWritten += c.pendFrames;
+                c.chunkG0[slot] = g0;
+                c.chunkG1[slot] = g1;
+                c.gain = g1;
+                if (next) {
+                    std::swap(c.pend, c.tmp);
+                    c.pendFrames = frames;
+                    c.pendPeak = nextPeak;
+                } else {
+                    c.hasPend = false;
+                }
+            } else {  // decoder done and everything written
                 if (!c.endFrame) c.endFrame = std::max<uint64_t>(c.realWritten, 1);
                 std::memset(dst, 0, n * sizeof(float));  // silence after the end
-            } else {
-                break;  // the decoder is behind
+                c.chunkG0[slot] = c.chunkG1[slot] = c.gain;
             }
             const int32_t offset = static_cast<int32_t>(c.writeHead % c.ring);
-            c.chunkGain[(c.writeHead / c.chunk) % kRingChunks] = c.gain;
             if (!clipSetData_.fn(clip, static_cast<Il2CppArray*>(static_cast<void*>(buf)), offset, clipSetData_.mi)) {
                 SongFailed(ch, "AudioClip.SetData refused the data");
                 return false;
@@ -1396,13 +1466,29 @@ private:
         return true;
     }
 
-    // Amplify's PCM gain with a soft knee: samples above kLimitKnee bend towards 1 instead of clipping.
-    static void ApplyGain(std::vector<float>& pcm, float g) {
-        constexpr float k = kLimitKnee, room = 1.0f - kLimitKnee;
-        for (float& x : pcm) {
-            const float y = x * g, a = std::fabs(y);
-            x = a <= k ? y : std::copysign(k + room * std::tanh((a - k) / room), y);
-        }
+    static float Peak(const std::vector<float>& pcm) {
+        float m = 0;
+        for (float x : pcm) m = std::max(m, std::fabs(x));
+        return std::isfinite(m) ? m : 1.0f;
+    }
+
+    // The channel gain over one chunk: linear from g0 at its first frame to g1 at its end.
+    static void ApplyRamp(std::vector<float>& pcm, uint32_t channels, float g0, float g1) {
+        const size_t frames = channels ? pcm.size() / channels : 0;
+        if (!frames) return;
+        const float step = (g1 - g0) / static_cast<float>(frames);
+        float g = g0;
+        for (size_t f = 0; f < frames; ++f, g += step)
+            for (uint32_t k = 0; k < channels; ++k) pcm[f * channels + k] *= g;
+    }
+
+    // The channel gain baked into the sample now playing (the ramp of its chunk at the play head).
+    static float GainAt(const Current* c) {
+        if (!c || !c->chunk || !c->started) return 1.0f;
+        const size_t slot = (c->playPos / c->chunk) % kRingChunks;
+        const float t = static_cast<float>(c->playPos % c->chunk) / static_cast<float>(c->chunk);
+        const float g = c->chunkG0[slot] + (c->chunkG1[slot] - c->chunkG0[slot]) * t;
+        return std::isfinite(g) ? std::max(1.0f, g) : 1.0f;
     }
 
     // The clock of a channel: its first speaker that plays the song (or is paused with the others).
@@ -1449,14 +1535,14 @@ private:
         if (!Fill(ch, c.started ? kWritesPerTick : static_cast<int>(kRingChunks))) return;
         // Buffering: the decoder fell behind the play head.
         const uint64_t ahead = c.writeHead > c.playPos ? c.writeHead - c.playPos : 0;
-        if (!c.stream->Done()) {
+        if (!c.Drained()) {
             if (c.started && ahead < c.chunk / 4) c.buffering = true;
             else if (c.buffering && (ahead >= 2ull * c.chunk || c.stream->Queued() >= 2)) c.buffering = false;
         } else {
             c.buffering = false;
         }
         // First start once enough is written.
-        const bool ready = c.writeHead >= static_cast<uint64_t>(kStartChunks) * c.chunk || c.stream->Done();
+        const bool ready = c.writeHead >= static_cast<uint64_t>(kStartChunks) * c.chunk || c.Drained();
         Il2CppObject* clip = Target(c.clip);
         const bool wantPause = c.userPaused || c.buffering || GamePaused() || !HasSpeaker(ch);
         // Where a (re)joining speaker starts: the playing speakers' position, else where the song
@@ -1467,6 +1553,13 @@ private:
             if (sp.ch != &ch) continue;
             Il2CppObject* src = Target(sp.src);
             if (!src || !clip || !sp.live) continue;  // switched off: rejoins when it is on again
+            if (Silent(sp)) {  // its owner set it to volume 0 (a booth switched off): it does not play at all
+                if (sp.clipGen) srcStop_.fn(src, srcStop_.mi);
+                sp.clipGen = 0;
+                sp.paused = false;
+                sp.drift = 0;
+                continue;
+            }
             if (sp.clipGen != c.clipGen) {
                 if (!ready) continue;
                 srcSetClip_.fn(src, clip, srcSetClip_.mi);
@@ -1491,27 +1584,54 @@ private:
         }
     }
 
-    void TickMix() {
+    void TickMix(float dt) {
         const float vol = std::clamp(cfg_.volume * MusicVolume(), 0.0f, 2.0f);
-        // Amplify: AudioSource.volume tops out at 1, so a channel whose loudest speaker wants more gets
-        // that gain baked into the PCM (Fill) and every speaker divides it out again, by the gain of the
-        // chunk now playing.
-        auto chunkGain = [](const Current* c) {
-            return c && c->chunk ? std::max(1.0f, c->chunkGain[(c->playPos / c->chunk) % kRingChunks]) : 1.0f;
+        // What a speaker wants to sound like (before the sum cap): AudioSource.volume tops out at 1, so a
+        // channel whose loudest speaker wants more gets that gain baked into the PCM (Fill) and every
+        // speaker divides it out again, by the gain at the play head.
+        auto wantOf = [&](const Speaker& sp) { return vol * sp.volScale * sp.boost * sp.lpVol; };
+        // Listener sum cap: the speakers of one channel play the same samples in sync, so at the camera
+        // they add up as amplitudes (linear rolloff, as Unity applies it; panning ignored = safe side).
+        Vec3 cam{};
+        const bool haveCam = !speakers_.empty() && CameraPos(cam);
+        const float step = std::isfinite(dt) && dt > 0 ? std::min(dt, 0.5f) : 0.0f;
+        auto heard = [&](const Speaker& sp) {
+            if (!haveCam || !sp.posOk || sp.maxD <= 0) return 0.0f;
+            const float dx = sp.pos.x - cam.x, dy = sp.pos.y - cam.y, dz = sp.pos.z - cam.z;
+            const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+            const float minD = std::max(0.5f, sp.maxD * (sp.ampedRange ? kAmpFullFraction : kFullFraction));
+            if (d <= minD) return 1.0f;
+            if (d >= sp.maxD) return 0.0f;
+            return (sp.maxD - d) / (sp.maxD - minD);
         };
         auto setWant = [&](Channel& ch) {
             if (!ch.cur) return;
-            float want = 1.0f;
-            if (cfg_.amplify)
-                for (const Speaker& sp : speakers_)
-                    if (sp.ch == &ch && sp.live) want = std::max(want, vol * sp.volScale * sp.boost);
-            ch.cur->wantGain = std::min(want, kAmpVolMax);
+            Current& c = *ch.cur;
+            float want = 1.0f, sum = 0.0f;
+            for (const Speaker& sp : speakers_) {
+                if (sp.ch != &ch || !Audible(sp)) continue;
+                const float w = wantOf(sp);
+                want = std::max(want, w);
+                sum += w * heard(sp);
+            }
+            const float cap = sum > kSumMax ? kSumMax / sum : 1.0f;
+            if (cap < c.sumCap) c.sumCap = cap;
+            else c.sumCap += (cap - c.sumCap) * (1.0f - std::exp(-step / kSumRelease));
+            if (!std::isfinite(c.sumCap) || c.sumCap <= 0) c.sumCap = 1.0f;
+            c.wantGain = std::clamp(want * c.sumCap, 1.0f, kMaxGain);
+            if (c.sumCap < 0.999f && !sumCapLogged_) {
+                sumCapLogged_ = true;
+                SR2_INFO("slime_dj: {} speaker(s) of '{}' add up to {:.2f}x full scale here; turned down to stay clean (logged once)",
+                         std::count_if(speakers_.begin(), speakers_.end(), [&](const Speaker& sp) { return sp.ch == &ch && Audible(sp); }),
+                         ch.Radio() ? RadioName(ch) : std::string("the queue"), sum);
+            }
         };
         setWant(global_);
         for (auto& r : radios_) setWant(*r);
         for (Speaker& sp : speakers_) {
-            const float g = chunkGain(sp.ch ? sp.ch->cur.get() : nullptr);
-            const float v = std::clamp(vol * sp.volScale * sp.boost * sp.lpVol / g, 0.0f, 1.0f);
+            const Current* cc = sp.ch ? sp.ch->cur.get() : nullptr;
+            const float cap = cc ? cc->sumCap : 1.0f;
+            const float v = Silent(sp) ? 0.0f : std::clamp(wantOf(sp) * cap / GainAt(cc), 0.0f, 1.0f);
             Il2CppObject* src = Target(sp.src);
             if (src && std::fabs(sp.volume - v) > 0.002f) {
                 srcSetVolume_.fn(src, v, srcSetVolume_.mi);
@@ -1520,7 +1640,6 @@ private:
             if (src) ApplyRange(sp, src);
             // The vanilla tune is silenced while the speaker's own channel has a song (a radio corral
             // whose radio is off or waiting for a slot keeps its tune).
-            const Current* cc = sp.ch ? sp.ch->cur.get() : nullptr;
             if (cc && !cc->userPaused && cfg_.muteVanilla) Mute(sp);
             else Unmute(sp);
         }
@@ -1820,65 +1939,82 @@ private:
     }
 
     // -------------------------------------------------------- walls dance ----
-    // Box scan: the corrals whose music box plays the global song and that the camera is within
-    // hearing range of (the speaker's range, Amplify included). Radio corrals do not dance.
+    // Box scan: the corrals whose music box plays a song and that the camera is within hearing range
+    // of (the speaker's range, Amplify included). Each follows its box's channel: the global queue, or
+    // (round 12: "the walls dont dance to the corral's specific radio") the corral's own radio.
+    // Audible emitters inside a corral (speaker stacks, Boomboxes, Slime Radios, a DJ Booth's
+    // speakers) boost its walls (round 12 idea: "speaker buildables/toy in a plot amplify the walls").
     void SyncDancer() {
-        if (!cfg_.danceWalls || !dancer_.Ready() || !global_.cur) return;
-        bool haveCam = false;
+        if (!cfg_.danceWalls || !dancer_.Ready() || !AnySong()) return;
         Vec3 cam{};
-        if (trGetPosition_)
-            if (Il2CppObject* c = unity::Camera_main(); c && unity::IsAlive(unity::TransformOf(c))) {
-                cam = trGetPosition_.fn(unity::TransformOf(c), trGetPosition_.mi);
-                haveCam = std::isfinite(cam.x) && std::isfinite(cam.y) && std::isfinite(cam.z);
-            }
-        std::vector<Il2CppObject*> ups;
+        const bool haveCam = CameraPos(cam);
+        std::vector<dj::WallDancer::Target> targets;
+        int boosted = 0;
         for (const Speaker& sp : speakers_) {
-            if (sp.emitter || !sp.live || sp.ch != &global_ || sp.clipGen != global_.cur->clipGen) continue;
+            if (sp.emitter || !sp.live || !sp.ch || !sp.ch->cur || sp.clipGen != sp.ch->cur->clipGen) continue;
             Il2CppObject* box = Target(sp.box);
             if (!box) continue;
             auto it = std::find_if(boxUps_.begin(), boxUps_.end(), [&](const auto& b) { return b.first == box; });
             if (it == boxUps_.end() || !unity::IsAlive(it->second)) continue;
-            if (haveCam) {
-                Il2CppObject* tr = unity::TransformOf(box);
-                const Vec3 p = tr ? trGetPosition_.fn(tr, trGetPosition_.mi) : cam;
-                const float dx = p.x - cam.x, dy = p.y - cam.y, dz = p.z - cam.z;
+            if (haveCam && sp.posOk) {
+                const float dx = sp.pos.x - cam.x, dy = sp.pos.y - cam.y, dz = sp.pos.z - cam.z;
                 if (dx * dx + dy * dy + dz * dz > sp.maxD * sp.maxD) continue;
             }
-            ups.push_back(it->second);
+            int extra = 0;
+            if (sp.corral >= 0)
+                for (const Speaker& e : speakers_)
+                    if (e.emitter && e.corral == sp.corral && e.ch == sp.ch && Audible(e)) ++extra;
+            boosted += extra ? 1 : 0;
+            targets.push_back({it->second, reinterpret_cast<uintptr_t>(sp.ch),
+                               std::min(1.0f + kDanceSpeakerStep * static_cast<float>(extra), kDanceSpeakerMax)});
         }
-        dancer_.Sync(ups);
-        if (dancer_.Plots() != dancePlots_) {
-            dancePlots_ = dancer_.Plots();
-            SR2_INFO("slime_dj: walls dance at {} corral(s)", dancePlots_);
+        dancer_.Sync(targets);
+        const std::array<int, 3> state{static_cast<int>(dancer_.Plots()),
+                                       static_cast<int>(std::count_if(targets.begin(), targets.end(),
+                                                                      [&](const auto& t) { return t.group != reinterpret_cast<uintptr_t>(&global_); })),
+                                       boosted};
+        if (state != danceState_) {
+            danceState_ = state;
+            SR2_INFO("slime_dj: walls dance at {} corral(s) ({} to their Corral Radio, {} boosted by speakers inside)", state[0],
+                     state[1], state[2]);
         }
     }
 
-    // Every frame: the analysis at the play position (a bit behind it, see kDanceLagSeconds).
+    // Every frame: each channel's analysis at its play position (a bit behind it, see kDanceLagSeconds).
+    void DanceSample(Channel& ch) {
+        ch.danceHas = false;
+        if (!ch.cur) return;
+        const Current& c = *ch.cur;
+        const bool playing = c.started && c.rate && c.stream && !c.userPaused && !c.buffering && !GamePaused() &&
+                             !(c.endFrame && c.playPos >= c.endFrame);
+        if (!playing) return;
+        const uint64_t lag = static_cast<uint64_t>(kDanceLagSeconds * c.rate);
+        const uint64_t pos = c.base + c.playPos;
+        const uint64_t q = pos > lag ? pos - lag : 0;
+        if (q < ch.danceLast || ch.danceGen != c.clipGen) ch.danceLast = q;  // new song, seek
+        ch.danceGen = c.clipGen;
+        ch.danceHas = c.stream->beats().Query(ch.danceLast, q, ch.dance);
+        ch.danceLast = q;
+    }
+
     void TickDancer(float dt) {
         if (!dancer_.Ready()) return;
-        if (!cfg_.danceWalls || !global_.cur) {
+        if (!cfg_.danceWalls || !AnySong()) {
             if (dancer_.Plots()) {
                 dancer_.Clear();
-                dancePlots_ = 0;
-                SR2_INFO("slime_dj: walls dance stopped ({}); walls restored", global_.cur ? "setting off" : "no song");
+                danceState_ = {0, 0, 0};
+                SR2_INFO("slime_dj: walls dance stopped ({}); walls restored", cfg_.danceWalls ? "no song" : "setting off");
             }
             return;
         }
-        const Current& c = *global_.cur;
-        dj::BeatTrack::Sample s;
-        const dj::BeatTrack::Sample* beat = nullptr;
-        const bool playing = c.started && c.rate && c.stream && !c.userPaused && !c.buffering && !GamePaused() &&
-                             !(c.endFrame && c.playPos >= c.endFrame);
-        if (playing) {
-            const uint64_t lag = static_cast<uint64_t>(kDanceLagSeconds * c.rate);
-            const uint64_t pos = c.base + c.playPos;
-            const uint64_t q = pos > lag ? pos - lag : 0;
-            if (q < danceLast_ || danceGen_ != c.clipGen) danceLast_ = q;  // new song, seek
-            danceGen_ = c.clipGen;
-            if (c.stream->beats().Query(danceLast_, q, s)) beat = &s;
-            danceLast_ = q;
-        }
-        dancer_.Tick(dt, beat, cfg_.danceIntensity);
+        DanceSample(global_);
+        for (auto& r : radios_) DanceSample(*r);
+        dancer_.Tick(dt, [&](uintptr_t group) -> const dj::BeatTrack::Sample* {
+            if (group == reinterpret_cast<uintptr_t>(&global_)) return global_.danceHas ? &global_.dance : nullptr;
+            for (auto& r : radios_)  // a group is only compared, never dereferenced (a dropped radio's id finds nothing)
+                if (group == reinterpret_cast<uintptr_t>(r.get())) return r->danceHas ? &r->dance : nullptr;
+            return nullptr;
+        }, cfg_.danceIntensity);
     }
 
     // One line a minute while box scans ran: their cost, and how often the scene was searched.
@@ -1957,13 +2093,13 @@ private:
         if (!AnySong() && !viewed) boxes_ = -1;
         TickSong(global_);
         for (size_t i = 0; i < radios_.size(); ++i) TickSong(*radios_[i]);
-        TickMix();
+        TickMix(dt);
         TickMuffle(dt);
         TickDancer(dt);
         TickMenu(dt);
         const Current* g = global_.cur.get();
         dj::emitters::SetPlaying(g && g->started && !g->userPaused &&
-                                     std::any_of(speakers_.begin(), speakers_.end(), [&](const Speaker& sp) { return sp.live && sp.ch == &global_; }),
+                                     std::any_of(speakers_.begin(), speakers_.end(), [&](const Speaker& sp) { return Audible(sp) && sp.ch == &global_; }),
                                  g ? g->name : std::string());
         publishAcc_ += dt;
         if (viewed && publishAcc_ >= kPublishInterval) {
@@ -1976,7 +2112,7 @@ private:
         menu_.Close("Slime DJ off");
         menuKey_.clear();
         dancer_.Clear();
-        dancePlots_ = 0;
+        danceState_ = {0, 0, 0};
         StopAll();
         DropRadios();
         DestroySpeakers();
@@ -2447,14 +2583,12 @@ private:
     float menuAge_ = 0, menuRefresh_ = 0;
     dj::SongList menuSongsFrom_;
     std::shared_ptr<const std::vector<dj::MenuSong>> menuSongs_;
-    size_t dancePlots_ = 0;
-    uint64_t danceLast_ = 0;
-    unsigned danceGen_ = 0;
+    std::array<int, 3> danceState_{0, 0, 0};  // walls dance: corrals, of them to a radio, boosted (logged on a change)
     int boxes_ = -1, emitters_ = 0, resyncs_ = 0, restartLogs_ = 0;
     std::array<int, 5> lastCounts_{-1, -1, -1, -1, -1};
     std::array<int, 2> lastCorralCounts_{-1, -1};
     int channelLogs_ = 0;
-    bool radioSaveWarned_ = false, lowPassFailLogged_ = false;
+    bool radioSaveWarned_ = false, lowPassFailLogged_ = false, sumCapLogged_ = false;
     unsigned emitterGen_ = 0;
     Il2CppGCHandle musicBus_ = nullptr, masterBus_ = nullptr, cueBus_ = nullptr;
     float boxScan_ = 0, busRetry_ = 0, publishAcc_ = 0;
