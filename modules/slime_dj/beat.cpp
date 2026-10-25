@@ -24,7 +24,14 @@ constexpr float kMinFlux = 0.01f;         // absolute floor of the threshold
 constexpr int kMinGapHops = 18;           // onsets at least 180 ms apart (333 BPM)
 constexpr float kOnsetPeakFall = 0.33f;   // the recent strongest onset falls this fraction per second
 constexpr uint64_t kWarmHops = 30;        // no onsets in the first 0.3 s (statistics settle)
-constexpr size_t kMaxHops = 6u * 3600u * 100u;  // 6 hours (2 bytes each)
+constexpr size_t kMaxHops = 6u * 3600u * 100u;  // 6 hours (4 bytes each)
+// Energy: ~1 s power averages against the song's loudest part so far and an absolute reference.
+constexpr float kSectionSeconds = 1.0f;
+constexpr float kSongFallDbPerSec = 0.02f;  // the song's loudest falls this slowly (1.2 dB a minute)
+constexpr float kBassRefDb = -8.0f;         // absolute references: a part this loud (or louder) can be "loud"
+constexpr float kBroadRefDb = -11.0f;       //   (dB of mean square, mono mix; full-scale sine = -3 dB)
+constexpr float kFullBelowDb = 2.0f;        // within this of the reference: energy 1
+constexpr float kCalmBelowDb = 12.0f;       // this far under it: energy 0
 }  // namespace
 
 void BeatTrack::Reset(uint32_t rate, uint64_t startFrame) {
@@ -65,6 +72,9 @@ void BeatTrack::Reset(uint32_t rate, uint64_t startFrame) {
     flux1_ = flux2_ = thr1_ = 0;
     sinceOnset_ = 1000;
     warm_ = 0;
+    hopSumSq_ = 0;
+    secBass_ = secBroad_ = 0;
+    songBassDb_ = songBroadDb_ = -200.0f;
     std::lock_guard lock(mu_);
     hopFramesShared_ = hopFrames_;
     firstHop_ = startFrame / hopFrames_;
@@ -77,7 +87,9 @@ void BeatTrack::Feed(const float* pcm, uint32_t frames, uint32_t channels) {
     if (!n_ || !pcm || channels == 0) return;
     for (uint32_t i = 0; i < frames; ++i) {
         const float* f = pcm + static_cast<size_t>(i) * channels;
-        ring_[ringPos_] = channels >= 2 ? 0.5f * (f[0] + f[1]) : f[0];
+        const float mono = channels >= 2 ? 0.5f * (f[0] + f[1]) : f[0];
+        ring_[ringPos_] = mono;
+        hopSumSq_ += static_cast<double>(mono) * mono;
         if (++ringPos_ == n_) ringPos_ = 0;
         if (++sinceHop_ == hopFrames_) {
             sinceHop_ = 0;
@@ -135,6 +147,22 @@ void BeatTrack::Hop() {
         const float span = std::clamp(peakDb_ - floorDb_, kMinSpanDb, kMaxSpanDb);
         level = std::clamp((db - (peakDb_ - span)) / span, 0.0f, 1.0f);
     }
+    // Energy of this part of the song: bass and broadband power over ~1 s, each against the louder
+    // of the song's loudest so far and an absolute reference; the lower one counts.
+    const float secA = 1.0f - std::exp(-hop / kSectionSeconds);
+    secBass_ += (bass - secBass_) * secA;
+    secBroad_ += (static_cast<float>(hopSumSq_ / hopFrames_) - secBroad_) * secA;
+    hopSumSq_ = 0;
+    const float bassSecDb = 10.0f * std::log10(secBass_ + 1e-10f);
+    const float broadSecDb = 10.0f * std::log10(secBroad_ + 1e-10f);
+    songBassDb_ = std::max(bassSecDb, songBassDb_ - kSongFallDbPerSec * hop);
+    songBroadDb_ = std::max(broadSecDb, songBroadDb_ - kSongFallDbPerSec * hop);
+    auto part = [](float db, float ref) {
+        return std::clamp((db - (ref - kCalmBelowDb)) / (kCalmBelowDb - kFullBelowDb), 0.0f, 1.0f);
+    };
+    const float energy = std::min(part(bassSecDb, std::max(songBassDb_, kBassRefDb)),
+                                  part(broadSecDb, std::max(songBroadDb_, kBroadRefDb)));
+
     // Detection function: spectral flux, mixed with the rise of the bass level (kicks).
     const float rise = std::max(0.0f, db - prevBassDb_) / kBassRiseDb;
     prevBassDb_ = std::max(db, slowPeakDb_ - kGateDb);
@@ -163,10 +191,12 @@ void BeatTrack::Hop() {
 
     std::lock_guard lock(mu_);
     if (onsetPrev && !entries_.empty()) {
-        entries_.back() = static_cast<uint16_t>((entries_.back() & 0xFF) | (onsetPrev << 8));
+        entries_.back() = (entries_.back() & ~0xFF00u) | (static_cast<uint32_t>(onsetPrev) << 8);
         ++beats_;
     }
-    if (entries_.size() < kMaxHops) entries_.push_back(static_cast<uint16_t>(std::lround(level * 255.0f)));
+    if (entries_.size() < kMaxHops)
+        entries_.push_back(static_cast<uint32_t>(std::lround(level * 255.0f)) |
+                           (static_cast<uint32_t>(std::lround(energy * 255.0f)) << 16));
 }
 
 bool BeatTrack::Query(uint64_t fromFrame, uint64_t toFrame, Sample& out) const {
@@ -176,6 +206,7 @@ bool BeatTrack::Query(uint64_t fromFrame, uint64_t toFrame, Sample& out) const {
     if (toHop < firstHop_ || toHop - firstHop_ >= entries_.size()) return false;
     const size_t to = static_cast<size_t>(toHop - firstHop_);
     out.level = static_cast<float>(entries_[to] & 0xFF) / 255.0f;
+    out.energy = static_cast<float>((entries_[to] >> 16) & 0xFF) / 255.0f;
     out.beat = 0;
     // (fromFrame, toFrame]; at most 0.5 s back (a seek or a long frame)
     // (no movement or a step back: no beat, so a paused song does not repeat its last one)
@@ -183,7 +214,7 @@ bool BeatTrack::Query(uint64_t fromFrame, uint64_t toFrame, Sample& out) const {
     uint64_t fromHop = fromFrame / hopFramesShared_ + 1;
     fromHop = std::max({fromHop, firstHop_, toHop >= 50 ? toHop - 50 : uint64_t{0}});
     for (uint64_t h = fromHop; h <= toHop; ++h)
-        out.beat = std::max(out.beat, static_cast<float>(entries_[static_cast<size_t>(h - firstHop_)] >> 8) / 255.0f);
+        out.beat = std::max(out.beat, static_cast<float>((entries_[static_cast<size_t>(h - firstHop_)] >> 8) & 0xFF) / 255.0f);
     return true;
 }
 

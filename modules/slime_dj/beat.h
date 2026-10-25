@@ -5,7 +5,7 @@
 // entry per 10 ms hop of the song: the bass level (0..1, auto-gained) and the onset strength of a
 // beat that starts in that hop (0 = none). The main thread reads the entries at the play
 // position. The decoder runs seconds ahead of the play head, so the entries are always there in
-// time. Memory: 2 bytes per hop (7 KB per minute of song).
+// time. Memory: 4 bytes per hop (24 KB per minute of song).
 //
 // How (no libraries): mono mix, Hann window of ~23 ms (a power of two: 1024 frames at 44.1/48 kHz),
 // one radix-2 FFT per hop. Bass level = energy of the 35-160 Hz bins in dB between a falling peak
@@ -13,6 +13,11 @@
 // Onsets = half spectral flux (rise of log magnitudes up to ~3 kHz, bass bins x3), half rise of the
 // bass level, above an adaptive threshold (running mean + 1.5 deviations), local maximum, at least
 // 180 ms apart; strength against the recent strongest onsets.
+// Energy (0..1, round 11): how loud this part of the song is against its loud parts, so a chill
+// section does not dance like a drop although the relative bass level still swings 0..1. Bass and
+// broadband loudness, each a ~1 s power average in dB, against the song's loudest so far (falls
+// very slowly) and an absolute reference (so a quiet intro is calm before the drop has been heard);
+// the lower of the two (bass, broadband) counts.
 //
 // No game calls. Feed and Reset: one thread (the decoder); Query: any thread.
 
@@ -29,6 +34,7 @@ public:
     struct Sample {
         float level = 0;  // bass level 0..1 at the end frame
         float beat = 0;   // strongest onset in the range, 0..1 (0 = no beat)
+        float energy = 1; // loudness of this part of the song, 0 (chill) .. 1 (loud part)
     };
 
     // Decoder thread, before the first Feed: song rate and the song frame decoding starts at.
@@ -60,12 +66,15 @@ private:
     float thr1_ = 0;               // threshold at the previous hop
     int sinceOnset_ = 1000;        // hops since the last onset
     uint64_t warm_ = 0;            // hops analysed (the threshold needs ~0.5 s to settle)
+    double hopSumSq_ = 0;          // broadband: sum of squared mono samples in this hop
+    float secBass_ = 0, secBroad_ = 0;  // ~1 s power averages (bass bins, broadband)
+    float songBassDb_ = -200.0f, songBroadDb_ = -200.0f;  // their loudest so far (falling slowly)
 
     // shared
     mutable std::mutex mu_;
     uint64_t firstHop_ = 0;        // song hop of entries_[0]
     uint64_t hopFramesShared_ = 0;
-    std::vector<uint16_t> entries_;  // low byte level, high byte onset
+    std::vector<uint32_t> entries_;  // byte 0 level, byte 1 onset, byte 2 energy
     size_t beats_ = 0;
 };
 
