@@ -141,7 +141,8 @@ feeder's (+x, -z) corner; the other corners hold the terminal and the plort coll
 blue cap material "sr2mods_blue (HDRP/Lit)" and blue palette tint on the base. Built / removed by the ~1 Hz
 tick like the silo button, removed at once when the radio is sold. A press (Activate detour ->
 `OnRadioButton`): animation + cue + 0.4 s rate limit, then slime_dj `OpenRadioMenu(plot, &why)`; a refusal
-("Slime DJ is off ...") is a game notification "Corral Radio: <why>" with the card's icon (round 12: "USE
+("Slime DJ is off, turn it on in the overlay under Ranch > Slime DJ"; round 13: "remove the parenthesis from
+the ingame notification") is a game notification "Corral Radio: <why>" with the card's icon (round 12: "USE
 GAME's NOTIFICATIONS PLEASE"; `Notify` = `SaleNotices::QueueText`, `CardIcon` = the injected card's
 `_icon`, none before the corral menu was opened this session). The world text above the button
 (`SiloButtons::Message`) is only the fallback when the HUD can't take a notice. The Hen Collector button's

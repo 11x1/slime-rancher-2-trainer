@@ -142,6 +142,12 @@ constexpr float kDanceSpeakerStep = 0.2f, kDanceSpeakerMax = 2.0f;
 constexpr size_t kMaxRadioStreams = 4;
 constexpr size_t kMaxRadios = 32;
 constexpr const char* kRadioValue = "slime_dj.radio";  // custom_upgrades per-plot value (the playlist)
+// The reason the Corral Radio button gets while Slime DJ is off (custom_upgrades shows it as a game
+// notification "Corral Radio: ..."; round 13: no parentheses).
+constexpr const char* kOffWhy = "Slime DJ is off, turn it on in the overlay under Ranch > Slime DJ";
+constexpr int32_t kUpgradeMusicBox = 2;  // LandPlot.Upgrade.MUSIC_BOX
+// Real radio: air records kept for radios whose channel is gone (no Music Box, zone unloaded).
+constexpr size_t kMaxAirs = 64;
 constexpr size_t kMaxPlaylist = 500;
 // Corral footprint (patchCorral barriers 9.5 x 9.5 m around the plot root): the listener counts as
 // inside within kCorralHalf of the centre (x / z, plot axes) and kInsideBelow / kInsideAbove of its
@@ -253,12 +259,24 @@ struct Current {
     bool hasPend = false;
     // Listener sum cap: factor on every speaker of the channel (smoothed; 1 = no cut).
     float sumCap = 1.0f;
+    // Real radio (round 13): fraction of a frame the silent play head is ahead (no speaker plays it).
+    double virt = 0;
     // Decoder finished, every chunk popped and the held-back one written.
     bool Drained() const { return stream && stream->Done() && !hasPend; }
 };
 
 struct QueueItem {
     uint64_t uid = 0, song = 0;
+};
+
+// Real radio (round 13): where a radio was on air when its channel went away (no Music Box any more, the
+// zone unloaded, a sale), so it comes back mid-song, later in its playlist, as if it had played on.
+struct Air {
+    std::string file;  // the entry playing
+    int index = -1;
+    size_t list = 0;   // hash of the playlist (another save / an edited list: not used)
+    double pos = 0;    // seconds into that song
+    double at = 0;     // radio clock (RadioTime) then
 };
 
 // One song source: the global queue (key "") or a corral that owns the Corral Radio (key = its
@@ -274,6 +292,8 @@ struct Channel {
     int index = -1;                     // playlist entry playing / played last
     bool on = false, shuffle = false;
     // radio, runtime
+    bool hasAir = false;            // `air` is where it was on air when it last went away
+    Air air;
     bool slot = false;              // holds one of the kMaxRadioStreams decoder slots
     bool seen = false;              // its corral was found in this box scan
     Il2CppGCHandle plot = nullptr;  // its LandPlot (for the sidecar value)
@@ -524,6 +544,7 @@ private:
         airNetUpClass_ = cls(kImage, "", "AirNetUpgrader", false);
         if (airNetUpClass_ && !off(airNetUpClass_, "AirNets", offAirNets_, false)) airNetUpClass_ = nullptr;
         landPlotClass_ = cls(kImage, "", "LandPlot", false);
+        if (landPlotClass_) plotHasUpgrade_ = R.Method(landPlotClass_, "HasUpgrade", 1);
         {
             std::string err;
             compInParent_ = R.MethodByParams(component, "GetComponentInParent", {"System.Type", "System.Boolean"}, &err);
@@ -1283,7 +1304,8 @@ private:
         for (auto& r : radios_) StopCurrent(*r);
     }
 
-    bool StartSong(Channel& ch, uint64_t id) {
+    // `startAt` (seconds; radios coming back on air): the decoder starts there, as a seek does.
+    bool StartSong(Channel& ch, uint64_t id, double startAt = 0) {
         const dj::SongInfo* s = FindSong(id);
         if (!s) {
             if (!ch.Radio()) bridge::SetStatus("That song is no longer in the music folder. Rescan?", true);
@@ -1298,10 +1320,19 @@ private:
         ch.cur->song = s->id;
         ch.cur->name = s->name;
         ch.cur->hintSeconds = s->seconds;
-        ch.cur->stream = dj::Stream::Start(s->path);
+        uint64_t frame = 0;
+        if (startAt >= 1.0 && std::isfinite(startAt) && s->rate) {
+            frame = static_cast<uint64_t>(startAt * s->rate);
+            if (s->frames) frame = std::min(frame, s->frames > s->rate ? s->frames - s->rate : 0);  // not past the end
+            ch.cur->base = frame;
+            ch.cur->rate = s->rate;
+        }
+        ch.cur->stream = dj::Stream::Start(s->path, frame);
         ch.lastSong = s->id;
         if (ch.Radio()) {
-            SR2_INFO("slime_dj: radio '{}' playing '{}' ({})", RadioName(ch), s->name, s->file);
+            SR2_INFO("slime_dj: radio '{}' playing '{}' ({}){}", RadioName(ch), s->name, s->file,
+                     frame ? std::format(" from {:.0f} s (it played on without a speaker)", static_cast<double>(frame) / s->rate)
+                           : std::string());
         } else {
             SR2_INFO("slime_dj: playing '{}' ({})", s->name, s->file);
             bridge::SetStatus("Now playing: " + s->name, false);
@@ -1370,23 +1401,73 @@ private:
         bridge::SetStatus("Queue finished.", false);
     }
 
+    // The entry after `index`: the next one (wrapping), or with shuffle a random other one.
+    int NextIndex(const Channel& r, int index) {
+        const int n = static_cast<int>(r.playlist.size());
+        if (n <= 0) return -1;
+        if (r.shuffle && n > 1) {
+            const bool skipLast = index >= 0 && index < n;  // never the entry that just played
+            std::uniform_int_distribution<int> pick(0, skipLast ? n - 2 : n - 1);
+            int next = pick(rng_);
+            if (skipLast && next >= index) ++next;
+            return next;
+        }
+        return index < 0 ? 0 : (index + 1) % n;
+    }
+
+    // Real radio (round 13, user: "its not really a radio if it doesnt play when no output"): a radio back
+    // on air after its channel was gone picks up where it would be now. From its Air record, the time gone
+    // by is played through the playlist (song lengths from the library; shuffle picks as it would have):
+    // sets r.index and the position in that song.
+    double CatchUp(Channel& r) {
+        const int n = static_cast<int>(r.playlist.size());
+        if (n <= 0) return 0;
+        const double gone = std::max(0.0, radioTime_ - r.air.at);
+        double pos = std::max(0.0, r.air.pos) + gone;
+        int idx = std::clamp(r.air.index, 0, n - 1);
+        // Without shuffle a whole round of the playlist changes nothing: skip whole rounds.
+        double round = 0;
+        bool known = true;
+        for (const std::string& f : r.playlist)
+            if (const dj::SongInfo* s = FindSongByFile(f); s && s->error.empty()) {
+                if (s->seconds > 0) round += s->seconds;
+                else known = false;
+            }
+        for (int steps = 0; steps < 4 * n + 1000; ++steps) {
+            const dj::SongInfo* s = FindSongByFile(r.playlist[static_cast<size_t>(idx)]);
+            const bool playable = s && s->error.empty();
+            if (playable && !(s->seconds > 0)) pos = 0;  // length unknown: that song from its start
+            if (playable && pos < s->seconds - 1.0) {
+                r.index = idx;
+                SR2_INFO("slime_dj: radio '{}' back on air after {:.0f} s: entry {} at {:.0f} s", RadioName(r), gone, idx + 1, pos);
+                return pos;
+            }
+            if (playable) pos -= s->seconds;
+            if (!r.shuffle && known && round > 0 && pos > round) pos = std::fmod(pos, round);
+            idx = NextIndex(r, idx);
+        }
+        r.index = idx;
+        return 0;
+    }
+
+    static size_t PlaylistHash(const Channel& r) {
+        size_t h = std::hash<size_t>{}(r.playlist.size());
+        for (const std::string& f : r.playlist) h = h * 1099511628211ull ^ std::hash<std::string>{}(f);
+        return h;
+    }
+
     void NextRadioSong(Channel& r, bool resume) {
         const int n = static_cast<int>(r.playlist.size());
+        double startAt = 0;
+        if (resume && r.hasAir && r.on) startAt = CatchUp(r);
+        r.hasAir = false;
         for (int tries = 0; tries < n; ++tries) {
             int next;
-            if (resume && tries == 0 && r.index >= 0 && r.index < n) {
-                next = r.index;
-            } else if (r.shuffle && n > 1) {
-                const bool skipLast = r.index >= 0 && r.index < n;  // never the entry that just played
-                std::uniform_int_distribution<int> pick(0, skipLast ? n - 2 : n - 1);
-                next = pick(rng_);
-                if (skipLast && next >= r.index) ++next;
-            } else {
-                next = r.index < 0 ? 0 : (r.index + 1) % n;
-            }
+            if (resume && tries == 0 && r.index >= 0 && r.index < n) next = r.index;
+            else next = NextIndex(r, r.index);
             r.index = next;
             const dj::SongInfo* s = FindSongByFile(r.playlist[static_cast<size_t>(next)]);
-            if (s && StartSong(r, s->id)) {
+            if (s && StartSong(r, s->id, tries == 0 ? startAt : 0.0)) {
                 SaveRadio(r);
                 return;
             }
@@ -1541,7 +1622,7 @@ private:
         return nullptr;
     }
 
-    void TickSong(Channel& ch) {
+    void TickSong(Channel& ch, float dt) {
         if (!ch.cur) return;
         Current& c = *ch.cur;
         if (c.stream->state() == dj::Stream::State::Opening) return;
@@ -1566,6 +1647,15 @@ private:
             }
             c.lastTs = ts;
         }
+        // Real radio (round 13): while no speaker plays a radio's song (none near, all switched off) it goes
+        // on in silence; Fill keeps the ring ahead, so a speaker that comes (back) joins mid-song.
+        if (ch.Radio() && !master && c.started && c.rate && !c.userPaused && !c.buffering && !GamePaused() &&
+            std::isfinite(dt) && dt > 0) {
+            c.virt += static_cast<double>(std::min(dt, 1.0f)) * c.rate;
+            const uint64_t step = static_cast<uint64_t>(c.virt);
+            c.virt -= static_cast<double>(step);
+            c.playPos += step;
+        }
         if (c.endFrame && c.playPos >= c.endFrame) {
             ch.failures = 0;
             NextSong(ch);
@@ -1583,6 +1673,11 @@ private:
         // First start once enough is written.
         const bool ready = c.writeHead >= static_cast<uint64_t>(kStartChunks) * c.chunk || c.Drained();
         Il2CppObject* clip = Target(c.clip);
+        // A radio song with nobody to play it starts on its own (the silent play head above runs it).
+        if (ch.Radio() && !c.started && ready && !master) {
+            c.started = true;
+            c.lastTs = static_cast<int32_t>(c.playPos % c.ring);
+        }
         const bool wantPause = c.userPaused || c.buffering || GamePaused() || !HasSpeaker(ch);
         // Where a (re)joining speaker starts: the playing speakers' position, else where the song
         // stopped when the last box went away (the ring still holds what follows).
@@ -1801,6 +1896,22 @@ private:
 
     void DropRadio(size_t i) {
         Channel& r = *radios_[i];
+        // Real radio: remember where it was on air; it plays on in silence until its channel is back.
+        if (r.on && r.cur && r.index >= 0 && r.index < static_cast<int>(r.playlist.size())) {
+            const Current& c = *r.cur;
+            Air a;
+            a.file = r.playlist[static_cast<size_t>(r.index)];
+            a.index = r.index;
+            a.list = PlaylistHash(r);
+            a.pos = c.rate ? static_cast<double>(c.base + (c.started ? c.playPos : 0)) / c.rate : 0.0;
+            a.at = radioTime_;
+            if (airs_.size() >= kMaxAirs && !airs_.count(r.key)) airs_.clear();
+            airs_[r.key] = std::move(a);
+        } else if (r.on && r.hasAir) {
+            airs_[r.key] = r.air;  // came back and went again before its song started
+        } else {
+            airs_.erase(r.key);
+        }
         StopCurrent(r);
         for (Speaker& sp : speakers_) {
             if (sp.ch != &r) continue;
@@ -1830,6 +1941,16 @@ private:
                 auto ch = std::make_unique<Channel>();
                 ch->key = c.radio;
                 LoadRadio(*ch, c.plot);
+                if (auto it = airs_.find(c.radio); it != airs_.end()) {
+                    const Air& a = it->second;
+                    if (ch->on && a.index >= 0 && a.index < static_cast<int>(ch->playlist.size()) &&
+                        ch->playlist[static_cast<size_t>(a.index)] == a.file && a.list == PlaylistHash(*ch)) {
+                        ch->air = a;
+                        ch->hasAir = true;
+                        ch->index = a.index;
+                    }
+                    airs_.erase(it);
+                }
                 r = ch.get();
                 radios_.push_back(std::move(ch));
                 SR2_INFO("slime_dj: radio '{}' (plot '{}'): {} song(s) in its playlist, {}{}", RadioName(*r), r->key,
@@ -2171,8 +2292,9 @@ private:
         LogPerf(dt);
         if (!AnySong() && !speakers_.empty()) DestroySpeakers();
         if (!AnySong() && !viewed) boxes_ = -1;
-        TickSong(global_);
-        for (size_t i = 0; i < radios_.size(); ++i) TickSong(*radios_[i]);
+        if (std::isfinite(dt) && dt > 0 && !GamePaused()) radioTime_ += std::min(dt, 1.0f);
+        TickSong(global_, dt);
+        for (size_t i = 0; i < radios_.size(); ++i) TickSong(*radios_[i], dt);
         TickMix(dt);
         TickMuffle(dt);
         TickDancer(dt);
@@ -2192,6 +2314,7 @@ private:
     void Shutdown() {
         menu_.Close("Slime DJ off");
         menuKey_.clear();
+        Free(menuPlot_);
         dancer_.Clear();
         danceState_ = {0, 0, 0};
         lamps_.Clear();
@@ -2217,12 +2340,14 @@ public:
             if (why) *why = w;
             return false;
         };
-        if (dead_.load() || !frameCb_) return no("Slime DJ is off (overlay: Ranch > Slime DJ)");
+        if (dead_.load() || !frameCb_) return no(kOffWhy);
         if (!menu_.Ready()) return no("the playlist menu is unavailable; use the overlay's Slime DJ tab");
         if (menu_.IsOpen() || !menuKey_.empty()) return no("the playlist menu is already open");
         std::string key = cu::PlotKey(plot);
         if (key.empty()) return no("this corral is not known yet; try again in a moment");
         menuKey_ = std::move(key);
+        Free(menuPlot_);
+        menuPlot_ = unity::NewGCHandle(plot);
         menuPending_ = true;
         menuAge_ = 0;
         menuRefresh_ = 0;
@@ -2250,14 +2375,32 @@ private:
         return menuSongs_;
     }
 
+    // The corral has no Music Box (LandPlot.HasUpgrade(MUSIC_BOX) false). False when unknown.
+    bool LacksMusicBox(Il2CppObject* plot) {
+        if (!plotHasUpgrade_ || !unity::IsAlive(plot)) return false;
+        int32_t up = kUpgradeMusicBox;
+        bool ok = false;
+        Il2CppObject* boxed = Call(plotHasUpgrade_, plot, {&up}, "LandPlot.HasUpgrade", &ok);
+        return ok && boxed && !*reinterpret_cast<bool*>(reinterpret_cast<char*>(boxed) + 2 * sizeof(void*));
+    }
+
+    // Round 13: no status line ("Remove the top status row 'Now playing: ...'"); a warning only when the
+    // radio can't play. Without a channel (no Music Box: "no speaker upgrade shows the queue as empty") the
+    // stored playlist is shown greyed.
     dj::MenuState MenuStateFor(const Channel* r) {
         dj::MenuState m;
         m.title = RadioName(menuKey_);
+        Channel stored;
         if (!r) {
             m.available = false;
-            m.status = menuAge_ < 3.0f ? "Tuning in..."
-                                       : "This corral's radio can't play right now: it needs its Music Box, and custom upgrades on.";
-            return m;
+            if (Il2CppObject* plot = Target(menuPlot_)) {
+                LoadRadio(stored, plot);
+                if (LacksMusicBox(plot)) m.warning = "No Music Box on this corral: its radio needs one to play.";
+            }
+            if (m.warning.empty() && menuAge_ >= 3.0f) m.warning = "This corral's radio can't play right now.";
+            r = &stored;
+        } else if (r->on && !r->cur && !r->slot) {
+            m.warning = std::format("{} radios play already: this one starts when one of them stops.", kMaxRadioStreams);
         }
         m.on = r->on;
         m.shuffle = r->shuffle;
@@ -2266,18 +2409,6 @@ private:
             const dj::SongInfo* song = FindSongByFile(f);
             m.playlist.push_back({song ? song->name : std::filesystem::path(f).stem().string(), song ? song->seconds : 0.0,
                                   !song || !song->error.empty()});
-        }
-        if (r->cur) {
-            const Current& c = *r->cur;
-            m.status = "Now playing: " + c.name;
-            if (GamePaused()) m.status += "  (paused while this menu is open)";
-            else if (c.buffering || !c.started) m.status += "  (loading)";
-        } else if (r->on && !r->slot) {
-            m.status = std::format("On - waiting: {} radios play already (the nearest ones get the next free slot).", kMaxRadioStreams);
-        } else if (r->on) {
-            m.status = songs_ ? "On" : "On - reading the music folder...";
-        } else {
-            m.status = r->playlist.empty() ? "Off - add songs, then switch the radio on." : "Off - press Radio to play this playlist here.";
         }
         return m;
     }
@@ -2290,19 +2421,22 @@ private:
             Channel* r = FindRadio(menuKey_);
             if (!menu_.Open(MenuStateFor(r), MenuSongs())) {
                 menuKey_.clear();
+                Free(menuPlot_);
                 return;
             }
             SR2_INFO("slime_dj: radio menu for '{}' (plot '{}'){}", RadioName(menuKey_), menuKey_,
-                     r ? "" : ": its radio is not found yet (scanning)");
+                     r ? "" : std::format(": no radio channel ({})", LacksMusicBox(Target(menuPlot_)) ? "no Music Box" : "corral not found yet"));
         }
         if (!menu_.IsOpen()) {
             menuKey_.clear();
+            Free(menuPlot_);
             return;
         }
         for (const dj::MenuAction& a : menu_.Tick(dt)) {
             if (a.op == dj::MenuOp::kClose) {
                 menu_.Close("closed");
                 menuKey_.clear();
+                Free(menuPlot_);
                 return;
             }
             MenuAct(a);
@@ -2619,6 +2753,7 @@ private:
     Il2CppClass* landPlotClass_ = nullptr;
     size_t offUpgradeWalls_ = 0, offAirNets_ = 0;
     const MethodInfo* compInParent_ = nullptr;
+    const MethodInfo* plotHasUpgrade_ = nullptr;  // optional: LandPlot.HasUpgrade (radio menu: Music Box?)
     M<void (*)(Il2CppObject*, float, const MethodInfo*)> lpSetCutoff_;
     M<void (*)(Il2CppObject*, bool, const MethodInfo*)> behSetEnabled_;
 
@@ -2662,6 +2797,7 @@ private:
     dj::LampPulser lamps_;          // "Lamps pulse to the music" (lamps.h)
     dj::RadioMenu menu_;            // Corral Radio playlist menu (radio_menu.h)
     std::string menuKey_;           // plot key of the radio the menu is for ("" = no menu)
+    Il2CppGCHandle menuPlot_ = nullptr;  // its LandPlot (the stored playlist while it has no channel)
     bool menuPending_ = false;      // requested, opens in the next tick
     float menuAge_ = 0, menuRefresh_ = 0;
     dj::SongList menuSongsFrom_;
@@ -2676,6 +2812,9 @@ private:
     Il2CppGCHandle musicBus_ = nullptr, masterBus_ = nullptr, cueBus_ = nullptr;
     float boxScan_ = 0, busRetry_ = 0, publishAcc_ = 0;
     std::mt19937_64 rng_{GetTickCount64()};
+    // Real radio: seconds of unpaused play time (TickImpl), and where radios without a channel were on air.
+    double radioTime_ = 0;
+    std::unordered_map<std::string, Air> airs_;
 
     Cfg cfg_;
     std::atomic<bool> cfgDirty_{true};
@@ -2710,7 +2849,7 @@ bool OpenRadioMenu(Il2CppObject* landPlot, std::string* why) {
     }
     SlimeDj* self = g_self;
     if (!self) {
-        if (why) *why = "Slime DJ is off (overlay: Ranch > Slime DJ)";
+        if (why) *why = kOffWhy;
         return false;
     }
     return self->RequestMenu(landPlot, why);
