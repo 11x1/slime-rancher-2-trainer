@@ -56,13 +56,15 @@ struct Look {
     // clears the definition's full-art reference (IdentifiableType._fullArt / _requiresFullArt) so the
     // details' UIImageDynamicLoader loads nothing over it. The grid tile and hotbar use
     // GadgetDefinition.icon: set that field yourself (get_Icon returns it when not null).
-    // The details image draws it (or the recoloured art) from a copy resampled to its on-screen size.
+    // The details image draws it (or the recoloured art) from a copy resampled to its on-screen size, set as
+    // Image.overrideSprite (what the details' loader drives) and Image.sprite; the loader is then detached.
     Il2CppObject* icon = nullptr;
     // artAmount > 0 (with `icon` set): the details picture becomes the base's full art (the 512 px addressable
     // sprite, copied by Instantiate) recoloured `artAmount` towards `artTint` (TintedSprite), instead of
     // `icon` stretched up from its 128 px. The full-art reference stays until the loader has loaded it once
     // (the first time the card is shown: `icon` shows until then); the recoloured copy is kept for the
-    // session and the reference is cleared. Falls back to `icon` when the art does not load in 10 s.
+    // session and the reference is cleared. Never `icon` (128 px) instead: when the art does not load in 10 s
+    // it waits again next time; when recolouring fails the card keeps the base's own full art.
     Rgb artTint;
     float artAmount = 0;
     // After GadgetItem.SetHeldGadget built the placement preview for this definition (the preview's root

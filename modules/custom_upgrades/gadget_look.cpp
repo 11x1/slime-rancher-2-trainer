@@ -103,6 +103,7 @@ struct Impl {
         float amount = 0;
     };
     std::map<Il2CppObject*, ArtTint> artTints;
+    std::set<Il2CppObject*> plainArt;      // recolouring failed: the card keeps the base's full art (game loader)
     std::set<Il2CppObject*> pinnedImages;  // details images we watch (pinned once, never freed)
     std::map<Il2CppObject*, std::string> loggedPictures;  // definition -> what its details picture log said last
     Il2CppObject* artImage = nullptr;
@@ -114,16 +115,23 @@ struct Impl {
     std::set<Il2CppObject*> made;  // every sprite this file made (TintedSprite, ScreenSized): never "the loaded full art"
     // One look at a vanilla card's details picture (how the game's own full art reaches the screen).
     Il2CppObject* probeImage = nullptr;
+    Il2CppObject* probeDef = nullptr;
     float probeWait = 0;
     int probes = 0;
     // offsets
     size_t offFullArt = 0, offRequiresFullArt = 0, offDetailsIcon = 0, offFabDef = 0, offLoaderSource = 0;
     Il2CppClass* fabItemClass = nullptr, *loaderClass = nullptr;
     const MethodInfo* imageSetSprite = nullptr, *imageGetSprite = nullptr;
+    // Round 15: the details image DRAWS Image.overrideSprite: the loader's `_onSetSprite` event is wired to
+    // Image.set_overrideSprite (menulayer_fabricator scene data) and sets it to the item's icon on every SetItem,
+    // to the loaded full art when done, and again on OnEnable / OnDisable. get_overrideSprite returns the drawn
+    // sprite (override ?? sprite). Rounds 12-14 set and read Image.sprite only, which an override hides.
+    const MethodInfo* imageSetOverride = nullptr, *imageGetOverride = nullptr, *loaderRelease = nullptr;
     // on-screen size and diagnostics (all optional: without them the picture is shown unscaled)
     const MethodInfo* rtGetRect = nullptr, *trLossy = nullptr, *graphicCanvas = nullptr, *graphicMaterial = nullptr,
                       *imagePreserve = nullptr, *canvasScale = nullptr, *canvasRoot = nullptr, *canvasMode = nullptr,
-                      *canvasPixelPerfect = nullptr, *screenW = nullptr, *screenH = nullptr, *texGetFilter = nullptr,
+                      *canvasPixelPerfect = nullptr, *screenW = nullptr, *screenH = nullptr, *screenCurRes = nullptr,
+                      *screenMode = nullptr, *texGetFilter = nullptr,
                       *texMipCount = nullptr, *texGetMipBias = nullptr, *texSetWrap = nullptr, *tex2dFormat = nullptr,
                       *objDestroy = nullptr;
     size_t offHeld = 0, offPlaceholder = 0, offTargeted = 0, offTargetingPlaceholder = 0, offSelected = 0;
@@ -180,7 +188,7 @@ struct Impl {
     void EnsureCallback();
     void ArtFrame(float dt);
     void ProbeFrame(float dt);
-    void DropArt(Il2CppObject* def, Slot* s, const std::string& why);
+    void DropArt(Il2CppObject* def, const std::string& why, bool retry);
     bool IsOurs(Il2CppObject* sprite);
     struct Screen {
         bool ok = false;      // the on-screen size is known
@@ -191,6 +199,8 @@ struct Impl {
     Screen OnScreen(Il2CppObject* image, float spriteW, float spriteH);
     std::string TextureText(Il2CppObject* sprite);
     void ShowPicture(Il2CppObject* image, Il2CppObject* def, Il2CppObject* sprite);
+    Il2CppObject* Drawn(Il2CppObject* image, bool* ok);
+    void Detach(Il2CppObject* image);
 };
 
 Impl* g = nullptr;
@@ -288,6 +298,7 @@ void SetItemDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo* mi)
                 if (!unity::IsAlive(image)) return;
                 if (g->pinnedImages.insert(image).second) (void)unity::NewGCHandle(image);
                 g->probeImage = image;
+                g->probeDef = unity::Field<Il2CppObject*>(item, g->offFabDef);
                 g->probeWait = 0;
                 g->EnsureCallback();
             });
@@ -298,6 +309,7 @@ void SetItemDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo* mi)
         if (!unity::IsAlive(image)) return;
         Il2CppObject* art = s->art.load(std::memory_order_acquire);
         Il2CppObject* def = s->def.load(std::memory_order_acquire);
+        if (!art && g->plainArt.count(def)) return;  // the base's full art, drawn by the game's loader
         if (art || !g->artTints.count(def) || !g->imageGetSprite) {
             g->ShowPicture(image, def, art ? art : icon);
             return;
@@ -322,15 +334,34 @@ void Impl::EnsureCallback() {
         });
 }
 
-// No recoloured full art for `def`: its picture is the icon from now on (the reference cleared).
-void Impl::DropArt(Il2CppObject* def, Slot* s, const std::string& why) {
-    artTints.erase(def);
-    unity::Field<Il2CppObject*>(def, offFullArt) = nullptr;
-    unity::Field<bool>(def, offRequiresFullArt) = false;
-    Il2CppObject* icon = s ? s->icon.load(std::memory_order_acquire) : nullptr;
-    SR2_INFO("[{}] gadget look: '{}' card picture stays the icon ({})", module, unity::GetName(def), why);
-    if (icon && unity::IsAlive(artImage)) ShowPicture(artImage, def, icon);
+// No recoloured full art for `def` (this time: `retry`, or for the session). Round 15: never the 128 px icon
+// stretched over the 440 px box ("blurry and pixelated"): the full-art reference stays, so the game's loader
+// draws the base's own full art (not recoloured) on the card.
+void Impl::DropArt(Il2CppObject* def, const std::string& why, bool retry) {
+    if (!retry) {
+        artTints.erase(def);
+        plainArt.insert(def);
+    }
+    SR2_INFO("[{}] gadget look: '{}' card picture = the base's full art, not recoloured ({}){}", module, unity::GetName(def), why,
+             retry ? "; tried again the next time the card is shown" : "");
     artImage = nullptr;
+}
+
+// What the image draws: Image.overrideSprite when set (the loader's), else Image.sprite (get_overrideSprite
+// returns that fallback itself).
+Il2CppObject* Impl::Drawn(Il2CppObject* image, bool* ok) {
+    return Call(imageGetOverride ? imageGetOverride : imageGetSprite, image, {}, "Image.get_overrideSprite", ok);
+}
+
+// After our picture is on `image`: the details' loader lets go of the card, so nothing it does later puts the
+// item's icon (or a late full art) over ours. ReleaseCurrentHandle drops a pending load and its Completed
+// callback; with `_iconSource` null OnEnable sets nothing and OnDisable clears the override (Image.sprite, also
+// ours, shows). The next SetItem sets the loader's source again (SetFullArtSource: source changed).
+void Impl::Detach(Il2CppObject* image) {
+    Il2CppObject* loader = loaderClass && offLoaderSource ? unity::GetComponent(image, loaderClass) : nullptr;
+    if (!unity::IsAlive(loader)) return;
+    if (loaderRelease) Call(loaderRelease, loader, {}, "UIImageDynamicLoader.ReleaseCurrentHandle");
+    unity::Field<Il2CppObject*>(loader, offLoaderSource) = nullptr;
 }
 
 // A sprite this file or mod_icons made, or one registered as a picture: never the loader's full art.
@@ -393,12 +424,21 @@ Impl::Screen Impl::OnScreen(Il2CppObject* image, float sw, float sh) {
     Il2CppObject* shader = unity::IsAlive(mat) && matGetShader ? Call(matGetShader, mat, {}, "Material.get_shader") : nullptr;
     const int scrW = screenW ? Value<int32_t>(Call(screenW, nullptr, {}, "Screen.get_width")) : 0;
     const int scrH = screenH ? Value<int32_t>(Call(screenH, nullptr, {}, "Screen.get_height")) : 0;
+    // Round 15: the display mode next to the backbuffer size (a non-native or upscaled mode would blur everything).
+    struct Resolution {
+        int32_t w, h;
+        uint32_t num, den;  // RefreshRate
+    };
+    const Resolution cur = screenCurRes ? Value<Resolution>(Call(screenCurRes, nullptr, {}, "Screen.get_currentResolution")) : Resolution{};
+    const int fsMode = screenMode ? Value<int32_t>(Call(screenMode, nullptr, {}, "Screen.get_fullScreenMode"), -1) : -1;
+    static constexpr const char* kFsModes[] = {"exclusive fullscreen", "borderless fullscreen", "maximized window", "windowed"};
     static constexpr const char* kModes[] = {"overlay", "camera", "world"};
     out.text = std::format(
         "on screen {:.1f}x{:.1f} px (box {:.0f}x{:.0f} units x canvas scale {:.3f}{}, parent scale {:.3f}; root canvas '{}' {}{}; "
-        "screen {}x{}; material '{}' shader '{}')",
+        "screen {}x{} (display {}x{} @ {:.0f} Hz, {}); material '{}' shader '{}')",
         out.w, out.h, box.w, box.h, scale, preserve ? ", aspect kept" : "", rel, unity::GetName(root),
-        mode >= 0 && mode < 3 ? kModes[mode] : "mode ?", pixelPerfect ? ", pixel perfect" : "", scrW, scrH,
+        mode >= 0 && mode < 3 ? kModes[mode] : "mode ?", pixelPerfect ? ", pixel perfect" : "", scrW, scrH, cur.w, cur.h,
+        cur.den ? static_cast<double>(cur.num) / cur.den : 0.0, fsMode >= 0 && fsMode < 4 ? kFsModes[fsMode] : "mode ?",
         unity::IsAlive(mat) ? unity::GetName(mat) : std::string("?"), unity::IsAlive(shader) ? unity::GetName(shader) : std::string("?"));
     return out;
 }
@@ -448,6 +488,12 @@ void Impl::ShowPicture(Il2CppObject* image, Il2CppObject* def, Il2CppObject* spr
         }
     }
     Call(imageSetSprite, image, {show}, "Image.set_sprite");
+    if (imageSetOverride) Call(imageSetOverride, image, {show}, "Image.set_overrideSprite");  // the one drawn
+    Detach(image);
+    // Round 15: say what the image really draws (rounds 12-14 logged a sprite hidden under the loader's override).
+    bool drawnOk = false;
+    Il2CppObject* drawn = Drawn(image, &drawnOk);
+    if (drawnOk) note += drawn == show ? "; the image draws it" : std::format("; but the image draws '{}'", unity::GetName(drawn));
     std::string line = std::format("{}; {}; {}", TextureText(sprite), sc.text, note);
     std::string& last = loggedPictures[def];
     if (last != line) {
@@ -471,7 +517,7 @@ void Impl::ArtFrame(float dt) {
     }
     artWait += std::isfinite(dt) && dt > 0 ? std::min(dt, 1.0f) : 0.0f;
     bool ok = false;
-    Il2CppObject* shown = Call(imageGetSprite, artImage, {}, "Image.get_sprite", &ok);
+    Il2CppObject* shown = Drawn(artImage, &ok);
     Il2CppObject* icon = s->icon.load(std::memory_order_acquire);
     // The full art is the bigger picture (512 px); anything else means still loading: our icon, nothing yet, or
     // the loader's own 160 px placeholder 'iconEmpty' it shows while loading (round 12: the Slime Radio's card
@@ -480,12 +526,12 @@ void Impl::ArtFrame(float dt) {
     const float iconW = icon ? Value<Rect>(Call(spriteRect, icon, {}, "Sprite.get_rect")).w : 0.0f;
     const float shownW = ok && unity::IsAlive(shown) && !IsOurs(shown) ? Value<Rect>(Call(spriteRect, shown, {}, "Sprite.get_rect", &ok)).w : 0.0f;
     if (!ok || shownW <= iconW || shownW < kMinFullArt || unity::GetName(shown) == "iconEmpty") {
-        if (artWait >= 10.0f) DropArt(artDef, s, "the full art did not load within 10 s");
+        if (artWait >= 10.0f) DropArt(artDef, "the full art did not load within 10 s", true);
         return;
     }
     std::string why;
     Il2CppObject* art = TintedSprite(shown, it->second.tint, it->second.amount, why);
-    if (!art) return DropArt(artDef, s, std::format("recolouring '{}' failed: {}", unity::GetName(shown), why));
+    if (!art) return DropArt(artDef, std::format("recolouring '{}' failed: {}", unity::GetName(shown), why), false);
     s->art.store(art, std::memory_order_release);
     artTints.erase(it);
     // Ours from now on: the loader loads nothing over it.
@@ -510,11 +556,18 @@ void Impl::ProbeFrame(float dt) {
     Il2CppObject* image = probeImage;
     probeImage = nullptr;
     bool ok = false;
-    Il2CppObject* shown = imageGetSprite ? Call(imageGetSprite, image, {}, "Image.get_sprite", &ok) : nullptr;
+    Il2CppObject* shown = imageGetSprite ? Drawn(image, &ok) : nullptr;
     if (!ok || !unity::IsAlive(shown)) return;
+    // Round 14 logged our own copy here (it read Image.sprite, hidden under the loader's override).
+    if (IsOurs(shown)) {
+        SR2_INFO("[{}] gadget look: vanilla card '{}' still draws our picture '{}' after 1 s (not compared)", module,
+                 unity::IsAlive(probeDef) ? unity::GetName(probeDef) : std::string("?"), unity::GetName(shown));
+        return;
+    }
     ++probes;
     const Rect rc = Value<Rect>(Call(spriteRect, shown, {}, "Sprite.get_rect"));
-    SR2_INFO("[{}] gadget look: a vanilla card's details picture = {}; {}", module, TextureText(shown), OnScreen(image, rc.w, rc.h).text);
+    SR2_INFO("[{}] gadget look: vanilla card '{}' details picture = {}; {}", module,
+             unity::IsAlive(probeDef) ? unity::GetName(probeDef) : std::string("?"), TextureText(shown), OnScreen(image, rc.w, rc.h).text);
 }
 
 }  // namespace
@@ -583,6 +636,8 @@ bool Setup(sr2::core::ModuleContext& ctx, const char* module, std::string& why, 
     off(p->fabItemClass, "<Definition>k__BackingField", p->offFabDef);
     p->imageSetSprite = method(image, "set_sprite", 1);
     p->imageGetSprite = R.Method(image, "get_sprite", 0);  // optional: Look.artAmount
+    p->imageSetOverride = R.Method(image, "set_overrideSprite", 1);  // what the details image draws (round 15)
+    p->imageGetOverride = R.Method(image, "get_overrideSprite", 0);
     off(gadgetItem, "_heldGadget", p->offHeld);
     off(gadgetItem, "_gadgetPlaceholderInstance", p->offPlaceholder);
     off(gadgetDir, "<TargetedGadget>k__BackingField", p->offTargeted);
@@ -641,6 +696,8 @@ bool Setup(sr2::core::ModuleContext& ctx, const char* module, std::string& why, 
     p->canvasPixelPerfect = opt(canvas, "get_pixelPerfect", 0);
     p->screenW = opt(screen, "get_width", 0);
     p->screenH = opt(screen, "get_height", 0);
+    p->screenCurRes = opt(screen, "get_currentResolution", 0);
+    p->screenMode = opt(screen, "get_fullScreenMode", 0);
     p->texGetFilter = opt(texture, "get_filterMode", 0);
     p->texMipCount = opt(texture, "get_mipmapCount", 0);
     p->texGetMipBias = opt(texture, "get_mipMapBias", 0);
@@ -650,6 +707,7 @@ bool Setup(sr2::core::ModuleContext& ctx, const char* module, std::string& why, 
     p->loaderClass = optCls(kImage, "MonomiPark.SlimeRancher.UI.Framework.Components", "UIImageDynamicLoader");
     if (p->loaderClass)
         if (auto o = R.FieldOffset(p->loaderClass, "_iconSource")) p->offLoaderSource = *o;
+    if (p->loaderClass) p->loaderRelease = R.Method(p->loaderClass, "ReleaseCurrentHandle", 0);
     // hooks
     const MethodInfo* descMi = method(gadgetDef, "get_LocalizedDescription", 0);
     const MethodInfo* infoMi = method(gadgetDir, "GetTargetGadgetInfo", 4);
@@ -687,6 +745,8 @@ bool Setup(sr2::core::ModuleContext& ctx, const char* module, std::string& why, 
         }
         report += std::format(" {}@0x{:X}", hooks[i].name, Resolver::Rva(ptrs[i]));
     }
+    if (!p->imageSetOverride || !p->imageGetOverride)
+        SR2_WARN("[{}] gadget look: Image.overrideSprite not found: Fabricator card pictures may show the item icon", module);
     p->armed = true;
     return true;
 }
