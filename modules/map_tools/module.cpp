@@ -50,6 +50,7 @@
 #include "core/log.h"
 #include "core/main_thread.h"
 #include "core/module.h"
+#include "core/perf.h"
 #include "core/resolver.h"
 #include "core/settings.h"
 #include "core/unity.h"
@@ -84,6 +85,13 @@ constexpr size_t kNoOff = static_cast<size_t>(-1);
 inline bool Has(size_t off) { return off != kNoOff; }
 constexpr float kIconRefresh = 2.0f;   // full map icons re-collected this often while the map is open
 constexpr int kClosedTicks = 3;        // no MapUI.LateUpdate for this many frames = map closed
+// Icons and the key bar hint wait this long after the map opened (round 13: the first M of a save opened the
+// map and closed it again; that open was the only one with a long frame of ours (37 ms: first icon scan, 77
+// icon objects, mouse glyph search, hint clone) right after the game's own open hitch, while the M key is
+// still down. The map closes on the *release* of its close input (MapUI.Start: UIInputFocusRegistrar.
+// BindCanceled(_closeInput)), so the first frames of an open stay light.)
+constexpr float kOpenSettle = 0.35f;
+constexpr float kShortOpen = 1.0f;     // an open shorter than this is logged when it closes (diagnostics)
 constexpr float kHintDiagDelay = 3.0f; // no hint this long after the map opened: log why (once per session)
 constexpr float kHintMsgSeconds = 3.0f; // a refusal stays in the key bar hint this long
 constexpr float kTravelTimeout = 90.0f;  // zone change: give up if the player is not in the new zone by then
@@ -609,6 +617,10 @@ private:
     uint32_t lastLate_ = 0;
     int closedTicks_ = kClosedTicks;
     bool open_ = false;
+    float openedAt_ = 0;       // time_ of this map open
+    int openFrames_ = 0;       // frames of this open
+    bool openWorkDone_ = false;  // icons / hint ran in this open (after kOpenSettle)
+    int opens_ = 0;            // map opens this session
     Ref mapUI_, map_, mapT_;
     float time_ = 0;
 
@@ -806,30 +818,49 @@ private:
         if (ui != mapUI_.get()) {
             OnMapClosed();
             mapUI_.Reset(ui);
+            openedAt_ = time_;
+            openFrames_ = 0;
+            openWorkDone_ = false;
+            ++opens_;
             SR2_DEBUG("map_tools: full map opened");
         }
         open_ = true;
+        ++openFrames_;
         Il2CppObject* map = F<Il2CppObject*>(ui, s_.uiMap);
         if (!ugui::IsA(map, s_.map)) return;
         if (map != map_.get()) OnNewPage(map);
 
         Step("reveal");
-        UpdateReveal(cfgChanged);
+        {
+            SR2_PERF_DETAIL("map_tools.reveal");
+            UpdateReveal(cfgChanged);
+        }
         if (int forced = g_forcedMaps.load(); forced != forcedLogged_) {
             SR2_INFO("map_tools: reveal: {} map tab(s) listed that the save has not unlocked yet ({} so far this session)",
                      forced - forcedLogged_, forced);
             forcedLogged_ = forced;
         }
+        if (time_ - openedAt_ < kOpenSettle) {  // keep the open's first frames light (kOpenSettle)
+            Step("teleport");
+            g_rightClick.store(false);
+            Step("idle");
+            return;
+        }
+        openWorkDone_ = true;
         Step("icons");
         iconAcc_ += dt;
         if (iconAcc_ >= kIconRefresh) {
             iconAcc_ = 0;
+            SR2_PERF_DETAIL("map_tools.icons (2 s)");
             RefreshIcons();
         }
         Step("icon scale");
         UpdateIconScale();
         Step("legend");
-        UpdateLegend();
+        {
+            SR2_PERF_DETAIL("map_tools.legend");
+            UpdateLegend();
+        }
         Step("teleport");
         if (g_rightClick.exchange(false) && cfg_.teleport) Teleport();
         Step("idle");
@@ -849,6 +880,10 @@ private:
 
     void OnMapClosed() {
         Step("map closed");
+        if (open_ && time_ - openedAt_ < kShortOpen)
+            SR2_INFO("map_tools: full map closed {:.2f} s ({} frames) after it opened (open #{} this session; icons / "
+                     "hint {})",
+                     time_ - openedAt_, openFrames_, opens_, openWorkDone_ ? "had run" : "not started yet");
         hintSince_ = -1;
         RestoreStaticFog();
         DestroyContainer();
