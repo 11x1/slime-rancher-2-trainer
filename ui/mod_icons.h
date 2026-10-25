@@ -18,7 +18,7 @@
 
 namespace sr2::ui::mod_icons {
 
-// `name` = file name without ".png" (e.g. "collector_2", "mods_tab").
+// `name` = file name without ".png" (e.g. "hen_collector_source", "mods_tab").
 // `sizeLike`: optional game sprite the icon replaces. The new sprite's pixelsPerUnit is
 // scaled so its native size (rect / pixelsPerUnit) equals that sprite's longer side,
 // which keeps layouts that use native sizes unchanged. Only the first call per icon
