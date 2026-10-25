@@ -71,7 +71,13 @@ per address). It shows only while custom_upgrades is on (`drone_programs::Availa
   option's `PromptContainer`, the same clone as the `[P] Programs` action: `ClonePrompt`), so shape,
   font, padding and colours are the game's; Close carries the `P` key glyph like the page's legend, the
   others show the label only (`InputEventDisplay` hidden). Selected states recolour the pill (Running and
-  the chosen mode teal with white text, Remove white, the other mode grey). The running program also shows
+  the chosen mode teal with white text, Remove white, the other mode grey). Key glyphs (round 10: "keybind
+  icons still look off, use the same look as for silo dialog menus"): every pill with a key (`[C] Limit`,
+  `[P] Programs`, the dialog's Close) shows the silo receipt's glyph: a clone of the game popup button's
+  `Icon Background` (`GameContext.UITemplates.popupPrompt` -> `PopupPrompt._negativeActionButton`, the
+  button the receipt's Cancel is cloned from) in place of the Change prompt's `InputEventDisplay`, its
+  InputEventDisplay off and the first InputIcon set to our key (`UsePopupGlyph`; log `key glyphs cloned
+  from the popup button`). Without the template: the Change prompt's glyph as before. The running program also shows
   the page's own "active" icon (`DroneProgramMenu._activeStateSprite`). Texts keep the menu's header /
   description fonts, the panel the menu's palette. If the prompt can't be cloned, the old drawn button is
   used.

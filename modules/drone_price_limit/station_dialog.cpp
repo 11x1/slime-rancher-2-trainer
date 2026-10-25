@@ -192,6 +192,11 @@ struct StationUi::Impl {
     size_t offMarketPlorts = 0, offPlortEntryType = 0, offIdentIcon = 0, offIdentName = 0, offIdentIsPlort = 0;
     size_t offIconButton = 0, offIconKey = 0, offIconKeyText = 0, offIconKeyImage = 0, offIconKeyLse = 0, offIconDouble = 0;
     size_t offEncMinW = 0, offEncPadX = 0;  // optional
+    // optional: the key glyph of the silo receipt (the game's popup button glyph, see UsePopupGlyph)
+    Il2CppClass* popupClass = nullptr;
+    size_t offTplPopup = 0, offPopupNegative = 0;
+    const MethodInfo* gcGetTemplates = nullptr, *trGetSibling = nullptr, *trSetSibling = nullptr;
+    bool popupGlyphOk = false, loggedGlyph = false;
     size_t offGcLookup = 0, offLookupCurrencies = 0, offCurrencyArr = 0, offCurrencyIcon = 0;  // optional (coin)
 
     // ---- methods ----
@@ -518,6 +523,7 @@ struct StationUi::Impl {
     Il2CppObject* StationModel();
     // ---- prompts ----
     bool ClonePrompt(Pill& P, Il2CppObject* orig, Il2CppObject* parentTr, const char* name);
+    bool UsePopupGlyph(Pill& P, Il2CppObject* pillTr);
     void EnsurePill(Pill& P, size_t buttonOff, const char* name, const char* what);
     void SyncPill(Pill& P, bool want, size_t buttonOff, const char* name, const char* what);
     void ApplyPillLook(Pill& P, const char* key);
@@ -816,6 +822,22 @@ bool StationUi::Setup(sr2::core::ModuleContext& ctx, const char* module, DialogH
         }
         if (!p->gcInstance || !p->offGcLookup || !p->offLookupCurrencies || !p->offCurrencyArr || !p->offCurrencyIcon)
             report += " coin icon: NOT available;";
+        // Key glyphs like the silo receipt's: GameContext.UITemplates.popupPrompt -> PopupPrompt
+        // ._negativeActionButton -> "Icon Background" (see UsePopupGlyph).
+        if (gameCtx && !p->gcInstance)
+            if (Il2CppClass* single = parentOf(gameCtx)) p->gcInstance = R.Method(single, "get_Instance", 0, &err);
+        Il2CppClass* templates = R.Class(kImage, "MonomiPark.SlimeRancher.UI", "UITemplates", &err);
+        p->popupClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Popup", "PopupPrompt", &err);
+        p->gcGetTemplates = gameCtx ? R.Method(gameCtx, "get_UITemplates", 0, &err) : nullptr;
+        p->trGetSibling = R.Method(transform, "GetSiblingIndex", 0, &err);
+        p->trSetSibling = R.Method(transform, "SetSiblingIndex", 1, &err);
+        if (templates)
+            if (auto o = R.FieldOffset(templates, "popupPrompt", &err)) p->offTplPopup = *o;
+        if (p->popupClass)
+            if (auto o = R.FieldOffset(p->popupClass, "_negativeActionButton", &err)) p->offPopupNegative = *o;
+        p->popupGlyphOk = p->gcInstance && p->gcGetTemplates && p->popupClass && p->offTplPopup && p->offPopupNegative &&
+                          p->trGetSibling && p->trSetSibling;
+        if (!p->popupGlyphOk) report += " silo-style key glyphs: NOT available (the Change prompt's glyph);";
         // Hotkeys: C and the pad's right stick click.
         Il2CppClass* kb = R.Class(kInput, "UnityEngine.InputSystem", "Keyboard", &err);
         Il2CppClass* pad = R.Class(kInput, "UnityEngine.InputSystem", "Gamepad", &err);
@@ -994,7 +1016,9 @@ bool StationUi::Impl::ClonePrompt(Pill& P, Il2CppObject* orig, Il2CppObject* par
         P.ied = ied;
         Keep(P.handles, ied);
     }
-    if (Il2CppObject* group = Find(tr, "InputEventDisplay/Icon Group")) {
+    if (UsePopupGlyph(P, tr)) {
+        // the silo receipt's key glyph (P.ied / P.group / P.icons are its parts)
+    } else if (Il2CppObject* group = Find(tr, "InputEventDisplay/Icon Group")) {
         P.group = group;
         Keep(P.handles, group);
         bool ok = false;
@@ -1027,6 +1051,68 @@ bool StationUi::Impl::ClonePrompt(Pill& P, Il2CppObject* orig, Il2CppObject* par
             if (offEncMinW) unity::Field<float>(enc, offEncMinW) = 0.0f;
             if (offEncPadX) unity::Field<float>(enc, offEncPadX) = std::max(unity::Field<float>(enc, offEncPadX), kPillPadX);
         }
+    return true;
+}
+
+// Round 10: "keybind icons still look off, use the same look as for silo dialog menus". The silo receipt's
+// buttons are clones of the game's confirm-popup buttons, whose key glyph is their "Icon Background"
+// (a background behind InputEventDisplay / Icon Group / InputIcons). The pill gets a clone of that
+// element (from the popup template's negative button, the one the receipt's Cancel is cloned from) in
+// place of the Change prompt's own InputEventDisplay (deactivated); ApplyPillLook then sets its first
+// InputIcon to our key exactly as before. false = not available: the Change prompt's glyph stays.
+bool StationUi::Impl::UsePopupGlyph(Pill& P, Il2CppObject* pillTr) {
+    if (!popupGlyphOk || !unity::IsAlive(P.ied)) return false;
+    auto miss = [&](const char* what) {
+        if (!loggedGlyph) SR2_WARN("[{}] station ui: silo-style key glyph not cloned ({}) - the Change prompt's", module, what);
+        loggedGlyph = true;
+        return false;
+    };
+    bool ok = false;
+    Il2CppObject* gc = Call(gcInstance, nullptr, {}, "GameContext.Instance", &ok);
+    if (!ok || !unity::IsAlive(gc)) return miss("no GameContext");
+    Il2CppObject* tpl = Call(gcGetTemplates, gc, {}, "GameContext.get_UITemplates", &ok);
+    if (!ok || !unity::IsAlive(tpl)) return miss("no UITemplates");
+    Il2CppObject* popupGo = unity::Field<Il2CppObject*>(tpl, offTplPopup);
+    Il2CppObject* popup = unity::IsAlive(popupGo) ? unity::GetComponent(popupGo, popupClass) : nullptr;
+    if (!unity::IsAlive(popup)) return miss("no PopupPrompt template");
+    Il2CppObject* button = unity::Field<Il2CppObject*>(popup, offPopupNegative);
+    if (!unity::IsAlive(button) || !IsA(button, goClass)) return miss("no popup button");
+    Il2CppObject* src = Find(unity::TransformOf(button), "Icon Background");
+    if (!src) return miss("no Icon Background on the popup button");
+    Il2CppObject* clone = unity::Instantiate(unity::GameObjectOf(src), pillTr);
+    if (!unity::IsAlive(clone)) return miss("Instantiate failed");
+    Il2CppObject* cgo = IsA(clone, goClass) ? clone : unity::GameObjectOf(clone);
+    Il2CppObject* ctr = unity::TransformOf(cgo);
+    Il2CppObject* ied = Find(ctr, "InputEventDisplay");
+    Il2CppObject* group = Find(ctr, "InputEventDisplay/Icon Group");
+    if (!ied || !group) {
+        Destroy(cgo);
+        return miss("no InputEventDisplay / Icon Group in it");
+    }
+    unity::SetName(cgo, "sr2mods_KeyGlyph");
+    SetEnabled(unity::GetComponent(ied, inputEventDisplayClass), false);  // our key, not the popup's binding
+    // Where the Change prompt's glyph was (left of the label); that one goes away.
+    int32_t idx = Unbox<int32_t>(Call(trGetSibling, P.ied, {}, "Transform.GetSiblingIndex", &ok));
+    if (ok) Call(trSetSibling, ctr, {&idx}, "Transform.SetSiblingIndex");
+    unity::SetActive(unity::GameObjectOf(P.ied), false);
+    P.ied = ctr;
+    Keep(P.handles, ctr);
+    P.group = group;
+    Keep(P.handles, group);
+    const int n = Unbox<int32_t>(Call(trChildCount, group, {}, "Transform.get_childCount", &ok));
+    for (int i = 0; ok && i < n && i < 8; ++i) {
+        int32_t k = i;
+        Il2CppObject* child = Call(trGetChild, group, {&k}, "Transform.GetChild");
+        if (unity::IsAlive(child)) {
+            Keep(P.handles, child);
+            P.icons.push_back(child);
+        }
+    }
+    if (!loggedGlyph) {
+        loggedGlyph = true;
+        SR2_INFO("[{}] station ui: key glyphs cloned from the popup button (as the silo receipt; {} key icon(s))", module,
+                 P.icons.size());
+    }
     return true;
 }
 
