@@ -12,17 +12,24 @@ The extracted game icons for reference are in `assets/icons/game/` (gitignored);
 ## Done by the user
 - `mods_tab` (Options menu Mods tab), `hen_collector_source`, `elder_collector_source`.
 
-## Still script-drawn: switch to the vanilla icon now, the user draws later
-| icon name | used for | vanilla fallback to use meanwhile |
+## Vanilla icon now, the user draws later (done 2026-10-25, branch chore/vanilla-card-icons)
+The script-drawn PNGs were removed from `assets/icons/`. Each name below has nothing embedded, so the vanilla icon shows; a drawing saved as `assets/icons/<name>.png` takes over at the next build (the code checks `mod_icons::Has(name)` first).
+
+| icon name to draw | used for | vanilla icon shown now |
 |---|---|---|
 | `music_2` | Music Box II card | the Music Box upgrade icon |
-| `collector_2`, `collector_3` | Plort Collector II / III | the Plort Collector icon |
-| `feeder_2` | Auto-Feeder II | the Auto-Feeder icon |
-| `hens_1`, `hens_2` | Faster Hens I / II | a coop upgrade icon (e.g. the coop's vanilla tier icon) |
-| `ash_boost` | Ash Booster | the Ash Trough icon |
-| `sell_all`, `sell_all_now` | Sell-All Button, Sell All Plorts Now | a silo upgrade icon / Newbucks icon |
-| `map_node`, `research_drone`, `ghost_drone`, `gordo`, `plort_door`, `shadow_door` | collectible tracker | the closest game sprite (map marker, drone, gordo, door), or keep until drawn (the game has no sprite for some) |
-| `corral_radio` (missing) | Corral Radio card | the Music Box icon (already) |
-| Sandbox sidebar icon | the overlay's Sandbox entry | an icon drawn in the overlay's own style (it's ImGui-drawn, not a game sprite) |
+| `corral_radio` | Corral Radio card | the Music Box upgrade icon |
+| `hens_1`, `hens_2` | Faster Hens I / II | the Deluxe Coop upgrade icon |
+| `ash_boost` | Ash Booster | the Ash Trough upgrade icon |
+| `sell_all` | Sell-All Button | the Market Link icon |
+| `growth_1`, `growth_2` | Sprinkler II / III | the Sprinkler upgrade icon |
+| `coop_air_net` | Coop Air Net | the corral's Air Net upgrade icon |
+| `gordo` | collectible tracker | sprite `iconGordoPedia_small` / `iconGordoPedia` (Slimepedia), else the map marker |
+| `plort_door`, `shadow_door` | collectible tracker | the map marker sprites |
+| `ghost_drone` | collectible tracker (under the minimap) | sprite `iconExplorerDronePedia` (user's pick), else placeholder |
+| `research_drone` | collectible tracker | sprite `iconPediaDrone_small` / `iconPediaDrone`, else placeholder |
+| `map_node` | collectible tracker | sprite `iconPediaHomeWorld` / `pediaHomeWorld` (Slimepedia World tile, may not be loaded in game), else placeholder |
 
-`growth_1`, `growth_2` and `coop_air_net` are already unused (vanilla icons shown).
+The tracker loads the game sprites by name (one `FindObjectsOfTypeAll(Sprite)` after a map page build, at most 3 per session; log line `collectibles: game sprites by name ...`). If one isn't loaded, `<name>_placeholder.png` (script-drawn, `make_icons.py`) shows for the three drone / node rows: these are the only script-drawn icons left. `collector_2/3`, `feeder_2` and `sell_all_now` belonged to retired upgrades and are gone.
+
+Still open, owned by other agents: the Sandbox sidebar icon (ImGui-drawn, overlay style), the Shadow Catcher card icon.
