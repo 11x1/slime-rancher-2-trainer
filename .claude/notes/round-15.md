@@ -2,6 +2,12 @@
 
 Build tested: 082aeda (develop). Results are in the work-account checklist https://claude.ai/artifact/12HrkuKyWbJs1PtsufwVvE (collection `results`, ids `r14*`; free text in `misc/notes`). User quotes are verbatim.
 
+## Status (2026-10-25)
+All tasks A-J are merged and deployed (d1f076b, DLL 49ae59d9; one build for the round). Checklist: round 15 is published to https://claude.ai/artifact/12HrkuKyWbJs1PtsufwVvE (34 new cases in `.claude/checklist/r15-cases.json`, carried-over cases under Skipped). Open questions for the user:
+- Play now from the radio's song list was merged into Queue (A); bring it back?
+- The Auto-Feeder lock slider is mouse only (I).
+- The upward-menu offset (F) has a placement log line to read after the test.
+
 ## How to run this round
 Same as round 14 (auto-memory: orchestrator mode, Opus subagents at medium effort in worktrees, git workflow, no session link, plain commands, checklist conventions, read logs yourself, deploy once per round; agent builds take turns via build.ps1):
 1. One agent per task below, up to 9 at a time. Each prompt is "Read `.claude/agent-brief.md` and follow it", the task's section, and the branch name.

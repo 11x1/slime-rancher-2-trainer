@@ -1,0 +1,331 @@
+[
+[
+"Menu only",
+"r15ug1",
+"Ranch > Upgrades: switch in the tab bar",
+[
+"Open Ranch > Upgrades: the Custom Upgrades switch is top right next to the close button, with a (?); no Custom Upgrades card; Plot upgrades on the left, Refinery upgrades on the right.",
+"Hover the (?): the Custom Upgrades description.",
+"Turn the switch off (no custom-upgrade save loaded): the tab title dims, Tier effects and the Extra Tank keys grey out, Sell back and Drone station price limit stay usable.",
+"Search \"custom upgrades\": the Upgrades page result shows the switch and opens Ranch > Upgrades."
+]
+],
+[
+"Menu only (Sandbox on, save loaded)",
+"r15sp1",
+"Upward menu sits at the cursor",
+[
+"Scroll a grid so a row is half cut off at the bottom of the screen.",
+"Right-click Pink Slime in that row: the menu opens upward with its bottom edge at the cursor, no gap.",
+"Right-click a tile near the top: it opens down-right at the cursor."
+]
+],
+[
+"Menu only (Sandbox on, save loaded)",
+"r15sp2",
+"No favourites line on food",
+[
+"Right-click a food or meat no slime favours: only its name, no \"No favourites or plorts known\" line.",
+"Right-click Lucky Slime: that line is still there."
+]
+],
+[
+"Menu only (Sandbox on, save loaded)",
+"r15sl4",
+"Slime Launcher in the Sandbox manager",
+[
+"Sandbox > Upgrades & Blueprints: lower Slime Launcher to I, or to not bought.",
+"Close the overlay and within about a second shoot a slime: the distance matches the new level (vanilla when not bought)."
+]
+],
+[
+"Ranch: anywhere",
+"r15mp1",
+"Map stays open after using the overlay",
+[
+"Insert to open the overlay; move the pointer over it, type in the search box, click a switch.",
+"Insert to close it.",
+"Tap M once: the map opens and stays open.",
+"Repeat with a long press of M: stays open."
+]
+],
+[
+"Ranch: anywhere",
+"r15mp2",
+"Other keys after the overlay",
+[
+"Use the overlay as above, close it.",
+"Press Tab, then Esc: Esc opens the pause menu as usual."
+]
+],
+[
+"Ranch: anywhere",
+"r15mp3",
+"Pause menu with the overlay",
+[
+"Esc for the pause menu, open the overlay, move the pointer over it and off it.",
+"Click the pause menu's buttons: they work.",
+"Close the overlay: the pause menu still reacts to the mouse and Esc."
+]
+],
+[
+"Ranch: anywhere",
+"r15mp4",
+"Overlay over the open map",
+[
+"M for the map, open the overlay, pointer over it, close the overlay.",
+"Press M: the map closes. Press M again: it opens and stays open."
+]
+],
+[
+"Ranch: Fabricator",
+"r15cp1",
+"DJ pictures sharp at last",
+[
+"Select DJ Booth: the right-hand picture is your large drawing, sharp, not a stretched small icon.",
+"Select DJ Speaker Stack, then Slime Radio: same.",
+"With a DJ card selected, close and reopen the Fabricator: still the large drawing."
+]
+],
+[
+"Ranch: Fabricator",
+"r15cp2",
+"Quantum Storage Link picture",
+[
+"In a fresh session, select Quantum Storage Link: within about 1 s the Refinery Link's large art, tinted; not the plain picture, not pixelated.",
+"Close, reopen, select it again: the tinted large art at once."
+]
+],
+[
+"Ranch: Fabricator",
+"r15cp3",
+"Vanilla cards unaffected",
+[
+"After a mod card, select the Refinery Link, then another vanilla card: each shows its own normal picture."
+]
+],
+[
+"Ranch: Fabricator",
+"r15sl1",
+"Slime Launcher card",
+[
+"Fabricator > Upgrades: a \"Slime Launcher I\" card with the Pink slime icon and its Slimepedia picture, 5,000 Newbucks plus refinery items.",
+"Buy it: the card shows \"Slime Launcher II\" (12,000) with level circles.",
+"Buy II and III: fully upgraded, 3 circles."
+]
+],
+[
+"Ranch: open ground",
+"r15sl2",
+"Slimes fly further",
+[
+"Before buying (or Sandbox: not bought), shoot a Pink slime from a slot and note the distance.",
+"With Slime Launcher III, shoot one the same way: clearly further, about 2.5x on flat ground.",
+"Shoot a plort or a fruit: the same distance as before."
+]
+],
+[
+"Ranch: open ground",
+"r15sl3",
+"Held largo flies further",
+[
+"Vacuum a largo so it's held at the nozzle, shoot it with III owned: clearly further than without.",
+"Shoot a held toy: vanilla distance."
+]
+],
+[
+"Ranch: open ground",
+"r15bd1",
+"Slime Radio bounces and rolls",
+[
+"Vac up a Slime Radio, shoot it at a wall: it bounces off, falls and tumbles or rolls like a vanilla toy, not hanging at the bounce point.",
+"Shoot it along the floor: it rolls or tips and comes to rest naturally, not frozen at a tilt."
+]
+],
+[
+"Ranch: open ground",
+"r15bd2",
+"Like a vanilla toy",
+[
+"Shoot a Fox Toy or Night Light at a wall, then the radio the same way: about the same.",
+"Walk into the standing radio: it tips onto its egg, rolls, settles.",
+"Leave a radio standing 10 s: it stays upright."
+]
+],
+[
+"Ranch: open ground",
+"r15lp2",
+"Ice Lamp pulses",
+[
+"Put an Ice Lamp near a playing speaker: it pulses like the Lava and Conservatory lamps.",
+"Stop the music: it keeps its own slow colour animation."
+]
+],
+[
+"Ranch: open ground",
+"r15lp3",
+"Lamps react fast",
+[
+"Start a song on a speaker next to lamps: they react within about half a second.",
+"While it plays, start a second speaker on another channel (a Corral Radio) near other lamps: those start within about half a second."
+]
+],
+[
+"Ranch: placed Quantum Storage Link",
+"r15ql1",
+"Go To hint gone",
+[
+"Press E on the link: Drones tab, the key row shows only Close; no \"[SPACE] Go To\", no magnifying glass, no greyed entry.",
+"Switch to Quantum Cloud and back: still absent.",
+"Open a real drone station afterwards: it works normally."
+]
+],
+[
+"Ranch: placed Quantum Storage Link",
+"r15ql2",
+"No green glow, bigger blue top",
+[
+"Look at the link from a few metres, day and night: no green light or rings from its middle; the blue effect on top is clearly bigger.",
+"Wait 30 s: the quantum moments still happen."
+]
+],
+[
+"Ranch: placed Quantum Storage Link",
+"r15ql3",
+"Name outside gadget mode",
+[
+"Without gadget mode, aim at the link: \"Quantum Storage Link\" above \"[T] Enter gadget mode\".",
+"Aim at a plain Refinery Link: \"Refinery Link\".",
+"Press T, aim at the link: still \"Quantum Storage Link\"."
+]
+],
+[
+"Ranch: corral with Corral Radio and Music Box",
+"r15ra1",
+"Radio menu layout",
+[
+"Open the menu: title and corral name on one row, headings right under, panel near the top; the bottom keys as two 2x2 grids (left: R Radio, F Shuffle / Esc Close; right: SPACE Queue, then C Clear in the bottom right).",
+"Sell the Music Box, open the menu: an orange pill on the title row, not over the corral name; columns about 20 px lower; nothing cut off. Buy the Music Box back."
+]
+],
+[
+"Ranch: corral with Corral Radio and Music Box",
+"r15ra2",
+"Game key icons",
+[
+"Space, Esc, Z, R, F and C look like the game's own key icons (Space wide); no text sticks out of a key."
+]
+],
+[
+"Ranch: corral with Corral Radio and Music Box",
+"r15ra3",
+"Song and playlist actions",
+[
+"Hover a song: the right grid shows only [SPACE] Queue. Space adds it at the end; Enter does the same.",
+"Hover a playlist entry: [Z] Remove and [SPACE] Play now. Space plays it; Z removes it."
+]
+],
+[
+"Ranch: corral with Corral Radio and Music Box",
+"r15ra4",
+"Moving in the key grids",
+[
+"Arrow down past the last list row: Queue or Remove is focused.",
+"Left / Right / Down move between buttons and skip empty cells; Up from the top row goes back to the list.",
+"Enter on Shuffle: it toggles.",
+"Move the mouse between the two lists: Queue and Remove swap in place, Play now appears and disappears, the others don't move."
+]
+],
+[
+"Ranch: corral (Auto-Feeder)",
+"r15fl1",
+"Auto-Feeder lock slider",
+[
+"In a corral without the Auto-Feeder, select its card: no slider.",
+"Buy it, select its card: a slider \"Feeder takes: any food\" where the price row was.",
+"Drag it: \"Feeder takes only: <food>\" with the food names in your language.",
+"Set it to Carrot and close the menu."
+]
+],
+[
+"Ranch: corral (Auto-Feeder)",
+"r15fl2",
+"Locked feeder",
+[
+"Shoot a Pogofruit into the feeder: refused, it stays outside.",
+"Shoot a Carrot in: taken.",
+"Reopen the menu, select the Auto-Feeder card: still Carrot.",
+"Save, quit to the menu, load: still locked to Carrot.",
+"Set the slider back to any food: everything is accepted again."
+]
+],
+[
+"Ranch: coop with Hen Collector",
+"r15hc1",
+"Hen Collector button, no popup",
+[
+"With fewer chickens than the keep-limits, press the collector's button: no notification or text; the cyclone spins and the vac sound plays briefly.",
+"With more hens than \"Keep hens\", press it: only the excess hens are sucked in, no popup.",
+"With the storage full (200), press it: the cyclone spins but no chickens go in."
+]
+],
+[
+"Ranch: coop with Hen Collector",
+"r15dp3",
+"Plot menu sliders unchanged",
+[
+"Open the coop's plot menu: the arrows on the first Hen Collector slider and Shift + arrows on the second work as before."
+]
+],
+[
+"Ranch: drone station",
+"r15dp1",
+"Programs dialog polish",
+[
+"Press P with 2+ programs: only the focused row's Edit and Delete are pink; the other rows' buttons are grey.",
+"Up / Down: the pink buttons follow the focus.",
+"Point at a grey Edit on another row: that row takes the focus and Edit shows the hover look; click it: that program runs and the dialog closes.",
+"Next program row: a wider navy pill, < and > near its ends with padding, \"After each delivery\" on one line; Left / Right and both arrows switch it."
+]
+],
+[
+"Ranch: drone station",
+"r15dp2",
+"Price-limit dialog",
+[
+"Destination Plort Market, press C: \"Limit by\" uses the same navy selector; no \"Up / Down: choose ...\" line.",
+"On Limit by press Left, Right, Space and click both arrows: each switches mode and the slider changes units.",
+"On the slider hold Right about 4 s: it speeds up the longer you hold.",
+"Shift + Right / Left: moves by 10. Ctrl + Right / Left: jumps to the max, then to 0 (no limit). D / A step like Right / Left.",
+"Close and the page's [C] Limit pill show the game's C key icon."
+]
+],
+[
+"Ranch: drone station",
+"r15fl3",
+"Drones respect the feeder lock",
+[
+"Program a drone: target Food (or Veggies / Fruit), any source, destination Feeder, with carrots and other foods at the source and the locked feeder empty.",
+"Watch it: it brings only carrots to the locked feeder; other foods go to unlocked feeders or aren't picked up."
+]
+],
+[
+"Powderfall Bluffs",
+"r15lp1",
+"Glowing ice pulses",
+[
+"Place a speaker (Boombox or speaker stack) within lamp range of some glowing ice crystals, play a song: the crystals' light (and ideally the cube glow) pulses with the beat in their own colours.",
+"Pause: back to their normal animated glow, nothing stuck.",
+"Walk away until they unload, come back: no crystal light stuck on or off."
+]
+],
+[
+"Main menu -> load a save",
+"r15sl5",
+"Slime Launcher saved per save",
+[
+"Own Slime Launcher II and save; reload: the card shows III as next and slimes still fly further.",
+"Turn custom upgrades off (or load without the mod): the save loads fine and slimes shoot at vanilla speed."
+]
+]
+]
