@@ -39,7 +39,16 @@ no threads, no frame callback, no save veto; the probe / action registry is neve
   one is cancelled.
 - Timeouts: every command takes `args.timeout_s`; defaults 10 s, `load_slot`/`load_save` 120, `new_game` 180,
   `quit_to_title` 60, `save`/`delete_slot` 30, `screenshot` 15, `teleport` 20. A timeout replies
-  `ok:false, error:"timeout"` (a job already posted may still run afterwards).
+  `ok:false, error:"timeout"` (a job already posted may still run afterwards). The waiting jobs (`load_slot`,
+  `load_save`, `new_game`, `quit_to_title`) log `<cmd>: waiting for <what> (phase, scene, at_title, in_game,
+  loading)` once per new wait, and on a timeout log it as a warning and reply `timeout waiting for <what> (...)`.
+- "At the title" (`state.at_title`, `game::AtTitle`): not loading and either main menu group. The menu after launch
+  is the group **MainMenuFromBoot**, which `SceneLoader.IsCurrentSceneGroupMainMenu` does not count (it only
+  compares with `_mainMenuSceneGroup`, "MainMenu", loaded after a quit). So a non-gameplay group also counts when its
+  scenes include every scene of the main menu group (Addressables GUIDs of `SceneGroup._sceneReferences`); a name
+  starting with `MainMenu` is the last resort when that check fails (logged as "accepted by its name"). Each group's verdict and why is logged once
+  (`scene group '<name>': is / is not the title screen; ...`). Round 17 bug: `new_game` from the boot menu waited
+  forever for at_title. See re/world.md (SceneLoader).
 - Multi-frame work (loading, menus, teleports) runs as a main-thread step function called every ~100 ms until done
   (`Steps` in module.cpp). Probes / actions use the same through `Retry()` (api.h).
 - Errors for an unknown command / probe / action / setting contain "unknown".
@@ -62,7 +71,7 @@ The contract from the plan (unchanged) plus additions (marked +). Slots are the 
 | `load_save`+ | `slot` (5/6), `save_name` (file name, `.sav` optional) or `save_number` | the same for one given save of that slot (`save_number` needs the summaries) |
 | `new_game` | `slot` (5/6), `name` (ignored), `replace`+ | same flow, then `StartNewGame(slot - 1, settings)`; refused if the slot has a game unless `replace: true` (then it is deleted first). The game names new games itself (`<time>_<slot>`, display name = the slot number), so `name` is only logged |
 | `save` | | `SaveAllNow` when the game in play is in slot 5 or 6 (refused otherwise); `{save_number, slot}` |
-| `quit_to_title` | | `SceneContext.OnSessionEnded` + `LoadMainMenuSceneGroup` (what the pause menu's Quit does, minus its save); waits at the title + 1 s; returns `state` |
+| `quit_to_title` | | `SceneContext.OnSessionEnded` + `LoadMainMenuSceneGroup` (what the pause menu's Quit does, minus its save); waits at the title + 1 s; returns `state`. Already at the title (either menu group): returns `state` at once, no reload |
 | `quit_game`+ | | `Application.Quit` 0.5 s later; only on the title screen |
 | `delete_slot` | `slot` (5/6) | `AutoSaveDirector.DeleteGame` for every game in that slot; refused while that game is loaded; `{deleted: [names], files_left+: [files still in the folder]}` |
 | `teleport` | `pos` [x,y,z] (exact) or [x,z] (onto the ground), `rot` (yaw or [x,y,z]), or `to` (a saved place) | `{pos}`; exact = `ground_teleport::TeleportExact` (new, same `TeleportablePlayer.TeleportTo`), ground = map_tools' ground teleport (region loading, floor search) |

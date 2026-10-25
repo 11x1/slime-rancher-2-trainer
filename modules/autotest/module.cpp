@@ -27,6 +27,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -220,6 +221,43 @@ Value Steps(std::function<Value(int)> step, Clock::time_point deadline, const st
     }
 }
 
+// What a waiting job waits for: logged once per new wait, and named on a timeout (sr2mods.log and the
+// reply), so a job that hangs says why. Written on the main thread, read by the caller after a timeout.
+struct WaitLog {
+    std::mutex m;
+    std::string cmd, what, detail;
+};
+
+// Records (and on a new wait, logs) that the job waits for `what`; returns Retry().
+Value Waiting(WaitLog& w, int phase, const std::string& what) {
+    const std::string detail = std::format("phase {}, scene '{}', at_title {}, in_game {}, loading {}", phase, game::SceneName(),
+                                           game::AtTitle(), game::InGame(), game::Loading());
+    std::lock_guard lk(w.m);
+    if (w.what != what) SR2_INFO("[{}] {}: waiting for {} ({})", kModule, w.cmd, what, detail);
+    w.what = what;
+    w.detail = detail;
+    return at::Retry();
+}
+
+// Steps, naming what the job waited for when it times out.
+Value WaitSteps(const std::shared_ptr<WaitLog>& w, std::function<Value(int)> step, Clock::time_point deadline,
+                const std::atomic<bool>& cancel) {
+    try {
+        return Steps(std::move(step), deadline, cancel);
+    } catch (const Error& e) {
+        if (std::string_view(e.what()) != "timeout") throw;
+        std::string what, detail;
+        {
+            std::lock_guard lk(w->m);
+            what = w->what;
+            detail = w->detail;
+        }
+        if (what.empty()) throw;
+        SR2_WARN("[{}] {}: timed out waiting for {} ({})", kModule, w->cmd, what, detail);
+        throw Error(std::format("timeout waiting for {} ({})", what, detail));
+    }
+}
+
 int SlotArg(const Value& args, const char* cmd) {
     const Value& v = args["slot"];
     if (!v.isNumber() || v.asNumber() != std::floor(v.asNumber()))
@@ -332,6 +370,7 @@ struct LoadJob {
     game::SaveInfo target;
     std::vector<std::string> deleteFirst;
     unsigned long long since = 0;
+    std::shared_ptr<WaitLog> wait = std::make_shared<WaitLog>();
 };
 
 Value LoadStep(LoadJob& j, int) {
@@ -381,10 +420,10 @@ Value LoadStep(LoadJob& j, int) {
         case 1:  // the title screen, loaded and settled
             if (!game::AtTitle()) {
                 j.since = 0;
-                return at::Retry();
+                return Waiting(*j.wait, 1, "the title screen");
             }
             if (!j.since) j.since = now;
-            if (now - j.since < 1500) return at::Retry();
+            if (now - j.since < 1500) return Waiting(*j.wait, 1, "the title screen to settle");
             j.phase = 2;
             [[fallthrough]];
         case 2:
@@ -404,7 +443,7 @@ Value LoadStep(LoadJob& j, int) {
             j.since = now;
             return at::Retry();
         case 3:  // in game, then a second to settle
-            if (!game::InGame()) return at::Retry();
+            if (!game::InGame()) return Waiting(*j.wait, 3, "the game to load");
             j.phase = 4;
             j.since = now;
             return at::Retry();
@@ -1198,7 +1237,8 @@ Value Handle(const std::string& cmd, const Value& args, const std::atomic<bool>&
         }
         if (job->newGame && args["name"].isString())
             SR2_INFO("[{}] new_game: \"name\" is not applied (the game names new games itself)", kModule);
-        return Steps([job](int a) { return LoadStep(*job, a); }, deadline, cancel);
+        job->wait->cmd = cmd;
+        return WaitSteps(job->wait, [job](int a) { return LoadStep(*job, a); }, deadline, cancel);
     }
     if (cmd == "save") {
         return OnMain(
@@ -1221,10 +1261,14 @@ Value Handle(const std::string& cmd, const Value& args, const std::atomic<bool>&
     if (cmd == "quit_to_title") {
         auto since = std::make_shared<unsigned long long>(0);
         auto started = std::make_shared<bool>(false);
-        return Steps(
-            [since, started](int) -> Value {
+        auto wait = std::make_shared<WaitLog>();
+        wait->cmd = cmd;
+        return WaitSteps(
+            wait,
+            [since, started, wait](int) -> Value {
                 if (!*started) {
                     *started = true;
+                    if (game::AtTitle()) return State();  // already there (either main menu group): no reload
                     if (game::InGame()) {
                         SR2_INFO("[{}] quit_to_title (no save)", kModule);
                         game::QuitToTitle();
@@ -1233,10 +1277,10 @@ Value Handle(const std::string& cmd, const Value& args, const std::atomic<bool>&
                 }
                 if (!game::AtTitle()) {
                     *since = 0;
-                    return at::Retry();
+                    return Waiting(*wait, 0, "the title screen");
                 }
                 if (!*since) *since = GetTickCount64();
-                if (GetTickCount64() - *since < 1000) return at::Retry();
+                if (GetTickCount64() - *since < 1000) return Waiting(*wait, 0, "the title screen to settle");
                 return State();
             },
             deadline, cancel);

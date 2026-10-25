@@ -216,7 +216,10 @@ One `ResourceNodeDirector` per area owns many `ResourceNodeSpawner` points; on a
 - methods: `LoadSceneGroup(group)`; `get_Stopwatch` 0x8DC6B0 (lazy, one `MonomiPark.SlimeRancher.Stopwatch` per SceneLoader); `Stopwatch.Start/Stop` 0x99EF80 / 0x99F010 only resume/pause the wrapped System.Diagnostics.Stopwatch (disasm)
 - gotchas: the Player.log line `Scene Transition ... took N seconds` (from `SceneLoader+<>c__DisplayClass99_0.<EnqueueLoadSceneGroup>b__16` 0x8E3150) is **cumulative** load time since launch; one step's time = difference to the previous line (log confirms monotonic). The game's instance is `SystemContext.Instance.SceneLoader`.
 - typical loads (log): CompanyLogo ~0.73 s, StandaloneStart ~0.14 s, MainMenuFromBoot ~8.6-8.9 s (~88k objects), MainMenu -> ConservatoryFields ~9.4-9.6 s
-- mod: quick_start
+- scene group checks (decompiled): `IsCurrentSceneGroupMainMenu` 0x8DA890 = `_currentSceneGroup == _mainMenuSceneGroup` (+0xC8 / +0x38) only; `IsCurrentSceneGroupGameplay` 0x8DA800 = current group `_isGameplay && !_isEditor`; `IsCurrentSceneGroupDefault` 0x8DA760 = current == `_defaultGameplaySceneGroup` (+0x40)
+- gotcha: the menu after launch is group **MainMenuFromBoot** (`PlatformEngagementPrompt.SceneGroupToLoad` +0x38), not `_mainMenuSceneGroup` ("MainMenu", loaded by `LoadMainMenuSceneGroup` after a quit), so `IsCurrentSceneGroupMainMenu` is **false** on the boot menu. autotest's `AtTitle` also accepts a non-gameplay group whose `SceneGroup._sceneReferences` (AssetReference[], +0x28; `AssetReference.m_AssetGUID` +0x10) contain every scene of `_mainMenuSceneGroup`
+- `AutoSaveDirector.StartNewGame` 0x5D1A70 loads `SceneLoader._defaultGameplaySceneGroup` with its own SceneLoadingParameters; `BeginLoad` 0x5CDB50 only refuses while `IsSceneLoadInProgress` (logs "Attempted to begin load during loadingGame..."). Neither checks which menu group is current (decompiled)
+- mod: quick_start, autotest
 
 ### CutsceneDirector
 - methods: `SpawnIntroSequence()` 0xAC4290 - activates the registered `IntroSequenceUIRoot` (registers itself in Awake) and pushes it on UIDirector; only caller is `AutoSaveDirector.StartNewGame`'s load step `<>c.<StartNewGame>b__29_2` 0x5E4150; `ClearIntroSequenceUIRoot()` (disasm)

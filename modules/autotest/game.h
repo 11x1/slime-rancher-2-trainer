@@ -54,7 +54,7 @@ Il2CppObject* AutoSave();        // GameContext.AutoSaveDirector
 Il2CppObject* SceneLoader();     // SystemContext.SceneLoader
 Il2CppObject* PlayerObject();    // SceneContext.player (GameObject)
 bool Loading();                  // SceneLoader.IsSceneLoadInProgress
-bool AtTitle();                  // main menu scene group, not loading
+bool AtTitle();                  // a main menu scene group (after a quit, or the boot one), not loading
 bool InGame();                   // gameplay scene group, a GameModel and a player, not loading
 std::string SceneName();         // the current scene group's name
 bool Position(Il2CppObject* goOrComponent, Vec3f& out);
