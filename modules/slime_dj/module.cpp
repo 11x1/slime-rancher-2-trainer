@@ -2260,31 +2260,14 @@ private:
         if (LampSignature() != lampSig_ || lamps_.Placed()) SyncLamps();  // Placed: a lamp was just put down
     }
 
-    // Every frame: each channel's song position (read like TickDancer: kDanceLagSeconds behind).
+    // Every frame: each channel's song position (BeatChannels).
     void TickLamps(float dt) {
         if (!lamps_.Ready()) return;
         if (!cfg_.danceLamps || !AnySong()) {
             if (lamps_.Lamps()) lamps_.Clear();
             return;
         }
-        const bool gamePaused = GamePaused();
-        std::vector<dj::LampPulser::Channel> chs;
-        auto add = [&](const Channel& ch) {
-            if (!ch.cur) return;
-            const Current& c = *ch.cur;
-            dj::LampPulser::Channel x;
-            x.key = &ch;
-            x.track = c.stream ? &c.stream->beats() : nullptr;
-            x.gen = c.clipGen;
-            x.playing = c.started && c.rate && c.stream && !c.userPaused && !c.buffering && !gamePaused &&
-                        !(c.endFrame && c.playPos >= c.endFrame);
-            const uint64_t lag = static_cast<uint64_t>(kDanceLagSeconds * c.rate), pos = c.base + c.playPos;
-            x.frame = pos > lag ? pos - lag : 0;
-            chs.push_back(x);
-        };
-        add(global_);
-        for (const auto& r : radios_) add(*r);
-        lamps_.Tick(dt, chs);
+        lamps_.Tick(dt, BeatChannels());
     }
 
     // ------------------------------------------------------- plorts glow ----
@@ -2297,7 +2280,7 @@ private:
         plortSig_ = LampSignature();
         plorts_.Sync(src, cfg_.plortRange);
     }
-    // Each channel's song position, read like TickLamps (kDanceLagSeconds behind).
+    // Each channel's song position for the lamps and plorts (read like TickDancer: kDanceLagSeconds behind).
     std::vector<dj::LampPulser::Channel> BeatChannels() {
         const bool gamePaused = GamePaused();
         std::vector<dj::LampPulser::Channel> chs;
