@@ -68,6 +68,7 @@
 - mod: sb upgrades manager state, slot unlock (`SlotUnlockUpgrades`)
 
 ### PlayerUpgradeFabricatableItem
+- card picture (IDA, round 11): `get_Icon` / `get_SmallIcon` 0x67DED0 = `UpgradeDefinition._icon` (grid tile); `get_FullArtReference` 0x82B5D0 / `get_RequiresFullArt` 0x82B920 = `UpgradeDefinition.get_FullArtReference` 0x99A410 / `get_RequiresFullArt` = its `_pediaEntry`'s (virtual). A cloned UpgradeDefinition keeps the original's pedia entry, so the Fabricator details show the original's full art. `FabricatorItemDetails.SetItem` 0x8089B0 -> `UIImageDynamicLoader.SetFullArtSource(item)` 0x7B52A0 (event with the item's icon, then `TryAcquireCurrentHandle` loads the full art). Shadow Catcher: `_pediaEntry` = `PediaDirector.GetEntry(Shadow slime)` (an `IdentifiablePediaEntry`: `FullArtReference` / `RequiresFullArt` / `Icon` from its `_identifiableType`). mod: custom_upgrades vacpack_upgrades.cpp `ShadowPedia`
 - methods: `FabricateAndSpendCost` 0x82AFA0 - `SpendableDirector.Spend`, analytics, `IncrementUpgradeLevel`, `_eventProducer.RaiseEventForData(def)` (IDA)
 - methods: `get_ShouldShowPlaceholder` 0x82B940 (`get_IsMissingBlueprint` returns the same) - true while not bought (level < 0), `_requireComponentToBeVisibleToPlayer` set, and a level-0 `_costs.ComponentCosts` entry missing (`SpendableDirector.HasUpgradeComponent(c, 1)` false); `CheckCanFabricate` then returns MISSING_BLUEPRINT (IDA)
 - gotchas: "discovering" an upgrade = owning its level-0 upgrade component (treasure pod pickup); buying level 0 spends it

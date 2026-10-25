@@ -252,13 +252,20 @@ GadgetItem, Fabricator categories), re/save.md (GetPersistenceId, `_reverseIndex
   kit back and holds the variant; removed otherwise, the tick gives it back. Toggle on a placed one flips
   quantum <-> plain in place.
 - **Look** (tick): materials instanced, colours 60 % purple, emission cyan, tagged ` [sr2q]` (originals
-  back when plain). Holder `sr2qlink#<gen>`: a teleporter `_activeFX` clone (0.3 size, 1 m up) that
-  glitches every 3.5-8 s for ~0.5 s (`QuantumLink::Frame`); the cloud-withdraw FX pulses every ~7 s and at
-  every take. Icon: a purple copy of the Refinery Link sprite (`TintedSprite`) in `icon` and
-  `quantum::SourceIcon()`.
-- **Use**: HUD notices (what it is, then the five largest cloud amounts or "The Quantum Cloud is empty";
-  `QueueText`, 1.5 s cooldown) instead of the refinery screen (fallback without a HUD list). Still a
-  refinery input. Log `Use component '<class>' on '<object>'`; `- not hooked` = Use stays vanilla.
+  back when plain). Holder `sr2qlink#<gen>`: a teleporter `_activeFX` clone (0.22 size, 1 m up; its child
+  particle systems in Local scaling mode get the factor on their own transforms, `ScaleParticles`) that
+  jitters in place and size every 3.5-8 s for ~0.5 s and never switches off (`QuantumLink::Frame`; round 11:
+  the old drop-out restarted the particles, "disappears in like 6-7s intervals"); the cloud-withdraw FX pulses
+  every ~7 s and at every take. Icon: a purple copy of the Refinery Link sprite (`TintedSprite`) in `icon`;
+  `quantum::SourceIcon()` = the same on a square canvas (round 11: the drone source icon "is wider than
+  normally").
+- **Use** (the link's `ScienceUIDisplayActivator`, a UIDisplayInteractable): opens the game's Quantum Cloud
+  menu, the drone station menu without a station (`OpenCloudMenu` / `CloudFrame`, RE: re/drones.md "Drone
+  station menu"): view only (no withdraw / send: those need a station), programming tab removed by the game,
+  the Quantum Cloud tab selected. Fallback (menu members missing, display not found): HUD notices (what it
+  is, the five largest cloud amounts; `QueueText`, 1.5 s cooldown). Still a refinery input. Logs `Quantum
+  Cloud menu = the drone station menu '<name>'`, `Quantum Cloud menu open (cloud tab N; view only, no
+  station)`, `did not open within 10 s`.
 - **Drone source** (`0x53520110`, after Silo, every target, while a link with a drone port is built):
   `GetSources` returns hidden storages (`sr2qstore`: `SiloStorage`, 8 slots, no type group, 999 each,
   own `AmmoModel`, active in hierarchy); catcher = the link's own `SiloCatcher`. Accepted cloud types
@@ -272,7 +279,8 @@ GadgetItem, Fabricator categories), re/save.md (GetPersistenceId, `_reverseIndex
 
 ## Mod gadget looks
 
-`gadget_look.h` (owns four hooks, above). RE: re/fabricator.md (GadgetDefinition, GetTargetGadgetInfo,
+`gadget_look.h` (owns four hooks, above). `TintedSprite` keeps a trimmed atlas sprite's full rect (its pixels
+at `textureRectOffset`) and can pad to a square (RE: re/unity.md "From round 11"). RE: re/fabricator.md (GadgetDefinition, GetTargetGadgetInfo,
 SetHeldGadget, FabricatorItemDetails). `Register(def, Look{name, description, icon, dressPreview})`: own
 description on the card (vanilla walks `VariantOf` to the root), our name as the gadget-mode label while
 held and, via `AddPlacedLabel` providers, when aiming at a listed placed gadget; `dressPreview` runs on the
@@ -286,7 +294,7 @@ Link's Setup); songs through `slime_dj/api.h` emitters. RE: re/fabricator.md (de
 ToggleVariant, stacking), re/audio.md (GadgetMusicPlayer, corral Music Box), re/slimes.md (SlimeAttachPoint).
 
 - **DJ Booth** = Scientist Desk variant. Faces +z, DJ behind (-z). Clutter and its sound off; a boombox
-  face up in the middle (deck); two small ones on the front corners (x +-0.8, z 0.3, 0.4 size); two big
+  upright in the middle facing the audience (round 11: the old face-up "deck" was "looking up"); two small ones on the front corners (x +-0.8, z 0.3, 0.4 size); two big
   ones on the floor at x +-1.75 (emitters, kind Booth); behind (z -1.8) the Boombox's bench with the
   Flower Pillow's mesh, colliders and `SlimeAttachmentPoint` with its scripts (largos: `_allowLargo` before
   Awake, trigger 1.5x). Other clones script-free. E: a `GadgetMusicPlayer` then a `GadgetUIInteractable`
@@ -316,8 +324,19 @@ ToggleVariant, stacking), re/audio.md (GadgetMusicPlayer, corral Music Box), re/
   the vacuum resets it); emitter kind Radio (0.6x range, 80 %), plays whenever a song plays. A radio that
   leaves the world raises `dj.radios_away` (max 20); the next Night Light appearing within 6 m of the
   camera is a radio again (logged). Failed spawns go to `dj.radios_owed` (up to 5 per tick later).
+  Round 11: the box gets a grippy, non-bouncy `PhysicsMaterial` (friction 0.9 / 1.0, Maximum combine) and
+  linear damping >= 0.6 ("slides so much"); while `Vacuumable._held` (read every frame, `DjBuildables::Frame`)
+  rotation X / Z are free and the tick does not re-freeze them; let go, it is stood up and frozen again (the
+  frozen axes fought the vacuum's lock joint and threw the radio away: "disappears after vaccing for 1-2
+  secs"). Logs `Slime Radio actor N held in the vacuum (rotation free)` / `let go (upright)`; the dressed line
+  ends with `grip yes, hold watch yes`. Hitboxes can be checked with debug_tools' Show entity hitboxes.
 - **Fabricator** (Decorations): booth after the Scientist Desk (Newbucks x2.5, items x2), stack after the
-  Boombox (x1.5), radio after the stack (x0.5), Newbucks rounded to 5. Booth / stack: vanilla decoration +
+  Boombox (x1.5), radio after the stack (x0.5), Newbucks rounded to 5. Card icons (tile + details):
+  `assets/icons/dj_booth.png` / `dj_speaker.png` / `slime_radio.png` when the user has drawn them, else the
+  base's vanilla icon recoloured (booth pink, stack orange, radio cyan; log `<label> card icon = ...`).
+- **Dressed at once**: placing (AfterPlace) and the toggle on a placed one (ChangeVariant) build the record
+  right away (`DressNow`); the tick keeps it (round 11: "have to wait a second for it to be the correct
+  model"). Booth / stack: vanilla decoration +
   one kit (`dj.booth_kits` / `dj.speaker_kits`); placing uses a kit (none: plain, logged), pick-up gives it
   back, removed otherwise the tick gives it back.
 - **Gadget mode**: booth and stack registered with gadget_look; `dressPreview` builds the dressed look
@@ -540,7 +559,9 @@ Card in `vacpack_upgrades.cpp` (`kShadowCatcher`), effect in `shadow_catcher.cpp
 
 - **Card**: like the Battery Saver (value `custom_upgrades.vacpack.shadow_catcher`), always shown. 40,000
   + Tank Booster VII's items with the 70 Hyper plorts swapped for 25 Shadow plorts once the Shadow slime is
-  found; Shadow icon; description ends with the sunlight warning.
+  found; Shadow icon; description ends with the sunlight warning. Details picture: the Shadow slime's pedia
+  entry (`_pediaEntry`; the clone kept Tank Booster's, whose full art showed: round 11; RE: re/upgrades.md
+  "PlayerUpgradeFabricatableItem"); log `Shadow Catcher card picture = the Shadow slime's pedia entry`.
 - **Owned flag**: the vacpack tick publishes `shadow::SetOwned` and the regular slot definitions (AmmoSlot1's
   type group: six vanilla + Extra Tank III / IV) every second.
 - **Vac**: `IsAllowed`: Shadow on a published slot -> true (never water, silos, drones, feeders).

@@ -15,3 +15,12 @@ What the module does: a main-thread frame callback, polled every 0.5 s. Option o
 Cost: the component's `OnGUI` loops over all tracked texts every repaint; fine for a developer view, not something to leave on.
 
 Not seen in game: the look of the labels (IMGUI default font, drawn over the game UI), whether `FindObjectsOfType(true)` on enable causes a visible hitch in a big scene, and texts created after the overlay was turned on that never change their text (only the change event registers them).
+
+## Entity hitboxes (`hitboxes`, default off; `hitbox_range` 2-40 m, default 12; `hitbox_triggers`, default off)
+
+`hitboxes.cpp` (round 11: "a debug option to show entity hitboxes"). Wireframes of the colliders of entities near the camera, drawn by the overlay through `ui/hud.h` line segments (clipped at the near plane), hidden while the settings window is open.
+
+- Every 0.5 s: `Physics.OverlapSphere(camera, range, all layers, triggers per option)`; kept: enabled colliders with an `Identifiable` in their parents (slimes, toys, food, plorts, gadgets, the mod's buildables) whose bounds do not hold the camera (the player), nearest 160, GC handles; shape read once.
+- Every frame: `Transform.localToWorldMatrix` per collider; boxes (12 edges), spheres (three circles, radius x the largest axis scale like Unity), capsules (rings, sides, cap arcs), anything else (mesh colliders) its world AABB. Green = solid, yellow = trigger, blue = AABB.
+- No hooks. Log `hitboxes: showing N entity collider(s) within R m` once per switch-on.
+- Not seen in game: frame cost with many slimes near (about 2 game calls per collider per frame), capsule directions on scaled objects.
