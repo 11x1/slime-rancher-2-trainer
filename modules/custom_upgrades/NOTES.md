@@ -12,6 +12,7 @@ per-system `re/*.md` files linked below. Each `.cpp` header comment has the file
 | `api.h` | for other modules: `Owns`, `Multiplier`, `CanSell` / `Remove`, `ChainSellTarget`, per-plot / per-save values, `PlotKey`, `HiddenMenuItem`, `IsModGadget` |
 | `coop_world.cpp` | Coop Air Net, Hen Collector (clone, vacuum, Activate, ranch drone linking) |
 | `feeder_lock.cpp` | Auto-Feeder "Leave last food item in" (two SlimeFeeder + five SiloStorage hooks, kept feeder table) |
+| `feeder_lights.cpp` | Auto-Feeder fill lights (port LEDs red / yellow / green by fill, property blocks, no hooks) |
 | `plot_menu_slider.cpp` | reusable uGUI slider for the plot menu details panel (also used by drone_price_limit) |
 | `silo_world.cpp`, `silo_receipt.cpp`, `sale_notify.cpp` | Sell-All world button (and the Corral Radio button: same class, `ButtonLook`), receipt dialog, HUD notices |
 | `plot_props.cpp` | decorative props for owned tiers |
@@ -282,6 +283,31 @@ user said "No no no no no, it should be just a toggle, 'Leave last food item in'
   storage, go straight to the originals (one atomic load while no feeder keeps one).
 - Module off / load / fault: `Cleanup` empties the table (vanilla feeders); the next tick rebuilds it from the
   loaded save's sidecar.
+- Round 16 bug (r16fl1 / r16fl6, "i dont see the 'locking' checkbox"): Setup looked `LandPlotModel` up in
+  the global namespace; it is `MonomiPark.SlimeRancher.DataModel.LandPlotModel`, so the whole feature was off
+  (`auto-feeder 'leave last food item in' unavailable (class 'LandPlotModel' not found ...)`) and the switch
+  never showed. Fixed in round 17; the other names (SlimeFeeder, SiloStorage, Identifiable: global;
+  UnityEngine.Component) were right.
+
+## Auto-Feeder fill lights (round 17)
+
+User (r16fl6): "for the feeder models ingame, color them red -> yellow -> green based on how full the are
+(the smaller lights besides the button that are green)". `feeder_lights.cpp`; RE: re/plots.md "SlimeFeeder"
+(prefab).
+- The lights: the LED arrows of the feeder's two depositor ports (input port beside the speed button,
+  output port at the distributor), material `TechDepositor_ArrowsLed`, green from `_EmissionGlowHigh` /
+  `_EmissionGlowLow`. Every MeshRenderer under the feeder's SiloStorage object whose material has both
+  properties gets a MaterialPropertyBlock with the two colours (GetPropertyBlock first, so the game's own
+  block entries stay). The port Animator animates other properties of that renderer, never these two.
+- Colour: fill = `SiloStorage.GetSlotCount(0) / GetSlotMaxCount(0)` in 20 steps; empty red (1, 0.04, 0),
+  half yellow (1, 0.85, 0), full vanilla green (0.368, 1, 0); any food at all is at least one step above
+  empty. Low = High * 0.6 + 0.15 (vanilla's softer tone). A block is written only when the step changes.
+- Finding feeders: `Resources.FindObjectsOfTypeAll(SlimeFeeder)` every 10 s (at once after a load or when a
+  cached one died): alive, active in hierarchy (bought) and `_storage` set. So a newly bought feeder turns
+  coloured within ~10 s. World tick part 13 (~1 Hz) reads the fills.
+- Setting `FeederFillLights` (group Corrals, default on). Off / module off: the material's own colours go
+  back into the block; load: the cache is dropped (its scene goes).
+- Logs: `auto-feeder fill lights: N feeder(s) (a new, b gone)`; debug: first tint per feeder.
 
 ## Drone sources Hen Collector / Elder Collector
 
