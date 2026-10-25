@@ -38,20 +38,19 @@ std::vector<Category> Spec() {
     upgrades.title = "Upgrades";
     upgrades.kind = TabKind::Cards;
     upgrades.columns = {{"custom_upgrades"}};
+    // Round 13: "move to 2 segments 'Plot upgrades' and 'Refinery upgrades', whis way we can remove thew
+    // subheadings". Sell Upgrades is a row of the Plot upgrades section, no heading of its own.
     CardSection plot;
     plot.title = "Plot upgrades";
-    plot.modules = {"plot_upgrades"};
-    plot.needCard = {"plot_upgrades"};  // its tiers exist only while Custom Upgrades is on
-    CardSection sell;
-    sell.title = "Sell upgrades";
-    sell.modules = {"sell_upgrades"};  // works on the game's own plot upgrades too
+    plot.modules = {"plot_upgrades", "sell_upgrades"};  // sell: works on the game's own plot upgrades too
+    plot.needCard = {"plot_upgrades"};                  // its tiers exist only while Custom Upgrades is on
     CardSection refinery;
     refinery.title = "Refinery upgrades";
     // Generic on purpose: the list of Fabricator upgrades grows (round 12 G: drone programs).
     refinery.note = "The vacpack and drone upgrades Custom Upgrades adds to the Fabricator.";
     refinery.groups = {"Vacpack"};             // the Extra Tank III / IV slot keys
     refinery.modules = {"drone_price_limit"};  // the drone station menu: price limit, Programs
-    upgrades.sections["custom_upgrades"] = {plot, sell, refinery};
+    upgrades.sections["custom_upgrades"] = {plot, refinery};
     upgrades.switchLabel = {
         {"plot_upgrades", "Tier effects"},
         {"sell_upgrades", "Sell back for half price"},

@@ -81,6 +81,7 @@ constexpr uint64_t kAllIdleWaitMs = 20000;  // every program was idle in a row: 
 constexpr int kIdleTicks = 2;              // ~1 s ticks resting with empty hands = nothing to do
 constexpr uint64_t kMenuPauseMs = 2000;    // the station menu was open this recently: no switching
 constexpr uint64_t kLogEveryMs = 30000;    // one switch line per station per 30 s at most
+constexpr uint64_t kIncinRescanMs = 300000;  // FindObjectsOfTypeAll(Incinerate) for the idle line: 5 min at most
 
 template <class T>
 T Unbox(Il2CppObject* boxed, T def = T{}) {
@@ -120,6 +121,10 @@ struct Impl {
     Il2CppClass* droneClass = nullptr, *restClass = nullptr, *idleClass = nullptr, *identClass = nullptr;
     Il2CppClass* incinerateClass = nullptr;      // optional (idle explanation only)
     const MethodInfo* ashSpace = nullptr;        // Incinerate.GetAshSpace(), optional
+    // The scene's incinerators for the idle line, from one scan kept as GC handles (round 13: the scan per
+    // idle line cost ~20 ms a frame; rescanned at most every kIncinRescanMs, when one went or none was found).
+    std::vector<Il2CppGCHandle> incinerators;
+    uint64_t incinScanMs = 0;  // 0: never scanned
     size_t offPlexer = 0, offAmmo = 0, offCurrBehaviour = 0, offProgramPlexer = 0;
     const MethodInfo* ammoIsEmpty = nullptr, *droneEnergy = nullptr, *maybeHasGather = nullptr;
     std::unordered_map<Il2CppClass*, const MethodInfo*> stateStr;  // GetProgramStateStr per behaviour class
@@ -409,14 +414,35 @@ std::string Impl::BehaviourInfo(Il2CppObject* beh) {
 }
 
 // Why a program has nothing to do, for the first idle switch of a program (rare: at most once per program
-// until the drone holds cargo again, so the scene scan for incinerators is fine here).
+// until the drone holds cargo again; but a resting drone's program logs that again after each cargo, ~every
+// 1.5 min in round 12). The incinerators come from a cached scan (Impl::incinerators).
 std::string Impl::IdleReason(const ProgramData& p) {
     constexpr int kSinkIncinerator = 4;  // DroneTaskSinkType.INCINERATOR
     if (p.sink != kSinkIncinerator || !incinerateClass || !ashSpace)
         return "the game finds nothing to gather that the destination has room for";
+    std::vector<Il2CppObject*> live;
+    bool gone = false;
+    for (Il2CppGCHandle h : incinerators) {
+        Il2CppObject* inc = unity::GCHandleTarget(h);
+        if (inc && unity::IsAlive(inc)) live.push_back(inc);
+        else gone = true;
+    }
+    const uint64_t now = NowMs();
+    if (!incinScanMs || ((gone || live.empty()) && now - incinScanMs >= kIncinRescanMs)) {
+        incinScanMs = now;
+        for (Il2CppGCHandle h : incinerators) unity::FreeGCHandle(h);
+        incinerators.clear();
+        live.clear();
+        for (Il2CppObject* inc : unity::FindObjectsOfTypeAll(incinerateClass)) {
+            if (!unity::IsAlive(inc) || !unity::ActiveInHierarchy(unity::GameObjectOf(inc))) continue;  // prefabs
+            if (Il2CppGCHandle h = unity::NewGCHandle(inc)) incinerators.push_back(h);
+            live.push_back(inc);
+            if (live.size() >= 64) break;
+        }
+    }
     int total = 0, room = 0;
-    for (Il2CppObject* inc : unity::FindObjectsOfTypeAll(incinerateClass)) {
-        if (!unity::IsAlive(inc) || !unity::ActiveInHierarchy(unity::GameObjectOf(inc))) continue;  // prefabs
+    for (Il2CppObject* inc : live) {
+        if (!unity::ActiveInHierarchy(unity::GameObjectOf(inc))) continue;
         ++total;
         bool ok = false;
         const int space = Unbox<int>(Call(ashSpace, inc, {}, "Incinerate.GetAshSpace", &ok));
