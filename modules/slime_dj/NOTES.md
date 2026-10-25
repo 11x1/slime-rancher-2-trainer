@@ -60,7 +60,8 @@ the ranch). The module keeps GC handles to known upgraders (`ups_`, max 256), an
 (`SetParent(…, false)`) to the box's first `SECTR_AudioSource` or the box itself. All speakers play the
 same clip, started together, so walking between corrals never restarts or doubles the song. A box that
 appears later joins at the clock's `timeSamples`; a speaker whose box is gone is destroyed. If every
-speaker of a channel goes (you leave the ranch), the song pauses and resumes when one is back.
+speaker of the global queue goes (you leave the ranch), its song pauses and resumes when one is back. A
+Corral Radio plays on in silence instead (round 13, see "Real radio" under Channels).
 - *Clock* (`Master()`): the first live speaker that `isPlaying` (or is paused with the others). A new
   clock continues the play head from the old one's position.
 - *Drift check* (every box scan): each speaker's `timeSamples` vs the clock's; more than 30 ms off on two
@@ -114,7 +115,7 @@ under `SECTR_AudioSystem.MasterBus` (system found with `FindFirstObjectByType`, 
 logged); its `EffectiveVolume` follows the game's music slider, 0 while muted. No music bus -> master bus.
 
 **Pause.** Speakers pause while the vanilla cue's bus reports `Paused` (pause menu), while you pause,
-while buffering, and while the channel has no speaker.
+while buffering, and (global queue only) while the channel has no speaker.
 
 **Vanilla tune (`mute_vanilla`, default on).** While a song is loaded and not paused by you, every
 `SECTR_AudioSource` under the box gets `Volume = 0` (old value restored) and a plain `AudioSource` under it
@@ -196,28 +197,47 @@ that changes channel stops, drops its clip and joins the other channel at its cl
   when the radio appears, written after every change and song change, saved with the next game save.
 - *Slots* (`AllocateSlots`): at most `kMaxRadioStreams` = 4 radios decode at once (global not counted). A
   radio keeps its slot while on, non-empty and loaded; free slots go to the nearest waiting radios. A radio
-  with a slot and no song resumes at its last entry (from the song's start). Waiting radios show "Waiting:
-  4 radios play already". Nothing starts before the music folder has been read.
+  with a slot and no song resumes at its last entry (from the song's start, unless it has an Air record,
+  below). Waiting radios show "Waiting: 4 radios play already". Nothing starts before the music folder has
+  been read.
+- *Real radio* (round 13, user: "buying radio II plays the selected music from the start not where it
+  continued, so in theory its not really a radio if it doesnt play when no output...?"). Two parts:
+  - Channel loaded, no speaker playing it (no box near, all switched off or silent): `TickSong` runs a
+    silent play head (`playPos += dt x rate`, fraction in `Current::virt`) while not paused by the game,
+    not buffering; `Fill` keeps the ring ahead of it, a song with nobody to play it starts on its own and
+    the next entry follows at its end. A speaker that comes (back) joins at `playPos % ring`, mid-song.
+    The global queue still pauses without speakers (it is the player, not a radio).
+  - Channel gone (Music Box sold, zone unloaded, radio sold): `DropRadio` keeps an `Air` record per plot
+    key (entry file + index, playlist hash, seconds into the song, `radioTime_` = unpaused play time of
+    the module, max 64 records). When the channel comes back (`SyncRadios`; the record is used only if the
+    radio is on and the playlist is unchanged), `NextRadioSong(resume)` -> `CatchUp` plays the time gone by
+    through the playlist (library lengths; whole rounds skipped without shuffle; shuffle picks as it would
+    have) and `StartSong(ch, id, startAt)` starts the decoder there (as a seek: `Current::base`). Logged:
+    `radio '...' back on air after N s: entry K at S s`, `radio '...' playing '...' (...) from S s (it played
+    on without a speaker)`. In memory only: after a game load a radio without a channel starts its stored
+    entry from the beginning when it gets one (it never was on air).
 - *Order*: next entry, wrapping; radio shuffle -> a random other entry. Missing / unplayable files are
   skipped; none playable or three failures in a row -> the radio switches off.
 - *After a load*: with custom upgrades on, an Apply record triggers one probe scan even while idle, so a
   radio left on in the save starts.
 - Not per radio: `SongPlaying` / `SongName` follow the global song only. Walls dance per channel (round 12).
 
-### Corral Radio menu (rounds 11-12, `radio_menu.cpp`)
+### Corral Radio menu (rounds 11-13, `radio_menu.cpp`)
 
 User: "Add a button in the last empty corner (color it blue; like you did for silo's button) and let the
 button open a menu to build a queue from". custom_upgrades builds the button (a second `SiloButtons` with
 `RadioButtonLook`: clone of the corral Plort Collector button, blue, on every corral that owns the Corral
 Radio, at the free (+x, -z) corner; see `modules/custom_upgrades/NOTES.md`). Its press calls `api.h
 OpenRadioMenu(plot, &why)`: it only records the plot key (`RequestMenu`; refused with a reason when Slime
-DJ is off, the menu unavailable or already open; custom_upgrades shows the reason above the button). The
-next tick counts as active (box scan now, so the radio channel exists), then opens the menu.
+DJ is off, the menu unavailable or already open; custom_upgrades shows the reason as a game notification,
+round 13 without parentheses: "Slime DJ is off, turn it on in the overlay under Ranch > Slime DJ"). The
+request keeps a GC handle of the plot (`menuPlot_`). The next tick counts as active (box scan now, so the
+radio channel exists), then opens the menu.
 
 - *Look*: a runtime uGUI panel like custom_upgrades' Sell-All receipt (same palette, SDF shapes, the HUD's
   TMP font, overlay Canvas 1920 x 1080 + UIInputLocker: game paused, cursor free). Title with the header
-  buttons Radio on/off, Shuffle, Clear (press twice) on its right, corral name, status line, two virtual
-  lists (Songs sorted by name; the playlist numbered, the playing entry pink with `>`), a feedback line.
+  buttons Radio on/off, Shuffle, Clear (press twice) on its right, corral name (+ warning pill), two virtual
+  lists (Songs sorted by name; the playlist numbered, the playing entry teal with `>`), a feedback line.
   5..11 rows per list (canvas height); only changed texts / colours are written.
 - *Round 12* (user: "the playlist could use more slime ranchification, we dont need keybinds when we put
   the list items as slime rancher's buttons (or design similiar to it, like Silo's sell all hud), what way
@@ -229,15 +249,33 @@ next tick counts as active (box scan now, so the radio channel exists), then ope
   rotated SDF bars, letters without `Transform.set_localRotation`). The header buttons are clones of the
   popup's Cancel button (as the receipt's; `Icon Background` key glyph hidden, LayoutManager, x0.72; the
   key focus colours the label pink), own pills if the clone fails. No key hint bar, no Done / Play / Up /
-  Down / Remove buttons. The clone code is a self-contained copy of the receipt's (`GameButton`,
-  `GameClicked`) for a later shared helper.
+  Down / Remove buttons.
+- *Round 13*:
+  - Header buttons through the shared `modules/common/game_button` (user: "Use game's button for the
+    overlay please, they have support to show what icon to press to activate the button"): key caps R
+    (Radio), F (Shuffle), C (Clear, new key), x0.72, min label width 150, key focus = the helper's teal
+    `SetSelected`, disabled = the game's grey (`SetInteractable`). The menu's own clone copy is gone; the
+    rows take the helper's colours (`kPink` / `kDeepBlue`, white label) when it resolves.
+  - Playing entry (user: "Currently playing (not hovered) song in the queue text is the same color as
+    background ... move the '>' outside before the row currently playing"): pink label on the pink row
+    before; now the row is the game's selected teal (`gbn::kTeal`) with a white label, and a pink `>` sits
+    in the list's left margin before it (hover still wins). The kept selection (cursor in the playlist
+    while the songs list has focus) is light blue with a navy label (white was unreadable on it).
+  - No status line (user: "Remove the top status row 'Now playing: ... (paused while this menu is open)'
+    text please"): `MenuState::warning` instead, an orange pill right of the corral name, shown only when
+    the radio can't play: no Music Box (`LandPlot.HasUpgrade(MUSIC_BOX)` false), no channel after 3 s for
+    another reason, or waiting for a decoder slot. The lists moved up by the freed row.
+  - No Music Box (user: "no speaker upgrade shows the queue as empty in radio dialog, make it grayed out
+    with an error warning on top of the dialog"): without a channel the menu reads the stored playlist from
+    the plot's sidecar value (`LoadRadio` into a temporary channel) and shows it greyed (the game's
+    disabled grey, no hover, no row buttons), header buttons disabled, a song click shows the warning.
 - *Input*: polled (InputSystem devices, Toggle clicks, the clones' `Selectable.IsPressed` + pointer inside),
   0.3 s grace; hover from `Selectable.get_isPointerInside` (the list box, then its rows, then the hovered
   entry's small buttons: about 16 calls per frame). The keys of round 11 still work, unprinted (see the
   `radio_menu.h` header).
 - *Edits* go through `HandleRadio` (the tab's requests), so the sidecar is written and playback reacts the
   same way; the menu's state refreshes every 0.25 s and after each action.
-- While open the game is paused, so the speakers pause too (status says so); the radio plays after Done.
+- While open the game is paused, so the speakers pause too; the radio plays on after the menu closes.
 - No search box (a TMP input field was not attempted); Page Up / Down (pad LT / RT), Home / End and the
   wheel move through long lists.
 - Closed on Esc / pad B / backdrop click (no Done button since round 12), module off, and before a fault
@@ -396,11 +434,11 @@ All prefixed `slime_dj:`; grep for these when reading `sr2mods.log`:
   brightness 5.00, '…' core (8.2, 4.5, 2.7), …` (first 8), `lamps pulse at N lamp(s) (M loaded lamp(s), S
   playing speaker(s), range R m)` (on a change), `lamps pulse stopped; lamps restored`, `'Lamps pulse to the
   music' unavailable (…)`
-- radio menu: `radio menu ready[; NOT available: ...]`, `radio menu for 'Corral NNNN' (plot '...')[: its radio is not
-  found yet (scanning)]`, `radio menu opened (N rows per list, M song(s), font ..., header buttons cloned from the
-  game's popup|own pills, rows in the game button's colours|in the menu palette)` (first), `radio menu rows in the
-  game button's colours: normal (...) ..., mouse-over (...), label (...)` (once), `radio menu: game button not cloned
-  (...) - own buttons`, `radio menu closed (why)`, `radio menu not opened: ...`
+- radio menu: `radio menu ready[; NOT available: ...]`, `radio menu: game buttons not available (...)`, `radio menu
+  for 'Corral NNNN' (plot '...')[: no radio channel (no Music Box|corral not found yet)]`, `radio menu opened (N rows
+  per list, M song(s), font ..., header buttons the game's popup button (game_button)|own pills, rows in the game
+  button's colours|in the menu palette)` (first), `radio menu: game button not cloned (...) - own buttons`, `radio
+  menu closed (why)`, `radio menu not opened: ...`
 - corrals / muffle / radio: `N corral(s) with a music box, M with High Walls / Air Net …`, `'Muffle behind High
   Walls' unavailable (…)`, `AudioLowPassFilter could not be added; …`, `Corral Radio unavailable (…)`,
   `radio 'Corral NNNN' (plot '…'): N song(s) in its playlist, on|off[, shuffle]`, `radio '…' playing|switched

@@ -11,6 +11,9 @@
 //
 // Round 12: every list row is a button in the game's button colours, the header buttons (Radio, Shuffle,
 // Clear) are clones of the game's popup button; no key hint bar, no action button row.
+// Round 13: the header buttons come from the shared modules/common/game_button (with their key glyphs R,
+// F, C); no status line (only a warning pill when the radio can't play); the playing entry is teal with a
+// '>' marker left of its row; without a channel (no Music Box) the playlist is shown greyed.
 //
 // Input (polled from the InputSystem devices, nothing hooked; ignored for the first 0.3 s):
 //   Mouse (the main way): hovering a row lights it (the cursor follows the mouse); a click on a song adds
@@ -20,7 +23,7 @@
 //   left stick) move in a list (up past the top: the header), Left / Right (A / D) switch list or button,
 //   Tab cycles the areas, Page Up / Down (pad LT / RT), Home / End. Enter / Space / pad A: add the song,
 //   play the entry, press the button. Delete / Backspace / pad X remove the entry, Shift + Up / Down
-//   (pad LB / RB) move it. R / pad Y radio on / off, F shuffle. Esc / pad B close.
+//   (pad LB / RB) move it. R / pad Y radio on / off, F shuffle, C clear (twice). Esc / pad B close.
 //   Clicks are polled from UnityEngine.UI.Toggle components (no managed delegates); the cloned game
 //   buttons from their Button (IsPressed last frame, released with the pointer inside).
 //
@@ -56,11 +59,11 @@ struct MenuEntry {
 // What the menu shows of the radio (refreshed by the module; only changes are redrawn).
 struct MenuState {
     std::string title;               // "Corral Radio - Corral 2419"
-    std::vector<MenuEntry> playlist;
+    std::vector<MenuEntry> playlist;  // without a channel: the stored playlist (shown greyed)
     int playing = -1;                // entry playing / played last (-1 = none)
     bool on = false, shuffle = false;
-    bool available = true;           // the radio channel exists (false: "tuning in", edits refused)
-    std::string status;              // one line: now playing / waiting / why not available
+    bool available = true;           // the radio channel exists (false: no Music Box / tuning in; greyed, edits refused)
+    std::string warning;             // "" = none; else why the radio can't play (a pill at the top)
     bool operator==(const MenuState&) const = default;
 };
 

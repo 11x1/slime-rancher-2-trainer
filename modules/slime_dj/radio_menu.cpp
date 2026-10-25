@@ -3,22 +3,23 @@
 // Layout (CanvasScaler reference 1920 x 1080, the panel centred, 1400 wide), round 12 ("the playlist could
 // use more slime ranchification, we dont need keybinds when we put the list items as slime rancher's
 // buttons ... remove the bottom hint, DONE PLAY UP DOWN REMOVE buttons"):
-//   title "Corral Radio"                                   [Radio: on] [Shuffle: off] [Clear]
-//   the corral's name, one status line (now playing / off / waiting)
+//   title "Corral Radio"                            [R Radio: on] [F Shuffle: off] [C Clear]
+//   the corral's name                 [ warning pill, only when the radio can't play ]
 //   Songs (N)            1-11 of N        Playlist (M)          1-11 of M
-//   [ song buttons, virtual ] |scroll|    [ entry buttons  (^) (v) (x) ] |scroll|
+//   [ song buttons, virtual ] |scroll|  > [ entry buttons  (^) (v) (x) ] |scroll|
 //   feedback note (green / orange, a few seconds)
 // No key hint bar and no action button row: every list row is a button in the game's button colours
-// (read from the game's popup button, see GameStyle), a song row adds the song, a playlist row plays that
-// entry, and each playlist row has its own small move up / move down / remove buttons. The header
-// buttons are clones of the game's popup button (the silo Sell-All receipt's Cancel button, key glyph
-// hidden); our own SDF pills if that fails. The keyboard / pad keys of round 11 still work (see
-// radio_menu.h), they are just not printed any more. The row count follows the canvas height (as the
-// receipt): 5..11 rows of 44 px.
+// (game_button.h: pink, DeepBlue on hover, white label), a song row adds the song, a playlist row plays
+// that entry, and each playlist row has its own small move up / move down / remove buttons. The playing
+// entry is teal with a pink '>' left of its row. The header buttons are the game's popup button through
+// the shared modules/common/game_button (round 13: "Use game's button ... they have support to show what
+// icon to press"), with their key caps R / F / C; our own SDF pills if that fails. Round 13 also dropped
+// the status line ("Remove the top status row 'Now playing: ...'"): only a warning shows, when the radio
+// can't play (no Music Box: the stored playlist greyed, not empty). Other keys of round 11 still work
+// unprinted (radio_menu.h). The row count follows the canvas height (as the receipt): 5..11 rows of 44 px.
 // The parts are the receipt's (custom_upgrades silo_receipt.cpp: SDF shapes with the game's menu palette,
 // TMP texts with the HUD's font, Toggles as pollable click targets, UIInputLocker); the helpers are
-// repeated here because they are private to that file. The game-button clone (GameButton / GameClicked)
-// is self-contained so it can move to a shared helper later.
+// repeated here because they are private to that file.
 
 #include "modules/slime_dj/radio_menu.h"
 
@@ -37,11 +38,13 @@
 #include "core/module.h"
 #include "core/resolver.h"
 #include "core/unity.h"
+#include "modules/common/game_button.h"
 
 namespace sr2::modules::slime_dj {
 namespace {
 
 namespace unity = sr2::core::unity;
+namespace gbn = sr2::modules::game_button;
 namespace main_thread = sr2::core::main_thread;
 using sr2::il2cpp::api;
 using sr2::il2cpp::Resolver;
@@ -78,6 +81,8 @@ constexpr Color kSelected{0.80f, 0.86f, 0.96f, 1.0f};  // the playlist entry sel
 constexpr Color kTeal{0.063f, 0.675f, 0.757f, 1.0f};
 constexpr Color kPink{0.871f, 0.310f, 0.522f, 1.0f};
 constexpr Color kGrey{0.78f, 0.80f, 0.84f, 1.0f};
+constexpr Color kGreyRow{gbn::kGrey.r, gbn::kGrey.g, gbn::kGrey.b, 1.0f};  // the game's disabled button grey
+constexpr Color kPlaying{gbn::kTeal.r, gbn::kTeal.g, gbn::kTeal.b, 1.0f};  // the playing entry's row
 constexpr Color kGreen{0.20f, 0.62f, 0.33f, 1.0f};
 constexpr Color kOrange{0.90f, 0.45f, 0.12f, 1.0f};
 constexpr Color kClear{0.0f, 0.0f, 0.0f, 0.0f};
@@ -92,12 +97,14 @@ constexpr int kMaxRows = 11, kMinRows = 5;
 constexpr float kRowW = kColW - 22;  // a row inside its list box (scroll thumb on the right)
 constexpr float kInlD = 34.0f, kInlGap = 6.0f;  // the playlist rows' small buttons
 constexpr float kInlW = 3 * kInlD + 2 * kInlGap + 6.0f;
-constexpr float kHdrBtnW = 230.0f, kHdrBtnH = 52.0f, kHdrY = 26.0f;  // header buttons (own pills)
+constexpr float kHdrBtnW = 250.0f, kHdrBtnH = 52.0f, kHdrY = 26.0f;  // header buttons (slot width; own pills)
 constexpr float kGameButtonScale = 0.72f;  // the popup button (59 high, 42 pt label), as in the receipt
+constexpr float kMarkerW = 22.0f;           // the playing entry's '>' left of its row
 
-// Header buttons: the radio's switches, right of the title.
+// Header buttons: the radio's switches, right of the title, with their keys.
 enum Hdr { kHdrToggle, kHdrShuffle, kHdrClear, kHdrCount };
 constexpr const char* kHdrNames[kHdrCount] = {"Radio", "Shuffle", "Clear"};
+constexpr const char* kHdrKeys[kHdrCount] = {"R", "F", "C"};
 // A playlist row's small buttons.
 enum Inl { kInlUp, kInlDown, kInlRemove, kInlCount };
 
@@ -107,8 +114,6 @@ std::string Clock(double s) {
     if (t >= 3600) return std::format("{}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60);
     return std::format("{}:{:02}", t / 60, t % 60);
 }
-
-float Luma(Color c) { return 0.299f * c.r + 0.587f * c.g + 0.114f * c.b; }
 
 }  // namespace
 
@@ -122,7 +127,7 @@ struct RadioMenu::Impl {
     const MethodInfo* goCtor = nullptr, *goAddComponent = nullptr, *trSetParent = nullptr;
     const MethodInfo* rtSetAnchorMin = nullptr, *rtSetAnchorMax = nullptr, *rtSetPivot = nullptr, *rtSetSize = nullptr,
                     *rtSetPos = nullptr;
-    const MethodInfo* objDestroy = nullptr, *gfxSetColor = nullptr, *gfxGetColor = nullptr, *gfxSetRaycast = nullptr;
+    const MethodInfo* objDestroy = nullptr, *gfxSetColor = nullptr, *gfxSetRaycast = nullptr;
     const MethodInfo* tmpSetText = nullptr, *tmpGetFont = nullptr, *tmpSetFont = nullptr, *tmpSetSize = nullptr,
                     *tmpSetColor = nullptr, *tmpSetAlign = nullptr, *tmpSetWrap = nullptr, *tmpSetOverflow = nullptr;
     const MethodInfo* cvSetMode = nullptr, *cvSetOrder = nullptr;
@@ -130,7 +135,7 @@ struct RadioMenu::Impl {
     const MethodInfo* sdfSetRadius = nullptr, *sdfSetBorder = nullptr, *sdfSetBorderColor = nullptr;
     const MethodInfo* tglGetOn = nullptr, *tglSetOnQuiet = nullptr, *selSetTransition = nullptr, *selSetNav = nullptr;
     const MethodInfo* selPointerInside = nullptr;  // optional: hover (rows, the wheel's list)
-    const MethodInfo* trSetLocalRotation = nullptr, *trSetLocalScale = nullptr, *trFind = nullptr;  // optional
+    const MethodInfo* trSetLocalRotation = nullptr;  // optional
     const MethodInfo* screenW = nullptr, *screenH = nullptr;
     // input (InputSystem)
     const MethodInfo* kbCurrent = nullptr, *padCurrent = nullptr, *mouseCurrent = nullptr;
@@ -139,7 +144,7 @@ struct RadioMenu::Impl {
                     *kbDown = nullptr, *kbLeft = nullptr, *kbRight = nullptr, *kbW = nullptr, *kbS = nullptr, *kbA = nullptr,
                     *kbD = nullptr, *kbTab = nullptr, *kbDelete = nullptr, *kbBackspace = nullptr, *kbR = nullptr,
                     *kbF = nullptr, *kbPgUp = nullptr, *kbPgDn = nullptr, *kbHome = nullptr, *kbEnd = nullptr,
-                    *kbShift = nullptr;
+                    *kbShift = nullptr, *kbC = nullptr;
     const MethodInfo* padSouth = nullptr, *padEast = nullptr, *padWest = nullptr, *padNorth = nullptr, *padDpad = nullptr,
                     *padStick = nullptr, *padLB = nullptr, *padRB = nullptr, *padLT = nullptr, *padRT = nullptr;
     const MethodInfo* dirUp = nullptr, *dirDown = nullptr, *dirLeft = nullptr, *dirRight = nullptr;
@@ -147,13 +152,7 @@ struct RadioMenu::Impl {
     const MethodInfo* mouseScroll = nullptr, *vec2Y = nullptr, *axisRead = nullptr;
     using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
     ObjectNewFn objectNew = nullptr;
-    // optional: the game's popup button (clone for the header buttons, colours for the rows)
-    const MethodInfo* gcInstance = nullptr, *gcGetTemplates = nullptr, *behSetEnabled = nullptr,
-                    *selSetInteractable = nullptr, *selIsPressed = nullptr;
-    Il2CppClass* popupClass = nullptr, *ieButtonClass = nullptr, *moreViewClass = nullptr, *uiButtonClass = nullptr,
-                 *layoutMgrClass = nullptr, *animatorClass = nullptr;
-    size_t offTplPopup = 0, offPopupNegative = 0, offMoreLabel = 0;
-    size_t offAnimColor = 0, offAnimNormal = 0, offAnimOver = 0, offAnimLabel = 0, offScriptColor = 0;
+    // optional: the game's popup button (modules/common/game_button) for the header buttons and the rows' colours
     bool gameButtonsOk = false;
 
     // ---- live state (main thread) ----
@@ -163,23 +162,22 @@ struct RadioMenu::Impl {
     };
     struct Slot {
         Il2CppObject* bg = nullptr, *name = nullptr, *time = nullptr, *toggle = nullptr, *inlRoot = nullptr;
+        Il2CppObject* marker = nullptr;  // playlist: the '>' left of the row (shown on the playing entry)
+        int markerShown = -1;
         std::string nameText, timeText;
         Color bgCol = kUnset, textCol = kUnset, timeCol = kUnset;
         Small inl[kInlCount];
         int inlShown = -1;
     };
     struct Header {
-        Il2CppObject* game = nullptr;        // the cloned game button's root (nullptr: our own pill)
-        Il2CppObject* button = nullptr;      // its Button (game) or our Toggle
+        gbn::Button game;                    // the game's button (game.Exists(); else our own pill below)
+        Il2CppObject* button = nullptr;      // own pill: its Toggle
         Il2CppObject* bg = nullptr, *text = nullptr;
         std::string label;
         Color fill = kUnset, textCol = kUnset;
-        Color gameText = kUnset;             // the clone's own label colour (restored when not focused)
-        bool wasPressed = false;             // game button: IsPressed() last frame
-        int interactable = -1;
     };
-    // Row colours: the game's popup button (its ButtonAnimator's normal / mouse-over colours and label
-    // colour) when they can be read, else the menu palette.
+    // Row colours: the game's popup button (game_button.h: pink, DeepBlue on mouse-over, white label) when
+    // it is available, else the menu palette.
     struct Style {
         Color normal = kBacker, hover = kTeal, text = kNavy, hoverText = kWhite, border = kLavender;
         bool fromGame = false;
@@ -188,8 +186,10 @@ struct RadioMenu::Impl {
     float grace = 0.0f;
     std::vector<Il2CppGCHandle> handles;
     Il2CppObject* root = nullptr, *rootRt = nullptr, *backdropToggle = nullptr, *font = nullptr;
-    Il2CppObject* statusText = nullptr, *noteText = nullptr, *head[2] = {}, *range[2] = {}, *listToggle[2] = {}, *thumb[2] = {};
-    std::string statusStr, noteStr, headStr[2], rangeStr[2];
+    Il2CppObject* warnBox = nullptr, *warnText = nullptr;  // the warning pill (inactive while there is none)
+    Il2CppObject* noteText = nullptr, *head[2] = {}, *range[2] = {}, *listToggle[2] = {}, *thumb[2] = {};
+    std::string warnStr, noteStr, headStr[2], rangeStr[2];
+    int warnShown = -1;
     Color noteCol = kUnset, thumbCol[2] = {kUnset, kUnset};
     float listY = 0.0f, listH = 0.0f;
     std::vector<Slot> slots[2];
@@ -205,7 +205,7 @@ struct RadioMenu::Impl {
     float clearArmed = 0.0f;   // Clear pressed once: a second press within this time empties the playlist
     std::shared_ptr<const std::vector<MenuSong>> songs;
     MenuState st;
-    bool loggedOpen = false, loggedFail = false, loggedStyle = false, loggedButtonMiss = false;
+    bool loggedOpen = false, loggedFail = false, loggedButtonMiss = false;
 
     // ---- helpers ----
     bool Faulted() const { return sr2::core::ModuleFaulted(kModule); }
@@ -305,14 +305,6 @@ struct RadioMenu::Impl {
         was = c;
         SetColor(g, c);
     }
-    bool GetColor(Il2CppObject* g, Color& out) {
-        if (!gfxGetColor || !unity::IsAlive(g)) return false;
-        bool ok = false;
-        Il2CppObject* boxed = Call(gfxGetColor, g, {}, "Graphic.get_color", &ok);
-        if (!ok || !boxed) return false;
-        out = Unbox<Color>(boxed);
-        return std::isfinite(out.r) && std::isfinite(out.g) && std::isfinite(out.b) && std::isfinite(out.a);
-    }
     void SetRaycast(Il2CppObject* g, bool on) {
         if (unity::IsAlive(g)) Call(gfxSetRaycast, g, {&on}, "Graphic.set_raycastTarget");
     }
@@ -400,12 +392,6 @@ struct RadioMenu::Impl {
         bool ok = false;
         return Unbox<bool>(Call(selPointerInside, selectable, {}, "Selectable.get_isPointerInside", &ok)) && ok;
     }
-    Il2CppObject* Child(Il2CppObject* tr, const char* path) {
-        if (!trFind || !unity::IsAlive(tr)) return nullptr;
-        bool ok = false;
-        Il2CppObject* c = Call(trFind, tr, {unity::NewString(path)}, "Transform.Find", &ok);
-        return ok && unity::IsAlive(c) ? c : nullptr;
-    }
     Il2CppObject* Device(const MethodInfo* current) {
         if (!current) return nullptr;
         bool ok = false;
@@ -455,10 +441,7 @@ struct RadioMenu::Impl {
         noteLeft = seconds;
     }
 
-    Il2CppObject* PopupButtonTemplate();
     void ReadGameStyle();
-    Il2CppObject* GameButton(Il2CppObject* parentRt, const char* label, Il2CppObject*& labelTmp);
-    bool GameClicked(Header& h);
     bool BuildHeader(Il2CppObject* prt);
     bool BuildSmall(Il2CppObject* parentRt, Small& s, int kind, float cx);
     bool Build();
@@ -466,124 +449,18 @@ struct RadioMenu::Impl {
     void Teardown();
 };
 
-// ------------------------------------------------------------ game button --
-// Self-contained copy of the silo receipt's game-button clone (custom_upgrades silo_receipt.cpp
-// GameButton; a shared helper is planned): the popup prompt's Cancel button
-// (GameContext.UITemplates.popupPrompt -> PopupPrompt._negativeActionButton, prefab
-// TextButton_NoneSelectable: Button + ButtonAnimator + DetailsMoreButtonView + InputEventButton +
-// "Label Background" SDF pill + "Icon Background" key glyph, laid out by a LayoutManager; re/ui.md).
+// ------------------------------------------------------------- game style --
 
-Il2CppObject* RadioMenu::Impl::PopupButtonTemplate() {
-    if (!gameButtonsOk) return nullptr;
-    bool ok = false;
-    Il2CppObject* gc = Call(gcInstance, nullptr, {}, "GameContext.Instance", &ok);
-    if (!ok || !unity::IsAlive(gc)) return nullptr;
-    Il2CppObject* tpl = Call(gcGetTemplates, gc, {}, "GameContext.get_UITemplates", &ok);
-    if (!ok || !unity::IsAlive(tpl)) return nullptr;
-    Il2CppObject* popupGo = unity::Field<Il2CppObject*>(tpl, offTplPopup);
-    Il2CppObject* popup = unity::IsAlive(popupGo) ? unity::GetComponent(popupGo, popupClass) : nullptr;
-    if (!unity::IsAlive(popup)) return nullptr;
-    Il2CppObject* src = unity::Field<Il2CppObject*>(popup, offPopupNegative);
-    return unity::IsAlive(src) && IsA(src, goClass) ? src : nullptr;
-}
-
-// The rows' colours from the game's button: ButtonAnimator.ColorNormal / ColorMouseOver (ScriptableColor
-// assets it tweens its background graphics to, IDA ButtonAnimator.AnimateColor 0x6840C0, only while
-// animateColor) and its label's colour; without the animator's colours the "Label Background" pill's own.
+// The rows' colours: the game's popup button (game_button.h kPink / kDeepBlue with a white label: the
+// colours of its ButtonAnimator, re/ui.md) when the button can be cloned, else the menu palette.
 void RadioMenu::Impl::ReadGameStyle() {
     style = Style{};
-    Il2CppObject* src = PopupButtonTemplate();
-    if (!src) return;
-    Style s;
-    bool normal = false, hover = false, text = false;
-    if (Il2CppObject* anim = animatorClass ? unity::GetComponent(src, animatorClass) : nullptr; unity::IsAlive(anim)) {
-        auto scripted = [&](size_t off, Color& out) {
-            Il2CppObject* sc = off ? unity::Field<Il2CppObject*>(anim, off) : nullptr;
-            if (!unity::IsAlive(sc) || !offScriptColor) return false;
-            out = unity::Field<Color>(sc, offScriptColor);
-            return std::isfinite(out.r) && out.a > 0.05f;
-        };
-        if (offAnimColor && unity::Field<bool>(anim, offAnimColor)) {
-            normal = scripted(offAnimNormal, s.normal);
-            hover = scripted(offAnimOver, s.hover);
-        }
-        if (Il2CppObject* label = offAnimLabel ? unity::Field<Il2CppObject*>(anim, offAnimLabel) : nullptr)
-            text = GetColor(label, s.text) && s.text.a > 0.05f;
-    }
-    if (!normal) {
-        Il2CppObject* bgTr = Child(unity::TransformOf(src), "Label Background");
-        Il2CppObject* g = bgTr && sdfRectClass ? unity::GetComponent(bgTr, sdfRectClass) : nullptr;
-        normal = g && GetColor(g, s.normal) && s.normal.a > 0.05f;
-    }
-    if (!normal) return;
-    if (!text) s.text = Luma(s.normal) < 0.55f ? kWhite : kNavy;
-    if (!hover) s.hover = kTeal;
-    s.normal.a = s.hover.a = s.text.a = 1.0f;
-    s.hoverText = Luma(s.hover) < 0.6f ? kWhite : s.text;
-    s.border = kLavender;
-    s.fromGame = true;
-    style = s;
-    if (!loggedStyle) {
-        loggedStyle = true;
-        SR2_INFO("slime_dj: radio menu rows in the game button's colours: normal ({:.2f}, {:.2f}, {:.2f}) from {}, "
-                 "mouse-over ({:.2f}, {:.2f}, {:.2f}){}, label ({:.2f}, {:.2f}, {:.2f}){}",
-                 s.normal.r, s.normal.g, s.normal.b, unity::IsAlive(src) ? "the popup button" : "?", s.hover.r, s.hover.g,
-                 s.hover.b, hover ? "" : " (menu teal)", s.text.r, s.text.g, s.text.b, text ? "" : " (by contrast)");
-    }
-}
-
-// A clone of the popup's Cancel button under `parentRt`, labelled `label`, key glyph hidden (round 12: "we
-// dont need keybinds"). nullptr: not available (the caller builds its own pill).
-Il2CppObject* RadioMenu::Impl::GameButton(Il2CppObject* parentRt, const char* label, Il2CppObject*& labelTmp) {
-    labelTmp = nullptr;
-    auto miss = [&](const char* what) -> Il2CppObject* {
-        if (!loggedButtonMiss) SR2_WARN("slime_dj: radio menu: game button not cloned ({}) - own buttons", what);
-        loggedButtonMiss = true;
-        return nullptr;
-    };
-    Il2CppObject* src = PopupButtonTemplate();
-    if (!src) return miss("no popup button template");
-    Il2CppObject* go = unity::Instantiate(src, parentRt);
-    if (!unity::IsAlive(go)) return miss("Instantiate failed");
-    if (!unity::IsAlive(unity::GetComponent(go, uiButtonClass))) {
-        Destroy(go);
-        return miss("no Button on the clone");
-    }
-    unity::SetName(go, label);
-    // Its pointer down / up would perform the popup's InputEvent (a menu cancel elsewhere).
-    if (Il2CppObject* ieb = unity::GetComponent(go, ieButtonClass); unity::IsAlive(ieb)) {
-        bool off = false;
-        Call(behSetEnabled, ieb, {&off}, "Behaviour.set_enabled(InputEventButton)");
-    }
-    Il2CppObject* view = unity::GetComponent(go, moreViewClass);
-    Il2CppObject* lse = unity::IsAlive(view) ? unity::Field<Il2CppObject*>(view, offMoreLabel) : nullptr;
-    Il2CppObject* tmp = nullptr;
-    if (unity::IsAlive(lse)) {
-        bool off = false;
-        Call(behSetEnabled, lse, {&off}, "Behaviour.set_enabled(LocalizeStringEvent)");
-        tmp = unity::GetComponent(lse, tmpTextClass);
-    }
-    if (!unity::IsAlive(tmp)) {
-        Destroy(go);
-        return miss("no label text on the clone");
-    }
-    // No key glyph: the buttons are clicked (or reached with Tab); the keys are not printed any more.
-    if (Il2CppObject* icon = Child(unity::TransformOf(go), "Icon Background"))
-        unity::SetActive(unity::GameObjectOf(icon), false);
-    SetText(tmp, label);
-    if (layoutMgrClass) AddComponent(go, layoutMgrClass, "AddComponent(LayoutManager)");
-    labelTmp = tmp;
-    return go;
-}
-
-// A game button's click: pressed in the last frame, released now with the pointer still on it.
-bool RadioMenu::Impl::GameClicked(Header& h) {
-    if (!h.game || !unity::IsAlive(h.button) || !selIsPressed) return false;
-    bool ok = false;
-    const bool pressed = Unbox<bool>(Call(selIsPressed, h.button, {}, "Selectable.IsPressed", &ok)) && ok;
-    const bool click = h.wasPressed && !pressed && PointerInside(h.button);
-    h.wasPressed = pressed;
-    return click;
+    if (!gameButtonsOk) return;
+    style.normal = {gbn::kPink.r, gbn::kPink.g, gbn::kPink.b, 1.0f};
+    style.hover = {gbn::kDeepBlue.r, gbn::kDeepBlue.g, gbn::kDeepBlue.b, 1.0f};
+    style.text = style.hoverText = kWhite;
+    style.border = kLavender;
+    style.fromGame = true;
 }
 
 // ---------------------------------------------------------------- setup --
@@ -612,15 +489,6 @@ bool RadioMenu::Setup(Resolver& R, std::string& why) {
         for (Il2CppClass* c = k; c; c = parentOf(c))
             if (const MethodInfo* m = R.Method(c, name, argc, &err)) return m;
         return nullptr;
-    };
-    auto optOff = [&](Il2CppClass* k, const char* field, size_t& out) {
-        std::string err;
-        for (Il2CppClass* c = k; c; c = parentOf(c))
-            if (auto o = R.FieldOffset(c, field, &err)) {
-                out = *o;
-                return true;
-            }
-        return false;
     };
     auto byParams = [&](Il2CppClass* k, const char* name, std::initializer_list<std::string_view> params) {
         std::string err;
@@ -706,13 +574,10 @@ bool RadioMenu::Setup(Resolver& R, std::string& why) {
 
     // Optional parts: each missing one only drops its key / feature.
     std::string err;
-    p->gfxGetColor = opt(graphic, "get_color", 0);
     p->tmpSetWrap = opt(p->tmpTextClass, "set_textWrappingMode", 1);
     p->tmpSetOverflow = opt(p->tmpTextClass, "set_overflowMode", 1);
     p->selPointerInside = opt(selectable, "get_isPointerInside", 0);
     p->trSetLocalRotation = opt(transform, "set_localRotation", 1);
-    p->trSetLocalScale = opt(transform, "set_localScale", 1);
-    p->trFind = R.MethodByParams(transform, "Find", {"System.String"}, &err);
     p->sdfRectClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.SDFUI", "SDFRoundedRectangle", &err);
     if (p->sdfRectClass) {
         p->sdfSetRadius = R.MethodByParams(p->sdfRectClass, "SetCornerRadius", {"System.Single"}, &err);
@@ -739,6 +604,7 @@ bool RadioMenu::Setup(Resolver& R, std::string& why) {
     p->kbHome = opt(kb, "get_homeKey", 0);
     p->kbEnd = opt(kb, "get_endKey", 0);
     p->kbShift = opt(kb, "get_shiftKey", 0);
+    p->kbC = opt(kb, "get_cKey", 0);
     p->padWest = opt(pad, "get_buttonWest", 0);
     p->padNorth = opt(pad, "get_buttonNorth", 0);
     p->padStick = opt(pad, "get_leftStick", 0);
@@ -758,34 +624,12 @@ bool RadioMenu::Setup(Resolver& R, std::string& why) {
     p->vec2Y = opt(vec2, "get_y", 0);
     p->axisRead = opt(axis, "ReadValue", 0);
 
-    // The game's popup button (header buttons) and its colours (rows); see the silo receipt.
-    Il2CppClass* gameCtx = R.Class(kImage, "", "GameContext", &err);
-    Il2CppClass* templates = R.Class(kImage, "MonomiPark.SlimeRancher.UI", "UITemplates", &err);
-    p->popupClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Popup", "PopupPrompt", &err);
-    p->ieButtonClass = R.Class(kImage, "MonomiPark.SlimeRancher.Input", "InputEventButton", &err);
-    p->moreViewClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Adapter", "DetailsMoreButtonView", &err);
-    p->uiButtonClass = R.Class(kUi, "UnityEngine.UI", "Button", &err);
-    p->layoutMgrClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Framework.Layout", "LayoutManager", &err);
-    p->animatorClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI", "ButtonAnimator", &err);
-    Il2CppClass* scriptColor = R.Class(kImage, "MonomiPark.SlimeRancher.UI", "ScriptableColor", &err);
-    Il2CppClass* behaviour = R.Class(kCore, "UnityEngine", "Behaviour", &err);
-    if (Il2CppClass* single = gameCtx ? parentOf(gameCtx) : nullptr) p->gcInstance = opt(single, "get_Instance", 0);
-    p->gcGetTemplates = opt(gameCtx, "get_UITemplates", 0);
-    p->behSetEnabled = opt(behaviour, "set_enabled", 1);
-    p->selSetInteractable = opt(selectable, "set_interactable", 1);
-    p->selIsPressed = opt(selectable, "IsPressed", 0);
-    p->gameButtonsOk = p->gcInstance && templates && p->popupClass && p->ieButtonClass && p->moreViewClass &&
-                       p->uiButtonClass && p->gcGetTemplates && p->behSetEnabled && p->selPointerInside &&
-                       optOff(templates, "popupPrompt", p->offTplPopup) &&
-                       optOff(p->popupClass, "_negativeActionButton", p->offPopupNegative) &&
-                       optOff(p->moreViewClass, "label", p->offMoreLabel);
-    if (p->animatorClass) {
-        optOff(p->animatorClass, "animateColor", p->offAnimColor);
-        optOff(p->animatorClass, "ColorNormal", p->offAnimNormal);
-        optOff(p->animatorClass, "ColorMouseOver", p->offAnimOver);
-        optOff(p->animatorClass, "label", p->offAnimLabel);
+    // The game's popup button (shared helper; header buttons) and its colours (rows).
+    {
+        std::string gerr;
+        p->gameButtonsOk = p->selPointerInside && gbn::Resolve(R, gerr);
+        if (!p->gameButtonsOk) SR2_INFO("slime_dj: radio menu: game buttons not available ({})", gerr.empty() ? "no hover" : gerr);
     }
-    if (scriptColor) optOff(scriptColor, "Color", p->offScriptColor);
 
     std::string missing;
     if (!p->sdfRectClass) missing += " SDF shapes (plain images);";
@@ -793,7 +637,6 @@ bool RadioMenu::Setup(Resolver& R, std::string& why) {
     if (!p->selPointerInside) missing += " hover (rows light up only from the keys);";
     if (!p->btnIsPressed || !p->kbShift) missing += " Shift + Up / Down;";
     if (!p->gameButtonsOk) missing += " game buttons (own pills);";
-    else if (!p->selIsPressed) missing += " game button clicks (own pills);";
     if (!p->trSetLocalRotation) missing += " row arrows (letters instead);";
     impl_ = p;
     ready_ = true;
@@ -803,38 +646,32 @@ bool RadioMenu::Setup(Resolver& R, std::string& why) {
 
 // ---------------------------------------------------------------- build --
 
-// Header buttons: game clones on zero-size slots (scaled like the receipt's, centred on fixed points), else
-// our own pills in the row style.
+// Header buttons: the game's popup button through game_button (round 13), scaled like the receipt's and
+// centred on fixed points, with the key cap of its key (R / F / C); else our own pills in the row style.
 bool RadioMenu::Impl::BuildHeader(Il2CppObject* prt) {
-    const bool game = gameButtonsOk && selIsPressed;
+    const bool haveKey[kHdrCount] = {kbR != nullptr, kbF != nullptr, kbC != nullptr};
     for (int i = 0; i < kHdrCount; ++i) {
         Header& h = hdr[i];
+        h.game.Forget();
         h = Header{};
         const float cx = kPanelW - kPad - kHdrBtnW * 0.5f - (kHdrCount - 1 - i) * (kHdrBtnW + 14.0f);
-        if (game) {
-            Il2CppObject* slot = NewUi(std::string(kHdrNames[i]) + "Slot", prt);
-            Il2CppObject* slotRt = slot ? unity::TransformOf(slot) : nullptr;
-            Il2CppObject* label = nullptr;
-            Il2CppObject* clone = slotRt ? GameButton(slotRt, kHdrNames[i], label) : nullptr;
-            if (clone) {
-                Rect(slotRt, {0, 1}, {0, 1}, {0.5f, 0.5f}, {cx, -(kHdrY + kHdrBtnH * 0.5f)}, {0, 0});
-                if (layoutMgrClass && trSetLocalScale) {
-                    float scale[3] = {kGameButtonScale, kGameButtonScale, 1.0f};
-                    Call(trSetLocalScale, slotRt, {scale}, "Transform.set_localScale");
-                }
-                Rect(unity::TransformOf(clone), {0.5f, 0.5f}, {0.5f, 0.5f}, {0.5f, 0.5f}, {0, 0}, {321.0f, 59.0f});
-                h.game = clone;
-                h.button = unity::GetComponent(clone, uiButtonClass);
-                h.text = label;
+        if (gameButtonsOk) {
+            gbn::Spec spec;
+            spec.name = std::string("Radio") + kHdrNames[i];
+            spec.label = kHdrNames[i];
+            spec.key = haveKey[i] ? kHdrKeys[i] : "";
+            spec.scale = kGameButtonScale;
+            spec.minWidth = 150.0f;
+            spec.module = kModule;
+            std::string why;
+            if (h.game.Create(prt, spec, why)) {
+                h.game.Place(cx, kHdrY + kHdrBtnH * 0.5f, 0.5f);
                 h.label = kHdrNames[i];
-                if (!GetColor(label, h.gameText)) h.gameText = kNavy;
-                Keep(h.game);
-                Keep(h.button);
-                Keep(h.text);
-                if (unity::IsAlive(h.button)) continue;
-                h = Header{};
+                continue;
             }
-            if (slot) Destroy(slot);
+            if (!loggedButtonMiss) SR2_WARN("slime_dj: radio menu: game button not cloned ({}) - own buttons", why);
+            loggedButtonMiss = true;
+            h.game.Forget();
         }
         Il2CppObject* b = NewUi(kHdrNames[i], prt);
         if (!b) return false;
@@ -901,8 +738,8 @@ bool RadioMenu::Impl::BuildSmall(Il2CppObject* parentRt, Small& s, int kind, flo
 
 bool RadioMenu::Impl::Build() {
     ReadGameStyle();
-    // Rows that fit the canvas (border + margin 36 px each side).
-    listY = 176.0f;
+    // Rows that fit the canvas (border + margin 36 px each side). Round 13: no status line any more.
+    listY = 154.0f;
     const float fixedH = listY + 14.0f + 36.0f + 24.0f;  // everything but the rows
     rows = std::clamp(static_cast<int>((CanvasHeight() - 72.0f - fixedH + kRowGap) / (kRowH + kRowGap)), kMinRows, kMaxRows);
     listH = rows * (kRowH + kRowGap) - kRowGap;
@@ -920,15 +757,25 @@ bool RadioMenu::Impl::Build() {
         Clickable(content);  // never polled: a click on the panel must not reach the backdrop (= close)
     }
     Text(prt, "Title", kPad, 26, 560, 52, "Corral Radio", 40.0f, kNavy, kAlignLeft);
-    Text(prt, "Corral", kPad, 80, kPanelW - 2 * kPad, 32, st.title, 24.0f, kNavyDim, kAlignLeft);
-    statusText = Text(prt, "Status", kPad, 112, kPanelW - 2 * kPad, 32, "", 22.0f, kNavy, kAlignLeft);
-    Keep(statusText);
+    Text(prt, "Corral", kPad, 80, 300, 32, st.title, 24.0f, kNavyDim, kAlignLeft);
+    // The warning pill right of the corral's name (only while the radio can't play; round 13: "make it
+    // grayed out with an error warning on top of the dialog").
+    {
+        constexpr float wx = kPad + 260.0f, ww = kPanelW - kPad - wx, wh = 34.0f;
+        warnBox = Box(prt, "Warning", wx, 79, ww, wh, kOrange, wh * 0.5f);
+        if (!warnBox) return false;
+        warnText = Text(unity::TransformOf(warnBox), "Text", 16, 0, ww - 32, wh, "", 21.0f, kWhite, kAlignCenter);
+        Keep(warnBox);
+        Keep(warnText);
+        unity::SetActive(warnBox, false);
+        warnShown = 0;
+    }
     if (!BuildHeader(prt)) return false;
 
     for (int l = 0; l < 2; ++l) {
         const float x = kPad + l * (kColW + kColGap);
-        head[l] = Text(prt, l == 0 ? "SongsHead" : "PlaylistHead", x + 6, 140, 400, 34, "", 26.0f, kNavy, kAlignLeft);
-        range[l] = Text(prt, l == 0 ? "SongsRange" : "PlaylistRange", x + kColW - 260, 144, 240, 30, "", 19.0f, kNavyDim,
+        head[l] = Text(prt, l == 0 ? "SongsHead" : "PlaylistHead", x + 6, 118, 400, 34, "", 26.0f, kNavy, kAlignLeft);
+        range[l] = Text(prt, l == 0 ? "SongsRange" : "PlaylistRange", x + kColW - 260, 122, 240, 30, "", 19.0f, kNavyDim,
                         kAlignRight);
         Keep(head[l]);
         Keep(range[l]);
@@ -963,6 +810,15 @@ bool RadioMenu::Impl::Build() {
             Keep(s.time);
             if (!s.toggle || !s.name || !s.time) return false;
             if (l == 1) {
+                // The playing entry's '>' outside the row, in the list's left margin (round 13: "move the '>'
+                // outside before the row currently playing").
+                s.marker = Text(lrt, "Playing", 2 - kMarkerW, 6 + i * (kRowH + kRowGap), kMarkerW, kRowH, ">", 28.0f, kPink,
+                                kAlignCenter);
+                Keep(s.marker);
+                if (s.marker) {
+                    unity::SetActive(unity::GameObjectOf(s.marker), false);
+                    s.markerShown = 0;
+                }
                 // The entry's own small buttons (round 12: no Up / Down / Remove row any more).
                 Il2CppObject* box = NewUi("Controls", rrt);
                 if (!box) return false;
@@ -998,10 +854,12 @@ void RadioMenu::Impl::Redraw() {
             const int idx = top[l] + i;
             std::string name, time;
             Color bg = kClear, text = sy.text, tcol = sy.text;
-            bool controls = false;
+            bool controls = false, marker = false;
             if (idx < n) {
                 bool dim = false, playing = false;
-                const bool focused = area == l && idx == cursor[l];
+                // Without a channel (no Music Box) the stored playlist is shown greyed and does not react.
+                const bool greyed = l == 1 && !st.available;
+                const bool focused = area == l && idx == cursor[l] && !greyed;
                 if (l == 0) {
                     const MenuSong& song = (*songs)[static_cast<size_t>(idx)];
                     name = song.name;
@@ -1012,19 +870,36 @@ void RadioMenu::Impl::Redraw() {
                 } else {
                     const MenuEntry& e = st.playlist[static_cast<size_t>(idx)];
                     playing = idx == st.playing;
-                    name = std::format("{}{}. {}", playing ? "> " : "", idx + 1, e.name);
+                    marker = playing;
+                    name = std::format("{}. {}", idx + 1, e.name);
                     time = e.missing ? "missing" : focused && !playing ? "Play" : Clock(e.seconds);
                     dim = e.missing;
                     controls = st.available;
                 }
-                const bool selected = l == 1 && idx == cursor[1];
-                bg = focused ? sy.hover : selected ? kSelected : sy.normal;
-                text = focused ? sy.hoverText : playing ? kPink : sy.text;
+                // Round 13: the playing entry was pink text on the pink row ("the same color as background");
+                // now its row is the game's selected teal with a white label (mouse-over still wins).
+                const bool selected = l == 1 && idx == cursor[1] && !greyed;
+                if (greyed) {
+                    bg = kGreyRow;
+                    text = kWhite;
+                } else if (focused) {
+                    bg = sy.hover;
+                    text = sy.hoverText;
+                } else if (playing) {
+                    bg = kPlaying;
+                    text = kWhite;
+                } else if (selected) {
+                    bg = kSelected;
+                    text = kNavy;
+                } else {
+                    bg = sy.normal;
+                    text = sy.text;
+                }
                 if (dim && !focused) text.a = 0.55f;
                 tcol = text;
                 tcol.a *= 0.8f;
             } else if (l == 1 && n == 0 && i == 0) {
-                name = "Empty: click songs on the left to add them.";
+                name = st.available ? "Empty: click songs on the left to add them." : "The playlist is empty.";
                 text = kNavyDim;
             } else if (l == 0 && n == 0 && i == 0) {
                 name = songs ? "No songs: put music files into the sr2mods_music folder." : "Reading the music folder...";
@@ -1035,6 +910,10 @@ void RadioMenu::Impl::Redraw() {
             SetTextColor(s.name, text, s.textCol);
             SetTextCached(s.time, time, s.timeText);
             SetTextColor(s.time, tcol, s.timeCol);
+            if (l == 1 && unity::IsAlive(s.marker) && static_cast<int>(marker) != s.markerShown) {
+                s.markerShown = marker ? 1 : 0;
+                unity::SetActive(unity::GameObjectOf(s.marker), marker);
+            }
             if (l == 1 && unity::IsAlive(s.inlRoot)) {
                 if (static_cast<int>(controls) != s.inlShown) {
                     s.inlShown = controls ? 1 : 0;
@@ -1069,7 +948,15 @@ void RadioMenu::Impl::Redraw() {
             SetColorCached(thumb[l], show ? kLavender : kClear, thumbCol[l]);
         }
     }
-    SetTextCached(statusText, st.status, statusStr);
+    // The warning pill: shown only while there is something wrong.
+    if (unity::IsAlive(warnBox)) {
+        const bool show = !st.warning.empty();
+        if (static_cast<int>(show) != warnShown) {
+            warnShown = show ? 1 : 0;
+            unity::SetActive(warnBox, show);
+        }
+        if (show) SetTextCached(warnText, st.warning, warnStr);
+    }
     // Header buttons: labels follow the radio; Clear needs entries; keys light the focus.
     const bool have = st.available && !st.playlist.empty();
     const bool enabled[kHdrCount] = {st.available && (st.on || have), st.available, have};
@@ -1079,20 +966,18 @@ void RadioMenu::Impl::Redraw() {
         if (i == kHdrToggle) label = st.on ? "Radio: on" : "Radio: off";
         else if (i == kHdrShuffle) label = st.shuffle ? "Shuffle: on" : "Shuffle: off";
         else if (i == kHdrClear && clearArmed > 0.0f) label = "Clear?";
+        const bool focused = area == 2 && hdrFocus == i;
+        if (h.game.Exists()) {
+            // The game's button animates hover / press / disabled itself; the key focus tints it teal.
+            h.label = label;
+            h.game.SetLabel(label);
+            h.game.SetInteractable(enabled[i]);
+            h.game.SetSelected(focused && enabled[i]);
+            continue;
+        }
         if (label != h.label) {
             h.label = label;
             SetText(h.text, label);
-        }
-        const bool focused = area == 2 && hdrFocus == i;
-        if (h.game) {
-            // The game's button animates hover / press / disabled itself; the key focus colours its label.
-            if (selSetInteractable && static_cast<int>(enabled[i]) != h.interactable) {
-                h.interactable = enabled[i] ? 1 : 0;
-                bool on = enabled[i];
-                Call(selSetInteractable, h.button, {&on}, "Selectable.set_interactable");
-            }
-            SetTextColor(h.text, focused ? kPink : h.gameText, h.textCol);
-            continue;
         }
         const bool hot = focused || hoverHdr == i;
         const bool lit = (i == kHdrToggle && st.on) || (i == kHdrShuffle && st.shuffle);
@@ -1110,7 +995,8 @@ void RadioMenu::Impl::Teardown() {
         Destroy(root);
     }
     open = false;
-    root = rootRt = backdropToggle = font = statusText = noteText = nullptr;
+    root = rootRt = backdropToggle = font = warnBox = warnText = noteText = nullptr;
+    warnShown = -1;
     for (int l = 0; l < 2; ++l) {
         head[l] = range[l] = listToggle[l] = thumb[l] = nullptr;
         headStr[l].clear();
@@ -1118,8 +1004,11 @@ void RadioMenu::Impl::Teardown() {
         thumbCol[l] = kUnset;
         slots[l].clear();
     }
-    for (Header& h : hdr) h = Header{};
-    statusStr.clear();
+    for (Header& h : hdr) {
+        h.game.Forget();  // destroyed with the root
+        h = Header{};
+    }
+    warnStr.clear();
     noteStr.clear();
     noteCol = kUnset;
     noteLeft = clearArmed = 0.0f;
@@ -1197,7 +1086,7 @@ bool RadioMenu::Open(const MenuState& state, std::shared_ptr<const std::vector<M
         SR2_INFO("slime_dj: radio menu opened ({} rows per list, {} song(s), font {}, header buttons {}, rows {}, input "
                  "locked by UIInputLocker)",
                  p.rows, p.Count(0), p.font ? "from the HUD" : "TMP default",
-                 p.hdr[0].game ? "cloned from the game's popup" : "own pills",
+                 p.hdr[0].game.Exists() ? "the game's popup button (game_button)" : "own pills",
                  p.style.fromGame ? "in the game button's colours" : "in the menu palette");
     }
     return true;
@@ -1240,7 +1129,7 @@ std::vector<MenuAction> RadioMenu::Tick(float unscaledDt) {
     int clickHdr = -1, clickRow[2] = {-1, -1}, clickInl = -1, clickInlRow = -1;
     for (int i = 0; i < kHdrCount; ++i) {
         Impl::Header& h = p.hdr[i];
-        if (h.game ? p.GameClicked(h) : p.Clicked(h.button)) clickHdr = i;
+        if (h.game.Exists() ? h.game.Tick() : p.Clicked(h.button)) clickHdr = i;
     }
     for (int l = 0; l < 2; ++l)
         for (int i = 0; i < static_cast<int>(p.slots[l].size()); ++i) {
@@ -1278,7 +1167,7 @@ std::vector<MenuAction> RadioMenu::Tick(float unscaledDt) {
                         if (p.PointerInside(p.slots[1][static_cast<size_t>(hr)].inl[k].toggle)) hi = k;
             } else {
                 for (int i = 0; i < kHdrCount; ++i)
-                    if (!p.hdr[i].game && p.PointerInside(p.hdr[i].button)) hh = i;
+                    if (!p.hdr[i].game.Exists() && p.PointerInside(p.hdr[i].button)) hh = i;
             }
         }
         if (hl != p.hoverList || hr != p.hoverRow) {
@@ -1333,7 +1222,7 @@ std::vector<MenuAction> RadioMenu::Tick(float unscaledDt) {
     auto addSong = [&](int idx) {
         if (!p.songs || idx < 0 || idx >= nSongs) return;
         if (!p.st.available) {
-            p.ShowNote("This corral's radio is not ready yet.", false);
+            p.ShowNote(p.st.warning.empty() ? "This corral's radio is not ready yet." : p.st.warning, false);
             return;
         }
         out.push_back({MenuOp::kAdd, (*p.songs)[static_cast<size_t>(idx)].id});
@@ -1419,6 +1308,8 @@ std::vector<MenuAction> RadioMenu::Tick(float unscaledDt) {
             press(kHdrToggle);
         } else if (p.Pressed(kb, p.kbF)) {
             press(kHdrShuffle);
+        } else if (p.Pressed(kb, p.kbC)) {
+            press(kHdrClear);
         } else if (p.area == 2) {
             if (left || right) {
                 p.hdrFocus = std::clamp(p.hdrFocus + (right ? 1 : -1), 0, kHdrCount - 1);

@@ -5,7 +5,7 @@
 ## LandPlot / LandPlotModel / LandPlotLocation
 
 - `LandPlot.Upgrade` enum: NONE 0, WALLS 1, MUSIC_BOX 2, STORAGE2 3, STORAGE3 4, STORAGE4 5, SOIL 6, SPRINKLER 7, SCARESLIME 8, FEEDER 9, VITAMIZER 10, AIR_NET 11, PLORT_COLLECTOR 12, SOLAR_SHIELD 13, ASH_TROUGH 14, MIRACLE_MIX 15, DELUXE_GARDEN 16, DELUXE_COOP 17, PLORT_COLLECTOR_POND 18, PLORT_COLLECTOR_INCINERATOR 19, STORAGE_CAPACITY_INCREASE 20. `LandPlot.Id`: CORRAL / COOP / GARDEN / SILO / POND / INCINERATOR ...
-- `LandPlot.HasUpgrade(Upgrade)` 0x989190: tail call into `LandPlotModel.HasUpgrade`. custom_upgrades hooks it (custom ids answered from the sidecar).
+- `LandPlot.HasUpgrade(Upgrade)` 0x989190: tail call into `LandPlotModel.HasUpgrade`. custom_upgrades hooks it (custom ids answered from the sidecar). slime_dj calls it (`Resolver::Invoke`, through that hook) with `MUSIC_BOX` = 2 for the Corral Radio menu's "No Music Box" warning.
 - `LandPlot.AddUpgrade(Upgrade)` 0x988750: `model.upgrades.Add` + `ApplyUpgrades`. Hooked: custom ids never reach the original.
 - `LandPlot.ApplyUpgrades`: runs after load and every change; `RanchMetadata.OnUpgradesChanged(plot)` rebuilds drone metadata (re/drones.md).
 - `LandPlotModel.upgrades` HashSet<Upgrade> (saved). `LandPlotModel.siloAmmo[guid]` (silo/collector storage, saved). `LandPlotModel.Init` / `NotifyParticipants`: only `InstantiatePlot` (a new plot object) calls `InitModel`/`SetModel` on plot children. `collectorNextTime`; `GetAmmoSet` (vanilla `new AmmoModel(null)`).
