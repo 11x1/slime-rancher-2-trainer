@@ -43,6 +43,8 @@ struct Tab {
                                             //   the tab also needs `module` enabled
     std::string help;                       // tooltip of the (?) next to the switch
     std::vector<std::vector<std::string>> columns;  // Cards: module ids per column
+    bool stacked = false;                           // Cards: columns[0] full width on top, the other columns
+                                                    //   side by side under it
     std::map<std::string, std::string> cardHelp;    // Cards: tooltip of a module's switch (default: its own)
     SandboxPage sandboxPage = SandboxPage::General;  // Sandbox: which of its pages
 };

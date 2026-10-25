@@ -93,7 +93,7 @@ RE for everything below: `re/ui.md` (Options menu classes, input system, CursorM
 - **Tab bar:** every category has at least one tab. On the right: reset (tab back to defaults, switches excluded; on Profiles: rescan), the tab's master switch (module `enabled` or the tab's master key; tooltip says what it does), close.
 - **Cards:** each `Def::group` is a card ("" = no heading), in two columns, shorter column first. Row = label left, control right: Bool → switch, Float/Int → slider snapped to `step` (Ctrl+click types), Enum → dropdown, Key → capture button. A whole Bool row is clickable (invisible button under it with `SetNextItemAllowOverlap`); its label is dimmed while off and brightens on hover.
 - **Tooltips** come from `Def::tooltip`: what the control does plus at most one short line on a non-obvious condition. No hook names, field names or log details (those go in the module's `NOTES.md`).
-- **Cards pages** (Misc > General, Ranch > General): one card per module with its switch in the card header; its groups get no headings, rows follow in group order. `Tab::cardHelp` gives each card switch its own tooltip.
+- **Cards pages** (Misc > General, Ranch > General): one card per module with its switch in the card header; its groups get no headings, rows follow in group order. `Tab::cardHelp` gives each card switch its own tooltip. Two columns; `Tab::stacked` (Ranch) draws `columns[0]` full width and the next two columns side by side under it.
 - **Switched off:** cards stay visible, grayed and read-only (`BeginDisabled`), tab label dimmed; the switch stays usable. A master tab whose module is off (Speed Panel while Hl2 Movement is off) adds a note naming the module. The Options tab instead hides an off module's rows.
 - **Nested options** (`settings::Def::parent` / `parentValue`, set by each module): a setting whose parent is a top-level row of the same card is drawn under it, indented on a thread line, sliding open/closed (0.22 s smoothstep). `DrawKids` draws in the card itself: rows shifted and clipped (`PushClipRect`), layout advanced by the visible part, rows fade with the slide; an unmeasured block is drawn parked and clipped for one frame; height re-measured every frame. Otherwise a setting stays in place and is hidden while its parent chain disallows it. A card with all rows hidden is left out. Labels drop the parent's name ("Autobhop hold key" → "Hold key").
 - **Slider units:** `Def::unit` after the number, `Def::zeroText` at 0, `Def::displayScale` scales the shown value; the slider runs on the displayed value, Ctrl+click types the bare number. `FormatValue` applies the same rules (Options tab stepper text matches). Modules whose registration helper takes no unit call `settings::SetDisplay`.
@@ -113,7 +113,7 @@ RE for everything below: `re/ui.md` (Options menu classes, input system, CursorM
 | Movement | Hl2 Movement (without its HUD group) |
 | World | Spawn Scaling, Wall Markers |
 | HUD | Minimap, Collectibles (drawn under the minimap, needs it on), Full Map (`map_tools`), Speed Panel |
-| Ranch | General (Custom Upgrades left; Plot Upgrades, Sell Upgrades right), Slime DJ |
+| Ranch | General (Custom Upgrades full width; Plot Upgrades and Sell Upgrades side by side under it, round 11), Slime DJ |
 | Misc | General (Quick Start, Free Placement, Debug Tools left; Instant Build, Quick Travel, Misc Tweaks right) |
 | Sandbox | General, Vacpack, Spawn & Craft, Upgrades, Weather (`Tab::sandboxPage`, `layout::SandboxPage`; sidebar icon a four-pointed sparkle) |
 | Profiles, Settings | one tab each |
