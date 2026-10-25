@@ -139,7 +139,8 @@ void Refresh(float range, bool triggers) {
         auto* c = static_cast<Il2CppObject*>(unity::ArrayAt(arr, i));
         if (!unity::IsAlive(c)) continue;
         if (!Value<bool>(Call(g.colEnabled, c, {}, "Collider.get_enabled", &ok)) || !ok) continue;
-        if (!Call(g.inParent, c, {unity::TypeOf(g.identClass)}, "GetComponentInParent(Identifiable)", &ok) || !ok) continue;
+        bool inactive = false;
+        if (!Call(g.inParent, c, {unity::TypeOf(g.identClass), &inactive}, "GetComponentInParent(Identifiable)", &ok) || !ok) continue;
         const Bounds b = Value<Bounds>(Call(g.colBounds, c, {}, "Collider.get_bounds", &ok));
         if (!ok) continue;
         const float dx = b.center.x - eye.x, dy = b.center.y - eye.y, dz = b.center.z - eye.z;
@@ -293,7 +294,8 @@ bool Setup(sr2::core::ModuleContext& ctx, std::string& why) {
     if (!why.empty()) return false;
     g.overlap = byParams(physics, "OverlapSphere",
                          {"UnityEngine.Vector3", "System.Single", "System.Int32", "UnityEngine.QueryTriggerInteraction"});
-    g.inParent = byParams(component, "GetComponentInParent", {"System.Type"});
+    // 1.3.0 strips Component.GetComponentInParent(Type); only the (Type, bool includeInactive) overload is left.
+    g.inParent = byParams(component, "GetComponentInParent", {"System.Type", "System.Boolean"});
     g.colEnabled = method(collider, "get_enabled", 0);
     g.colTrigger = method(collider, "get_isTrigger", 0);
     g.colBounds = method(collider, "get_bounds", 0);

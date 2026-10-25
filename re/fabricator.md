@@ -9,6 +9,7 @@
 - Other runtime categories: `PlayerUpgradeFabricateCategory(Runtime)`, `PinnedFabricateCategory(Runtime)`.
 
 ### GadgetDefinition / GadgetDirector
+- `LookupDirector.get_MarketLink` / `get_RefineryLink` return null in 1.3.0 (the `_marketLink` / `_refineryLink` fields stay empty); the definitions are found by name (`MarketLink`, `RefineryLink`) in `_gadgetDefinitions` and its `_memberGroups` (custom_upgrades module.cpp `FindGadgetByName`, quantum_link.cpp `FindRefineryLink`). Gadget full art: `GadgetDefinition.icon` is the 128 px `_small` sprite; `_fullArt` the 512 px addressable picture of the Fabricator details (gadget_look `artTint` recolours it once loaded).
 - `GadgetDefinition` (IdentifiableType): `VariantOf`, `get_LocalizedDescription` 0x51B440 walks `VariantOf` to the root and returns ITS `_localizedDescription` (variants show the base text unless hooked: gadget_look); `localizedName` read directly; `get_Icon` returns its own icon when set; `_fullArt` / `_requiresFullArt` (details picture, addressable sprite via `UIImageDynamicLoader`); `_pediaLink`.
 - `GadgetDirector`: `InstantiateGadget` (model type from the prefab via `TryGetId(prefab)`), `_gadgetVariantMap` (every variant lookup is `get_Item` without fallback: register a key for mod definitions), `HasBlueprint`, `GetItemCount` (variants -> `BaseGadget`), `GetTargetGadgetInfo` 0x868E80 (gadget-mode label: `DisplayName` from `_pediaLink`), `TargetedGadget`, `CurrentGadgetMusicPlayer`.
 - `GadgetsModel._itemCounts` / blueprints: `Pull` throws on unknown or duplicate ids (re/save.md).

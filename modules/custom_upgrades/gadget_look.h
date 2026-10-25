@@ -57,6 +57,13 @@ struct Look {
     // details' UIImageDynamicLoader loads nothing over it. The grid tile and hotbar use
     // GadgetDefinition.icon: set that field yourself (get_Icon returns it when not null).
     Il2CppObject* icon = nullptr;
+    // artAmount > 0 (with `icon` set): the details picture becomes the base's full art (the 512 px addressable
+    // sprite, copied by Instantiate) recoloured `artAmount` towards `artTint` (TintedSprite), instead of
+    // `icon` stretched up from its 128 px. The full-art reference stays until the loader has loaded it once
+    // (the first time the card is shown: `icon` shows until then); the recoloured copy is kept for the
+    // session and the reference is cleared. Falls back to `icon` when the art does not load in 10 s.
+    Rgb artTint;
+    float artAmount = 0;
     // After GadgetItem.SetHeldGadget built the placement preview for this definition (the preview's root
     // GameObject; inside the hook's DetourGuard). nullptr: the base's preview.
     std::function<void(Il2CppObject* placeholder)> dressPreview;

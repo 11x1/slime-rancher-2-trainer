@@ -692,6 +692,7 @@ private:
     void ReportStorageCards(Il2CppObject* plot, MenuInjection& inj);
     bool Shown(Il2CppObject* plot, const UpgradeDef& d);
     Il2CppObject* MarketIcon();
+    Il2CppObject* FindGadgetByName(Il2CppObject* lookup, std::string_view name);
     void SetTexts(const Injected& in, const std::string& title, const std::string& desc, const std::string& prompt);
     void Cleanup(const char* why);
 
@@ -821,6 +822,9 @@ public:
     const MethodInfo* slotCountMi_ = nullptr;
     const MethodInfo* decrementMi_ = nullptr;
     const MethodInfo* marketLinkMi_ = nullptr;  // LookupDirector.get_MarketLink (optional)
+    // Market Link by name in LookupDirector._gadgetDefinitions (optional; the property is null in 1.3.0)
+    Il2CppClass* groupClass_ = nullptr;
+    size_t offLookupGadgets_ = 0, offGroupMembers_ = 0, offGroupSubs_ = 0;
     const MethodInfo* itemUpdAvailMi_ = nullptr;   // PlotUpgradePurchaseItemModel.UpdateAvailability (optional)
     const MethodInfo* itemUpdHiddenMi_ = nullptr;  // PlotUpgradePurchaseItemModel.UpdateHidden (optional)
     const MethodInfo* setHideFlagsMi_ = nullptr;
@@ -1698,21 +1702,51 @@ bool CustomUpgrades::ListCall(Il2CppObject* list, const char* method, Il2CppObje
 
 Il2CppObject* CustomUpgrades::MarketIcon() {
     if (marketIconTried_) return marketIcon_;
-    marketIconTried_ = true;
-    if (!marketLinkMi_) return nullptr;
     bool ok = false;
     Il2CppObject* gc = Invoke(gameCtxInstMi_, nullptr, {}, "GameContext.Instance", &ok);
     Il2CppObject* lookup = (ok && unity::IsAlive(gc)) ? unity::Field<Il2CppObject*>(gc, offGcLookup_) : nullptr;
-    if (!unity::IsAlive(lookup)) return nullptr;
-    Il2CppObject* ml = Invoke(marketLinkMi_, lookup, {}, "LookupDirector.get_MarketLink", &ok);
-    if (!ok || !unity::IsAlive(ml) || !IsA(ml, identClass_)) return nullptr;
-    Il2CppObject* icon = unity::Field<Il2CppObject*>(ml, offIdentIcon_);
+    if (!unity::IsAlive(lookup)) return nullptr;  // not loaded yet: try again next time
+    marketIconTried_ = true;
+    Il2CppObject* ml = marketLinkMi_ ? Invoke(marketLinkMi_, lookup, {}, "LookupDirector.get_MarketLink", &ok) : nullptr;
+    const char* from = "LookupDirector.MarketLink";
+    if (!ml || !ok || !unity::IsAlive(ml) || !IsA(ml, identClass_)) {
+        // Round 11: the property is null in 1.3.0 (as RefineryLink, quantum_link.cpp), so the card kept the
+        // cloned template's icon, Storage Capacity's. The definition is in the gadget groups by name.
+        ml = FindGadgetByName(lookup, "MarketLink");
+        from = "the gadget groups";
+    }
+    Il2CppObject* icon = ml ? unity::Field<Il2CppObject*>(ml, offIdentIcon_) : nullptr;
     if (unity::IsAlive(icon)) {
         marketIcon_ = icon;
         unity::NewGCHandle(icon);  // pinned for the session (never freed)
-        SR2_INFO("[{}] using the Market Link icon '{}' for the sell-all items", kModule, unity::GetName(icon));
+        SR2_INFO("[{}] using the Market Link icon '{}' for the sell-all items (definition from {})", kModule,
+                 unity::GetName(icon), from);
+    } else {
+        SR2_WARN("[{}] no Market Link definition (LookupDirector.MarketLink null, none named 'MarketLink' in the gadget "
+                 "groups) - the Sell-All Button card keeps the template's icon", kModule);
     }
     return marketIcon_;
+}
+
+// The gadget definition with this name in LookupDirector._gadgetDefinitions and its member groups.
+// Once per session (MarketIcon).
+Il2CppObject* CustomUpgrades::FindGadgetByName(Il2CppObject* lookup, std::string_view name) {
+    if (!groupClass_ || !offLookupGadgets_ || !offGroupMembers_) return nullptr;
+    std::vector<Il2CppObject*> groups{unity::Field<Il2CppObject*>(lookup, offLookupGadgets_)};
+    for (size_t gi = 0; gi < groups.size() && gi < 64; ++gi) {
+        Il2CppObject* grp = groups[gi];
+        if (!unity::IsAlive(grp) || !IsA(grp, groupClass_)) continue;
+        void* members = unity::Field<void*>(grp, offGroupMembers_);
+        for (size_t i = 0, n = unity::ListCount(members); i < n && i < 1000; ++i) {
+            auto* t = static_cast<Il2CppObject*>(unity::ListAt(members, i));
+            if (IsA(t, identClass_) && unity::IsAlive(t) && unity::GetName(t) == name) return t;
+        }
+        if (!offGroupSubs_) continue;
+        void* subs = unity::Field<void*>(grp, offGroupSubs_);
+        for (size_t i = 0, n = unity::ListCount(subs); i < n && i < 64; ++i)
+            groups.push_back(static_cast<Il2CppObject*>(unity::ListAt(subs, i)));
+    }
+    return nullptr;
 }
 
 // The user's drawing for a custom item (assets/icons/<name>.png, ui/mod_icons.h), or nullptr when
@@ -3314,6 +3348,17 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         Il2CppClass* lookup = R.Class(kImage, "", "LookupDirector");
         std::string err;
         marketLinkMi_ = lookup ? R.Method(lookup, "get_MarketLink", 0, &err) : nullptr;  // optional icon
+        groupClass_ = R.Class(kImage, "", "IdentifiableTypeGroup", &err);
+        if (lookup && groupClass_) {
+            auto lg = R.FieldOffset(lookup, "_gadgetDefinitions");
+            auto gm = R.FieldOffset(groupClass_, "_memberTypes");
+            auto gs = R.FieldOffset(groupClass_, "_memberGroups");
+            if (lg && gm) {
+                offLookupGadgets_ = *lg;
+                offGroupMembers_ = *gm;
+                offGroupSubs_ = gs ? *gs : 0;
+            }
+        }
     }
 
     {

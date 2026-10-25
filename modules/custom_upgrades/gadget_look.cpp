@@ -61,6 +61,7 @@ struct Slot {
     std::atomic<Il2CppObject*> name{nullptr};
     std::atomic<Il2CppObject*> desc{nullptr};
     std::atomic<Il2CppObject*> icon{nullptr};
+    std::atomic<Il2CppObject*> art{nullptr};  // the recoloured full art (Look.artAmount), once made
 };
 Slot g_slots[kMax];
 
@@ -88,10 +89,22 @@ struct Impl {
     std::mutex placedMu;  // AddPlacedLabel may come from the worker thread
     std::vector<PlacedLabel> placed;
     std::set<std::string> loggedShaders;
+    // Look.artAmount: definitions whose recoloured full art is still to be made, and the details image
+    // waiting for the loader (SetItemDetour -> ArtFrame).
+    struct ArtTint {
+        Rgb tint;
+        float amount = 0;
+    };
+    std::map<Il2CppObject*, ArtTint> artTints;
+    std::set<Il2CppObject*> pinnedImages;  // details images we watch (pinned once, never freed)
+    Il2CppObject* artImage = nullptr;
+    Il2CppObject* artDef = nullptr;
+    float artWait = 0;
+    int artCallback = 0;
     // offsets
     size_t offFullArt = 0, offRequiresFullArt = 0, offDetailsIcon = 0, offFabDef = 0;
     Il2CppClass* fabItemClass = nullptr;
-    const MethodInfo* imageSetSprite = nullptr;
+    const MethodInfo* imageSetSprite = nullptr, *imageGetSprite = nullptr;
     size_t offHeld = 0, offPlaceholder = 0, offTargeted = 0, offTargetingPlaceholder = 0, offSelected = 0;
     const void* obsClass = nullptr;
     size_t obsValue = 0;
@@ -142,6 +155,8 @@ struct Impl {
         return obsValue ? unity::Field<Il2CppObject*>(obs, obsValue) : nullptr;
     }
     Il2CppObject* PlacedLabelFor(Il2CppObject* director, Il2CppObject* def);
+    void ArtFrame(float dt);
+    void DropArt(Il2CppObject* def, Slot* s, const std::string& why);
 };
 
 Impl* g = nullptr;
@@ -212,11 +227,77 @@ void SetItemDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo* mi)
     if (api().il2cpp_object_get_class(item) != g->fabItemClass) return;
     Slot* s = Find(unity::Field<Il2CppObject*>(item, g->offFabDef));
     Il2CppObject* icon = s ? s->icon.load(std::memory_order_acquire) : nullptr;
+    g->artImage = nullptr;  // another card: stop waiting
     if (!icon) return;
     g_guard.Run([&] {
         Il2CppObject* image = unity::Field<Il2CppObject*>(self, g->offDetailsIcon);
-        if (unity::IsAlive(image)) g->Call(g->imageSetSprite, image, {icon}, "Image.set_sprite");
+        if (!unity::IsAlive(image)) return;
+        Il2CppObject* art = s->art.load(std::memory_order_acquire);
+        Il2CppObject* def = s->def.load(std::memory_order_acquire);
+        if (art || !g->artTints.count(def) || !g->imageGetSprite) {
+            g->Call(g->imageSetSprite, image, {art ? art : icon}, "Image.set_sprite");
+            return;
+        }
+        // Full art still to recolour: the loader shows our icon (the item's) and puts the base's full art on
+        // this image once loaded (maybe already, inside the original). ArtFrame picks it up from there.
+        if (g->pinnedImages.insert(image).second) (void)unity::NewGCHandle(image);
+        g->artImage = image;
+        g->artDef = def;
+        g->artWait = 0;
+        if (!g->artCallback)
+            g->artCallback = main_thread::AddFrameCallback("custom_upgrades", [](float dt) {
+                if (g && g->armed && !g->Faulted()) g_guard.Run([&] { g->ArtFrame(dt); });
+            });
     });
+}
+
+// No recoloured full art for `def`: its picture is the icon from now on (the reference cleared).
+void Impl::DropArt(Il2CppObject* def, Slot* s, const std::string& why) {
+    artTints.erase(def);
+    unity::Field<Il2CppObject*>(def, offFullArt) = nullptr;
+    unity::Field<bool>(def, offRequiresFullArt) = false;
+    Il2CppObject* icon = s ? s->icon.load(std::memory_order_acquire) : nullptr;
+    if (icon && unity::IsAlive(artImage)) Call(imageSetSprite, artImage, {icon}, "Image.set_sprite");
+    SR2_INFO("[{}] gadget look: '{}' card picture stays the icon ({})", module, unity::GetName(def), why);
+    artImage = nullptr;
+}
+
+// Waits (up to 10 s) for the details image to show something other than our icon: the loaded full art.
+void Impl::ArtFrame(float dt) {
+    if (!artImage) return;
+    Slot* s = Find(artDef);
+    auto it = artTints.find(artDef);
+    if (!s || it == artTints.end() || s->art.load(std::memory_order_acquire)) {
+        artImage = nullptr;
+        return;
+    }
+    if (!unity::IsAlive(artImage)) {
+        artImage = nullptr;  // the menu closed before the art came: the next SetItem waits again
+        return;
+    }
+    artWait += std::isfinite(dt) && dt > 0 ? std::min(dt, 1.0f) : 0.0f;
+    bool ok = false;
+    Il2CppObject* shown = Call(imageGetSprite, artImage, {}, "Image.get_sprite", &ok);
+    Il2CppObject* icon = s->icon.load(std::memory_order_acquire);
+    // The full art is the bigger picture; anything else (our icon, nothing yet) means still loading.
+    const float iconW = icon ? Value<Rect>(Call(spriteRect, icon, {}, "Sprite.get_rect")).w : 0.0f;
+    const float shownW = ok && unity::IsAlive(shown) && shown != icon ? Value<Rect>(Call(spriteRect, shown, {}, "Sprite.get_rect", &ok)).w : 0.0f;
+    if (!ok || shownW <= iconW) {
+        if (artWait >= 10.0f) DropArt(artDef, s, "the full art did not load within 10 s");
+        return;
+    }
+    std::string why;
+    Il2CppObject* art = TintedSprite(shown, it->second.tint, it->second.amount, why);
+    if (!art) return DropArt(artDef, s, std::format("recolouring '{}' failed: {}", unity::GetName(shown), why));
+    s->art.store(art, std::memory_order_release);
+    artTints.erase(it);
+    // Ours from now on: the loader loads nothing over it.
+    unity::Field<Il2CppObject*>(artDef, offFullArt) = nullptr;
+    unity::Field<bool>(artDef, offRequiresFullArt) = false;
+    Call(imageSetSprite, artImage, {art}, "Image.set_sprite");
+    SR2_INFO("[{}] gadget look: '{}' card picture = its full art '{}' recoloured (after {:.1f} s)", module,
+             unity::GetName(artDef), unity::GetName(shown), artWait);
+    artImage = nullptr;
 }
 
 }  // namespace
@@ -284,6 +365,7 @@ bool Setup(sr2::core::ModuleContext& ctx, const char* module, std::string& why, 
     off(details, "_icon", p->offDetailsIcon);
     off(p->fabItemClass, "<Definition>k__BackingField", p->offFabDef);
     p->imageSetSprite = method(image, "set_sprite", 1);
+    p->imageGetSprite = R.Method(image, "get_sprite", 0);  // optional: Look.artAmount
     off(gadgetItem, "_heldGadget", p->offHeld);
     off(gadgetItem, "_gadgetPlaceholderInstance", p->offPlaceholder);
     off(gadgetDir, "<TargetedGadget>k__BackingField", p->offTargeted);
@@ -377,7 +459,12 @@ void Register(Il2CppObject* def, Look look) {
     s->name.store(look.name, std::memory_order_release);
     s->desc.store(look.description, std::memory_order_release);
     s->icon.store(look.icon, std::memory_order_release);
-    if (look.icon) {  // the card's picture is ours: no full art loaded over it
+    const bool tintArt = look.icon && look.artAmount > 0 && !s->art.load(std::memory_order_acquire) && g->imageGetSprite &&
+                         unity::Field<Il2CppObject*>(def, g->offFullArt) && unity::Field<bool>(def, g->offRequiresFullArt);
+    if (tintArt) {
+        g->artTints[def] = {look.artTint, look.artAmount};  // the full art loads once, then is recoloured
+    } else if (look.icon) {  // the card's picture is ours: no full art loaded over it
+        g->artTints.erase(def);
         unity::Field<Il2CppObject*>(def, g->offFullArt) = nullptr;
         unity::Field<bool>(def, g->offRequiresFullArt) = false;
     }

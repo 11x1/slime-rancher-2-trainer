@@ -1,9 +1,10 @@
 """Turns a hand-drawn icon into an embeddable one (offline tool, Pillow).
 
-python pad_icon.py <drawing.png> <name>
+python pad_icon.py <drawing.png> <name> [size]
 Writes assets/icons/<name>.png: the drawing cropped to its visible pixels, centred on a
 transparent square canvas and reduced by a whole factor (2x, 3x, ... box filter, never a
-fractional resize) so it fits the 256 x 256 the other icons use. A drawing that already
+fractional resize) so it fits the 256 x 256 the other icons use (or `size`, e.g. 512 for a
+`<name>_large` copy: the Fabricator details picture of a buildable). A drawing that already
 fits is padded unscaled. The input file is not changed.
 """
 
@@ -19,9 +20,12 @@ SIZE = 256
 
 
 def main():
-    if len(sys.argv) != 3:
+    global SIZE
+    if len(sys.argv) not in (3, 4):
         sys.exit(__doc__)
     src, name = sys.argv[1], sys.argv[2]
+    if len(sys.argv) == 4:
+        SIZE = int(sys.argv[3])
     im = Image.open(src).convert("RGBA")
     box = im.getchannel("A").getbbox()
     if not box:

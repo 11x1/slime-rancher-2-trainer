@@ -39,7 +39,7 @@
 //     two small ones on the front corners, two big boomboxes on the floor beside it (emitters), a
 //     bench with the flower pillow and the game's slime attachment point behind it (largos allowed), E on
 //     the desk root; speaker = bench and boombox hidden, a stack of two boomboxes with one box collider, stacking allowed on top, an emitter; radio = the night light hidden,
-//     a small boombox instead, upright and box-shaped, an emitter. Every clone is script-free except the
+//     a small speaker stack filling the toy's ball, which rolls and rights itself on a flat base, an emitter. Every clone is script-free except the
 //     pillow's attachment point. The boomboxes dance and show their notes only while they play.
 //   * Plain placed Boomboxes (not DJ Speakers) are left as they are but play the song too when switched
 //     on: an emitter on their model_boombox, and the same dance (SyncPlain).
@@ -124,14 +124,18 @@ constexpr int kStaleTicks = 5;
 constexpr int kStaleTicksEmpty = 60;
 constexpr int kMaxRadioSpawn = 5;
 // The speaker stack (BuildStack): base boombox scale, top boombox scale and height (at s = 1), the Boombox's bounds
-// centre on its gadget root, the box collider around the stack; the radio is the same stack at kRadioScale (toy units).
+// centre on its gadget root, the box collider around the stack; the radio is the same stack sized by kRadioFill (toy units).
 constexpr float kStackBase = 1.3f, kStackTop = 0.85f, kStackTopY = 1.0f, kStackX = 0.18f, kStackZ = 0.03f;
 struct StackBox {
     float x, y, z;
 };
 constexpr StackBox kStackBox{1.2f, 1.7f, 0.9f};
-constexpr float kRadioScale = 0.26f;
-constexpr float kRadioDamping = 0.6f;  // the radio's Rigidbody linear damping (at least)
+// The radio (BuildRadio, toy units): the stack's height as a fraction of the ball's diameter, the flat base's
+// height and width (x the ball's radius), how far the centre of mass sits below the ball's centre (x radius),
+// linear and angular damping (at least).
+constexpr float kRadioFill = 0.82f, kRadioBaseH = 0.14f, kRadioBaseW = 1.15f, kRadioComDrop = 0.55f;
+constexpr float kRadioDamping = 0.6f, kRadioAngDamping = 1.5f;
+constexpr float kIconTint = 0.7f;      // card icon / details picture: how far the base's colours go to the family's
 // The booth (BuildBooth, DressPreview): desk top height, the middle boombox's scale and depth, the seat (bench) and its top.
 constexpr float kDeskTop = 1.22f, kDeck = 0.45f, kDeckZ = 0.05f, kSeatTop = 0.72f;
 constexpr StackBox kSeat{0.0f, 0.0f, -1.8f};
@@ -265,6 +269,8 @@ struct Impl : variant_ext::Extension {
     const MethodInfo* sphereGetRadius = nullptr, *sphereSetRadius = nullptr, *rbGetConstraints = nullptr, *rbSetConstraints = nullptr;
     const MethodInfo* trGetEuler = nullptr, *trSetEuler = nullptr;
     const MethodInfo* rbGetDamping = nullptr, *rbSetDamping = nullptr, *colGetMat = nullptr, *colSetMat = nullptr;
+    const MethodInfo* rbGetAngDamping = nullptr, *rbSetAngDamping = nullptr, *rbSetCom = nullptr, *rbResetCom = nullptr;
+    const MethodInfo* sphereGetCenter = nullptr;
     const MethodInfo* pmCtor = nullptr, *pmSetDyn = nullptr, *pmSetStatic = nullptr, *pmSetBounce = nullptr,
                       *pmSetFricCombine = nullptr, *pmSetBounceCombine = nullptr;
     Il2CppObject* radioMat = nullptr;  // our high-friction physics material for the radio's box (session object)
@@ -337,15 +343,19 @@ struct Impl : variant_ext::Extension {
         int spin = -1;                         // booth: spin applied (-1 = none yet)
         Il2CppObject* standby = nullptr;       // booth: our copy of the corral music box's SECTR audio source
         bool standbyOn = false;                // booth: Play() was called on it
-        Il2CppObject* rb = nullptr;            // radio: the toy's Rigidbody (rotation frozen while not held)
+        Il2CppObject* rb = nullptr;            // radio: the toy's Rigidbody (rotation free, low centre of mass)
         int32_t rbWas = 0;
         float dampWas = -1.0f;                 // radio: its linear damping before ours (-1 = untouched)
+        float angDampWas = -1.0f;              // radio: its angular damping before ours (-1 = untouched)
+        bool comSet = false;                   // radio: centre of mass moved (reset on undress)
         Il2CppObject* vac = nullptr;           // radio: the toy's Vacuumable (_held read every frame)
         int held = -1;                         // radio: hold state applied (-1 = none yet)
         Il2CppObject* matWas = nullptr;        // radio: the box collider's shared physics material before ours
         bool matSet = false;
-        Il2CppObject* sphere = nullptr;        // radio: the toy's ball collider (off)
-        Il2CppObject* box = nullptr;           // radio: the toy's box collider (made the radio's size)
+        Il2CppObject* sphereMatWas = nullptr;  // radio: the ball's shared physics material before ours
+        bool sphereMatSet = false;
+        Il2CppObject* sphere = nullptr;        // radio: the toy's ball collider (kept on: it rolls)
+        Il2CppObject* box = nullptr;           // radio: the toy's bottom box collider (made the flat base)
         Vec3 boxCenterWas{}, boxSizeWas{};
         std::vector<Il2CppObject*> emitters;
         std::vector<EmitterScale> scales;      // per emitter (parallel to emitters; missing = 1, 1)
@@ -1212,6 +1222,19 @@ void Impl::RegisterLooks() {
     int n = 0;
     for (int f : {kBooth, kSpeaker, kRadio}) {
         Il2CppObject* icon = fams[f].defs.empty() ? nullptr : MakeIcon(f);
+        // Round 12 ("The icons are so low quality on the right pane"): a recoloured 128 px icon stretched
+        // up; the details picture is the base's 512 px full art recoloured the same way instead. A user's
+        // drawing shows as drawn: its 512 px copy (<iconName>_large.png) in the details when embedded.
+        const bool drawn = icon && fams[f].iconName && sr2::ui::mod_icons::Has(fams[f].iconName) &&
+                           icon == sr2::ui::mod_icons::Get(fams[f].iconName);  // cached: MakeIcon's sprite
+        Il2CppObject* details = icon;
+        if (drawn) {
+            const std::string large = std::string(fams[f].iconName) + "_large";
+            if (sr2::ui::mod_icons::Has(large))
+                if (Il2CppObject* big = sr2::ui::mod_icons::Get(large, unity::Field<Il2CppObject*>(fams[f].base, offIcon))) details = big;
+            SR2_INFO("[{}] dj buildables: {} details picture = the mod icon '{}'", module, fams[f].label,
+                     details != icon ? large : std::string(fams[f].iconName));
+        }
         for (Il2CppObject* def : fams[f].defs) {
             gadget_look::Look look;
             look.name = Label(def);
@@ -1220,7 +1243,11 @@ void Impl::RegisterLooks() {
             if (f != kRadio) look.dressPreview = [this, def](Il2CppObject* placeholder) { DressPreview(def, placeholder); };
             if (icon) {
                 SetRef(def, offIcon, icon);  // the grid tile (GadgetDefinition.get_Icon)
-                look.icon = icon;            // the details picture
+                look.icon = details;         // the details picture (vanilla base: until its full art is recoloured)
+                if (!drawn) {
+                    look.artTint = {fams[f].tint.r, fams[f].tint.g, fams[f].tint.b};
+                    look.artAmount = kIconTint;
+                }
             }
             gadget_look::Register(def, std::move(look));
             ++n;
@@ -1241,7 +1268,7 @@ Il2CppObject* Impl::MakeIcon(int f) {
         }
     std::string why;
     const Rgb3 t = fams[f].tint;
-    Il2CppObject* tinted = unity::IsAlive(baseIcon) ? gadget_look::TintedSprite(baseIcon, {t.r, t.g, t.b}, 0.7f, why) : nullptr;
+    Il2CppObject* tinted = unity::IsAlive(baseIcon) ? gadget_look::TintedSprite(baseIcon, {t.r, t.g, t.b}, kIconTint, why) : nullptr;
     if (tinted) SR2_INFO("[{}] dj buildables: {} card icon = the {}'s icon recoloured", module, fams[f].label, fams[f].baseName);
     else SR2_INFO("[{}] dj buildables: {} card icon = the {}'s ({})", module, fams[f].label, fams[f].baseName,
                   unity::IsAlive(baseIcon) ? why : std::string("no base icon"));
@@ -1548,17 +1575,34 @@ void Impl::BuildSpeaker(Rec& rec, std::string& what) {
                        rec.gadget ? "on" : "unknown (no Gadget)");
 }
 
-// The Night Light toy dressed as a small speaker stack (the DJ Speaker Stack's look), upright and box-shaped (its
-// ball collider made it roll). The stack is centred on the toy's root, where the night light was: held in the
-// vacuum the root sits at the nozzle (round 9: "slime radio just disappears when vacced" - the old single boombox
-// hung below the root, out of view).
+// The Night Light toy dressed as a speaker stack (the DJ Speaker Stack's look) on the toy's own colliders.
+// Round 12 ("a bit small tbh, use the original radio hitboxes with a flattened base so they can still roll and
+// have collision"): the toy's ball (r 0.47) stays on and rolls; its small bottom box becomes a flat base
+// (wider than the ball's contact patch), the centre of mass sits low so it rights itself on that base like a
+// roly-poly toy, and the stack is sized to fill the ball. Round 11's box collider with frozen rotation slid.
+// The stack is centred on the ball, where the night light was: held in the vacuum the root sits at the nozzle
+// (round 9: "slime radio just disappears when vacced" - the old single boombox hung below the root).
 void Impl::BuildRadio(Rec& rec, std::string& what) {
     HideVanilla(rec, {"model_nightlight"});
-    const float h = kStackBox.y * kRadioScale;  // the stack's height (toy units; the toy is scaled 1.75)
-    int built = 0;
-    Il2CppObject* radio = BuildStack(rec, rec.holder, {0.0f, -h * 0.5f, 0.0f}, kRadioScale, &built);
-    if (radio) rec.emitters.push_back(radio);
     bool ok = false;
+    // The ball (toy units; the toy root is scaled 1.75).
+    Vec3 ball{0.0f, 0.0f, 0.0f};
+    float r = 0.47f;
+    if ((rec.sphere = unity::GetComponent(rec.root, sphereColliderClass)) != nullptr) {
+        bool a = false, b = false;
+        const Vec3 c = Value<Vec3>(Call(sphereGetCenter, rec.sphere, {}, "SphereCollider.get_center", &a));
+        const float rr = Value<float>(Call(sphereGetRadius, rec.sphere, {}, "SphereCollider.get_radius", &b));
+        if (a) ball = c;
+        if (b && rr > 0.05f && rr < 5.0f) r = rr;
+        bool on = true;  // an older dressing (round 11) switched it off
+        Call(colSetEnabled, rec.sphere, {&on}, "Collider.set_enabled");
+        Keep(rec, rec.sphere);
+    }
+    const float baseH = r * kRadioBaseH, bottom = ball.y - r;  // the flat base: its bottom is the ball's bottom
+    const float s = 2.0f * r * kRadioFill / kStackBox.y;      // the stack fills the ball's height (fill fraction)
+    int built = 0;
+    Il2CppObject* radio = BuildStack(rec, rec.holder, {ball.x, bottom + baseH, ball.z}, s, &built);
+    if (radio) rec.emitters.push_back(radio);
     if ((rec.rb = unity::GetComponent(rec.root, rigidbodyClass)) != nullptr) {
         rec.rbWas = Value<int32_t>(Call(rbGetConstraints, rec.rb, {}, "Rigidbody.get_constraints", &ok));
         if (ok) {
@@ -1566,21 +1610,26 @@ void Impl::BuildRadio(Rec& rec, std::string& what) {
             bool got = false;
             Vec3 e = Value<Vec3>(Call(trGetEuler, tr, {}, "Transform.get_eulerAngles", &got));
             if (got) {
-                e.x = 0.0f, e.z = 0.0f;  // stand it up, keep its heading
+                e.x = 0.0f, e.z = 0.0f;  // start upright, keep its heading
                 Call(trSetEuler, tr, {&e}, "Transform.set_eulerAngles");
             }
-            int32_t frozen = rec.rbWas | 16 | 64;  // RigidbodyConstraints.FreezeRotationX | FreezeRotationZ
-            Call(rbSetConstraints, rec.rb, {&frozen}, "Rigidbody.set_constraints", &ok);
+            int32_t loose = rec.rbWas & ~(16 | 64);  // rotation free (an older dressing froze X / Z): it rolls
+            Call(rbSetConstraints, rec.rb, {&loose}, "Rigidbody.set_constraints", &ok);
         }
         if (ok) Keep(rec, rec.rb);
         else rec.rb = nullptr;
+    }
+    // Low centre of mass: on its side the ball rolls back onto the base.
+    if (rec.rb && rbSetCom) {
+        Vec3 com{ball.x, ball.y - r * kRadioComDrop, ball.z};
+        Call(rbSetCom, rec.rb, {&com}, "Rigidbody.set_centerOfMass", &rec.comSet);
     }
     if ((rec.box = unity::GetComponent(rec.root, boxColliderClass)) != nullptr) {
         bool a = false, b = false;
         rec.boxCenterWas = Value<Vec3>(Call(boxGetCenter, rec.box, {}, "BoxCollider.get_center", &a));
         rec.boxSizeWas = Value<Vec3>(Call(boxGetSize, rec.box, {}, "BoxCollider.get_size", &b));
         if (a && b) {
-            Vec3 c{0.0f, 0.0f, -0.05f * kRadioScale}, sz{kStackBox.x * kRadioScale, h, kStackBox.z * kRadioScale};
+            Vec3 c{ball.x, bottom + baseH * 0.5f, ball.z}, sz{r * kRadioBaseW, baseH, r * kRadioBaseW};
             Call(boxSetCenter, rec.box, {&c}, "BoxCollider.set_center");
             Call(boxSetSize, rec.box, {&sz}, "BoxCollider.set_size");
             Keep(rec, rec.box);
@@ -1588,21 +1637,21 @@ void Impl::BuildRadio(Rec& rec, std::string& what) {
             rec.box = nullptr;
         }
     }
-    if (rec.box && (rec.sphere = unity::GetComponent(rec.root, sphereColliderClass)) != nullptr) {
-        bool off = false;
-        Call(colSetEnabled, rec.sphere, {&off}, "Collider.set_enabled", &ok);
-        if (ok) Keep(rec, rec.sphere);
-        else rec.sphere = nullptr;
-    }
-    // Round 11: "It slides so much when moved". The toy's ball had the toy's slippery material and no
-    // damping; the box gets a high-friction, non-bouncy material and some linear damping.
-    if (rec.box) {
+    // Round 11: "It slides so much when moved". Both colliders get a high-friction, non-bouncy material; the
+    // body some linear damping and angular damping (it rolls, but not forever).
+    if (Il2CppObject* mat = RadioMaterial()) {
         bool got = false;
-        if (Il2CppObject* mat = RadioMaterial()) {
+        if (rec.box) {
             rec.matWas = Call(colGetMat, rec.box, {}, "Collider.get_sharedMaterial", &got);
             if (got) Call(colSetMat, rec.box, {mat}, "Collider.set_sharedMaterial", &got);
             rec.matSet = got;
             if (got && rec.matWas) Keep(rec, rec.matWas);
+        }
+        if (rec.sphere) {
+            rec.sphereMatWas = Call(colGetMat, rec.sphere, {}, "Collider.get_sharedMaterial", &got);
+            if (got) Call(colSetMat, rec.sphere, {mat}, "Collider.set_sharedMaterial", &got);
+            rec.sphereMatSet = got;
+            if (got && rec.sphereMatWas) Keep(rec, rec.sphereMatWas);
         }
     }
     if (rec.rb && rbGetDamping && rbSetDamping) {
@@ -1614,13 +1663,21 @@ void Impl::BuildRadio(Rec& rec, std::string& what) {
             if (got) rec.dampWas = was;
         }
     }
-    // Round 11: "it disappears after vaccing for 1-2 secs". Held at the nozzle, the vacuum's lock joint turns
-    // the toy to face the player (VacuumItem.UpdateHeld); with rotation X / Z frozen the joint fought the
-    // constraints and threw the radio away. FrameRadios frees the rotation while Vacuumable._held is set.
+    if (rec.rb && rbGetAngDamping && rbSetAngDamping) {
+        bool got = false;
+        const float was = Value<float>(Call(rbGetAngDamping, rec.rb, {}, "Rigidbody.get_angularDamping", &got));
+        if (got) {
+            float d = std::max(was, kRadioAngDamping);
+            Call(rbSetAngDamping, rec.rb, {&d}, "Rigidbody.set_angularDamping", &got);
+            if (got) rec.angDampWas = was;
+        }
+    }
     if ((rec.vac = vacuumableClass ? unity::GetComponent(rec.root, vacuumableClass) : nullptr) != nullptr) Keep(rec, rec.vac);
-    what = std::format("night light {}, stack of {} boombox(es), upright {}, box collider {}, grip {}, hold watch {}",
-                       rec.hidden.empty() ? "not found" : "hidden", built, rec.rb ? "yes" : "no", rec.sphere ? "yes" : "no",
-                       rec.matSet ? "yes" : "no", rec.vac && offVacHeld ? "yes" : "no");
+    what = std::format("night light {}, stack of {} boombox(es) at {:.2f} size, ball {} (r {:.2f}), flat base {}, low centre of "
+                       "mass {}, grip {}, rolls {}",
+                       rec.hidden.empty() ? "not found" : "hidden", built, s, rec.sphere ? "on" : "MISSING", r,
+                       rec.box ? "yes" : "no", rec.comSet ? "yes" : "no", rec.matSet || rec.sphereMatSet ? "yes" : "no",
+                       rec.rb ? "yes" : "unknown (no Rigidbody)");
 }
 
 // The radio's physics material (made once): grippy, no bounce; of two touching colliders the higher friction
@@ -1643,26 +1700,16 @@ Il2CppObject* Impl::RadioMaterial() {
     return m;
 }
 
-// Held in the vacuum: rotation free (the lock joint turns it). Let go: upright again, X / Z frozen.
+// Held in the vacuum. Round 11 froze rotation X / Z while not held, which fought the vacuum's lock joint
+// ("disappears after vaccing for 1-2 secs"); round 12 leaves rotation free all the time (it rolls and rights
+// itself on its base), so only stale freeze bits are cleared here. Kept for the log.
 void Impl::RadioHeld(Rec& rec, bool held) {
     rec.held = held ? 1 : 0;
     if (!rec.rb || !unity::IsAlive(rec.rb)) return;
     bool ok = false;
-    if (held) {  // only our two bits off: whatever else the vacuum set stays
-        int32_t c = Value<int32_t>(Call(rbGetConstraints, rec.rb, {}, "Rigidbody.get_constraints", &ok));
-        if (ok && (c & (16 | 64)) != 0) {
-            c &= ~(16 | 64);
-            Call(rbSetConstraints, rec.rb, {&c}, "Rigidbody.set_constraints", &ok);
-        }
-    } else {
-        Il2CppObject* tr = unity::TransformOf(rec.root);
-        bool got = false;
-        Vec3 e = Value<Vec3>(Call(trGetEuler, tr, {}, "Transform.get_eulerAngles", &got));
-        if (got && (std::fabs(e.x) > 0.01f || std::fabs(e.z) > 0.01f)) {
-            e.x = 0.0f, e.z = 0.0f;
-            Call(trSetEuler, tr, {&e}, "Transform.set_eulerAngles");
-        }
-        int32_t c = rec.rbWas | 16 | 64;
+    int32_t c = Value<int32_t>(Call(rbGetConstraints, rec.rb, {}, "Rigidbody.get_constraints", &ok));
+    if (ok && (c & (16 | 64)) != 0) {
+        c &= ~(16 | 64);
         Call(rbSetConstraints, rec.rb, {&c}, "Rigidbody.set_constraints", &ok);
     }
 }
@@ -1674,7 +1721,7 @@ void Impl::FrameRadios() {
         const bool held = unity::Field<bool>(rec.vac, offVacHeld);
         if (rec.held == (held ? 1 : 0)) continue;
         if (rec.held >= 0 || held)
-            SR2_INFO("[{}] dj buildables: Slime Radio actor {} {}", module, id, held ? "held in the vacuum (rotation free)" : "let go (upright)");
+            SR2_INFO("[{}] dj buildables: Slime Radio actor {} {}", module, id, held ? "held in the vacuum" : "let go");
         RadioHeld(rec, held);
         if (Faulted()) return;
     }
@@ -1731,8 +1778,12 @@ void Impl::Undress(Rec& rec, bool restore) {
         if (unity::IsAlive(rec.rb)) {
             Call(rbSetConstraints, rec.rb, {&rec.rbWas}, "Rigidbody.set_constraints", &ok);
             if (rec.dampWas >= 0.0f) Call(rbSetDamping, rec.rb, {&rec.dampWas}, "Rigidbody.set_linearDamping", &ok);
+            if (rec.angDampWas >= 0.0f) Call(rbSetAngDamping, rec.rb, {&rec.angDampWas}, "Rigidbody.set_angularDamping", &ok);
+            if (rec.comSet && rbResetCom) Call(rbResetCom, rec.rb, {}, "Rigidbody.ResetCenterOfMass", &ok);
         }
         if (rec.matSet && unity::IsAlive(rec.box)) Call(colSetMat, rec.box, {rec.matWas}, "Collider.set_sharedMaterial", &ok);
+        if (rec.sphereMatSet && unity::IsAlive(rec.sphere))
+            Call(colSetMat, rec.sphere, {rec.sphereMatWas}, "Collider.set_sharedMaterial", &ok);
         if (unity::IsAlive(rec.box)) {
             Call(boxSetCenter, rec.box, {&rec.boxCenterWas}, "BoxCollider.set_center", &ok);
             Call(boxSetSize, rec.box, {&rec.boxSizeWas}, "BoxCollider.set_size", &ok);
@@ -2419,6 +2470,11 @@ bool DjBuildables::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& 
     // optional (the radio's grip): damping, collider material, PhysicsMaterial
     p->rbGetDamping = R.Method(p->rigidbodyClass, "get_linearDamping", 0);
     p->rbSetDamping = R.Method(p->rigidbodyClass, "set_linearDamping", 1);
+    p->rbGetAngDamping = R.Method(p->rigidbodyClass, "get_angularDamping", 0);  // the radio rolls (round 12)
+    p->rbSetAngDamping = R.Method(p->rigidbodyClass, "set_angularDamping", 1);
+    p->rbSetCom = R.Method(p->rigidbodyClass, "set_centerOfMass", 1);
+    p->rbResetCom = R.Method(p->rigidbodyClass, "ResetCenterOfMass", 0);
+    p->sphereGetCenter = R.Method(p->sphereColliderClass, "get_center", 0);
     p->colGetMat = R.Method(p->colliderClass, "get_sharedMaterial", 0);
     p->colSetMat = R.Method(p->colliderClass, "set_sharedMaterial", 1);
     if (p->physMatClass) {

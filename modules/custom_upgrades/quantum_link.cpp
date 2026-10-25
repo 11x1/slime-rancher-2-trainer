@@ -93,6 +93,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <format>
@@ -589,6 +590,7 @@ struct Impl {
     int ScaleParticles(Il2CppObject* glow);
     bool OpenCloudMenu();
     void CloudFrame();
+    std::string HideCloudHints(Il2CppObject* cloudMenu);
     void EndCloudRequest();
     bool OnUse(Il2CppObject* interactable);
     std::string NameOf(Il2CppObject* type);
@@ -1426,6 +1428,8 @@ void Impl::MakeLook() {
     look.name = name != unity::Field<Il2CppObject*>(base, offLocName) ? name : nullptr;
     look.description = desc != unity::Field<Il2CppObject*>(base, offDesc) ? desc : nullptr;
     look.icon = icon;
+    look.artTint = {kPurple.r, kPurple.g, kPurple.b};  // details: the Refinery Link's full art in purple (round 12)
+    look.artAmount = 0.85f;
     look.dressPreview = [this](Il2CppObject* placeholder) {
         const int n = gadget_look::TintTree(placeholder, {kPurple.r, kPurple.g, kPurple.b}, 0.6f, {kCyan.r, kCyan.g, kCyan.b},
                                             "Quantum Storage Link preview");
@@ -1577,8 +1581,66 @@ void Impl::CloudFrame() {
     Il2CppObject* tabbed = unity::IsAlive(menu) ? unity::Field<Il2CppObject*>(menu, offMenuTabbed) : nullptr;
     bool switched = false;
     if (index >= 0 && unity::IsAlive(tabbed)) switched = Value<bool>(Call(tabGoTo, tabbed, {&index}, "TabbedControl.GoToTab", &ok)) && ok;
-    SR2_INFO("[{}] quantum link: Quantum Cloud menu open ({}; view only, no station)", module,
-             switched ? std::format("cloud tab {}", index + 1) : index < 0 ? std::string("cloud tab not found") : std::string("already on the cloud tab"));
+    const std::string hints = unity::IsAlive(cloud) ? HideCloudHints(cloud) : std::string("no cloud page");
+    SR2_INFO("[{}] quantum link: Quantum Cloud menu open ({}; view only, no station; legend: {})", module,
+             switched ? std::format("cloud tab {}", index + 1) : index < 0 ? std::string("cloud tab not found") : std::string("already on the cloud tab"),
+             hints);
+}
+
+// Round 12: "the row shows to press [SPACE] and a magnifying glass, #watdatmean". Without a station
+// DroneMenuUI.SetViewModel (IDA 0x817A30) configures the cloud page's input legend with
+// DroneCloudInventoryMenu._defaultLegendConfig, the one the map's drone panel shows (map controls; nothing in
+// the cloud menu handles them: TryUpdateInputLegend 0x8133E0 returns early when the inventory can't be managed).
+// Its hints are switched off here (IInputLegend.SetItemEnabled(event, false)) except back / close ones, so
+// the row only shows what works. Returns a summary for the log ("hid 'Label' [Event], kept ...").
+std::string Impl::HideCloudHints(Il2CppObject* cloudMenu) {
+    Resolver& R = Resolver::Get();
+    Il2CppClass* mk = api().il2cpp_object_get_class(cloudMenu);
+    auto legendOff = R.FieldOffset(mk, "_inputLegend");
+    auto cfgOff = R.FieldOffset(mk, "_defaultLegendConfig");
+    if (!legendOff || !cfgOff) return "DroneCloudInventoryMenu fields not found";
+    Il2CppObject* ci = unity::Field<Il2CppObject*>(cloudMenu, *legendOff);  // ComponentInterface<IInputLegend>
+    Il2CppObject* cfg = unity::Field<Il2CppObject*>(cloudMenu, *cfgOff);
+    if (!ci || !unity::IsAlive(cfg)) return "no legend / default configuration";
+    std::optional<size_t> objOff;  // ComponentInterfaceBase._object (the generic class's parent)
+    for (Il2CppClass* k = api().il2cpp_object_get_class(ci); k && !objOff;
+         k = api().il2cpp_class_get_parent ? api().il2cpp_class_get_parent(k) : nullptr)
+        objOff = R.FieldOffset(k, "_object");
+    Il2CppObject* legend = objOff ? unity::Field<Il2CppObject*>(ci, *objOff) : nullptr;
+    if (!unity::IsAlive(legend)) return "legend component not found";
+    const MethodInfo* setEnabled = R.Method(api().il2cpp_object_get_class(legend), "SetItemEnabled", 2, nullptr);
+    auto hintsOff = R.FieldOffset(api().il2cpp_object_get_class(cfg), "_hints");
+    if (!setEnabled || !hintsOff) return std::format("{}.SetItemEnabled / _hints not found", unity::ClassName(legend));
+    void* hints = unity::Field<void*>(cfg, *hintsOff);
+    std::string hid, kept;
+    for (size_t i = 0, n = std::min<size_t>(unity::ArrayLength(hints), 16); i < n; ++i) {
+        auto* h = static_cast<Il2CppObject*>(unity::ArrayAt(hints, i));
+        if (!h) continue;
+        Il2CppClass* hk = api().il2cpp_object_get_class(h);
+        auto evOff = R.FieldOffset(hk, "InputEvent");
+        auto lblOff = R.FieldOffset(hk, "Label");
+        Il2CppObject* ev = evOff ? unity::Field<Il2CppObject*>(h, *evOff) : nullptr;
+        if (!unity::IsAlive(ev)) continue;
+        std::string label;
+        if (Il2CppObject* ls = lblOff ? unity::Field<Il2CppObject*>(h, *lblOff) : nullptr; ls && lsGetString) {
+            bool ok = false;
+            Il2CppObject* str = Call(lsGetString, ls, {}, "LocalizedString.GetLocalizedString", &ok);
+            if (ok) label = unity::ToUtf8(reinterpret_cast<Il2CppString*>(str));
+        }
+        const std::string evName = unity::GetName(ev);
+        std::string lower = evName;
+        for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const std::string entry = std::format("'{}' [{}]", label, evName);
+        if (lower.find("cancel") != std::string::npos || lower.find("back") != std::string::npos ||
+            lower.find("close") != std::string::npos || lower.find("exit") != std::string::npos) {
+            kept += (kept.empty() ? "" : ", ") + entry;
+            continue;
+        }
+        bool off = false, ok = false;
+        Call(setEnabled, legend, {ev, &off}, "IInputLegend.SetItemEnabled", &ok);
+        if (ok) hid += (hid.empty() ? "" : ", ") + entry;
+    }
+    return std::format("hid {}; kept {}", hid.empty() ? "nothing" : hid, kept.empty() ? "nothing" : kept);
 }
 
 std::string Impl::NameOf(Il2CppObject* type) {
