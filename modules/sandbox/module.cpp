@@ -3663,9 +3663,24 @@ int Sandbox::DoSpawn(const Ctx& c, uintptr_t item, int64_t count, int limit, int
             return 0;
         }
     }
-    const std::string name = radiant < 0    ? ItemName(ident)
-                             : radiant == 0 ? "Radiant " + ItemName(ident)
-                                            : std::format("Radiant {} (radiant {})", ItemName(ident), ItemName(radiantBase));
+    // A radiant largo is named with the slime it is radiant from first, as the context menu has it (round 14):
+    // "Radiant Tabby Pink Largo".
+    auto shortName = [this](Il2CppObject* slime) {
+        std::string n = ItemName(slime);
+        constexpr std::string_view kSuffix = " Slime";
+        if (n.size() > kSuffix.size() && n.ends_with(kSuffix)) n.resize(n.size() - kSuffix.size());
+        return n;
+    };
+    std::string name;
+    if (radiant < 0) name = ItemName(ident);
+    else if (radiant == 0) name = "Radiant " + ItemName(ident);
+    else {
+        void* bases = offSlimeBases_ ? unity::Field<void*>(ident, offSlimeBases_) : nullptr;
+        auto* other = static_cast<Il2CppObject*>(unity::ArrayAt(bases, static_cast<size_t>(2 - radiant)));
+        name = other && IsA(other, slimeDefClass_) && unity::IsAlive(other)
+                   ? std::format("Radiant {} {} Largo", shortName(radiantBase), shortName(other))
+                   : std::format("Radiant {} (radiant {})", ItemName(ident), ItemName(radiantBase));
+    }
     if (!Saveable(SaveIndex(), ident)) {
         Done(false, std::format("{} not spawned: the game can't save it", name));
         return 0;
