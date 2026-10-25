@@ -2877,7 +2877,8 @@ bool CustomUpgrades::Notify(Il2CppObject* icon, const std::string& text) {
 // you did for silo's button) and let the button open a menu to build a queue from"): a second
 // SiloButtons with the blue look on the corral's free corner. A press opens slime_dj's playlist menu for
 // the corral (slime_dj/api.h OpenRadioMenu); when Slime DJ can't, the reason is a game notification
-// (round 12; the text above the button only when the HUD can't take one).
+// (round 12; the text above the button only when the HUD can't take one). Round 14 ("Just show 'Slime DJ
+// is off'"): the reason alone, no "Corral Radio: " in front (the card's icon says which).
 bool CustomUpgrades::OnRadioButton(Il2CppObject* activator) {
     if (!radioButtons_.Ready() || !radioButtons_.IsOurs(activator)) return false;
     if (!On()) return true;  // swallowed (the button is removed with the next frame)
@@ -2895,7 +2896,7 @@ bool CustomUpgrades::OnRadioButton(Il2CppObject* activator) {
         SR2_INFO("[{}] corral radio (plot '{}'): playlist menu requested", kModule, id);
     } else {
         SR2_INFO("[{}] corral radio (plot '{}'): no playlist menu ({})", kModule, id, why);
-        if (!Notify(CardIcon(CORRAL_RADIO), "Corral Radio: " + why)) radioButtons_.Message(activator, why, false);
+        if (!Notify(CardIcon(CORRAL_RADIO), why)) radioButtons_.Message(activator, why, false);
     }
     return true;
 }
