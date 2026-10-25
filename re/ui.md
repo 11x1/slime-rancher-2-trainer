@@ -125,7 +125,7 @@ Unity's new Input System only, through a ScriptableObject event bus; gameplay su
 - components: Button (onClick empty), ButtonAnimator (hover anim / colours, may animate scale), EventTrigger, DetailsMoreButtonView (label LocalizeStringEvent), InputEventButton (performs the bound InputEvent on pointer down / up - before the Button click), EncapsulateChildren; children `Label Background` (SDF pill, label 42 pt at x 30, ResizeToPreferred) and `Icon Background` (`InputEventDisplay` key glyph, 64 px icons; `SetInputEvent(...)`)
 - layout behaviours (`MonomiPark.SlimeRancher.UI.Framework.Layout`: HorizontalLayout, EncapsulateChildren -> SetSizeWithCurrentAnchors in LateUpdate, ResizeToPreferred) run only under a `LayoutManager` (OnEnable / LateUpdate -> ApplyLayout)
 - gotchas: not focusable (NoneSelectable); half-width splits get overwritten by the layout; InputEventButton on a Sell clone made one click sell AND confirm a purchase
-- mod: silo_receipt.cpp, sell_upgrades
+- mod: silo_receipt.cpp, sell_upgrades; drone_price_limit station_dialog.cpp clones only the negative button's `Icon Background` into its pills (`UsePopupGlyph`, same key look as the receipt)
 
 ### ConfirmPopup / map expansions
 - `AccessDoorUI.PromptForExpansion` -> ConfirmPopup; prompts sorted by `<>c.<UpdateShowData>b__27_0` (`b.PromptType - a.PromptType`, SUBMIT first) into its InputLegend; `ConfirmPopup.UpdateShowData` (setup Title = item `_title` LocalizedString)
