@@ -9,15 +9,20 @@
 // pauses the game and frees the cursor while the menu is open). The lists are virtual: a fixed number
 // of row slots whose texts change as the list scrolls, so 2000 songs cost no more than 10.
 //
+// Round 12: every list row is a button in the game's button colours, the header buttons (Radio, Shuffle,
+// Clear) are clones of the game's popup button; no key hint bar, no action button row.
+//
 // Input (polled from the InputSystem devices, nothing hooked; ignored for the first 0.3 s):
-//   three focus areas - Songs, Playlist, the button row. Up / Down (W / S, d-pad, left stick) move in a
-//   list, Left / Right (A / D) switch list or button, Tab cycles the areas, Page Up / Down (pad LT / RT)
-//   jump a page, Home / End. Enter / Space / pad A: Songs = add to the playlist, Playlist = play that
-//   entry now, buttons = press. Delete / Backspace / pad X remove the playlist entry, Shift + Up / Down
-//   (pad LB / RB) move it. R / pad Y switch the radio on / off, F shuffle. Esc / pad B close.
-//   Mouse: a click on a song adds it, on an entry selects it; the wheel scrolls the list under the
-//   pointer (the focused one otherwise); every button is clickable; a click on the backdrop closes.
-//   Clicks are polled from UnityEngine.UI.Toggle components (no managed delegates).
+//   Mouse (the main way): hovering a row lights it (the cursor follows the mouse); a click on a song adds
+//   it, a click on a playlist entry plays it, the entry's small buttons move it up / down or remove it;
+//   the wheel scrolls the list under the pointer; a click on the backdrop closes.
+//   Keys (not printed): three focus areas - Songs, Playlist, the header buttons. Up / Down (W / S, d-pad,
+//   left stick) move in a list (up past the top: the header), Left / Right (A / D) switch list or button,
+//   Tab cycles the areas, Page Up / Down (pad LT / RT), Home / End. Enter / Space / pad A: add the song,
+//   play the entry, press the button. Delete / Backspace / pad X remove the entry, Shift + Up / Down
+//   (pad LB / RB) move it. R / pad Y radio on / off, F shuffle. Esc / pad B close.
+//   Clicks are polled from UnityEngine.UI.Toggle components (no managed delegates); the cloned game
+//   buttons from their Button (IsPressed last frame, released with the pointer inside).
 //
 // Main thread only; every game call through Resolver::Invoke. Objects kept across frames are GC-handled
 // and freed only from posted main-thread jobs. No scans except one FindObjectOfType(TextMeshProUGUI) per
