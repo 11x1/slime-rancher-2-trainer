@@ -7,13 +7,14 @@
 | note | about |
 |---|---|
 | `ideas.md` | unplanned ideas |
-| `agent-context.md` | a library of what is decompiled and known, so agents find context fast (do first) |
 | `round-11.md` | round 10 test feedback, split into agent tasks |
 | `custom-icons.md` | replacing script-drawn icons with the user's drawings; vanilla icons meanwhile |
 
 ## Where the documentation lives
 
+- `re/INDEX.md`: start here. Map of game systems (`re/<system>.md`: classes, RVAs, fields, gotchas), `re/hooks.md` (every hook; check before hooking), core helpers and UI components, and `re/re_lookup.py` (offline dump lookup).
+- `.claude/agent-brief.md`: rules for every agent (context, fault policy, git, build, report format).
 - `README.md`: what the mod is, build, install, settings and profiles.
 - `ui/NOTES.md`: the in-game Options tab and the ImGui overlay (layout, theme, fonts, Slimepedia slime logo).
 - `modules/<name>/NOTES.md`: each module's design and findings.
-- `re/*.md`: reverse-engineering notes (`symbols.md`, `candidates.md`, ...). The dumps in `re/dump/` are not in git.
+- The IL2CPP dumps in `re/dump/` and the IDA database in `re/ida/` exist only in the main checkout, not in git.
