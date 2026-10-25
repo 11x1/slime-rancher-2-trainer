@@ -2154,9 +2154,9 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                 if (sl.unlocked && holds) {
                     FontScope bf(theme::Body(), fs);
                     const float sp = ImGui::GetStyle().ItemSpacing.x, bw = std::floor((rowW - sp) * 0.5f);
-                    const std::string fill = std::format("Fill ({}/{})", count, max);
+                    // Just "Fill", no amount (round 11: "Just "Fill" text, no amount in parenthesis").
                     ImGui::BeginDisabled(count >= max);
-                    if (ImGui::Button(fill.c_str(), ImVec2(bw, e + U(4)))) {
+                    if (ImGui::Button("Fill", ImVec2(bw, e + U(4)))) {
                         SetSlotPending(idx, holds, max);
                         SbxRequest(sbx::Op::SetSlotCount, max, idx);
                         ImGui::CloseCurrentPopup();
@@ -2164,7 +2164,7 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                     ImGui::EndDisabled();
                     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                         Tooltip(count >= max ? std::string("The slot is full.")
-                                             : std::format("Fill slot {} to its maximum.", idx + 1));
+                                             : std::format("Fill slot {} to its maximum ({} / {}).", idx + 1, count, max));
                     ImGui::SameLine(0, sp);
                     if (ImGui::Button("Empty", ImVec2(bw, e + U(4)))) {
                         SetSlotPending(idx, 0, 0);
