@@ -228,6 +228,7 @@ Unity's new Input System only, through a ScriptableObject event bus; gameplay su
 - Continue = `ContinueGameItemDefinition` -> `ContinueGameBehaviorModel` (: `LoadGameBehaviorModel`, …UI.MainMenu.Model), `<GameDataSummary>k__BackingField` = `AutoSaveDirector.GetSaveToContinue()`
 - `LoadGameBehaviorModel.InvokeBehavior()`: returns if `SceneLoader.IsSceneLoadInProgress`; else `AutoSaveDirector.BeginLoad(summary.SaveIdentifier, null)`
 - visibility: `ButtonBehaviorConditionUtility.HasContinueGame()` -> `AutoSaveDirector.HasContinue()`
+- gotchas (log, rounds 10/11): `FindObjectOfType(MainMenuLandingRootUI)` (Unity 6 FindFirstObjectByType, active only) never found the menu the player saw, so quick_start's soft fallback invoked Continue with a null menu and faulted (VERSION.dll+0x1E5D7F = quick_start `FindContinueModel`, `mov r15,[rdx+r8]` with rdx = 0; mapped from `dist/archive` builds). Same as FabricatorUI (re/fabricator.md) and NewGadgetSelectionUI: track UI instances from their OnEnable/Start hooks. quick_start now holds the OnEnable instance (GC handle) and logs once whether FindObjectOfType finds it
 - `Persist.Summary.get_SaveIdentifier()`; boxed `GameSaveIdentifier` / bool from runtime_invoke read at 2*sizeof(void*)
 - mod: quick_start auto_continue
 
