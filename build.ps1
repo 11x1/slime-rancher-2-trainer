@@ -84,18 +84,30 @@ if ($Clean -and (Test-Path $buildDir)) { Remove-Item -Recurse -Force $buildDir }
 & $cmake -S $root -B $buildDir -G Ninja "-DCMAKE_BUILD_TYPE=$Config" "-DCMAKE_MAKE_PROGRAM=$ninja" `
   -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
+# a linked worktree (agent) has its own .git file; its git dir differs from the common dir
+$gitDir = (& git -C $root rev-parse --path-format=absolute --git-dir 2>$null)
+$common = (& git -C $root rev-parse --path-format=absolute --git-common-dir 2>$null)
+$isWorktree = [bool]($gitDir -and $common -and $gitDir -ne $common)
 if ($Jobs -le 0 -and $env:SR2MODS_BUILD_JOBS) { $Jobs = [int]$env:SR2MODS_BUILD_JOBS }
-if ($Jobs -le 0) {
-  # a linked worktree (agent) has its own .git file; its git dir differs from the common dir
-  $gitDir = (& git -C $root rev-parse --path-format=absolute --git-dir 2>$null)
-  $common = (& git -C $root rev-parse --path-format=absolute --git-common-dir 2>$null)
-  if ($gitDir -and $common -and $gitDir -ne $common) { $Jobs = 2 }
+if ($Jobs -le 0 -and $isWorktree) { $Jobs = 2 }
+# Agent builds take turns (one worktree compiles at a time) at below-normal priority, which
+# ninja and cl inherit, so several agents don't flood the user's CPU.
+$buildLock = $null
+if ($isWorktree) {
+  try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch {}
+  $buildLock = New-Object System.Threading.Mutex($false, 'Local\sr2mods-agent-build')
+  Write-Host "Waiting for other agent builds to finish..."
+  try { [void]$buildLock.WaitOne() } catch [System.Threading.AbandonedMutexException] {}
 }
-if ($Jobs -gt 0) {
-  Write-Host "Parallel jobs: $Jobs"
-  & $cmake --build $buildDir -j $Jobs
-} else {
-  & $cmake --build $buildDir
+try {
+  if ($Jobs -gt 0) {
+    Write-Host "Parallel jobs: $Jobs"
+    & $cmake --build $buildDir -j $Jobs
+  } else {
+    & $cmake --build $buildDir
+  }
+} finally {
+  if ($buildLock) { $buildLock.ReleaseMutex(); $buildLock.Dispose() }
 }
 if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 
