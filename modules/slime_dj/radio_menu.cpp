@@ -828,12 +828,12 @@ void RadioMenu::Impl::LayoutBar(bool force) {
     for (int i = 0; i < kBarCount; ++i) {
         BarBtn& b = bar[i];
         const float x = std::round(colX[kBarCol[i]]);
-        const float top = barY + static_cast<float>(kBarRow[i]) * (kBarH + kBarRowGap);
-        if (!force && std::fabs(x - b.px) < 0.5f && std::fabs(top - b.py) < 0.5f) continue;
+        const float rowTop = barY + static_cast<float>(kBarRow[i]) * (kBarH + kBarRowGap);
+        if (!force && std::fabs(x - b.px) < 0.5f && std::fabs(rowTop - b.py) < 0.5f) continue;
         b.px = x;
-        b.py = top;
-        if (b.game.Exists()) b.game.Place(x, top + kBarH * 0.5f, 0.0f);
-        else if (unity::IsAlive(b.bg)) At(unity::TransformOf(unity::GameObjectOf(b.bg)), x, top, w[i], kBarH);
+        b.py = rowTop;
+        if (b.game.Exists()) b.game.Place(x, rowTop + kBarH * 0.5f, 0.0f);
+        else if (unity::IsAlive(b.bg)) At(unity::TransformOf(unity::GameObjectOf(b.bg)), x, rowTop, w[i], kBarH);
     }
 }
 
