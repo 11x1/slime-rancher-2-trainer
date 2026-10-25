@@ -222,7 +222,7 @@ re/custom-upgrades.md 2.1 / 2.4.
 
 ## Several programs per drone
 
-`drone_programs.cpp`; UI (`[P] Programs` pill and dialog) in drone_price_limit `station_dialog.cpp`, only
+`drone_programs.cpp`; UI (`[P] Programs` key bar entry and dialog) in drone_price_limit `station_dialog.cpp`, only
 while custom upgrades are on and the save owns the **Drone Program Scheduler** (below). RE: re/drones.md
 (AssignRanchTask, DroneBehaviorPlexer, RanchDroneSourceProgramDynamic).
 
