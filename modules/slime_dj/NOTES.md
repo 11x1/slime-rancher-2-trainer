@@ -404,6 +404,26 @@ checked at each lamp refresh (4 s) while a speaker plays; 5 s after it changed t
 LightControl whose parent is named `iceCube*` and that has no `Gadget` above it (Ice Lamps are placed
 lamps), as a GC handle + position (static geometry; up to 512). Candidates are then the crystals that
 are active now (proxied regions are off). The scan is logged with its time.
+Round 14 (round 13 test: "didnt see"): the log had two scans, both on the ranch (`0 glowing ice crystal(s)
+... (20 LightControl(s) looked at)`: the ranch has no scene ice; the placed Ice Lamp is skipped as a gadget).
+While the player was in Powderfall no speaker played (minute line `0 corral(s) known, 0 speaker(s)`), so no
+lamp refresh ran there and the zone was never scanned: the scene ice only pulses near a speaker placed in
+Powderfall itself. The debug highlighter (below) now runs the scene group check and scan without music, and
+the log line names the scene group, the LightControls on placed Ice Lamps and, when 0 crystals match, up to 8
+other LightControl parent names (to see whether the crystals are named differently in game).
+
+*Own colours* (round 14: "pulse lamps (electric pillar can stay rgb) in their own color light"): only the
+Electric Pillar Lamp (`decorElectricLampPillar*` by name) mixes towards the beat hue; every other lamp and
+the scene ice pulse brightness only (k = 0, `Light.color` not written at all).
+
+*Debug highlighter* (`LampPulser::Debug`, every frame while debug_tools' "Highlight what the mod touches"
+is on, music or not): every 4 s the ice check and a lamp refresh of its own (renderer bounds of up to 96
+loaded lamps, `Renderer.get_bounds` union; ice crystals measured once each, 64 per refresh); every 1 s it
+publishes `slime_dj.lamps.pulsing` (pink, the held lamps), `slime_dj.lamps.idle` (grey, loaded lamps that do
+not pulse) and `slime_dj.lamps.ice` (cyan, loaded crystals not pulsing) to `modules/common/debug_marks.h`.
+The module publishes `slime_dj.speakers.playing` (green, lamp range as a ground circle) / `.silent` (grey)
+at each box scan while a song is loaded. Log `lamps: highlighter: N pulsing, M not pulsing, K glowing ice
+crystal(s) loaded of T in scene group '...'` on a change.
 
 *Sources* (`SyncLamps`): every live speaker playing its channel's current clip with volume > 0 (so a DJ
 Booth / Boombox that is switched off does not count): music boxes, DJ Booth speakers, speaker stacks, Slime
@@ -440,7 +460,7 @@ or the module is disabled. A lamp whose scene unloaded is simply dropped (its ob
 | `dance_walls` | off | a ripple runs round the corral walls on every beat of the song the corral plays (queue or its Corral Radio); walls and Air Net glow and change colour (corrals within hearing range); speakers in the corral make it stronger |
 | `dance_intensity` | 1.0 (100 %) | 10-200 %, steeper above 100 % (shown while `dance_walls` is on) |
 | `dance_lamps` | on | lamps (Electric Pillar, Striped, Conservatory, Lava, Ice) and Powderfall's glowing ice near a playing speaker pulse their glow and lights with the beat |
-| `lamp_range` | 20 m | 5-100 m around a playing speaker; full strength to 40 % of it (shown while `dance_lamps` is on) |
+| `lamp_range` | 20 m | 5-100 m: the distance from a playing speaker within which lamps pulse (tooltip says so, round 14); full strength to 40 % of it (shown while `dance_lamps` is on) |
 
 ## Log lines
 
@@ -462,8 +482,9 @@ All prefixed `slime_dj:`; grep for these when reading `sr2mods.log`:
 - lamps: `lamps: N lamp definition(s) (K of 5 lamp kinds found): …` (once), `lamps: no gadget definition with
   a lamp prefab ('decorElectricLampPillar', ...) among N …`, `lamps: pulsing lamp '…' at (x, y, z): N glowing
   renderer(s), M light(s): '…' brightness 5.00, '…' core (8.2, 4.5, 2.7), light 1200, …` (first 8), `lamps: N
-  glowing ice crystal(s) in this scene group (M LightControl(s) looked at, X ms)` (per scene group while music
-  plays), `lamps: glowing scene ice unavailable (…)`, `lamps pulse at N lamp(s) (M loaded lamp(s), S
+  glowing ice crystal(s) in scene group 'G' (M LightControl(s) looked at, K on placed Ice Lamps, X ms[; other
+  LightControl parents: ...])` (per scene group while music plays or the highlighter is on), `lamps:
+  highlighter: …`, `lamps: glowing scene ice unavailable (…)`, `lamps pulse at N lamp(s) (M loaded lamp(s), S
   playing speaker(s), range R m)` (on a change), `lamps pulse stopped; lamps restored`, `'Lamps pulse to the
   music' unavailable (…)`
 - radio menu: `radio menu ready[; NOT available: ...]`, `radio menu: game buttons not available (...)`, `radio menu

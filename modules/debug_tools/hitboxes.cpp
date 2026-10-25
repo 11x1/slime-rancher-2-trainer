@@ -348,6 +348,30 @@ bool Setup(sr2::core::ModuleContext& ctx, std::string& why) {
     return true;
 }
 
+bool CameraFrame(float vp[16], float eye[3]) {
+    if (!g.ready || g.faulted) return false;
+    Il2CppObject* cam = unity::Camera_main();
+    if (!cam) return false;
+    bool ok = false;
+    const Mat4 v = Value<Mat4>(Call(g.camView, cam, {}, "Camera.get_worldToCameraMatrix", &ok));
+    const Mat4 p = ok ? Value<Mat4>(Call(g.camProj, cam, {}, "Camera.get_projectionMatrix", &ok)) : Mat4{};
+    if (!ok) return false;
+    for (int c = 0; c < 4; ++c)
+        for (int r = 0; r < 4; ++r) {
+            float s = 0;
+            for (int k = 0; k < 4; ++k) s += p.m[k * 4 + r] * v.m[c * 4 + k];
+            vp[c * 4 + r] = s;
+        }
+    for (int i = 0; i < 16; ++i)
+        if (!std::isfinite(vp[i])) return false;
+    if (eye) {
+        Vec3 e{};
+        if (!CameraPos(e)) return false;
+        eye[0] = e.x, eye[1] = e.y, eye[2] = e.z;
+    }
+    return true;
+}
+
 void Tick(float dt, bool want, float range, bool triggers) {
     if (!g.ready || g.faulted || !want || sr2::ui::overlay::IsOpen()) {
         Hide();
@@ -364,21 +388,9 @@ void Tick(float dt, bool want, float range, bool triggers) {
         Refresh(range, triggers);
         if (g.faulted) return Hide();
     }
-    Il2CppObject* cam = unity::Camera_main();
-    if (!cam || g.kept.empty()) return Hide();
-    bool ok = false;
-    const Mat4 v = Value<Mat4>(Call(g.camView, cam, {}, "Camera.get_worldToCameraMatrix", &ok));
-    const Mat4 p = ok ? Value<Mat4>(Call(g.camProj, cam, {}, "Camera.get_projectionMatrix", &ok)) : Mat4{};
-    if (!ok) return Hide();
+    if (g.kept.empty()) return Hide();
     sr2::ui::hud::Frame f;
-    for (int c = 0; c < 4; ++c)
-        for (int r = 0; r < 4; ++r) {
-            float s = 0;
-            for (int k = 0; k < 4; ++k) s += p.m[k * 4 + r] * v.m[c * 4 + k];
-            f.vp[c * 4 + r] = s;
-        }
-    for (float x : f.vp)
-        if (!std::isfinite(x)) return Hide();
+    if (!CameraFrame(f.vp, nullptr)) return Hide();
     for (const Kept& k : g.kept) {
         Il2CppObject* col = unity::GCHandleTarget(k.h);
         if (!unity::IsAlive(col)) continue;

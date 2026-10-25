@@ -13,6 +13,9 @@
 //   * Entity hitboxes (hitboxes.h): wireframes of the colliders of entities near the camera through the overlay's
 //     world line segments (ui/hud.h); a physics query every 0.5 s, the shapes every frame while it is on.
 //
+//   * Highlight what the mod touches (highlight.h): labelled boxes of what other modules publish to
+//     modules/common/debug_marks.h (slime_dj: pulsing lamps, other lamps, glowing ice, speakers), same drawing.
+//
 // Fault policy: all game calls run in a main-thread frame callback, polled every kPollSeconds (no per-frame work, no
 // FindObjects of our own); the GameObject is held by a GC handle and checked with IsAlive before use. Direct method
 // pointers; no hooks.
@@ -30,6 +33,7 @@
 #include "core/module.h"
 #include "core/settings.h"
 #include "core/unity.h"
+#include "modules/debug_tools/highlight.h"
 #include "modules/debug_tools/hitboxes.h"
 
 namespace sr2::modules {
@@ -44,6 +48,7 @@ constexpr const char* kFontOverlay = "font_overlay";
 constexpr const char* kHitboxes = "hitboxes";
 constexpr const char* kHitboxRange = "hitbox_range";
 constexpr const char* kHitboxTriggers = "hitbox_triggers";
+constexpr const char* kHighlight = "highlight";
 constexpr float kPollSeconds = 0.5f;  // reaction time to the toggle; also the liveness check interval
 constexpr int kMaxStartFailures = 3;  // stop retrying StartDebugUI after this many failed starts in a row
 
@@ -52,6 +57,7 @@ std::atomic<bool> g_fontOverlay{false};
 std::atomic<bool> g_hitboxes{false};
 std::atomic<float> g_hitboxRange{12.0f};
 std::atomic<bool> g_hitboxTriggers{false};
+std::atomic<bool> g_highlight{false};
 
 class DebugTools final : public sr2::core::Module {
 public:
@@ -162,12 +168,29 @@ bool DebugTools::Setup(sr2::core::ModuleContext& ctx) {
         t.parent = kHitboxes;
         t.tooltip = "Also the invisible trigger volumes (pickup and interaction zones, slime attach spots)";
         settings::Register(t);
+        settings::Def l;
+        l.module = kModule;
+        l.group = "Developer tools";
+        l.key = kHighlight;
+        l.label = "Highlight what the mod touches";
+        l.kind = settings::Kind::Bool;
+        l.def = 0;
+        l.min = 0;
+        l.max = 1;
+        l.step = 1;
+        l.tooltip = "Draws a labelled box round the things the mod's features act on, so you can see what to check: "
+                    "lamps that pulse to the music (pink), lamps with no playing speaker near (grey), the glowing ice "
+                    "crystals of Powderfall Bluffs (cyan, also without music), and Slime DJ speakers (green while "
+                    "playing, with the lamp range as a circle on the ground; grey when silent). Labels show within "
+                    "80 m, boxes within 250 m. Hidden while this menu is open";
+        settings::Register(l);
     }
     auto readAll = [] {
         g_fontOverlay.store(settings::GetBool(kModule, kFontOverlay));
         g_hitboxes.store(settings::GetBool(kModule, kHitboxes));
         g_hitboxRange.store(static_cast<float>(settings::GetFloat(kModule, kHitboxRange)));
         g_hitboxTriggers.store(settings::GetBool(kModule, kHitboxTriggers));
+        g_highlight.store(settings::GetBool(kModule, kHighlight));
     };
     readAll();
     if (!onChange_) onChange_ = settings::OnChange(kModule, [readAll](const std::string&) { readAll(); });
@@ -181,6 +204,7 @@ bool DebugTools::Setup(sr2::core::ModuleContext& ctx) {
 void DebugTools::Tick(float dt) {
     if (hitboxesOk_)
         debug_tools::hitboxes::Tick(dt, g_enabled.load() && g_hitboxes.load(), g_hitboxRange.load(), g_hitboxTriggers.load());
+    debug_tools::highlight::Tick(g_enabled.load() && g_highlight.load());
     sincePoll_ += dt;
     if (sincePoll_ < kPollSeconds) return;
     sincePoll_ = 0;

@@ -81,6 +81,7 @@ UI components to reuse (`ui/`; details in ui/NOTES.md):
 - `il2cpp_util.h` (`sr2::ui::il`) by-name lookups, guarded `Invoke`, `IsA`, `Keep/Release`.
 - `modded_label.h` `SetMenuEnableListener` (the single `MainMenuLandingRootUI.OnEnable` listener); `quick_start_hint.h`.
 - Bridges (module publishes a snapshot on the main thread, the render thread draws, the UI posts actions back): `sandbox_bridge.h`, `sandbox_extras_bridge.h`, `sandbox_upgrades_bridge.h`, `sandbox_weather_bridge.h`, `slime_dj_bridge.h`, `discord_bridge.h`.
+- Debug highlighter registry: `modules/common/debug_marks.h` (modules publish labelled world boxes of what they touch while `Wanted()`; debug_tools draws them, `modules/debug_tools/highlight.cpp`).
 - Game-styled button: `modules/common/game_button.h` (the game's popup button as a runtime uGUI button: label, key glyph, selected tint, disabled grey, polled click; used by the silo receipt, the drone station dialogs and the Corral Radio menu's header buttons).
 - Game-UI helpers in modules: `modules/custom_upgrades/plot_menu_slider.h` (uGUI slider in the plot menu), `sale_notify.h` (HUD notices), `silo_receipt.cpp` (runtime uGUI dialog with input lock), `gadget_look.h` (looks of mod gadget definitions), `variant_ext.h` (plug into the gadget-variant hooks), `modules/minimap/ugui.cpp` (runtime uGUI).
 
