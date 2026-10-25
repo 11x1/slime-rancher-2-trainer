@@ -38,6 +38,9 @@ struct Upgrade {
     // (UpgradeLevelDefinition._costs: Newbucks, refinery items, upgrade components). Empty title: fully upgraded.
     std::string nextTitle;
     std::vector<CostLine> nextCosts;
+    // The Fabricator's description of the next level (UpgradeLevelDefinition.Description; fully upgraded: the last
+    // level's), the tooltip's entry text like the Slimepedia slime tooltips. Line breaks kept, tags dropped.
+    std::string description;
 };
 
 // One of the mod's own buildables (custom_upgrades/buildables.h: Quantum Storage Link, DJ Booth, DJ Speaker,

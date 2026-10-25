@@ -63,7 +63,7 @@
 - mod: sb upgrades.cpp Heal
 
 ### UpgradeDefinition
-- fields: `_levels[n]` (UpgradeLevelDefinition: `Effects` = `List<FloatModifier>` with `TargetProperty` in the generic base, `_costs` with `ComponentCosts`, `Title`), `_icon`, `_uniqueId` (20 AmmoCapacity / Tank Booster: vanilla 8 levels; 40 AmmoSlots / Extra Tank: vanilla 2), `_requireComponentToBeVisibleToPlayer`, `LevelCount`
+- fields: `_levels[n]` (UpgradeLevelDefinition: `Effects` = `List<FloatModifier>` with `TargetProperty` in the generic base, `_costs` with `ComponentCosts`, `Title`, `Description` = the Fabricator's per-level text, read by sandbox for the entry tooltip; `GetDescription(level)` 0x999C30), `_icon`, `_uniqueId` (20 AmmoCapacity / Tank Booster: vanilla 8 levels; 40 AmmoSlots / Extra Tank: vanilla 2), `_requireComponentToBeVisibleToPlayer`, `LevelCount`
 - gotchas: FloatModifiers are ADDs relative to the property default; several upgrades can stack on one property (custom tiers on top of vanilla)
 - mod: sb upgrades manager state, slot unlock (`SlotUnlockUpgrades`)
 

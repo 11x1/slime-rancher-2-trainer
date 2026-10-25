@@ -95,7 +95,7 @@ struct Slot {
 // One line of a recipe's fabricator cost ("20 x Pink Plort" with its icon, or "150 Newbucks").
 struct CostLine {
     std::string text;
-    uint32_t icon = 0;       // ui/item_icons.h id (0: none; currencies have none)
+    uint32_t icon = 0;       // ui/item_icons.h id (0: none; Newbucks: the game's iconNewBuck once found)
     Kind kind = Kind::Other;
     bool currency = false;
 };
@@ -141,6 +141,7 @@ struct Snapshot {
     std::string why;              // !inGame: what is missing
     bool haveNewbucks = false;    // the Newbucks currency was found
     int newbucks = 0, maxNewbucks = 0;
+    uint32_t newbucksIcon = 0;    // ui/item_icons.h id of the game's iconNewBuck sprite (0: not found, a drawn coin)
     int health = 0, maxHealth = 0;
     int energy = 0, maxEnergy = 0;
     int rads = 0;
