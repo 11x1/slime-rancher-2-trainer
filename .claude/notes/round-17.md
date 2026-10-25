@@ -32,3 +32,7 @@ Skipped (re-add): r16fl2-fl5 (blocked by A), r16gs4 (stacks save and pick up tog
 ## F. Quantum Link polish (`fix/quantum-link-r17`)
 - r16ql1: "Its there for a split second, like 200-500ms, otherwise gone nice". The drone row magnifier + [SPACE] hint flashes for 200-500 ms when the Drones tab opens. Hide it before the first frame it's visible (hide on the row's creation / enable, not on a later tick).
 - r16ql2: "can we somehow make the white transparent? otherwise clean". The glitch copy still draws white; make the white parts transparent (alpha from the drone pass, or a tint with alpha near 0 on the bright parts).
+
+## G. Stale inventory for one frame (`fix/inventory-refresh-r17`)
+- User: "when closing the menu with inventory open, emptying slots, reopening inventory, for a split frame it shows old inventory".
+- Most likely the overlay's inventory page (Sandbox vacpack / item grid, `ui/item_grid.cpp`): close the overlay on that page, empty vacpack slots in game, reopen it, and the old contents show for one frame before the refresh. Refresh the cached slot data before the first frame the page draws on reopen (or draw nothing until fresh data is in), not on a later tick. If the overlay isn't the cause, check the game's own inventory UI with the mod's hooks the same way.
