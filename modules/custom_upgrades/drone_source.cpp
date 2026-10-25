@@ -84,6 +84,7 @@
 #include <set>
 #include <sstream>
 #include <string_view>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -183,7 +184,12 @@ struct Impl {
     Il2CppClass* taskTargetClass = nullptr, *lsClass = nullptr, *typeGroupClass = nullptr, *identClass = nullptr;
     // offsets
     size_t offDroneModel = 0, offDroneTime = 0, offDroneRanch = 0, offDroneMove = 0, offDroneCfg = 0, offDroneStation = 0;
-    size_t offModelTask = 0, offActorId = 0;
+    size_t offModelTask = 0, offActorId = 0, offModelType = 0;
+    // Explorer mode stations: DroneStation._model / _droneTaskConfig, AssignExplorerTask (optional)
+    Il2CppClass* stationClass = nullptr;
+    size_t offStationModel = 0, offStationCfg = 0;
+    const MethodInfo* assignExplorerMi = nullptr;
+    std::unordered_map<int64_t, Il2CppGCHandle> explorerStations;  // station id -> its DroneStation
     size_t offTdTarget = 0, offTdIdent = 0, offTdSource = 0, offTdSink = 0;
     size_t offSrcType = 0, offProgDrone = 0, offProgRanch = 0;
     size_t offRmPlots = 0, offLpmElder = 0, offSmStorage = 0;
@@ -285,6 +291,12 @@ struct Impl {
     Il2CppObject* CopyProgram(const ProgramData& p);
     Il2CppObject* LiveDrone(Il2CppObject* model, int64_t id);
     bool Assign(Il2CppObject* model, const ProgramData& p, const char* why);
+    bool IsExplorerModel(Il2CppObject* model) const {
+        constexpr int32_t kExplorerDrone = 1;  // DroneType.EXPLORER_DRONE
+        return offModelType && IsA(model, stationModelClass) && unity::Field<int32_t>(model, offModelType) == kExplorerDrone;
+    }
+    Il2CppObject* ExplorerStation(Il2CppObject* model, int64_t id);
+    bool AssignExplorer(Il2CppObject* model, int64_t id, const ProgramData& p, const char* why);
     bool Switch(Il2CppObject* model, int64_t id, int kind, const char* why, int32_t vanilla = kSourceCoop);
     void QuantumTick(const std::vector<Il2CppObject*>& stations, const std::unordered_set<int64_t>& first,
                      const std::unordered_map<int64_t, int32_t>& reverted);
@@ -771,10 +783,60 @@ Il2CppObject* Impl::LiveDrone(Il2CppObject* model, int64_t id) {
     return drone;
 }
 
+// An Explorer mode station's DroneStation (the scene object whose _model is `model`). Cached; a miss scans
+// the stations once (only when a program is switched by hand, never per frame).
+Il2CppObject* Impl::ExplorerStation(Il2CppObject* model, int64_t id) {
+    if (!stationClass || !offStationModel) return nullptr;
+    if (auto it = explorerStations.find(id); it != explorerStations.end()) {
+        Il2CppObject* st = unity::GCHandleTarget(it->second);
+        if (st && unity::IsAlive(st) && unity::Field<Il2CppObject*>(st, offStationModel) == model) return st;
+        unity::FreeGCHandle(it->second);
+        explorerStations.erase(it);
+    }
+    for (Il2CppObject* st : unity::FindObjectsOfTypeAll(stationClass)) {
+        if (!unity::IsAlive(st) || unity::Field<Il2CppObject*>(st, offStationModel) != model) continue;
+        if (!unity::ActiveInHierarchy(unity::GameObjectOf(st))) continue;
+        if (Il2CppGCHandle h = unity::NewGCHandle(st)) explorerStations[id] = h;
+        return st;
+    }
+    return nullptr;
+}
+
+// Explorer mode: the target only, through the game's own DroneStation.AssignExplorerTask (new task data, the
+// explorer program re-plans what it gathers). Without the station object: the data only.
+bool Impl::AssignExplorer(Il2CppObject* model, int64_t id, const ProgramData& p, const char* why) {
+    Il2CppObject* station = assignExplorerMi && offStationCfg ? ExplorerStation(model, id) : nullptr;
+    bool assigned = false;
+    if (station) {
+        int32_t tt = p.target;
+        bool ok = false;
+        Il2CppObject* target = objectNew(taskTargetClass);
+        if (target)
+            Call(targetCtor, target, {unity::Field<Il2CppObject*>(station, offStationCfg), &tt, p.ident},
+                 "DroneTaskTarget..ctor", &ok);
+        bool analytics = false;
+        if (ok) Call(assignExplorerMi, station, {target, &analytics}, "DroneStation.AssignExplorerTask", &ok);
+        assigned = ok;
+    }
+    if (!assigned) {
+        Il2CppObject* live = TaskOf(model);
+        if (!live) return false;
+        unity::Field<int32_t>(live, offTdTarget) = p.target;
+        SetRef(live, reinterpret_cast<void**>(reinterpret_cast<char*>(live) + offTdIdent), p.ident);
+        unity::Field<int32_t>(live, offTdSource) = p.source;
+        unity::Field<int32_t>(live, offTdSink) = p.sink;
+    }
+    SR2_INFO("[{}] drone programs: explorer station {} program set (target {}{}; {})", module, id, p.target,
+             why ? std::string(", ") + why : std::string(),
+             assigned ? "explorer drone re-programmed" : "program data only (station not loaded)");
+    return true;
+}
+
 // The whole program (target, source, destination) -> `p`, the same way as Switch.
 bool Impl::Assign(Il2CppObject* model, const ProgramData& p, const char* why) {
     if (!TaskOf(model)) return false;
     const int64_t id = StationId(model);
+    if (IsExplorerModel(model)) return AssignExplorer(model, id, p, why);
     Il2CppObject* drone = LiveDrone(model, id);
     Il2CppObject* station = drone ? unity::Field<Il2CppObject*>(drone, offDroneStation) : nullptr;
     bool assigned = false;
@@ -985,6 +1047,8 @@ bool ReadProgram(Il2CppObject* stationModel, ProgramData& out) {
     return true;
 }
 
+bool IsExplorer(Il2CppObject* stationModel) { return g && g->IsExplorerModel(stationModel); }
+
 bool StationModels(std::vector<Il2CppObject*>& out) {
     out.clear();
     if (!g || !g->hooked || !main_thread::IsMainThread() || Impl::Faulted(g->module)) return false;
@@ -1133,6 +1197,16 @@ bool HenSource::Setup(sr2::core::ModuleContext& ctx, const char* module, std::st
     p->gatherSourceMi = method(p->droneClass, "GatherSourceTask", 1);
     p->gatherSinkMi = method(p->droneClass, "GatherSinkTask", 1);
     p->assignMi = method(station, "AssignRanchTask", 4);
+    {  // optional: Explorer mode stations (programs = targets only)
+        std::string err;
+        p->stationClass = station;
+        if (auto o = R.FieldOffset(p->stationModelClass, "_type", &err)) p->offModelType = *o;
+        if (auto o = station ? R.FieldOffset(station, "_model", &err) : std::nullopt) p->offStationModel = *o;
+        if (auto o = station ? R.FieldOffset(station, "_droneTaskConfig", &err) : std::nullopt) p->offStationCfg = *o;
+        p->assignExplorerMi = station ? R.Method(station, "AssignExplorerTask", 2, &err) : nullptr;
+        if (!p->offModelType || !p->offStationModel || !p->offStationCfg || !p->assignExplorerMi)
+            report += " explorer stations' programs: data only (game calls NOT available);";
+    }
     p->sceneInst = method(parentOf(sceneCtx), "get_Instance", 0);
     p->lsGetTable = method(p->lsClass, "get_TableReference", 0);
     p->lsGetEntry = method(p->lsClass, "get_TableEntryReference", 0);

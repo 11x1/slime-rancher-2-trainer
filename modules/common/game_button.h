@@ -37,6 +37,14 @@
 //                                hand as InputIcon.SetKey does).
 //   key "C"  + padGlyph true   : the source binding's display stays (pad button glyph with a pad), but a
 //                                keyboard key cap reads "C" (the silo receipt's Cancel).
+//   control "<Keyboard>/space" : the game's own key icon for that control: the KeyboardMouseIcon entry of the
+//                                game's KeyboardMouseIconSet asset handed to InputIcon.SetIcon, exactly as the
+//                                key bar draws it (localized key name, the icon widens to fit "Space", or the
+//                                entry's sprite). `key` is the fallback text when no entry is found.
+//
+// Focus (keyboard / pad navigation of a dialog, round 14): SetFocused(true) gives the button the game's hover
+// look (ButtonAnimator.OnPointerEnter: DeepBlue + the RectBounce animation), kept while focused (a pointer
+// leaving it would drop it); PlayPress() plays the press animation (ButtonAnimator.OnSubmit).
 //
 // Threading: Resolve on the worker thread (by name, idempotent); everything else on the Unity main thread
 // inside the caller's fault guard. A native exception marks the owning module faulted (Spec's module).
@@ -68,6 +76,9 @@ inline constexpr Color kTeal{0.063f, 0.675f, 0.757f, 1.0f};      // the menus' "
 // own drawn buttons). Optional parts (layout, glyph, tint) are reported in `why` too but still return true.
 bool Resolve(sr2::il2cpp::Resolver& R, std::string& why);
 bool Available();
+// Main thread: the game's KeyboardMouseIcon entry for an input control path ("<Keyboard>/space"), from the
+// game's KeyboardMouseIconSet asset(s) (one asset scan per new path per session, cached); nullptr = none.
+Il2CppObject* KeyIcon(std::string_view control);
 
 enum class Source { kPositive, kNegative };  // which popup button is cloned (only the glyph binding differs)
 
@@ -75,6 +86,7 @@ struct Spec {
     std::string name = "sr2mods_GameButton";
     std::string label;
     std::string key;          // key cap text ("C"), "" = see popupGlyph
+    std::string control;      // input control path ("<Keyboard>/space"): the game's own key icon (key = fallback)
     bool padGlyph = false;    // with a key: the source binding's display while a pad is used
     bool popupGlyph = false;  // without a key: the source binding's own glyph
     Source source = Source::kNegative;
@@ -110,6 +122,10 @@ public:
     void SetTint(const Color* normal);
     void SetSelected(bool on) { SetTint(on ? &kTeal : nullptr); }
     void SetActive(bool on);
+    // Keyboard / pad focus: the game's hover look while on (see the header comment).
+    void SetFocused(bool on);
+    bool Focused() const { return focused_; }
+    void PlayPress();  // the game's press animation (keyboard / pad Submit)
 
     // Main thread, every frame while it exists: re-applies key / label / placement for a few frames after a
     // change (the layout and the InputEventDisplay may still configure themselves) and polls the click.
@@ -130,6 +146,7 @@ public:
 private:
     void Apply();
     void ApplyGlyph();
+    void FocusTick(bool inside);
     void PadGlyphTick();
     void Release();
 
@@ -140,7 +157,9 @@ private:
     std::vector<Il2CppObject*> icons_;                      // InputIcon components of the glyph
     Il2CppObject* padKeyText_ = nullptr, *padKeyRoot_ = nullptr;  // padGlyph: first icon's key text / root
     std::vector<Il2CppGCHandle> handles_;
-    std::string label_text_, key_;
+    std::string label_text_, key_, control_;
+    Il2CppObject* keyIcon_ = nullptr;  // the KeyboardMouseIcon entry for control_ (kept for the session elsewhere)
+    bool focused_ = false, focusShown_ = false;
     bool padGlyph_ = false, popupGlyph_ = false;
     bool interactable_ = true, colorDirty_ = true, wasPressed_ = false;
     bool tinted_ = false;

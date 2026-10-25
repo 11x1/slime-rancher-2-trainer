@@ -245,7 +245,15 @@ while custom upgrades are on and the save owns the **Drone Program Scheduler** (
   vacpack upgrades (setup failed, card not created) the feature is not locked.
 
 - Up to 3 programs per station; the game keeps one (`_taskData`); switching = `DroneStation.AssignRanchTask`
-  (what Start Program does).
+  (what Start Program does; the page shows "Save Program" while custom upgrades are on, round 14).
+- **Explorer mode** (round 14: "can't add multiple programs to a explorer mode drone as it has no source and
+  destination"): a program is its target only (`ProgramData::ValidFor(explorer)`, `drones::IsExplorer` =
+  `DroneStationGadgetModel._type` EXPLORER_DRONE); switching = `DroneStation.AssignExplorerTask` (the station
+  object found by `_model`, re/drones.md "Explorer mode stations"), log `explorer station N program set (...;
+  explorer drone re-programmed)`. No rotation for explorer stations (the explorer drone gathers non-stop; the
+  rotation watches the RanchDrone): the player picks the program with Edit; the dialog has no Next program
+  selector there. A station switched between modes keeps its stored programs (a ranch program on an explorer
+  station only uses its target).
 - **When idle** (default): behaviour Rest, ammo empty, `MaybeHasNextGatherBehavior()` false for 2 ticks.
   The at-station flourish neither counts nor resets. **After each delivery**: also when the ammo went full
   -> empty. Never with cargo (DumpAmmo would destroy it), without battery, or with the station menu open

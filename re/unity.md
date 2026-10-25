@@ -103,6 +103,7 @@ Patch data instead of hooking a shared getter. Small getters may also be inlined
 
 ### Unity engine / uGUI
 - gotchas: uGUI bakes Graphic colour x every parent CanvasGroup alpha into vertex colour; `CanvasGroup.ignoreParentGroups = true` isolates a subtree (SetActive unaffected)
+- gotchas: a CanvasRenderer added at runtime has `cullTransparentMesh` on (Unity 6 default): a Graphic whose vertex colours are all transparent is not drawn at all, so an SDF "frame" with a transparent fill and a coloured border (SDFGraphic border via material) is invisible. Use an opaque shape (e.g. a larger ring behind the element) or `CanvasRenderer.set_cullTransparentMesh(false)`. This was why the drone programs dialog's focus frame never showed in rounds 12-13 (drone_price_limit) (inferred from the code + test reports)
 - gotchas: setting a Transform/Graphic to the SAME value still dirties it: the canvas rebuilds; set only on change. Canvas rebuild/batching happens in `Canvas.willRenderCanvases`, outside per-module timing; nested Canvases isolate per-frame changes from rebatching the parent
 - gotchas: uGUI batches vertices in the ROOT canvas's space (nested Canvas without overrideSorting); for ScreenSpaceOverlay shader positions are canvas space, for Camera/World modes world space (MM assumption for the NegativeMask matrix)
 - gotchas: uGUI `Mask` is a stencil mask: binary edge regardless of sprite AA; materials need `_Stencil` to be clipped
