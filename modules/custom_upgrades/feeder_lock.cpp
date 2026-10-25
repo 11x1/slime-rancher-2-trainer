@@ -299,7 +299,7 @@ bool FeederLock::Setup(sr2::core::ModuleContext& ctx, std::string& why, std::str
     auto* l = new Lookups();
     l->feederClass = cls(kImage, "", "SlimeFeeder");
     l->storageClass = cls(kImage, "", "SiloStorage");
-    Il2CppClass* plotModel = cls(kImage, "", "LandPlotModel");
+    Il2CppClass* plotModel = cls(kImage, "MonomiPark.SlimeRancher.DataModel", "LandPlotModel");
     Il2CppClass* ident = cls(kImage, "", "Identifiable");
     Il2CppClass* component = cls(kCore, "UnityEngine", "Component");
     if (!why.empty()) {
