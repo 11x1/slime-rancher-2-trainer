@@ -147,7 +147,7 @@ body { padding-bottom: 260px; }
 <div class="wrap">
   <header>
     <h1>SR2 Mods Test Run</h1>
-    <p class="sub">Round 16: new and carried-over cases. Use the build whose Insert menu footer shows commit <code>bc3486d</code> or later. Mark each case; use Note to write something down. Results save as you go, and Claude can read them.</p>
+    <p class="sub">Round 17: new and carried-over cases. Use the build whose Insert menu footer shows commit <code>744628c</code> or later. Mark each case; use Note to write something down. Results save as you go, and Claude can read them.</p>
   </header>
 
   <div class="summary" aria-live="polite">
@@ -183,62 +183,47 @@ body { padding-bottom: 260px; }
 <script>
 const SECTIONS = [
   { name: "Menu only (Sandbox on, save loaded)", cases: [
-    ["r16ov1", "No tooltips on upgrade - / +", ["Sandbox > Upgrades & Blueprints > Upgrades: hover - and + on an entry: no tooltip.", "Click + then -: the level goes up and down.", "Discover all and Max still have tooltips."]],
-    ["r16ov2", "Rounded menu highlights", ["Right-click an upgrade entry, hover Discover / Undiscover: rounded highlight.", "Blueprint tab, right-click a tile, hover Unlock blueprint: rounded."]],
-    ["r16ov3", "Smaller rounded submenu arrow", ["Spawner: right-click Pink Slime: \"Largos (N)\" has a small rounded arrow at its right end, centred, smaller than before.", "Hover it: rounded highlight, the submenu opens; a radiant largo row has the same arrow.", "Click a largo row: it spawns."]],
+    ["r17ov1", "Upgrade menus less rounded", ["Sandbox > Upgrades & Blueprints > Upgrades: right-click an entry, hover a row: corners only slightly rounded, like the slime spawner's right-click menu.", "Blueprint tab: right-click a tile, hover Unlock / Lock: same.", "Mod buildables: right-click a card: same.", "Spawner: right-click a slime: unchanged."]],
+    ["r17ov2", "Upgrade cost tooltip", ["Upgrades: hover Tank Booster's entry (not on - / +): the next tier's name, a \"Next level\" tag and \"Fabricator cost\" rows with icons and counts.", "Hover an upgrade at its last level: \"Fully upgraded\".", "Hover an upgrade not bought yet (e.g. Jetpack): \"First level\" and its cost, components with icons.", "Hover - / +, or with the right-click menu open: no cost tooltip.", "Is this the look you meant (\"like slimes in Slimepedia\")? Say in the note if not."]],
+    ["r17ir1", "Vacpack page shows fresh slots", ["Open Sandbox > Vacpack with some slots filled, close the overlay.", "Shoot out or empty a few slots.", "Reopen the overlay: the new contents show at once, no frame of the old ones (at most a brief blank).", "Scroll down a little, close and reopen: the scroll position stays."]],
+    ["r17ir2", "Switching back to the Sandbox tab", ["On Sandbox > Vacpack, switch to another overlay tab, close the overlay, vac some items, reopen and switch back to Sandbox: the current counts show, no flash of old ones."]],
   ]},
   { name: "Main menu -> load a save", cases: [
-    ["r16mm2", "Ghost icon under the minimap", ["Load a save without opening a drone station.", "Within about 10-20 s the Ghosts cell under the minimap shows the explorer drone picture, not the placeholder.", "Travel to another zone: it stays. Open and close a drone station later: still there, the station works."]],
-    ["r16fl6", "Old feeder lock carries over", ["Load the save that had a round 15 food lock on a feeder: that feeder's switch shows \"On\"."]],
-  ]},
-  { name: "Ranch: expansion islands", cases: [
-    ["r16mm1", "Tracker row on every ranch island", ["On the main Conservatory island: the row under the minimap shows the ranch counts (pods, drones, ghosts).", "Walk into the Gully: the same counts stay.", "Same in the Den, Archway and Tidepools.", "Boat to the Sanctuary: its own counts."]],
-  ]},
-  { name: "Ranch: Fabricator", cases: [
-    ["r16uc1", "Next: labels", ["Slime Launcher with I owned: \"Next: Slime Launcher II\"; with nothing owned: no Next label.", "Tank Booster with VIII owned: \"Next: Tank Booster IX\"; after buying IX: \"Next: Tank Booster X\".", "Drone Battery Saver with I owned: \"Next: Drone Battery Saver II\".", "A vanilla card (Extra Tank I): unchanged."]],
-  ]},
-  { name: "Ranch: open ground", cases: [
-    ["r16gs1", "Stack a decoration", ["Gadget mode, hold a lamp decoration.", "Aim at the top of a placed pillar or decoration: the outline sits on its top (right after placing the base, look away once first).", "Place it: it stays on top, no blocked or invalid message."]],
-    ["r16gs2", "Overlap another gadget", ["Hold any gadget and aim so it intersects a placed gadget beside it: the outline stays valid (not red).", "Place it: placed."]],
-    ["r16gs4", "Stacks save and pick up together", ["Stack one gadget on another.", "Save, quit to the menu, load: still on top, same spot and rotation.", "Pick up the bottom one: both go back into the inventory."]],
-    ["r16gs5", "Stacking switch and Free Placement", ["Turn on Free Placement: stacking still works.", "Turn off Misc > General > Gadget Stacking: aiming at a placed gadget, the outline passes through to the ground, and overlapping is red again. Turn it back on."]],
-    ["r16lp1", "Placed lamp starts at once", ["Play a song from a nearby Music Box.", "Place a lamp within 20 m: it pulses within about half a second.", "Pick it up and place it again: just as fast.", "Place one more than 20 m away: it doesn't pulse."]],
-    ["r16lp2", "Music Pillar and Music Tile", ["Place a Music Pillar and a Music Tile within 20 m of a playing speaker: both pulse their pink glow and light, and flash on the beats like when stepped on, without the note sound.", "Pause the song: the flashes stop, normal look.", "Walk onto the tile while the song plays: the normal note and flash."]],
-    ["r16lp3", "Highlighter labels", ["Highlighter on: a Music Tile near a playing speaker is boxed pink \"pulsing lamp / music tile\"; one far away is grey."]],
-  ]},
-  { name: "Ranch: placed Quantum Storage Link", cases: [
-    ["r16ql1", "No hint on drone rows", ["Use the link: Drones tab.", "Move over the drone rows with keys or the mouse: the focused row highlights, with no magnifier and no [SPACE].", "Open a real Drone Station and focus a row: as before.", "The map's drone panel: the magnifier and [SPACE] Go To still show there and work."]],
-    ["r16ql2", "Bigger blue top, subtler glitch", ["The blue effect on top is about twice as big as before.", "Wait up to 30 s: the ghost flickers briefly, darker and more see-through, not a solid white copy.", "Afterwards the link keeps its purple tint."]],
-  ]},
-  { name: "Ranch: corral with Corral Radio and Music Box", cases: [
-    ["r16ra1", "Right key grid aligned", ["Open the radio menu: in the bottom-right grid Queue is in the top-right cell, the cell to its left empty, Clear under Queue; Queue's and Clear's right edges line up.", "Move into the playlist: Remove top-left of the right grid, Play now top-right, lined up with Clear.", "On the song list press Down past the last song: focus on Queue; Up / Down between Queue and Clear; Left from Queue skips the empty cell to the left grid."]],
-    ["r16gs3", "Plots still block stacking", ["Hold a decoration and aim inside the corral or into its wall: blocked as in vanilla."]],
+    ["r17vu1", "Extra Tank slots after loading", ["With Custom upgrades off in settings, load a save that owns Extra Tank IV: within about 1 s the HUD shows 8 slots plus water.", "Press 7 and 8: those slots are selected; water still works.", "Vac items into slots 7 and 8, save, quit to the menu, load: the items are back in 7 and 8.", "Sandbox > Upgrades: lower Extra Tank IV to II: slots 7 and 8 go; raise it to IV: they come back."]],
   ]},
   { name: "Ranch: corral plot menu", cases: [
-    ["r16fl1", "Leave last food item in switch", ["Buy the Auto-Feeder, select its card: a short switch \"Leave last food item in: Off\" where the cost row was. An unbought feeder card has no switch.", "Click its right half: \"On\", handle right, pink fill.", "Close and reopen: still On.", "Enter (or pad A) with the card selected: flips to Off, no popup; again: On.", "Left / right move the card selection as usual."]],
-    ["r16ic2", "Music Box and Corral Radio icons", ["On a corral without the Music Box: the Music Box card shows your speaker drawing.", "Buy it: Music Box II shows the vanilla Music Box icon.", "The Corral Radio card shows the Slimepedia music player icon (if it shows the Music Box icon: open the Slimepedia once, wait 20 s, reopen the menu).", "Custom upgrades off: the Music Box card is vanilla again."]],
+    ["r17fl1", "Leave last food item in switch", ["Select the owned Auto-Feeder card: a \"Leave last food item in: Off\" switch in the cost row.", "Click it (or Enter / pad A): On.", "Close and reopen the menu: still On."]],
+    ["r17ic1", "Music Box icon in place", ["A corral without the Music Box: the card shows your drawing exactly where the vanilla Music Box icon sits, no shift compared to Music Box II."]],
   ]},
-  { name: "Ranch: corral with Auto-Feeder, Music Box and loose plorts", cases: [
-    ["r16fl2", "The last item stays in", ["Switch on, shoot 3 carrots into the feeder.", "Wait for feeding: 2 come out, 1 stays; more cycles: still 1.", "Shoot a beet in: it stays outside. A carrot: accepted (2)."]],
-    ["r16fl3", "Switching off releases it", ["Switch Off: the last carrot is fed out at the next feed.", "Once empty, shoot a beet in: accepted."]],
-    ["r16pg1", "Plorts glow to the music", ["Let a few plorts lie in the corral and play a song on its Music Box: plorts within about 15 m brighten with the beat in their own colours, calmer in quiet parts.", "Pause: back to normal.", "Vac a glowing plort and shoot it out: once it lands it glows again within about 2 s.", "Turn off \"Plorts glow to the music\" on the Slime DJ tab: normal at once."]],
-    ["r16pg2", "Dark and special plorts", ["Drop Ringtail, Shadow, Phosphor and Twin plorts near the playing speaker: each glows visibly, the dark ones too, and no colour shifts."]],
-    ["r16pg3", "Plort range and strength", ["Set \"Plort range\" to 5 m, plorts at 3 m and 10 m: only the near ones glow.", "Add a second speaker near them: the glow gets stronger.", "Highlighter on: orange boxes on glowing plorts, grey on the others, also without music."]],
-    ["r16pg5", "Many plorts", ["Let over 64 plorts collect near the playing speaker: only the 64 nearest glow, the frame rate stays smooth."]],
+  { name: "Ranch: corral with Auto-Feeder", cases: [
+    ["r17fl2", "The last item stays", ["Switch On, put 3 of one food in the feeder.", "Wait for feedings: 1 stays in, never ejected.", "Shoot a different food in: it bounces off. The same food: goes in.", "Sleep to the next day: at least 1 still in.", "Save, quit, load: switch still On, the item still there.", "Switch Off: the last item feeds out at the next feeding."]],
+    ["r17fl3", "Fill lights", ["Look at the small arrow lights on the feeder ports (beside the speed button and at the top chute).", "Empty the feeder: red within about 1 s.", "Fill about half: yellow. Fill it up: green like vanilla.", "Let it feed down: the colour follows."]],
+    ["r17fl4", "Fill lights setting", ["Options > custom upgrades: turn \"Auto-Feeder fill lights\" Off: vanilla green within about 1 s. On again: the fill colours return."]],
+    ["r17fl5", "Newly bought feeder lights", ["Buy an Auto-Feeder on a corral without one: its lights turn red (empty) within about 10 s."]],
   ]},
   { name: "Ranch: garden plot menu", cases: [
-    ["r16ic1", "Sprinkler icons", ["A garden without the Sprinkler: the Sprinkler card shows your drawing.", "Buy it: Sprinkler II shows your drawing with water drops.", "Buy II: Sprinkler III shows the vanilla icon.", "Custom upgrades off: the Sprinkler card is vanilla again."]],
+    ["r17ic2", "Sprinkler icons in place", ["A garden without the Sprinkler: your drawing sits low, where the vanilla icon's sprinkler base sits, not centred.", "Sprinkler II card: your drawing at the same height; the row lines up with Sprinkler III.", "Custom upgrades off: the vanilla icon, base in the same place."]],
   ]},
-  { name: "Ranch: coop", cases: [
-    ["r16uc2", "Hen Collector description", ["Deluxe coop menu, Hen Collector card: the new plain description, no counts or slider mention."]],
-    ["r16uc3", "Coop Air Net stays put", ["Load a save with a Coop Air Net: the net sits on top of the coop walls, not floating.", "Wait about a minute: it stays.", "Buy High Walls: the net moves up onto the new walls."]],
+  { name: "Ranch: corral with Music Box and loose plorts", cases: [
+    ["r17pg1", "Plorts start at once, own glow replaced", ["Music stopped, loose plorts near the Music Box. Start a song: plorts glow to the beat within about a quarter second, with the lamps.", "A plain plort (Pink): no slow own glow on top, only the beat.", "Pause the song: normal look again, own glow included."]],
+    ["r17pg2", "New plorts join at once", ["Song playing: shoot a plort out next to the speaker: it glows at once.", "A slime near the speaker makes a plort: it joins at once."]],
+    ["r17pg3", "Phosphor and Shadow plorts", ["Song playing: a Phosphor plort's glow follows the beat instead of its slow fade.", "A Shadow plort pulses with the beat, its own glow gone.", "Stop the music: both look vanilla."]],
+    ["r17pg4", "Up to 256 plorts", ["Gather 150+ loose plorts near playing speakers: all of them glow.", "The plort setting's tooltip mentions the 256 cap.", "Frame rate stays smooth."]],
+  ]},
+  { name: "Ranch: placed Quantum Storage Link", cases: [
+    ["r17ql1", "Drone row hint never flashes", ["With at least one drone, use the link: the Drones tab opens.", "Watch the first row as the menu appears: no magnifier / [SPACE], not even briefly.", "Move through the rows: none shows it. Close and reopen: same."]],
+    ["r17ql3", "See-through glitch", ["Wait up to about 30 s for a quantum moment: the glitch shows as faint see-through cyan scanlines, no solid white.", "Between moments the link looks normal."]],
   ]},
   { name: "Ranch: drone station", cases: [
-    ["r16fl4", "Drones bring only the kept food", ["Drone program from a garden or silo with several foods to Feeder, the corral feeder keeping carrots: only carrots are delivered to it."]],
-    ["r16fl5", "Last item survives a night", ["Leave a few items in a kept feeder of a corral with hungry slimes, sleep through the night: 1 item is still in."]],
+    ["r17ql2", "Station rows keep their hint", ["After using the link's menu, open a drone station's menu, drone list: a focused row still shows its magnifier and [SPACE].", "Watch a ranch drone fly through a wall away from any quantum moment: its pass-through effect looks as bright as before."]],
   ]},
-  { name: "Anywhere with plort doors", cases: [
-    ["r16ic3", "Plort door icon", ["The plort doors row under the minimap shows your drawing.", "The shadow doors row (Grey Labyrinth) still shows the vanilla marker."]],
+  { name: "Powderfall Bluffs: glowing ice", cases: [
+    ["r17lp1", "Ice pulses at once", ["With a song loaded, walk to the glowing ice cubes, place and start a speaker next to them: the ice pulses right away.", "Stop and start the music: the ice reacts at once.", "Teleport to Powderfall with a speaker already playing by the ice: it pulses about 3 s after arriving."]],
+  ]},
+  { name: "Round 16", group: "Skipped", cases: [
+    ["r16gs4", "Stacks save and pick up together", ["Stack one gadget on another.", "Save, quit to the menu, load: still on top, same spot and rotation.", "Pick up the bottom one: both go back into the inventory."]],
+    ["r16uc3", "Coop Air Net stays put", ["Load a save with a Coop Air Net: the net sits on top of the coop walls, not floating.", "Wait about a minute: it stays.", "Buy High Walls: the net moves up onto the new walls."]],
+    ["r16fl4", "Drones bring only the kept food", ["Drone program from a garden or silo with several foods to Feeder, the corral feeder keeping carrots: only carrots are delivered to it."]],
   ]},
   { name: "Game launch", group: "Skipped", cases: [
     ["r11qs2", "Manual Continue click", ["With auto-continue on, restart.", "Click Continue yourself as soon as the menu shows.", "The save loads once: no fault, no second load."]],

@@ -36,3 +36,6 @@ Skipped (re-add): r16fl2-fl5 (blocked by A), r16gs4 (stacks save and pick up tog
 ## G. Stale inventory for one frame (`fix/inventory-refresh-r17`)
 - User: "when closing the menu with inventory open, emptying slots, reopening inventory, for a split frame it shows old inventory".
 - Most likely the overlay's inventory page (Sandbox vacpack / item grid, `ui/item_grid.cpp`): close the overlay on that page, empty vacpack slots in game, reopen it, and the old contents show for one frame before the refresh. Refresh the cached slot data before the first frame the page draws on reopen (or draw nothing until fresh data is in), not on a later tick. If the overlay isn't the cause, check the game's own inventory UI with the mod's hooks the same way.
+
+## Status (2026-10-25)
+All tasks A-G merged and deployed (744628c, DLL 9494cc5d; one build for the round), together with the autotest harness, client and showcase tool (setting off by default). Checklist: round 17 published to https://claude.ai/artifact/12HrkuKyWbJs1PtsufwVvE (20 new cases in `.claude/checklist/r17-cases.json`; r16gs4, r16uc3, r16fl4 and the older skipped cases carried over). Open question: B's cost tooltip uses the Sandbox page's tooltip style with icons; the user asked for it "like it is for slimes in slimeipedia".

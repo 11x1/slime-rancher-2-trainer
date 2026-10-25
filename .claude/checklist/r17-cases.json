@@ -1,0 +1,200 @@
+[
+[
+"Menu only (Sandbox on, save loaded)",
+"r17ov1",
+"Upgrade menus less rounded",
+[
+"Sandbox > Upgrades & Blueprints > Upgrades: right-click an entry, hover a row: corners only slightly rounded, like the slime spawner's right-click menu.",
+"Blueprint tab: right-click a tile, hover Unlock / Lock: same.",
+"Mod buildables: right-click a card: same.",
+"Spawner: right-click a slime: unchanged."
+]
+],
+[
+"Menu only (Sandbox on, save loaded)",
+"r17ov2",
+"Upgrade cost tooltip",
+[
+"Upgrades: hover Tank Booster's entry (not on - / +): the next tier's name, a \"Next level\" tag and \"Fabricator cost\" rows with icons and counts.",
+"Hover an upgrade at its last level: \"Fully upgraded\".",
+"Hover an upgrade not bought yet (e.g. Jetpack): \"First level\" and its cost, components with icons.",
+"Hover - / +, or with the right-click menu open: no cost tooltip.",
+"Is this the look you meant (\"like slimes in Slimepedia\")? Say in the note if not."
+]
+],
+[
+"Menu only (Sandbox on, save loaded)",
+"r17ir1",
+"Vacpack page shows fresh slots",
+[
+"Open Sandbox > Vacpack with some slots filled, close the overlay.",
+"Shoot out or empty a few slots.",
+"Reopen the overlay: the new contents show at once, no frame of the old ones (at most a brief blank).",
+"Scroll down a little, close and reopen: the scroll position stays."
+]
+],
+[
+"Menu only (Sandbox on, save loaded)",
+"r17ir2",
+"Switching back to the Sandbox tab",
+[
+"On Sandbox > Vacpack, switch to another overlay tab, close the overlay, vac some items, reopen and switch back to Sandbox: the current counts show, no flash of old ones."
+]
+],
+[
+"Main menu -> load a save",
+"r17vu1",
+"Extra Tank slots after loading",
+[
+"With Custom upgrades off in settings, load a save that owns Extra Tank IV: within about 1 s the HUD shows 8 slots plus water.",
+"Press 7 and 8: those slots are selected; water still works.",
+"Vac items into slots 7 and 8, save, quit to the menu, load: the items are back in 7 and 8.",
+"Sandbox > Upgrades: lower Extra Tank IV to II: slots 7 and 8 go; raise it to IV: they come back."
+]
+],
+[
+"Ranch: corral plot menu",
+"r17fl1",
+"Leave last food item in switch",
+[
+"Select the owned Auto-Feeder card: a \"Leave last food item in: Off\" switch in the cost row.",
+"Click it (or Enter / pad A): On.",
+"Close and reopen the menu: still On."
+]
+],
+[
+"Ranch: corral plot menu",
+"r17ic1",
+"Music Box icon in place",
+[
+"A corral without the Music Box: the card shows your drawing exactly where the vanilla Music Box icon sits, no shift compared to Music Box II."
+]
+],
+[
+"Ranch: corral with Auto-Feeder",
+"r17fl2",
+"The last item stays",
+[
+"Switch On, put 3 of one food in the feeder.",
+"Wait for feedings: 1 stays in, never ejected.",
+"Shoot a different food in: it bounces off. The same food: goes in.",
+"Sleep to the next day: at least 1 still in.",
+"Save, quit, load: switch still On, the item still there.",
+"Switch Off: the last item feeds out at the next feeding."
+]
+],
+[
+"Ranch: corral with Auto-Feeder",
+"r17fl3",
+"Fill lights",
+[
+"Look at the small arrow lights on the feeder ports (beside the speed button and at the top chute).",
+"Empty the feeder: red within about 1 s.",
+"Fill about half: yellow. Fill it up: green like vanilla.",
+"Let it feed down: the colour follows."
+]
+],
+[
+"Ranch: corral with Auto-Feeder",
+"r17fl4",
+"Fill lights setting",
+[
+"Options > custom upgrades: turn \"Auto-Feeder fill lights\" Off: vanilla green within about 1 s. On again: the fill colours return."
+]
+],
+[
+"Ranch: corral with Auto-Feeder",
+"r17fl5",
+"Newly bought feeder lights",
+[
+"Buy an Auto-Feeder on a corral without one: its lights turn red (empty) within about 10 s."
+]
+],
+[
+"Ranch: garden plot menu",
+"r17ic2",
+"Sprinkler icons in place",
+[
+"A garden without the Sprinkler: your drawing sits low, where the vanilla icon's sprinkler base sits, not centred.",
+"Sprinkler II card: your drawing at the same height; the row lines up with Sprinkler III.",
+"Custom upgrades off: the vanilla icon, base in the same place."
+]
+],
+[
+"Ranch: corral with Music Box and loose plorts",
+"r17pg1",
+"Plorts start at once, own glow replaced",
+[
+"Music stopped, loose plorts near the Music Box. Start a song: plorts glow to the beat within about a quarter second, with the lamps.",
+"A plain plort (Pink): no slow own glow on top, only the beat.",
+"Pause the song: normal look again, own glow included."
+]
+],
+[
+"Ranch: corral with Music Box and loose plorts",
+"r17pg2",
+"New plorts join at once",
+[
+"Song playing: shoot a plort out next to the speaker: it glows at once.",
+"A slime near the speaker makes a plort: it joins at once."
+]
+],
+[
+"Ranch: corral with Music Box and loose plorts",
+"r17pg3",
+"Phosphor and Shadow plorts",
+[
+"Song playing: a Phosphor plort's glow follows the beat instead of its slow fade.",
+"A Shadow plort pulses with the beat, its own glow gone.",
+"Stop the music: both look vanilla."
+]
+],
+[
+"Ranch: corral with Music Box and loose plorts",
+"r17pg4",
+"Up to 256 plorts",
+[
+"Gather 150+ loose plorts near playing speakers: all of them glow.",
+"The plort setting's tooltip mentions the 256 cap.",
+"Frame rate stays smooth."
+]
+],
+[
+"Ranch: placed Quantum Storage Link",
+"r17ql1",
+"Drone row hint never flashes",
+[
+"With at least one drone, use the link: the Drones tab opens.",
+"Watch the first row as the menu appears: no magnifier / [SPACE], not even briefly.",
+"Move through the rows: none shows it. Close and reopen: same."
+]
+],
+[
+"Ranch: placed Quantum Storage Link",
+"r17ql3",
+"See-through glitch",
+[
+"Wait up to about 30 s for a quantum moment: the glitch shows as faint see-through cyan scanlines, no solid white.",
+"Between moments the link looks normal."
+]
+],
+[
+"Ranch: drone station",
+"r17ql2",
+"Station rows keep their hint",
+[
+"After using the link's menu, open a drone station's menu, drone list: a focused row still shows its magnifier and [SPACE].",
+"Watch a ranch drone fly through a wall away from any quantum moment: its pass-through effect looks as bright as before."
+]
+],
+[
+"Powderfall Bluffs: glowing ice",
+"r17lp1",
+"Ice pulses at once",
+[
+"With a song loaded, walk to the glowing ice cubes, place and start a speaker next to them: the ice pulses right away.",
+"Stop and start the music: the ice reacts at once.",
+"Teleport to Powderfall with a speaker already playing by the ice: it pulses about 3 s after arriving."
+]
+]
+]
