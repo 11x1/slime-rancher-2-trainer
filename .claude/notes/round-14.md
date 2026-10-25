@@ -74,3 +74,13 @@ Added by the user while round 14 was running:
 - "also has a suction effect on the output (comes from the refinery link's model) maybe it's removable?" Remove or switch off the Refinery Link's suction effect on the link.
 - "also the gadget name for it shows 'Refinery Link'". The placed gadget's name (the look-at label / gadget mode name) should read "Quantum Storage Link".
 - "maybe the agent can even switch the small arrows to the other side or somehow take them from elder collector outputs? shows like items can go in the link which they cant". The arrow markers suggest items go into the link. Flip them to point outwards, or use the Elder Collector's output arrows.
+
+## J. Hen Collector suction regressed (`fix/hen-collector-vacuum-r14`)
+User: "the chicken collector sucking got reverted again, its not sucking anymore :( no vaccuum effect, they just disappear".
+From sr2mods.log (2026-10-25):
+- At 17:41:55 the collector was built while active (`activeInHierarchy true`): "vacuum: the elder collector's own suction".
+- At 17:45:39 it was rebuilt right after a map teleport, while the plot was inactive (`activeInHierarchy false, renderers enabled+active 0`): "no vacuum: stored directly".
+- It then stayed "stored directly" for the rest of the session, also with the Activate button.
+- One WARN: `hen collector on plot ...: collector has no Region / TimeDirector / storage / audio / CollectPt - chickens are stored directly`.
+
+So building while the plot's region is unloaded or inactive falls back to direct storage for good. Defer the suction setup until the clone is active and its components resolve, or retry it later. Never lock in "stored directly" from a build done while inactive. Check `modules/custom_upgrades/NOTES.md` for how the suction worked when it was fixed before, so it doesn't regress a third time.
