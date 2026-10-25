@@ -11,12 +11,15 @@ namespace sr2::ui::sandbox {
 namespace {
 
 constexpr unsigned long long kViewedMs = 600;
+constexpr unsigned long long kFreshWaitMs = 400;  // Current: how long a reopened tab waits for a new snapshot
 
 std::mutex g_mutex;
 std::shared_ptr<const Snapshot> g_snap;  // guarded by g_mutex
 Status g_status;                          // guarded by g_mutex
 std::atomic<void (*)(const Action&)> g_handler{nullptr};
 std::atomic<unsigned long long> g_viewed{0};
+std::atomic<unsigned> g_session{0};
+std::atomic<unsigned long long> g_sessionStart{0};
 std::atomic<bool> g_cheated{false};
 
 }  // namespace
@@ -54,7 +57,20 @@ Status GetStatus() {
     return g_status;
 }
 
-void MarkViewed() { g_viewed.store(GetTickCount64(), std::memory_order_relaxed); }
+unsigned ViewSession() { return g_session.load(); }
+
+void MarkViewed() {
+    const unsigned long long now = GetTickCount64();
+    const unsigned long long v = g_viewed.exchange(now, std::memory_order_relaxed);
+    if (v == 0 || now - v >= kViewedMs) {  // shown again: the module has stopped refreshing since then
+        g_sessionStart.store(now);
+        g_session.fetch_add(1);
+    }
+}
+
+bool Current(const Snapshot& s) {
+    return s.view == g_session.load() || GetTickCount64() - g_sessionStart.load() >= kFreshWaitMs;
+}
 
 bool Request(const Action& a) {
     namespace main_thread = ::sr2::core::main_thread;

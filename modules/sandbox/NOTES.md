@@ -246,7 +246,7 @@ Infinite energy and infinite health live in the mark's `"toggles"` (`SaveToggle`
 
 ## Threading, faults, performance
 
-- Hooks only for the achievement block, the cheated-save mark, the Fabricator open tracking and infinite health. One main-thread frame callback: the snapshot every 250 ms only while the tab was drawn in the last 0.6 s, the infinite-energy / health top-ups, the queued HUD notices.
+- Hooks only for the achievement block, the cheated-save mark, the Fabricator open tracking and infinite health. One main-thread frame callback: the snapshot every 250 ms only while the tab was drawn in the last 0.6 s (at once when the tab is shown again: `bridge::ViewSession`, see ui/NOTES.md Reopen), the infinite-energy / health top-ups, the queued HUD notices.
 - Tab buttons post an `Action` (`main_thread::Post`); the module validates, applies, logs one line (`[sandbox] Newbucks set: 1,200 -> 5,000`, ...), sets the status line (shown only for errors, 8 s) and refreshes the snapshot.
 - Every game call is `Resolver::Invoke` (managed exceptions captured with the first five managed frames via `il2cpp_format_stack_trace`); a native fault marks the module faulted and it stops calling the game. Each step re-reads and checks the player objects (`TryGetPlayerState`, `IsAlive` + class on `PlayerState`, `PlayerModel`, `AmmoSlotManager`, slots, items).
 - Snapshot data is immutable once published (`shared_ptr<const ...>` lists built on the main thread, swapped under the bridge's lock; changes copy). The render thread keeps its snapshot for the frame. `ui/item_icons` is append-only and holds its own COM reference per texture.
