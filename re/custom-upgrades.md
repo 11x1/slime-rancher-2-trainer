@@ -104,6 +104,8 @@ comments and NOTES cite them.
 - **2.3** Drone price limit: `modules/drone_price_limit/NOTES.md`; market sink in re/drones.md.
 - **2.4** Coop Air Net: NOTES "Coop: Hen Collector and Air Net"; corral/coop prefab data in re/plots.md.
 - **2.5** Drone Battery Saver: NOTES "Drone Battery Saver"; battery model in re/drones.md.
+- **2.6** Drone Program Scheduler (several programs per station behind a card): NOTES "Drone Program
+  Scheduler" and "Several programs per drone"; programs in re/drones.md.
 - **2b.1 / 2b.1b** Sell button and gamepad/keyboard selling (sell_upgrades): list-menu internals in
   re/ui.md "List menus".
 - **2b.2** Per-plot tiers: NOTES "Plot upgrades (ids, keys)", `modules/plot_upgrades/NOTES.md`.
