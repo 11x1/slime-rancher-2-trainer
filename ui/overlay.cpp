@@ -856,6 +856,7 @@ void RenderFrame() {
 }
 
 // ---------------------------------------------------------- screenshots ----
+#if SR2MODS_AUTOTEST
 // The test harness (autotest_view.h) asked for the back buffer: copied through a staging texture
 // (resolved first when multisampled) and converted to RGBA8 here; the PNG is encoded off this thread.
 float HalfToFloat(uint16_t h) {
@@ -989,6 +990,7 @@ autotest::Shot CaptureBackBuffer() {
     bb->Release();
     return shot;
 }
+#endif  // SR2MODS_AUTOTEST
 
 void OnPresentImpl(IDXGISwapChain* sc) {
     if (!g_initDone) {
@@ -1000,9 +1002,13 @@ void OnPresentImpl(IDXGISwapChain* sc) {
         }
     }
     if (sc != g_swapChain) return;  // some other swap chain (not the game window)
+#if SR2MODS_AUTOTEST
     if (autotest::ShotWanted(false)) autotest::DeliverShot(CaptureBackBuffer());  // the game's frame only
     RenderFrame();
     if (autotest::ShotWanted(true)) autotest::DeliverShot(CaptureBackBuffer());  // with the overlay
+#else
+    RenderFrame();
+#endif
 }
 
 void OnPresentGuarded(IDXGISwapChain* sc) {

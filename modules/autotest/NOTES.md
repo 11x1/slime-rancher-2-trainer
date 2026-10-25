@@ -9,6 +9,17 @@ Module key `autotest`, **off by default**. Options: Misc > General > Debug Tools
 (one switch). Not in profiles (`core/profiles.cpp`): a shared profile can never open the pipe. While off: no pipe,
 no threads, no frame callback, no save veto; the probe / action registry is never called.
 
+**Compiled in only when asked**: CMake option `SR2MODS_AUTOTEST` (default OFF in CMake). `build.ps1` turns it ON
+for local builds (`.\build.ps1 -Autotest:$false` leaves it out); the GitHub release builds (develop and master,
+`.github/workflows/release.yml`) leave it out, a manual workflow run can add it (input `autotest`, artifact only).
+Without it: `modules/autotest/*.cpp` and `ui/autotest_view.cpp` are not built, the module is not registered
+(`core/module_registry.cpp`), the "Test harness" card is not in the menu (`ui/menu_layout.cpp`), the menu-page
+requests (`ui/menu.cpp`) and back-buffer screenshots (`ui/overlay.cpp`) are compiled out, and `autotest_view.h`
+gives the overlay constant-false stubs. The hooks other modules expose for it stay (`custom_upgrades::SetSaveVeto`,
+`ground_teleport::TeleportExact`, the profiles skip of `autotest`); nothing calls them. The log header says
+`test harness compiled in` or `no test harness`; `ping` returns `harness_compiled: true`. If the client can't
+connect to `\\.\pipe\sr2mods-autotest`, check that line first.
+
 ## Files
 
 | file | what |

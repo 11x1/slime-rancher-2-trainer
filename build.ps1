@@ -6,6 +6,7 @@
   .\build.ps1                 # Release
   .\build.ps1 -Config Debug   # Debug (debug console available)
   .\build.ps1 -Clean          # wipe build dir first
+  .\build.ps1 -Autotest:$false  # without the test harness (like the GitHub release builds)
   .\build.ps1 -Regen          # regenerate proxy exports from System32\version.dll (needs Python + pefile)
 
   Output: build\<Config>\version.dll, copied with sr2mods.json to dist\<Config>\.
@@ -18,7 +19,10 @@ param(
   [switch]$Clean,
   [switch]$Regen,
   [switch]$NoVerify,
-  [int]$Jobs = 0
+  [int]$Jobs = 0,
+  # Compile in the test harness (modules/autotest). On for local builds; the GitHub release builds
+  # pass -Autotest:$false (no pipe code, no "Test harness" switch).
+  [bool]$Autotest = $true
 )
 
 $ErrorActionPreference = 'Stop'
@@ -81,8 +85,10 @@ if ($py) {
 if ($Clean -and (Test-Path $buildDir)) { Remove-Item -Recurse -Force $buildDir }
 
 # ---- configure + build ---------------------------------------------------------
+$autotestFlag = if ($Autotest) { 'ON' } else { 'OFF' }
+Write-Host "Test harness: $autotestFlag"
 & $cmake -S $root -B $buildDir -G Ninja "-DCMAKE_BUILD_TYPE=$Config" "-DCMAKE_MAKE_PROGRAM=$ninja" `
-  -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+  -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl "-DSR2MODS_AUTOTEST=$autotestFlag"
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
 # a linked worktree (agent) has its own .git file; its git dir differs from the common dir
 $gitDir = (& git -C $root rev-parse --path-format=absolute --git-dir 2>$null)

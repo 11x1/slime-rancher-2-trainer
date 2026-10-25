@@ -1305,6 +1305,7 @@ bool Quick(const std::string& cmd, const Value& args, Value& result) {
         result.set("build", Str(sr2::core::build_info::TimeIso()));
         result.set("sha", Str(sr2::core::build_info::Commit()));
         result.set("version", Str(SR2MODS_VERSION));
+        result.set("harness_compiled", Bool(true));  // CMake SR2MODS_AUTOTEST (builds without it have no pipe)
         result.set("save_guard", Bool(g_guardActive.load()));
         result.set("faulted", Bool(sr2::core::ModuleFaulted(kModule)));
         return true;

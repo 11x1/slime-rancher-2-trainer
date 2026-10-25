@@ -2,7 +2,10 @@
 #
 # - push to develop -> a pre-release tagged dev-<yyyyMMdd-HHmm>-<sha7> (commit time, UTC), one per push
 # - push to master  -> a release tagged v0.<N> (N = newest v0.* tag + 1)
-# - manual run      -> build and verify only, nothing published
+# - manual run      -> build and verify, uploaded as a 7-day workflow artifact, no release
+#                      (input "autotest" adds the test harness)
+#
+# Release builds leave the test harness out (build.ps1 -Autotest:$false, CMake SR2MODS_AUTOTEST=OFF).
 #
 # Release notes: .github/scripts/release_notes.py, grouped by the branches merged into develop
 # since the previous tag of the same kind (preview locally: python .github/scripts/release_notes.py).
@@ -18,6 +21,11 @@ on:
   push:
     branches: [develop, master]
   workflow_dispatch:
+    inputs:
+      autotest:
+        description: Compile in the test harness (modules/autotest); manual runs publish nothing
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -96,7 +104,9 @@ jobs:
         shell: pwsh
         env:
           SR2MODS_VERSION_STRING: ${{ steps.version.outputs.version }}
-        run: .\build.ps1 -Config Release
+          # releases never contain the test harness; a manual run can ask for it (and publishes nothing)
+          AUTOTEST: ${{ github.event_name == 'workflow_dispatch' && inputs.autotest && 'true' || 'false' }}
+        run: .\build.ps1 -Config Release -Autotest:([bool]::Parse($env:AUTOTEST))
 
       - name: Verify exports
         shell: pwsh
@@ -144,6 +154,16 @@ jobs:
           $text | Set-Content out/THIRD-PARTY-NOTICES.txt -Encoding utf8
           Get-ChildItem out | Format-Table Name, Length
           Write-Host "version.dll sha256 $hash"
+
+      - name: Upload the build (manual runs only, kept 7 days)
+        if: github.event_name == 'workflow_dispatch'
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sr2mods-${{ github.sha }}${{ inputs.autotest && '-autotest' || '' }}
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
 
       - name: Release notes
         if: steps.version.outputs.publish == 'true'

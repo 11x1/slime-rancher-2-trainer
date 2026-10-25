@@ -748,6 +748,7 @@ void JumpTo(const spotlight::Target& t) {
     g_hl.requested = ImGui::GetTime();
 }
 
+#if SR2MODS_AUTOTEST
 // The test harness asked for a page (autotest_view.h RequestPage, for screenshots of the menu): category
 // by id or title, tab by title or index, both case-insensitive.
 void ApplyPageRequest(const autotest::PageRequest& req, const std::vector<Category>& cats) {
@@ -787,6 +788,7 @@ void ApplyPageRequest(const autotest::PageRequest& req, const std::vector<Catego
     g_tab[cat->id] = tab;
     autotest::PageDone(req.id, true, cat->id + " / " + cat->tabs[static_cast<size_t>(tab)].title);
 }
+#endif  // SR2MODS_AUTOTEST
 
 // One setting: label on the left (dim while its switch is off), control on the right.
 void DrawRow(const Host& h, const settings::Def& d, const std::string& label, bool nested) {
@@ -5102,7 +5104,9 @@ bool Draw(const Host& h) {
     const auto views = BuildModuleViews();
     const auto cats = layout::Build(views);
     const ModuleView* ui = FindView(views, kUiModule);
+#if SR2MODS_AUTOTEST
     if (autotest::PageRequest req; autotest::TakePageRequest(req)) ApplyPageRequest(req, cats);
+#endif
 
     auto catIt = std::find_if(cats.begin(), cats.end(), [](const Category& c) { return c.id == g_cat; });
     if (catIt == cats.end()) catIt = cats.begin();

@@ -40,6 +40,7 @@ You need Visual Studio 2022/2026 or the Build Tools, with the "Desktop developme
 .\build.ps1                  # Release -> build\Release\version.dll, dist\Release\
 .\build.ps1 -Config Debug    # Debug build; a log console opens if debug_console=true
 .\build.ps1 -Clean           # delete the build directory first
+.\build.ps1 -Autotest:$false # without the test harness, like the GitHub releases
 .\build.ps1 -Regen           # regenerate the proxy export stubs (needs Python + pefile)
 ```
 
@@ -57,6 +58,8 @@ Prebuilt DLLs are on the repository's [Releases](https://github.com/11x1/slime-r
 The notes list the branches merged into `develop` since the previous tag of the same kind, each with its own commit subjects; commits made directly on `develop` go under "Other". Preview them before a push with `python .github/scripts/release_notes.py` (develop; `--kind master` for the next numbered release, `--since <ref>` for any start).
 
 Icons that exist only in a local checkout (not in git) are not in a release build: the mod shows the game's own icon there.
+
+Release builds leave out the in-game test harness (`modules/autotest`: no pipe code, no "Test harness" switch). It is a CMake option, `SR2MODS_AUTOTEST`: `build.ps1` turns it on for local builds, `.\build.ps1 -Autotest:$false` builds like a release. A manual run of the workflow (Actions > release > Run workflow, input `autotest`) can include it; manual runs only upload the files as a 7-day workflow artifact and publish no release. The first log line says `test harness compiled in` or `no test harness`.
 
 To install a release: close the game, back up your saves (`%USERPROFILE%\AppData\LocalLow\MonomiPark\SlimeRancher2`), and copy `version.dll` into the game folder next to `SlimeRancher2.exe` (Steam: right-click Slime Rancher 2 > Manage > Browse local files). `sr2mods.json` (settings) and `sr2mods.log` appear next to it on the first start. To update, replace `version.dll`; to uninstall, delete it.
 

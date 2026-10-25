@@ -133,7 +133,9 @@ std::vector<Category> Spec() {
          "Developer tools Monomi Park left in the game, each off until you turn it on. Only what still works in the "
          "release build is here."},
     };
+#if SR2MODS_AUTOTEST
     // The test harness (module "autotest", off by default): a section card under Debug Tools.
+    // Only in builds with the harness compiled in (CMake SR2MODS_AUTOTEST).
     CardSection harness;
     harness.title = "Test harness";
     harness.note = "Lets Claude drive the game through a local pipe to run tests. Leave it off unless asked.";
@@ -143,6 +145,7 @@ std::vector<Category> Spec() {
     general.cardHelp["autotest"] =
         "Opens a local pipe for the test client (other computers can't connect). While a client is connected only "
         "save slots 5 and 6 can be saved, and a tag shows in the bottom right corner.";
+#endif
     misc.tabs.push_back(general);
     cats.push_back(misc);
 
