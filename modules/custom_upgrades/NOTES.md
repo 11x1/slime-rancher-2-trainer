@@ -11,6 +11,7 @@ per-system `re/*.md` files linked below. Each `.cpp` header comment has the file
 | `module.cpp` | upgrade table `kDefs`, menu injection, HasUpgrade / AddUpgrade, sidecar, gate, tiers, Sell-All sale, silo capacity, demolish, Activate detour |
 | `api.h` | for other modules: `Owns`, `Multiplier`, `CanSell` / `Remove`, `ChainSellTarget`, per-plot / per-save values, `PlotKey`, `HiddenMenuItem`, `IsModGadget` |
 | `coop_world.cpp` | Coop Air Net, Hen Collector (clone, vacuum, Activate, ranch drone linking) |
+| `feeder_lock.cpp` | Auto-Feeder food lock (five SiloStorage hooks, locked storage table) |
 | `plot_menu_slider.cpp` | reusable uGUI slider for the plot menu details panel (also used by drone_price_limit) |
 | `silo_world.cpp`, `silo_receipt.cpp`, `sale_notify.cpp` | Sell-All world button (and the Corral Radio button: same class, `ButtonLook`), receipt dialog, HUD notices |
 | `plot_props.cpp` | decorative props for owned tiers |
@@ -94,6 +95,8 @@ MinHook allows one hook per address; other modules must not hook these:
   `UpgradeChain.Show`, `FabricatorItemButton.ConfigurePips`.
 - shadow_catcher.cpp: `AmmoSlotDefinition.IsAllowed`, `ShadowSlimeScatter` (ScatterIfPlayerNear,
   Relevancy, DoAlert, Action), `ProducePlortsOnHit.ProducePlort`.
+- feeder_lock.cpp: `SiloStorage.CanSpecificSlotAccept` / `CanAnySlotAccept` / `MaybeAddToSpecificSlot` /
+  `MaybeAddToAnySlot` / `MaybeAddAsResource` (pass-through except for a locked feeder's storage).
 - radio_shop.cpp: `ShopCategoryRuntime.GetRuntimeItems`, `ShopRuntimeItem.get_Asset` / `get_Description` /
   `TryPurchase`, `ShopDirector.SpawnNextItem`.
 
@@ -193,8 +196,13 @@ re/custom-upgrades.md 2.1 / 2.4.
 - **Activate button**: the vanilla collector button is kept (Collector null) while the Activate detour is
   installed (`CoopWorld::KeepHenButton`; build line `Activate button kept` / `no Activate button`). A press
   runs the excess-only vacuum at once (the 6 h period restarts) with animation, cue and 0.4 s rate limit
-  (`SiloButtons::Press`) and a short world text ("Collecting N chickens", "Nothing to collect (keeps H hens /
-  R roosters)", "The Hen Collector is full", "Already collecting").
+  (`SiloButtons::Press`). Round 15 (user: "Remove the popup when manually clicking the collector, just start
+  sucking (dont get them in if over limit)"): no notification and no world text any more; every press spins
+  the cyclone and plays the vac sound for the vanilla minimum (`_forceCollectUntil` = HoursFromNow(1/12), as
+  DoCollection does), and only the chickens over the coop's keep-limits are pulled in, as long as the
+  2 x 100 storage has room ("over limit" read as the storage limit: nothing goes in once it is full; the
+  keep-limits stay as before). The result ("Collecting N chickens", "Nothing to collect (keeps H hens /
+  R roosters)", "The Hen Collector is full", "Already collecting") is only logged (`hen collector button:`).
 - **Ranch drones (Coop)**: the tick appends the Hen Collector's two slots to the coop's
   `RanchMetadata ... elderCollectors` (`LinkDrones`, log `linked to the ranch drones`); every Register
   replaces the entry, so the next tick adds them again. Sold / not owned / off:
@@ -202,6 +210,32 @@ re/custom-upgrades.md 2.1 / 2.4.
   rooster target thus also empties the Hen Collector, fast-forward included. Edge: turning the module off
   while a drone flies to a port that still holds chickens leaves it a destroyed port (as vanilla on a
   deluxe coop demolish). RE: re/drones.md (RanchMetadata).
+
+## Auto-Feeder food lock (round 15)
+
+User: "Give the autofeeder an option to lock 1 item in it as always in the buy menu so drones can be filtered
+to put specific food items in them not just everything". RE: re/plots.md "SlimeFeeder", re/drones.md
+"Feeder sink".
+- **Menu**: in a corral's plot menu, while the OWNED vanilla Auto-Feeder card is selected, a `PlotMenuSlider`
+  ("FeederLock", mouse only like the Hen Collector sliders) sits in the cost row's slot: "Feeder takes: any
+  food" at 0, then "Feeder takes only: <food>" for each food of the feeder (its storage's slot definition
+  group with sub-groups, minus the block list, group order; logged once per session: `auto-feeder food lock:
+  N food(s) in group ...`). The card is found by its `_description` instance among the corral menu's items
+  (`_upgrade` FEEDER 9). Not offered for an unbought feeder (no active SlimeFeeder, no storage).
+- **Save**: per plot `PlotValue` `custom_upgrades.feeder_lock` = the food's asset name ("" = unlocked,
+  nothing stored). Never in the vanilla save; a mod-free load simply has a normal feeder.
+- **Effect** (`feeder_lock.cpp`): world tick part 12 hands the locked corrals to `FeederLock::Tick`, which maps
+  each live feeder's SiloStorage (`SlimeFeeder._storage`) to the locked IdentifiableType; the slider applies a
+  change at once (`SetNow`). Five SiloStorage hooks answer false for any other item on a locked storage:
+  `CanSpecificSlotAccept` makes the feeder no drone destination for it (GetSinks), so drones whose program
+  ends in Feeder fetch and deliver only the locked food to it (other feeders unchanged); `MaybeAddToSpecificSlot`
+  keeps the player's shots of other foods out (the item stays outside, as for a non-food); the other three
+  are backstops. Unlocked feeders and every other storage go straight to the original (one atomic load while
+  nothing is locked). Food already inside when locking stays and is fed out; the slot holds one type, so the
+  locked food comes in once it is empty. Logs: `auto-feeder on plot '<id>' locked to '<food>'` / `unlocked`,
+  `locked auto-feeder refused '<food>' (...)` once per food.
+- Module off / load / fault: `Cleanup` empties the table (vanilla feeders); the next tick rebuilds it from the
+  loaded save's sidecar.
 
 ## Drone sources Hen Collector / Elder Collector
 
@@ -840,6 +874,7 @@ for shot lava.
 - Silo: tanks, slot displays at the new max, the merged Additional Storage card (round 8 saw separate cards;
   the list check logs it). Alt-action sell prompt and key.
 - Props: Music Box II speaker animation, sizes, `Glow` / `Embers` playing, ember spots, plush hen facing.
+- Auto-Feeder food lock: the whole feature (slider, drones, shots, save + reload).
 - Vacpack: 12 circles / pips, buying the tiers, save + reload, mod-free load, extra slots and keys, centred
   row. Shadow Catcher: the whole feature.
 

@@ -17,6 +17,11 @@
 - `RanchMetadata.Register(LandPlot)` 0x98D7D0, `GetStorageMetadata` 0x98D290, `OnUpgradesChanged(plot)` (rebuilds the plot entry): re/plots.md.
 - UI: `DroneUIDefinitionSource.FindSourceDefinition`, `GatherSourceOptions` (keeps list order; sort index); `DroneTaskTarget.<Predicate>k__BackingField`; task config `MeatTypeGroup`, `HenType`.
 
+## Feeder sink (IDA, round 15)
+- `RanchDroneSinkProgramFeeder : RanchDroneSinkProgramSiloStorage<Destination>`; ctor 0xA2B190 takes a `foodTypeGroup` (target compatibility, `<>c__DisplayClass0_0.<.ctor>b__0`).
+- `GetSinks(id, overflow)` 0xA2AE60 (no iterator class: LINQ) = `ranchMetadata.plots.SelectMany(b__0: m => m.feeders.Where(b__2).Select(b__3)).Where(<>c.b__1_1)`. `b__2` 0xA37160 (body folded with the silo sink's `b__1`) = `s.storage.CanSpecificSlotAccept(id.CreateBlankAmmoMetadata(), s.index, overflow)`; `b__3` 0xA37350 = `new Destination(s, m, id)` (a StorageMetadata copy + `corral` = `RanchDroneSinkProgramCorral.Destination(m, id)` + `seeded` = the slot already holds `id`); `b__1_1` 0xA36880 = `seeded || corral.AnyEat` (some slime in that corral eats it). `Prioritize` 0xA2B040 = OrderBy with `Destination.Comparer`.
+- Base `RanchDroneSinkProgramSiloStorage<T>`: `OnAction_Deposit` 0x1638F30 = `_sink.Increment(selectedId, overflow, 1)` then drone ammo Decrement; `GetAvailableSpace` 0x1638CC0 = Aggregate over `GetSinks(id, false)`; `FastForward` 0x1638B90 = `Prioritize(GetSinks(id, overflow)).First()` + Increment. So a feeder storage that refuses an item in `CanSpecificSlotAccept` is no destination for it anywhere (Relevancy, re-check, fast-forward, and the sources' `IsSourceValid` "a sink has room" test): custom_upgrades' Auto-Feeder food lock uses exactly that (feeder_lock.cpp).
+
 ## Market sink and price limit (code)
 
 - `ScorePlort.CanDroneDeposit(id, ignoreMarketShutdown)` 0x991E40 = `GetMarketValue(id).HasValue` (+ active / not charging). Only callers: the `GetSinks` iterators of the market and caretaker-shop sink programs (always `ignoreMarketShutdown = true`). `HasAvailableSpace`, `GetAvailableSpace`, `Relevancy`, per-tick `OnAction` re-check and source gather checks all go through `GetSinks`. `_isCaretakerShop`.
