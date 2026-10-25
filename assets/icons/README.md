@@ -30,6 +30,9 @@ Names a drawing can take over (nothing embedded under them now, the vanilla icon
    It crops to the visible pixels, centres them on a square transparent canvas and reduces
    by a whole factor only (a ~490 px drawing becomes 1/2 scale), so the art is not resampled
    at an odd ratio.
+   A drawing made on the vanilla icon's canvas (a redraw of a game card icon, e.g. the 512 px
+   Sprinkler / Music Box ones) takes `--keep-place`: the whole canvas is kept and only reduced,
+   so the art stays where the vanilla icon has it on the card instead of being centred.
 3. `.\build.ps1` (it runs `src/gen_inc.py`, which embeds every `assets/icons/*.png`).
 
 For the Elder Collector that is all: `modules/custom_upgrades/drone_source.cpp` looks for

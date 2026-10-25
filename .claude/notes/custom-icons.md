@@ -5,6 +5,7 @@ The user is replacing AI-drawn / script-drawn art with their own drawings ("tryi
 ## How a drawing goes in
 1. The user puts the drawing in `assets/icons/source/<name>_custom.png` (any size, transparent background).
 2. `python assets/icons/src/pad_icon.py assets/icons/source/<name>_custom.png <icon name>` makes the 256 x 256 copy in `assets/icons/` (a 128 px drawing that should match a 128 px stock icon can be copied as is, like `mods_tab.png`).
+   A drawing on the vanilla icon's canvas (a redraw of a game card icon) takes `--keep-place` before the file name: no crop, so it keeps the vanilla icon's position on the card (round 16: the cropped, centred Sprinkler / Music Box drawings moved). `sprinkler_1`, `music_1` and `growth_1` are made that way.
    For a buildable's Fabricator card (DJ Booth / Speaker Stack / Slime Radio) also make the details copy: `python assets/icons/src/pad_icon.py assets/icons/source/<name>_custom.png <name>_large 512` (shown sharp in the details pane; without it the 256 px icon is used there).
 3. `.\build.ps1` embeds it (`gen_inc.py`); the code picks it up by name through `mod_icons::Get` / `mod_icons::Has`, falling back to the vanilla icon.
 4. Remove its drawing function from `assets/icons/src/make_icons.py` so a regeneration can't overwrite it.
