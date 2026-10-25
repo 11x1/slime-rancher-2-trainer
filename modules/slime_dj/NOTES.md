@@ -342,8 +342,16 @@ rise above an adaptive threshold, at least 180 ms apart). Tuned offline on the u
 read while paused or past the end: the walls settle and are restored.
 
 *Which corrals* (`SyncDancer`, every box scan and when the setting goes on): music box speakers (not
-emitters) playing their channel's clip whose box is within hearing range (Amplify included) of the camera.
-Their `MusicBoxUpgrader` is the plot root, which also carries `WallUpgrader` / `AirNetUpgrader`. Max 12.
+emitters) playing their channel's clip, at any distance. Their `MusicBoxUpgrader` is the plot root, which
+also carries `WallUpgrader` / `AirNetUpgrader`. Max 12, nearest to the camera first (`WallDancer::Sync`
+only looks at the first 12 targets, so a far plot gives way to a near one). Round 14 ("the walls dont
+react to music from far away :("): until then only corrals within hearing range (Amplify included) of the
+camera danced, so with the user's 30 m range the walls stopped a few steps outside the corral (log:
+`walls dance at 0 corral(s)` with 2 music boxes playing). Nothing else limits it: out of range the
+speaker's AudioSource plays on silently (linear rolloff, volume 0), so `timeSamples`, the play head and
+`DanceSample` keep running, and a box only counts while its plot is loaded (`MusicBox` activeInHierarchy),
+which is also when its walls can be seen. Cost per far corral is the same as a near one (about 9 property
+block updates per frame, one ripple per beat), bounded by the 12.
 Round 12 ("the walls dont dance to the corral's specific radio"): each corral follows its box's channel,
 the global queue or its own Corral Radio. `WallDancer::Target{up, group, boost}`: `group` = the channel's
 address (only compared, never dereferenced); the dancer keeps one `Groove` (level, pulse, chase, hue,
@@ -386,7 +394,7 @@ I x (1 + 0.75 max(0, I - 1)) for intensity I (100 % = 1, 200 % = 3.5). Formulas 
 more.
 Cached per plot (GC handles for renderers, a per-renderer snapshot block from `GetPropertyBlock` before the
 first change, the 4 ripple points); rebuilt when the active walls root or net changes. Restore =
-`SetPropertyBlock(snapshot)` when the song pauses (after settling), stops, the plot leaves range, the
+`SetPropertyBlock(snapshot)` when the song pauses (after settling), stops, the plot unloads, the
 setting goes off, or the module is disabled. Ripples in flight fade on their own. After a native fault the
 walls are left as they are.
 
@@ -490,7 +498,7 @@ or the module is disabled. A lamp whose scene unloaded is simply dropped (its ob
 | `shuffle` | on | random songs when the queue is empty |
 | `mute_vanilla` | on | silence the music box's own tune while a song plays |
 | `muffle_walls` | on | music from a corral with High Walls (and/or Air Net) sounds muffled from outside |
-| `dance_walls` | off | a ripple runs round the corral walls on every beat of the song the corral plays (queue or its Corral Radio); walls and Air Net glow and change colour (corrals within hearing range); speakers in the corral make it stronger |
+| `dance_walls` | off | a ripple runs round the corral walls on every beat of the song the corral plays (queue or its Corral Radio); walls and Air Net glow and change colour (any distance while the plot is loaded, nearest 12); speakers in the corral make it stronger |
 | `dance_intensity` | 1.0 (100 %) | 10-200 %, steeper above 100 % (shown while `dance_walls` is on) |
 | `dance_lamps` | on | lamps (Electric Pillar, Striped, Conservatory, Lava, Ice) and Powderfall's glowing ice near a playing speaker pulse their glow and lights with the beat |
 | `lamp_range` | 20 m | 5-100 m: the distance from a playing speaker within which lamps pulse (tooltip says so, round 14); full strength to 40 % of it (shown while `dance_lamps` is on) |

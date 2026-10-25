@@ -617,12 +617,14 @@ void WallDancer::Sync(const std::vector<Target>& targets) {
         if (Il2CppObject* b = P.NewBlock()) P.work = unity::NewGCHandle(b);
         if (!P.work) return;
     }
-    // Gone, out of range, or their walls / net changed (bought or sold): restore and drop (rebuilt below).
+    // Only the nearest kMaxPlots count (targets come nearest first): a far plot gives way to a near one.
+    const auto wanted = targets.begin() + static_cast<std::ptrdiff_t>(std::min(targets.size(), kMaxPlots));
+    // Gone, no longer wanted, or their walls / net changed (bought or sold): restore and drop (rebuilt below).
     for (size_t i = 0; i < P.plots.size();) {
         Impl::Plot& plot = P.plots[i];
         Il2CppObject* up = Impl::Target(plot.up);
-        auto t = std::find_if(targets.begin(), targets.end(), [&](const Target& x) { return x.up == up; });
-        bool keep = up && t != targets.end();
+        auto t = std::find_if(targets.begin(), wanted, [&](const Target& x) { return x.up == up; });
+        bool keep = up && t != wanted;
         if (keep) {
             plot.group = t->group;
             plot.boost = t->boost;
@@ -637,8 +639,8 @@ void WallDancer::Sync(const std::vector<Target>& targets) {
         P.Drop(plot);
         P.plots.erase(P.plots.begin() + static_cast<std::ptrdiff_t>(i));
     }
-    for (const Target& t : targets) {
-        Il2CppObject* up = t.up;
+    for (auto t = targets.begin(); t != wanted; ++t) {
+        Il2CppObject* up = t->up;
         if (P.plots.size() >= kMaxPlots) break;
         if (!unity::IsAlive(up)) continue;
         const bool have = std::any_of(P.plots.begin(), P.plots.end(), [&](const Impl::Plot& pl) { return Impl::Target(pl.up) == up; });
@@ -646,8 +648,8 @@ void WallDancer::Sync(const std::vector<Target>& targets) {
         Impl::Plot plot;
         plot.up = unity::NewGCHandle(up);
         if (!plot.up) continue;
-        plot.group = t.group;
-        plot.boost = t.boost;
+        plot.group = t->group;
+        plot.boost = t->boost;
         P.Build(plot, up);
         P.plots.push_back(std::move(plot));
     }
