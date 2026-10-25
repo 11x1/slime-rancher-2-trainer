@@ -13,6 +13,14 @@
 //   c' = c x s + (c / max(c)) x kLift x (s - 1),  s = 1 + kLevel e + kBeat p
 // with e = w x bass level, p = w x beat pulse, w from the speakers of the plort's channel in range
 // (the lamps' kStack rule). Colours keep their hue (no colour cycling).
+// The plort's own glow (round 17: "they still have their default glow"): the shaders' property lists
+// (shaders bundle, UnityPy) have one glow input each: _PulseGlowIntensity (SR/AMP/Slime/Plort, Unstable,
+// Shadow: "Pulse Glow Intensity", 1 on most plorts, 5000 on Shadow with a dark _PulseGlowColor) and the
+// Phosphor "Plort (Glow)" animation (_GlowSpeed 0.8, _GlowMin 0, _GlowMax 1, _GlowStrength 1). While a
+// plort pulses, _PulseGlowIntensity goes to 0 (faded with the plort's strength easing in), and Phosphor's
+// glow stops animating (_GlowSpeed 0) and follows the beat (_GlowMin = _GlowMax = beat amount between
+// the material's min and max) instead of its _GlowTop being scaled. Restore puts the renderer's own block
+// back, so the game's glow returns.
 // A renderer is a glowing part when its material has _TopColor, _MiddleColor and _BottomColor.
 // Base colours: the renderer's own block (RecolorSlimeMaterial writes these three through a block on
 // slimes; a block without the colour reads back as (0, 0, 0, 0)), else the shared material.
@@ -30,12 +38,14 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <optional>
 #include <unordered_map>
 
 #include "core/detour_guard.h"
 #include "core/guard.h"
 #include "core/log.h"
 #include "core/module.h"
+#include "core/perf.h"
 #include "core/resolver.h"
 #include "core/settings.h"
 #include "core/unity.h"
@@ -53,9 +63,13 @@ constexpr const char* kModule = "slime_dj";
 constexpr const char* kImage = "Assembly-CSharp";
 constexpr const char* kCore = "UnityEngine.CoreModule";
 constexpr float kFindSeconds = 2.0f;          // plort list refresh (identifiablesByIdent), at most this often
-constexpr float kNewSourceSeconds = 0.5f;     // a speaker started playing: refresh now, but at most this often
+constexpr float kNewSourceSeconds = 0.25f;    // a speaker started playing: refresh now, but at most this often
 constexpr float kTypeRetrySeconds = 10.0f;    // plort types not found yet (groups not loaded)
-constexpr size_t kMaxPlorts = 64;             // glowing at once (nearest to a speaker first)
+constexpr float kListLookupSeconds = 10.0f;   // the kept plort lists are looked up again at least this often
+// Glowing at once, nearest to a speaker first. Round 17 ("why not all?"): 64 -> 256. Per glowing plort
+// and frame: one GetPropertyBlock, up to 9 Set*, one SetPropertyBlock per body renderer (native calls, a
+// few microseconds), skipped while its look did not change (kSkip); frame:slime_dj was 0.05-0.1 ms with 64.
+constexpr size_t kMaxPlorts = 256;
 constexpr size_t kMaxModels = 1024;           // loose plorts read per refresh
 constexpr size_t kMaxRends = 4;               // glowing renderers per plort (body + an attachment)
 constexpr float kFullShare = 0.4f;            // full closeness up to this share of the range (as the lamps)
@@ -68,7 +82,9 @@ constexpr float kCalmShare = 0.15f;                  // level / pulse share left
 constexpr float kLevel = 0.7f, kBeat = 1.5f;         // colour x (1 + level a + pulse b)
 constexpr float kLift = 0.2f;                        // own-hue lift per unit of boost (dark plorts glow too)
 constexpr float kRest = 0.004f;                      // below this a channel counts as settled
-constexpr float kEase = 0.5f;                        // distance weight easing (s): a plort entering range fades in
+constexpr float kEase = 0.25f;                       // distance weight easing (s; the lamps' kFadeIn): a plort entering range fades in
+constexpr float kSkip = 0.002f;                      // beat factor / fade change below this: the block is not rewritten
+constexpr float kGlowFull = 0.8f;                    // Phosphor: beat factor - 1 at which its glow is at the material's max
 // Debug highlighter
 constexpr float kDebugFindSeconds = 4.0f, kDebugPublishSeconds = 1.0f;
 constexpr size_t kDebugMaxIdle = 96;
@@ -110,18 +126,28 @@ struct PlortPulser::Impl {
     M<Il2CppObject* (*)(Il2CppObject*, const MethodInfo*)> rendSharedMaterial;
     M<bool (*)(Il2CppObject*, int32_t, const MethodInfo*)> matHasProperty;
     M<Color (*)(Il2CppObject*, int32_t, const MethodInfo*)> matGetColor;
+    M<void (*)(Il2CppObject*, int32_t, float, const MethodInfo*)> mpbSetFloat;
+    M<float (*)(Il2CppObject*, int32_t, const MethodInfo*)> matGetFloat;
     M<int32_t (*)(Il2CppString*, const MethodInfo*)> propertyToId;
     M<Vec3 (*)(Il2CppObject*, const MethodInfo*)> trGetPosition;
     Il2CppClass* dictClass = nullptr;  // the live Dictionary<IdentifiableType, List<IdentifiableModel>> class
     const MethodInfo* dictTryGet = nullptr;
-    enum Prop { kTop, kMid, kBot, kTwinTop, kTwinMid, kTwinBot, kGlowTop, kPulseGlow, kProps };
-    int32_t ids[kProps] = {};
+    size_t offDictCount = 0;           // Dictionary._count (0 = unknown: lists looked up every time, no watch)
+    Il2CppClass* listClass = nullptr;  // List<IdentifiableModel>
+    size_t offListVersion = 0;
+    // colours scaled by the beat; floats of the plort's own glow (replaced while it pulses)
+    enum Prop { kTop, kMid, kBot, kTwinTop, kTwinMid, kTwinBot, kGlowTop, kProps };
+    enum FProp { kPulseGlow, kGlowSpeed, kGlowMin, kGlowMax, kFProps };
+    int32_t ids[kProps] = {}, fids[kFProps] = {};
 
     // ---- state
     struct RendRec {
         Il2CppGCHandle h = nullptr, saved = nullptr;  // saved: the renderer's own block
         bool has[kProps] = {};
         Color col[kProps] = {};
+        bool fhas[kFProps] = {};
+        float fval[kFProps] = {};
+        bool phosphor = false;  // Plort (Glow): its glow animation follows the beat (_GlowTop left alone)
     };
     struct Plort {
         Il2CppGCHandle tr = nullptr;  // the plort's Transform (identity + alive check)
@@ -129,8 +155,20 @@ struct PlortPulser::Impl {
         std::vector<RendRec> rends;
         const void* channel = nullptr;
         float weight = 0, shown = 0;
+        float lastS = -1, lastFade = -1;  // look last written (Animate skips an unchanged one)
         bool touched = false;
     };
+    // the plort lists as the last Find saw them (same order as `types`): kept while the dictionary's key
+    // count stays the same, their _version watched by Changed()
+    struct Watch {
+        Il2CppGCHandle list = nullptr;  // nullptr = the type had no list then
+        int version = 0;
+    };
+    std::vector<Watch> watch;
+    Il2CppGCHandle watchDict = nullptr;
+    int watchCount = 0;
+    ULONGLONG lookupAt = 0;  // last TryGetValue round
+    bool forceFind = false;  // Changed saw a change: the next Sync refreshes now
     struct ChannelState {
         uint64_t last = 0;
         unsigned gen = 0;
@@ -258,7 +296,10 @@ struct PlortPulser::Impl {
     }
 
     // ---- every loose plort that is loaded now (transform + position).
+    // The plort lists are looked up (one TryGetValue per type) only when the dictionary or its key count
+    // changed, a type went away, or kListLookupSeconds passed; otherwise the kept lists are read directly.
     void Find() {
+        SR2_PERF_DETAIL("slime_dj.plorts.find");
         placed.clear();
         Il2CppObject* gm = GameModel();
         if (!gm || !Types(gm)) return;
@@ -267,17 +308,43 @@ struct PlortPulser::Impl {
         if (Il2CppClass* k = unity::ClassOf(dict); k != dictClass) {
             dictClass = k;
             dictTryGet = k ? Resolver::Get().Method(k, "TryGetValue", 2, nullptr) : nullptr;
+            const auto count = k ? Resolver::Get().FieldOffset(k, "_count", nullptr) : std::nullopt;
+            offDictCount = count ? *count : 0;
+            FreeWatch();
         }
         if (!dictTryGet) return;
-        bool ok = false;
-        for (Il2CppGCHandle h : types) {
-            Il2CppObject* type = Target(h);
-            if (!type) continue;
-            Il2CppObject* list = nullptr;
-            Il2CppObject* boxed = Invoke(dictTryGet, dict, {type, &list}, "identifiablesByIdent.TryGetValue", &ok);
-            if (!ok) return;
-            const bool found = boxed && *reinterpret_cast<bool*>(reinterpret_cast<char*>(boxed) + 2 * sizeof(void*));
-            for (size_t i = 0, n = found && list ? unity::ListCount(list) : 0; i < n && placed.size() < kMaxModels; ++i) {
+        const ULONGLONG now = GetTickCount64();
+        const bool keep = offDictCount && Managed(watchDict) == dict && unity::Field<int>(dict, offDictCount) == watchCount &&
+                          watch.size() == types.size() && now - lookupAt < static_cast<ULONGLONG>(kListLookupSeconds * 1000);
+        if (!keep) {
+            std::vector<Il2CppObject*> lists;
+            bool ok = false;
+            for (Il2CppGCHandle h : types) {
+                Il2CppObject* type = Target(h);
+                Il2CppObject* list = nullptr;
+                Il2CppObject* boxed = type ? Invoke(dictTryGet, dict, {type, &list}, "identifiablesByIdent.TryGetValue", &ok) : nullptr;
+                if (type && !ok) return;
+                const bool found = boxed && *reinterpret_cast<bool*>(reinterpret_cast<char*>(boxed) + 2 * sizeof(void*));
+                lists.push_back(found ? list : nullptr);  // a managed List (no m_CachedPtr, so no IsAlive)
+            }
+            lookupAt = now;
+            FreeWatch();
+            watchDict = unity::NewGCHandle(dict);
+            watchCount = offDictCount ? unity::Field<int>(dict, offDictCount) : 0;
+            for (Il2CppObject* l : lists) {
+                if (l && unity::ClassOf(l) != listClass) {
+                    listClass = unity::ClassOf(l);
+                    const auto version = Resolver::Get().FieldOffset(listClass, "_version", nullptr);
+                    offListVersion = version ? *version : 0;
+                }
+                watch.push_back({l ? unity::NewGCHandle(l) : nullptr, 0});
+            }
+        }
+        for (Watch& w : watch) {
+            Il2CppObject* list = Managed(w.list);
+            if (!list) continue;
+            if (offListVersion) w.version = unity::Field<int>(list, offListVersion);
+            for (size_t i = 0, n = unity::ListCount(list); i < n && placed.size() < kMaxModels; ++i) {
                 auto* m = static_cast<Il2CppObject*>(unity::ListAt(list, i));
                 if (!m || !IsA(m, actorModelClass)) continue;
                 Il2CppObject* tr = unity::Field<Il2CppObject*>(m, offAmTransform);
@@ -286,6 +353,24 @@ struct PlortPulser::Impl {
                 if (Position(tr, p)) placed.emplace_back(tr, p);
             }
         }
+    }
+    // managed collections (not UnityEngine.Object): the handle's target as is
+    static Il2CppObject* Managed(Il2CppGCHandle h) { return h ? unity::GCHandleTarget(h) : nullptr; }
+    void FreeWatch() {
+        for (Watch& w : watch) Free(w.list);
+        watch.clear();
+        Free(watchDict);
+        watchCount = 0;
+    }
+    // A plort list changed since Find read it (plain memory reads): a plort was made or went away.
+    bool ListsChanged() {
+        Il2CppObject* dict = Managed(watchDict);
+        if (!dict || !offDictCount || !offListVersion) return false;
+        if (unity::Field<int>(dict, offDictCount) != watchCount) return true;
+        for (const Watch& w : watch)
+            if (Il2CppObject* l = Managed(w.list))
+                if (unity::Field<int>(l, offListVersion) != w.version) return true;
+        return false;
     }
 
     std::vector<Il2CppObject*> Renderers(Il2CppObject* tr) {
@@ -319,6 +404,14 @@ struct PlortPulser::Impl {
                 rec.has[k] = Finite(c);
                 rec.col[k] = c;
             }
+            // the plort's own glow (material values; the game does not set these through a block)
+            for (int k = 0; k < kFProps; ++k) {
+                rec.fhas[k] = fids[k] && matHasProperty.fn(mat, fids[k], matHasProperty.mi);
+                if (rec.fhas[k]) rec.fval[k] = matGetFloat.fn(mat, fids[k], matGetFloat.mi);
+                rec.fhas[k] = rec.fhas[k] && std::isfinite(rec.fval[k]);
+            }
+            rec.phosphor = rec.fhas[kGlowSpeed] && rec.fhas[kGlowMin] && rec.fhas[kGlowMax];
+            if (rec.phosphor) rec.has[kGlowTop] = false;  // the beat drives the glow amount instead
             rec.h = unity::NewGCHandle(r);
             rec.saved = unity::NewGCHandle(saved);
             if (!rec.h || !rec.saved) {
@@ -328,8 +421,9 @@ struct PlortPulser::Impl {
             }
             if (what.size() < 200) {
                 const Color& c = rec.col[kTop];
-                what += std::format("{}'{}' top ({:.2f}, {:.2f}, {:.2f}){}{}", what.empty() ? "" : ", ", unity::GetName(mat), c.r, c.g, c.b,
-                                    rec.has[kGlowTop] ? " +glow" : "", rec.has[kTwinTop] ? " +twin" : "");
+                what += std::format("{}'{}' top ({:.2f}, {:.2f}, {:.2f}){}{}{}", what.empty() ? "" : ", ", unity::GetName(mat), c.r, c.g, c.b,
+                                    rec.fhas[kPulseGlow] ? std::format(" pulse glow {:.0f} off", rec.fval[kPulseGlow]) : "",
+                                    rec.phosphor ? " +glow to the beat" : "", rec.has[kTwinTop] ? " +twin" : "");
             }
             plort.rends.push_back(rec);
         }
@@ -343,6 +437,7 @@ struct PlortPulser::Impl {
     void Restore(Plort& plort) {
         if (!plort.touched) return;
         plort.touched = false;
+        plort.lastS = plort.lastFade = -1;
         for (const RendRec& r : plort.rends) {
             Il2CppObject* o = Target(r.h);
             Il2CppObject* saved = Target(r.saved);
@@ -364,7 +459,13 @@ struct PlortPulser::Impl {
         if (!work0) return;
         const float e = ch.env * plort.shown, p = ch.pulse * plort.shown;
         const float s = 1.0f + kLevel * e + kBeat * p, lift = kLift * (s - 1.0f);
+        // the plort's own glow fades out as the beat glow fades in (replaced, not added on top)
+        const float fade = std::clamp(plort.shown / std::max(plort.weight, 1e-3f), 0.0f, 1.0f);
+        if (plort.touched && std::fabs(s - plort.lastS) < kSkip && std::fabs(fade - plort.lastFade) < kSkip) return;  // unchanged
         plort.touched = true;
+        plort.lastS = s;
+        plort.lastFade = fade;
+        const float amount = std::clamp((s - 1.0f) / kGlowFull, 0.0f, 1.0f);
         for (const RendRec& r : plort.rends) {
             Il2CppObject* o = Target(r.h);
             if (!o) continue;
@@ -376,6 +477,14 @@ struct PlortPulser::Impl {
                 const float m = std::max({c.r, c.g, c.b, 1e-3f});
                 mpbSetColor.fn(work0, ids[k], Color{c.r * s + c.r / m * lift, c.g * s + c.g / m * lift, c.b * s + c.b / m * lift, c.a},
                                mpbSetColor.mi);
+            }
+            if (r.fhas[kPulseGlow]) mpbSetFloat.fn(work0, fids[kPulseGlow], r.fval[kPulseGlow] * (1.0f - fade), mpbSetFloat.mi);
+            if (r.phosphor) {  // frozen animation, glow amount = the beat
+                const float lo = std::min(r.fval[kGlowMin], r.fval[kGlowMax]), hi = std::max(r.fval[kGlowMin], r.fval[kGlowMax]);
+                const float v = lo + (hi - lo) * amount;
+                mpbSetFloat.fn(work0, fids[kGlowSpeed], 0.0f, mpbSetFloat.mi);
+                mpbSetFloat.fn(work0, fids[kGlowMin], v, mpbSetFloat.mi);
+                mpbSetFloat.fn(work0, fids[kGlowMax], v, mpbSetFloat.mi);
             }
             rendSetBlock.fn(o, work0, rendSetBlock.mi);
         }
@@ -450,6 +559,8 @@ bool PlortPulser::Resolve(std::string& why) {
     bind(P.rendSharedMaterial, byParams(P.rendererClass, "get_sharedMaterial", {}), "Renderer.get_sharedMaterial");
     bind(P.matHasProperty, byParams(material, "HasProperty", {"System.Int32"}), "Material.HasProperty");
     bind(P.matGetColor, byParams(material, "GetColor", {"System.Int32"}), "Material.GetColor");
+    bind(P.mpbSetFloat, byParams(P.mpbClass, "SetFloat", {"System.Int32", "System.Single"}), "MaterialPropertyBlock.SetFloat");
+    bind(P.matGetFloat, byParams(material, "GetFloat", {"System.Int32"}), "Material.GetFloat");
     bind(P.propertyToId, byParams(shader, "PropertyToID", {"System.String"}), "Shader.PropertyToID");
     bind(P.trGetPosition, byParams(transform, "get_position", {}), "Transform.get_position");
     if (!why.empty()) return false;
@@ -461,9 +572,11 @@ void PlortPulser::Sync(const std::vector<Source>& sources, float range) {
     Impl& P = *p_;
     if (!P.ready) return;
     if (!P.ids[Impl::kTop]) {  // main thread, first use
-        static constexpr const char* kNames[Impl::kProps] = {"_TopColor",     "_MiddleColor",     "_BottomColor", "_TwinTopColor",
-                                                             "_TwinMiddleColor", "_TwinBottomColor", "_GlowTop",     "_PulseGlowColor"};
+        static constexpr const char* kNames[Impl::kProps] = {"_TopColor",        "_MiddleColor",     "_BottomColor", "_TwinTopColor",
+                                                             "_TwinMiddleColor", "_TwinBottomColor", "_GlowTop"};
+        static constexpr const char* kFNames[Impl::kFProps] = {"_PulseGlowIntensity", "_GlowSpeed", "_GlowMin", "_GlowMax"};
         for (int k = 0; k < Impl::kProps; ++k) P.ids[k] = P.propertyToId.fn(unity::NewString(kNames[k]), P.propertyToId.mi);
+        for (int k = 0; k < Impl::kFProps; ++k) P.fids[k] = P.propertyToId.fn(unity::NewString(kFNames[k]), P.propertyToId.mi);
     }
     if (!Impl::Target(P.work)) {
         Impl::Free(P.work);
@@ -485,8 +598,10 @@ void PlortPulser::Sync(const std::vector<Source>& sources, float range) {
     P.placed.clear();
     if (sources.empty()) {
         P.lastFind = 0;
-    } else if (!P.lastFind || now - P.lastFind >= every) {
+        P.forceFind = false;
+    } else if (P.forceFind || !P.lastFind || now - P.lastFind >= every) {  // forceFind: a plort list changed (Changed)
         P.lastFind = now;
+        P.forceFind = false;
         P.Find();
         P.loaded = P.placed.size();
     } else {
@@ -574,9 +689,19 @@ void PlortPulser::Sync(const std::vector<Source>& sources, float range) {
     P.placed.clear();
 }
 
+bool PlortPulser::Changed() {
+    Impl& P = *p_;
+    if (!P.ready || P.lastSources.empty()) return false;  // no speaker plays: the next one refreshes anyway
+    if (P.forceFind) return true;  // still pending (a Find of the debug highlighter saw the change)
+    if (!P.ListsChanged()) return false;
+    P.forceFind = true;
+    return true;
+}
+
 void PlortPulser::Tick(float dt, const std::vector<Channel>& channels) {
     Impl& P = *p_;
     if (!P.ready) return;
+    SR2_PERF_DETAIL("slime_dj.plorts.tick");
     dt = std::clamp(dt, 0.0f, 0.1f);
     for (auto& [key, st] : P.channels) st.seen = st.active = false;
     for (const Channel& c : channels) {
@@ -648,6 +773,7 @@ void PlortPulser::Debug(bool want) {
     if (!P.debugFind || now - P.debugFind >= static_cast<ULONGLONG>(kDebugFindSeconds * 1000)) {
         P.debugFind = now;
         P.debugPublish = 0;
+        if (P.ListsChanged()) P.forceFind = true;  // this Find must not swallow a change the glow has not seen
         P.Find();
         P.loaded = P.placed.size();
         freeIdle();
@@ -697,6 +823,7 @@ void PlortPulser::Clear() {
     P.channels.clear();
     P.lastSources.clear();
     P.lastFind = 0;
+    P.forceFind = false;
     P.wasOn = false;
 }
 
@@ -713,8 +840,9 @@ void RegisterPlortSettings() {
     x.step = 1;
     x.tooltip = "Loose plorts near a music box, DJ Booth, speaker stack or radio that plays a song glow brighter "
                 "with the beat, in their own colours: calm in quiet parts, flashing in loud ones. More speakers "
-                "make them glow stronger. Up to 64 plorts at once, the nearest to a speaker first. They go back "
-                "to normal when the song stops or pauses.";
+                "make them glow stronger; the beat replaces their own glow while they dance. Up to 256 plorts at once "
+                "(the nearest to a speaker first), so a ranch full of plorts stays smooth. They go back to "
+                "normal when the song stops or pauses.";
     settings::Register(x);
     x.key = "plort_range";
     x.label = "Plort range";
