@@ -31,23 +31,47 @@ std::vector<Category> Spec() {
     std::vector<Category> cats;
 
     Category ranch = Cat("ranch", "Ranch", Icon::Ranch);
-    Tab ranchGeneral;
-    ranchGeneral.title = "General";
-    ranchGeneral.kind = TabKind::Cards;
-    // Plot Upgrades and Sell Upgrades work on the plot upgrades Custom Upgrades adds: their cards sit
-    // under its card (round 11), side by side.
-    ranchGeneral.columns = {{"custom_upgrades"}, {"plot_upgrades"}, {"sell_upgrades"}};
-    ranchGeneral.stacked = true;
-    ranchGeneral.cardHelp = {
+    // Round 12: "Should be under 1 card, left column, Custom upgrades, rename the tab to "Upgrades" ... one
+    // card on the left, plot upgrades; sell upgrades; custom refinery upgrades". One Custom Upgrades card
+    // with a section each; Plot Upgrades, Sell Upgrades and Drone Price Limit are rows in it, not cards.
+    Tab upgrades;
+    upgrades.title = "Upgrades";
+    upgrades.kind = TabKind::Cards;
+    upgrades.columns = {{"custom_upgrades"}};
+    CardSection plot;
+    plot.title = "Plot upgrades";
+    plot.modules = {"plot_upgrades"};
+    plot.needCard = {"plot_upgrades"};  // its tiers exist only while Custom Upgrades is on
+    CardSection sell;
+    sell.title = "Sell upgrades";
+    sell.modules = {"sell_upgrades"};  // works on the game's own plot upgrades too
+    CardSection refinery;
+    refinery.title = "Refinery upgrades";
+    refinery.note = "Bought at the Fabricator: Tank Booster IX-XII, Extra Tank III-IV, Drone Battery Saver, Shadow "
+                    "Catcher.";
+    refinery.groups = {"Vacpack"};             // the Extra Tank III / IV slot keys
+    refinery.modules = {"drone_price_limit"};  // the drone station menu: price limit, Programs
+    upgrades.sections["custom_upgrades"] = {plot, sell, refinery};
+    upgrades.switchLabel = {
+        {"plot_upgrades", "Tier effects"},
+        {"sell_upgrades", "Sell back for half price"},
+        {"drone_price_limit", "Drone station price limit"},
+    };
+    upgrades.cardHelp = {
         {"custom_upgrades",
          "Adds extra plot upgrades and Fabricator upgrades to the game's menus. Stays on while a save that uses "
          "them is loaded."},
-        {"plot_upgrades", "Applies the effects of the upgrade tiers bought through Custom Upgrades."},
+        {"plot_upgrades",
+         "Applies the effects of the plot upgrade tiers bought through Custom Upgrades: Music Box II, Faster Hens, "
+         "Sprinkler II and III, Ash Booster."},
         {"sell_upgrades",
-         "Sell an owned plot upgrade back for half its price, from the plot's purchase menu. Silo storage "
-         "upgrades can't be sold."},
+         "Sell an owned plot upgrade back for half its price, from the plot's purchase menu. Works on the game's "
+         "own upgrades too. Silo storage upgrades can't be sold."},
+        {"drone_price_limit",
+         "Drones sell a plort to the Plort Market only at or above their station's price limit, set in the "
+         "station menu. That menu also holds Programs (several programs per drone) while Custom Upgrades is on."},
     };
-    ranch.tabs.push_back(ranchGeneral);
+    ranch.tabs.push_back(upgrades);
     Tab dj;
     dj.title = "Slime DJ";
     dj.kind = TabKind::SlimeDj;
@@ -188,6 +212,12 @@ std::vector<Category> Build(const std::vector<ModuleView>& views) {
                     std::erase_if(col, [&](const std::string& m) { return !find(m); });
                     placed.insert(col.begin(), col.end());
                 }
+                for (auto& [card, secs] : t.sections)
+                    for (auto& sec : secs) {
+                        std::erase_if(sec.modules, [&](const std::string& m) { return !find(m); });
+                        // Only placed when their card is shown (else they fall back to Misc > General).
+                        if (placed.count(card)) placed.insert(sec.modules.begin(), sec.modules.end());
+                    }
             }
             keep.push_back(std::move(t));
         }

@@ -34,7 +34,7 @@ comments and NOTES cite them.
 
 ### 1.2b Gate: off by default, locked on per save
 - `custom_upgrades.enabled` defaults to **off**: no custom item, tier effect, world object or per-save
-  value until it is on (overlay: Ranch > General).
+  value until it is on (overlay: Ranch > Upgrades).
 - Turning it on with a save loaded marks that save (per-save value `custom_upgrades.on` = "1", written
   with the next game save). While a marked save, or one whose sidecar owns any custom upgrade, is
   loaded, the switch is pinned on with `settings::Lock` (tooltip "Locked on: this save uses custom
