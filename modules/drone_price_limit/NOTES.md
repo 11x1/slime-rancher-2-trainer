@@ -67,21 +67,18 @@ upgrade (`drone_programs::Owned`; round 12: hidden without it, the station has o
   selects, P / Esc / Close / backdrop close.
 - Edit = `drone_programs::Run` + `DroneProgramViewModel.RevertChangesToLastAppliedProgram`, so the page
   shows the program that now runs; the dialog closes. Remove / mode rebuild the dialog in place.
-- Look (round 9: "make it aligned with slime rancher's UI"): every button of the dialog (Edit / Running,
-  Remove, Add program, the two mode buttons, Close) is a clone of the game's own prompt pill (the target
-  option's `PromptContainer`, the same clone as the `[P] Programs` action: `ClonePrompt`), so shape,
-  font, padding and colours are the game's; Close carries the `P` key glyph like the page's legend, the
-  others show the label only (`InputEventDisplay` hidden). Selected states recolour the pill (Running and
-  the chosen mode teal with white text, Remove white, the other mode grey). Key glyphs (round 10: "keybind
-  icons still look off, use the same look as for silo dialog menus"): every pill with a key (`[C] Limit`,
-  `[P] Programs`, the dialog's Close) shows the silo receipt's glyph: a clone of the game popup button's
-  `Icon Background` (`GameContext.UITemplates.popupPrompt` -> `PopupPrompt._negativeActionButton`, the
-  button the receipt's Cancel is cloned from) in place of the Change prompt's `InputEventDisplay`, its
-  InputEventDisplay off and the first InputIcon set to our key (`UsePopupGlyph`; log `key glyphs cloned
-  from the popup button`). Without the template: the Change prompt's glyph as before. The running program also shows
-  the page's own "active" icon (`DroneProgramMenu._activeStateSprite`). Texts keep the menu's header /
-  description fonts, the panel the menu's palette. If the prompt can't be cloned, the old drawn button is
-  used.
+- Look (round 11: "use Silo's GUI buttons, theyre the best ones we have rn that look similiar to SR2's
+  style"): the `[C] Limit` / `[P] Programs` pills and every dialog button (Edit / Running, Remove, Add
+  program, the mode buttons of both dialogs, Close) are the shared game button
+  (`modules/common/game_button.h`), the same clone of the game's popup button as the silo receipt's: pink
+  pill, the game's hover colour / bounce / hover sound, key glyph on the left. Pills: scale 0.8, key cap C /
+  P, placed 12 px right of the option's Change prompt in its anchor space (log `... action is a game popup
+  button (key C)`). Dialog buttons: scale 0.72, label at least the old button width, selected states
+  (Running, the chosen mode) teal through our own ScriptableColor (hover stays the game's blue); Close shows
+  C (limit dialog) / P (programs dialog). The focus frame follows the laid-out size. The running program
+  also shows the page's own "active" icon (`DroneProgramMenu._activeStateSprite`). Without the popup
+  template: the earlier Change-prompt clones (with the receipt's glyph via `UsePopupGlyph`), then drawn
+  buttons.
 - While the station menu is open (any tab; a tab other than the program page counts for 2 min after the
   page was last seen, so a closed display that stays loaded can't hold it) the station's rotation waits
   (`NoteMenuOpen`).
@@ -117,8 +114,8 @@ To check in game (programs):
 9. Program 1 with the Hen Collector / Quantum Storage Link source: saved as Coop / Silo, restored with
    the true source after a load.
 10. Pick the station up: log `extra programs dropped (the station is gone ...)`.
-11. Round 9: the dialog's buttons look like the page's own prompt pills; Close shows the P key; the
-    running row has the page's "active" icon. Switching programs (Edit, or the rotation) and closing the
+11. Round 11: the pills and the dialog's buttons look like the silo receipt's (pink, hover turns blue and
+    bounces); Close shows the P key; the running row has the page's "active" icon. Switching programs (Edit, or the rotation) and closing the
     menu without touching the page: no "discard" prompt.
 12. A program that never gets cargo (e.g. Meats, Outside Plots, with chickens running around): after 90 s
     the next program runs and the log says what the drone was doing.
