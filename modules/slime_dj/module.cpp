@@ -69,6 +69,7 @@
 #include "core/resolver.h"
 #include "core/settings.h"
 #include "core/unity.h"
+#include "modules/common/debug_marks.h"
 #include "modules/custom_upgrades/api.h"
 #include "modules/slime_dj/emitters.h"
 #include "modules/slime_dj/lamps.h"
@@ -86,6 +87,7 @@ namespace unity = sr2::core::unity;
 namespace main_thread = sr2::core::main_thread;
 namespace bridge = sr2::ui::slime_dj;
 namespace dj = sr2::modules::slime_dj;
+namespace debug_marks = sr2::modules::common::debug_marks;
 namespace cu = sr2::modules::custom_upgrades;
 using il2cpp::api;
 using il2cpp::Resolver;
@@ -600,7 +602,8 @@ private:
         x.step = 1;
         x.tooltip = "Lamps (Electric Pillar, Striped, Conservatory, Lava and Ice Lamps) and the glowing ice in "
                     "Powderfall Bluffs near a music box, DJ Booth, speaker stack or radio that plays a song pulse "
-                    "their light and glow with the beat: calm in quiet parts, flashing in loud ones. One speaker "
+                    "their light and glow with the beat in their own colour (the Electric Pillar Lamp also cycles "
+                    "through colours): calm in quiet parts, flashing in loud ones. One speaker "
                     "gives a gentle pulse, more speakers a stronger one. They go back to normal when the song stops "
                     "or pauses.";
         settings::Register(x);
@@ -612,8 +615,8 @@ private:
         x.max = 100.0;
         x.step = 5.0;
         x.parent = "dance_lamps";
-        x.tooltip = "How far from a playing speaker a lamp pulses. Strongest close to the speaker, fading out "
-                    "towards this distance.";
+        x.tooltip = "The distance from a speaker (music box, DJ Booth, speaker stack or radio) within which "
+                    "lamps pulse while it plays. Strongest close to the speaker, fading out towards this distance.";
         settings::Register(x);
         settings::SetDisplay(kModule, "lamp_range", " m");
     }
@@ -2218,6 +2221,33 @@ private:
         lamps_.Tick(dt, chs);
     }
 
+    // Debug highlighter (modules/common/debug_marks.h): the speakers of this box scan, playing ones with the
+    // lamp range as a circle. Removed when the highlighter goes off, no song is loaded or the module stops.
+    void PublishSpeakerMarks() {
+        if (!debug_marks::Wanted()) return;
+        std::vector<debug_marks::Box> playing, silent;
+        for (const Speaker& sp : speakers_) {
+            if (!sp.posOk) continue;
+            debug_marks::Box b;
+            b.x = sp.pos.x, b.y = sp.pos.y + 0.5f, b.z = sp.pos.z;
+            b.hx = b.hz = 0.45f;
+            b.hy = 0.5f;
+            const bool on = Audible(sp) && sp.ch && sp.ch->cur && sp.clipGen == sp.ch->cur->clipGen;
+            if (on && cfg_.danceLamps) b.ring = cfg_.lampRange;
+            (on ? playing : silent).push_back(b);
+        }
+        debug_marks::Publish("slime_dj.speakers.playing", cfg_.danceLamps ? "playing speaker (circle: lamp range)" : "playing speaker",
+                             0xF060FF60, std::move(playing));
+        debug_marks::Publish("slime_dj.speakers.silent", "speaker (silent / switched off)", 0xC0A0A0A0, std::move(silent));
+        speakerMarks_ = true;
+    }
+    void RemoveSpeakerMarks() {
+        if (!speakerMarks_) return;
+        speakerMarks_ = false;
+        debug_marks::Remove("slime_dj.speakers.playing");
+        debug_marks::Remove("slime_dj.speakers.silent");
+    }
+
     // One line a minute while box scans ran: their cost, and how often the scene was searched.
     void LogPerf(float dt) {
         perf_.acc += std::isfinite(dt) && dt > 0 ? std::min(dt, 1.0f) : 0.0f;
@@ -2288,6 +2318,7 @@ private:
                 for (auto& r : radios_) Resync(*r);
                 SyncDancer();
                 SyncLamps();
+                PublishSpeakerMarks();
             }
             perf_.Scan(Qpc() - scan0);
         }
@@ -2301,6 +2332,8 @@ private:
         TickMuffle(dt);
         TickDancer(dt);
         TickLamps(dt);
+        lamps_.Debug(debug_marks::Wanted());
+        if (!debug_marks::Wanted() || !AnySong()) RemoveSpeakerMarks();
         TickMenu(dt);
         const Current* g = global_.cur.get();
         dj::emitters::SetPlaying(g && g->started && !g->userPaused &&
@@ -2320,6 +2353,8 @@ private:
         dancer_.Clear();
         danceState_ = {0, 0, 0};
         lamps_.Clear();
+        lamps_.Debug(false);
+        RemoveSpeakerMarks();
         StopAll();
         DropRadios();
         DestroySpeakers();
@@ -2797,6 +2832,7 @@ private:
     ScanPerf perf_;
     dj::WallDancer dancer_;
     dj::LampPulser lamps_;          // "Lamps pulse to the music" (lamps.h)
+    bool speakerMarks_ = false;     // speaker boxes published to the debug highlighter
     dj::RadioMenu menu_;            // Corral Radio playlist menu (radio_menu.h)
     std::string menuKey_;           // plot key of the radio the menu is for ("" = no menu)
     Il2CppGCHandle menuPlot_ = nullptr;  // its LandPlot (the stored playlist while it has no channel)

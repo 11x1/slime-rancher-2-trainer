@@ -36,7 +36,9 @@
 //   _BrightnessMultiplier / _IntensityDay / _IntensityNight = base x (1 + kGlowLevel e + kGlowBeat p)
 //   _ColorCore / _ColorEdge / _EmissiveColor / _InnerEmission = base x (1 + kBoltLevel e + kBoltBeat p)
 //   Light.intensity = base x (1 + kLightLevel e + kLightBeat p)
-//   every colour (also _Color, Light.color) mixed towards the hue by kColourMix x max(e, p), brightness kept.
+//   Electric Pillar Lamp only: every colour (also _Color, Light.color) mixed towards the hue by kColourMix x
+//   max(e, p), brightness kept. The other lamps and the ice keep their own colours (round 14: "pulse lamps
+//   (electric pillar can stay rgb) in their own color light").
 // Restore: the renderer's own property block as it was before the first change; a light's own values.
 
 #include "modules/slime_dj/lamps.h"
@@ -56,6 +58,7 @@
 #include "core/module.h"
 #include "core/resolver.h"
 #include "core/unity.h"
+#include "modules/common/debug_marks.h"
 
 namespace sr2::modules::slime_dj {
 
@@ -100,12 +103,21 @@ constexpr float kLightLevel = 1.0f, kLightBeat = 2.0f;  // Light.intensity, same
 constexpr float kMinEmission = 0.01f;                // an emission colour dimmer than this does not glow: left alone
 constexpr float kColourMix = 0.7f;                   // hue share at full level / pulse
 constexpr float kRest = 0.004f;                      // below this a channel counts as settled
+constexpr const char* kRainbowPrefab = "decorElectricLampPillar";  // the one lamp that shifts hue with the beat
+// Debug highlighter (modules/common/debug_marks.h)
+constexpr float kDebugPublishSeconds = 1.0f;         // boxes republished this often while it is on
+constexpr size_t kDebugMaxLamps = 96;                // idle lamps measured per refresh
+constexpr size_t kDebugBoundsPerRefresh = 64;        // ice crystals measured per refresh (cached after)
+constexpr uint32_t kColPulsing = 0xF0FF50FF, kColIdle = 0xC8E0E0E0, kColIce = 0xF0FFE060;  // IM_COL32 order
 
 struct Vec3 {
     float x, y, z;
 };
 struct Color {
     float r, g, b, a;
+};
+struct Bounds {
+    Vec3 center, extents;
 };
 
 template <class Fn>
@@ -165,6 +177,7 @@ struct LampPulser::Impl {
     M<int32_t (*)(Il2CppString*, const MethodInfo*)> propertyToId;
     M<Vec3 (*)(Il2CppObject*, const MethodInfo*)> trGetPosition;
     M<Il2CppObject* (*)(Il2CppObject*, const MethodInfo*)> trGetParent;
+    M<Bounds (*)(Il2CppObject*, const MethodInfo*)> rendGetBounds;  // optional: debug highlighter boxes
     // Light components (pulsed through Light.intensity / color: HDRP forwards to these, re/unity.md)
     Il2CppClass* lightClass = nullptr;
     M<float (*)(Il2CppObject*, const MethodInfo*)> lightGetIntensity;
@@ -209,6 +222,8 @@ struct LampPulser::Impl {
         float weight = 0;               // 0..1 from its distance to that speaker
         float shown = 0;                // weight eased in (a lamp entering range fades in)
         bool touched = false;
+        bool rainbow = false;           // Electric Pillar Lamp: hue shift with the beat (others keep their colour)
+        Bounds box{};                   // world bounds of its renderers (debug highlighter); extents 0 = unknown
     };
     struct ChannelState {
         uint64_t last = 0;
@@ -224,13 +239,27 @@ struct LampPulser::Impl {
     bool defsLogged = false, defsMissingLogged = false;
     Il2CppGCHandle work = nullptr;     // shared MaterialPropertyBlock
     std::vector<std::pair<Il2CppObject*, Vec3>> placed;  // Find: lamp transforms (raw, valid during this Sync) + position
+    size_t placedLamps = 0;            // Find: the first placedLamps of `placed` are lamps, the rest scene ice
     size_t loaded = 0;                 // lamps loaded at the last refresh (for the log)
     size_t lastLogged = 0;
     int builtLogs = 0;
     // glowing scene ice of the current scene group: the crystal's Transform + position (static geometry)
     std::vector<std::pair<Il2CppGCHandle, Vec3>> ice;
+    std::vector<Bounds> iceBox;      // same index as `ice`: renderer bounds (debug highlighter; extents 0 = not measured)
     const void* iceGroup = nullptr;  // scene group the cache belongs to (compared only, never dereferenced)
     ULONGLONG iceScanAt = 0;         // pending scan time (0 = none)
+    std::string iceGroupName;        // for the log
+    // debug highlighter
+    bool debugOn = false;
+    ULONGLONG debugFind = 0, debugPublish = 0;
+    struct DebugLamp {
+        Vec3 pos;
+        Bounds box;
+        Il2CppGCHandle tr;  // identity: skipped while it pulses (drawn as pulsing)
+    };
+    std::vector<DebugLamp> debugIdle;
+    std::vector<bool> iceOn;         // same index as `ice`: loaded (active) at the last debug refresh
+    std::string debugLogged;         // last highlighter summary logged
 
     template <class Fn>
     static bool Bind(M<Fn>& m, const MethodInfo* mi) {
@@ -348,6 +377,7 @@ struct LampPulser::Impl {
     // ---- every placed lamp that is loaded now (transform + position).
     void Find() {
         placed.clear();
+        placedLamps = 0;
         if (!Defs()) return;
         bool ok = false;
         Il2CppObject* sc = Invoke(sceneCtxInst, nullptr, {}, "SceneContext.Instance", &ok);
@@ -376,6 +406,7 @@ struct LampPulser::Impl {
                 if (posOk) placed.emplace_back(tr, p);
             }
         }
+        placedLamps = placed.size();
         // glowing scene ice that is loaded now (positions from the scan: scene geometry does not move)
         for (const auto& [h, p] : ice) {
             if (placed.size() >= kMaxModels) break;
@@ -386,7 +417,12 @@ struct LampPulser::Impl {
 
     // ---- glowing scene ice (Powderfall Bluffs "iceCube0N_light"): a LightControl-driven point Light
     // under an ice cube with an inner-emission material. One FindObjectsOfTypeAll(LightControl) per
-    // scene group (kIceScanDelay after it changed), only while a speaker plays; never per frame.
+    // scene group (kIceScanDelay after it changed), only while a speaker plays or the debug highlighter
+    // is on; never per frame.
+    // Round 13 test ("didnt see"): both scans in the log ran on the ranch (ConservatoryFields, 0 crystals of
+    // 20 LightControls, the placed Ice Lamp skipped as a gadget); in Powderfall no speaker played (0 speakers
+    // in the minute line), so no lamp refresh ran there and the zone was never scanned. The highlighter now
+    // scans without music, and the log names the scene group (and, with 0 found, some LightControl parents).
     void IceCheck() {
         if (!iceReady) return;
         bool ok = false;
@@ -397,6 +433,7 @@ struct LampPulser::Impl {
         const ULONGLONG now = GetTickCount64();
         if (group != iceGroup) {
             iceGroup = group;
+            iceGroupName = unity::GetName(group);
             FreeIce();
             iceScanAt = now + static_cast<ULONGLONG>(kIceScanDelay * 1000);
             return;
@@ -404,7 +441,8 @@ struct LampPulser::Impl {
         if (!iceScanAt || now < iceScanAt) return;
         iceScanAt = 0;
         const LARGE_INTEGER t0 = Now();
-        size_t seen = 0;
+        size_t seen = 0, gadgets = 0;
+        std::vector<std::string> others;  // parents of the LightControls that did not match (log, with 0 found)
         for (Il2CppObject* lc : unity::FindObjectsOfTypeAll(lightControlClass)) {
             if (ice.size() >= kMaxIce || ++seen > 8192) break;
             if (!unity::IsAlive(lc)) continue;
@@ -412,22 +450,37 @@ struct LampPulser::Impl {
             Il2CppObject* cube = tr ? trGetParent.fn(tr, trGetParent.mi) : nullptr;
             if (!unity::IsAlive(cube)) continue;
             const std::string name = unity::GetName(cube);
-            if (_strnicmp(name.c_str(), "iceCube", 7) != 0) continue;
+            if (_strnicmp(name.c_str(), "iceCube", 7) != 0) {
+                if (others.size() < 8 && std::find(others.begin(), others.end(), name) == others.end()) others.push_back(name);
+                continue;
+            }
             bool inactive = true;
             Il2CppObject* gadget = Invoke(compInParent, lc, {unity::TypeOf(gadgetClass), &inactive}, "GetComponentInParent", &ok);
             if (!ok) return;
-            if (unity::IsAlive(gadget)) continue;  // an Ice Lamp decoration: pulsed as a placed lamp
+            if (unity::IsAlive(gadget)) {  // an Ice Lamp decoration: pulsed as a placed lamp
+                ++gadgets;
+                continue;
+            }
             bool posOk = false;
             const Vec3 p = Position(cube, &posOk);
             if (!posOk) continue;
-            if (Il2CppGCHandle h = unity::NewGCHandle(cube)) ice.emplace_back(h, p);
+            if (Il2CppGCHandle h = unity::NewGCHandle(cube)) {
+                ice.emplace_back(h, p);
+                iceBox.push_back({});
+            }
         }
-        SR2_INFO("slime_dj: lamps: {} glowing ice crystal(s) in this scene group ({} LightControl(s) looked at, {:.2f} ms)", ice.size(),
-                 seen, Ms(t0));
+        std::string other;
+        if (ice.empty())
+            for (const std::string& n : others) other += std::format("{}'{}'", other.empty() ? "; other LightControl parents: " : ", ", n);
+        SR2_INFO("slime_dj: lamps: {} glowing ice crystal(s) in scene group '{}' ({} LightControl(s) looked at, {} on placed Ice "
+                 "Lamps, {:.2f} ms{})",
+                 ice.size(), iceGroupName, seen, gadgets, Ms(t0), other);
     }
     void FreeIce() {
         for (auto& [h, p] : ice) Free(h);
         ice.clear();
+        iceBox.clear();
+        iceOn.clear();
     }
     static LARGE_INTEGER Now() {
         LARGE_INTEGER t;
@@ -452,9 +505,34 @@ struct LampPulser::Impl {
         return out;
     }
 
+    // World bounds of the given renderers (debug highlighter boxes); extents 0 when none / unavailable.
+    Bounds Measure(const std::vector<Il2CppObject*>& rends) {
+        Bounds out{};
+        if (!rendGetBounds) return out;
+        Vec3 lo{}, hi{};
+        bool any = false;
+        for (Il2CppObject* r : rends) {
+            const Bounds b = rendGetBounds.fn(r, rendGetBounds.mi);
+            const Vec3 c = b.center, e = b.extents;
+            const float sum = e.x + e.y + e.z;
+            if (!std::isfinite(c.x + c.y + c.z + sum) || sum <= 0 || sum > 300) continue;
+            const Vec3 a{c.x - e.x, c.y - e.y, c.z - e.z}, z{c.x + e.x, c.y + e.y, c.z + e.z};
+            lo = any ? Vec3{std::min(lo.x, a.x), std::min(lo.y, a.y), std::min(lo.z, a.z)} : a;
+            hi = any ? Vec3{std::max(hi.x, z.x), std::max(hi.y, z.y), std::max(hi.z, z.z)} : z;
+            any = true;
+        }
+        if (any)
+            out = {{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f},
+                   {(hi.x - lo.x) * 0.5f, (hi.y - lo.y) * 0.5f, (hi.z - lo.z) * 0.5f}};
+        return out;
+    }
+
     bool Build(Lamp& lamp, Il2CppObject* tr) {
         std::string glow;
-        for (Il2CppObject* r : Children(tr, rendererClass, 48)) {
+        lamp.rainbow = unity::GetName(tr).rfind(kRainbowPrefab, 0) == 0;
+        const std::vector<Il2CppObject*> all = Children(tr, rendererClass, 48);
+        lamp.box = Measure(all);
+        for (Il2CppObject* r : all) {
             if (lamp.rends.size() >= kMaxRends) break;
             Il2CppObject* mat = rendSharedMaterial.fn(r, rendSharedMaterial.mi);
             if (!unity::IsAlive(mat)) continue;
@@ -557,7 +635,7 @@ struct LampPulser::Impl {
         const float w = lamp.shown;
         const float e = ch.env * w, p = ch.pulse * w;
         const Color hue = Hsv(ch.hue, 0.85f, 1.0f);
-        const float k = kColourMix * std::min(1.0f, std::max(e, p));
+        const float k = lamp.rainbow ? kColourMix * std::min(1.0f, std::max(e, p)) : 0.0f;  // the others keep their colour
         const float glow = 1.0f + kGlowLevel * e + kGlowBeat * p, bolt = 1.0f + kBoltLevel * e + kBoltBeat * p;
         const float light = 1.0f + kLightLevel * e + kLightBeat * p;
         const bool fresh = !lamp.touched;  // first frame after a restore: read the lights' own values
@@ -592,7 +670,7 @@ struct LampPulser::Impl {
             r.wrote = r.base * light;
             r.wroteCol = Tint(r.baseCol, hue, k);
             lightSetIntensity.fn(o, r.wrote, lightSetIntensity.mi);
-            lightSetColor.fn(o, r.wroteCol, lightSetColor.mi);
+            if (lamp.rainbow) lightSetColor.fn(o, r.wroteCol, lightSetColor.mi);  // the others' own colour is left alone
         }
     }
 };
@@ -682,6 +760,7 @@ bool LampPulser::Resolve(std::string& why) {
     bind(P.lightGetColor, byParams(P.lightClass, "get_color", {}), "Light.get_color");
     bind(P.lightSetColor, byParams(P.lightClass, "set_color", {"UnityEngine.Color"}), "Light.set_color");
     if (!why.empty()) return false;
+    Impl::Bind(P.rendGetBounds, R.MethodByParams(P.rendererClass, "get_bounds", {}, nullptr));  // optional (debug boxes)
     P.ready = true;
     // Glowing scene ice: optional (placed lamps pulse without it).
     {
@@ -844,6 +923,100 @@ void LampPulser::Tick(float dt, const std::vector<Channel>& channels) {
         if (settled) P.Restore(lamp);
         else P.Animate(lamp, *st);
     }
+}
+
+// Debug highlighter (modules/common/debug_marks.h): every kFindSeconds the scene ice check and a lamp
+// refresh of its own (also without music: the ice of the zone is scanned once per scene group), then
+// boxes for the pulsing lamps, the loaded lamps that do not pulse, and the loaded glowing ice crystals.
+void LampPulser::Debug(bool want) {
+    Impl& P = *p_;
+    namespace dm = common::debug_marks;
+    if (!P.ready) return;
+    auto freeIdle = [&] {
+        for (Impl::DebugLamp& d : P.debugIdle) Impl::Free(d.tr);
+        P.debugIdle.clear();
+    };
+    if (!want) {
+        if (P.debugOn) {
+            P.debugOn = false;
+            freeIdle();
+            P.iceOn.clear();
+            for (const char* k : {"slime_dj.lamps.pulsing", "slime_dj.lamps.idle", "slime_dj.lamps.ice"}) dm::Remove(k);
+        }
+        return;
+    }
+    const ULONGLONG now = GetTickCount64();
+    if (!P.debugOn) {
+        P.debugOn = true;
+        P.debugFind = P.debugPublish = 0;
+        P.debugLogged.clear();
+    }
+    if (!P.debugFind || now - P.debugFind >= static_cast<ULONGLONG>(kFindSeconds * 1000)) {
+        P.debugFind = now;
+        P.debugPublish = 0;
+        P.IceCheck();
+        P.Find();
+        freeIdle();
+        for (size_t i = 0; i < P.placedLamps && P.debugIdle.size() < kDebugMaxLamps; ++i) {
+            Il2CppObject* tr = P.placed[i].first;
+            Impl::DebugLamp d{P.placed[i].second, P.Measure(P.Children(tr, P.rendererClass, 48)), unity::NewGCHandle(tr)};
+            if (d.tr) P.debugIdle.push_back(d);
+        }
+        P.placed.clear();
+        P.placedLamps = 0;
+        // which crystals are loaded now; bounds measured once each (a few per refresh)
+        P.iceOn.assign(P.ice.size(), false);
+        size_t measured = 0;
+        for (size_t i = 0; i < P.ice.size(); ++i) {
+            Il2CppObject* tr = Impl::Target(P.ice[i].first);
+            P.iceOn[i] = tr && unity::ActiveInHierarchy(unity::GameObjectOf(tr));
+            Bounds& b = P.iceBox[i];
+            if (P.iceOn[i] && b.extents.x + b.extents.y + b.extents.z <= 0 && measured < kDebugBoundsPerRefresh) {
+                ++measured;
+                b = P.Measure(P.Children(tr, P.rendererClass, 8));
+            }
+        }
+    }
+    if (P.debugPublish && now - P.debugPublish < static_cast<ULONGLONG>(kDebugPublishSeconds * 1000)) return;
+    P.debugPublish = now;
+    auto box = [](const Bounds& b, const Vec3& pos, float fallback) {
+        dm::Box x;
+        if (b.extents.x + b.extents.y + b.extents.z > 0) {
+            x.x = b.center.x, x.y = b.center.y, x.z = b.center.z;
+            x.hx = std::max(b.extents.x, 0.1f), x.hy = std::max(b.extents.y, 0.1f), x.hz = std::max(b.extents.z, 0.1f);
+        } else {  // not measured: a box of this half size standing on the position
+            x.x = pos.x, x.y = pos.y + fallback, x.z = pos.z;
+            x.hx = x.hz = fallback * 0.6f;
+            x.hy = fallback;
+        }
+        return x;
+    };
+    std::vector<Il2CppObject*> pulsingObjs;
+    std::vector<dm::Box> pulsing, idle, ice;
+    for (const Impl::Lamp& l : P.lamps)
+        if (Il2CppObject* tr = Impl::Target(l.tr)) {
+            pulsingObjs.push_back(tr);
+            pulsing.push_back(box(l.box, l.pos, 0.75f));
+        }
+    auto isPulsing = [&](Il2CppObject* o) { return std::find(pulsingObjs.begin(), pulsingObjs.end(), o) != pulsingObjs.end(); };
+    for (const Impl::DebugLamp& d : P.debugIdle) {
+        Il2CppObject* tr = Impl::Target(d.tr);
+        if (tr && !isPulsing(tr)) idle.push_back(box(d.box, d.pos, 0.75f));
+    }
+    for (size_t i = 0; i < P.ice.size() && i < P.iceOn.size(); ++i) {
+        if (!P.iceOn[i]) continue;
+        Il2CppObject* tr = Impl::Target(P.ice[i].first);
+        if (tr && !isPulsing(tr)) ice.push_back(box(P.iceBox[i], P.ice[i].second, 0.5f));
+    }
+    const std::string summary = std::format("{} pulsing, {} not pulsing, {} glowing ice crystal(s) loaded of {} in scene group '{}'",
+                                            pulsing.size(), idle.size(), ice.size(), P.ice.size(), P.iceGroupName);
+    if (summary != P.debugLogged) {
+        P.debugLogged = summary;
+        SR2_INFO("slime_dj: lamps: highlighter: {}", summary);
+    }
+    dm::Publish("slime_dj.lamps.pulsing", "pulsing lamp", kColPulsing, std::move(pulsing));
+    dm::Publish("slime_dj.lamps.idle", "lamp (no playing speaker near)", kColIdle, std::move(idle));
+    dm::Publish("slime_dj.lamps.ice", "glowing ice", kColIce, std::move(ice));
 }
 
 void LampPulser::Clear() {

@@ -26,5 +26,8 @@ namespace sr2::modules::debug_tools::hitboxes {
 bool Setup(sr2::core::ModuleContext& ctx, std::string& why);
 // Main thread, every frame. `want` = option on and module on.
 void Tick(float dt, bool want, float range, bool triggers);
+// Main thread: Camera.main's projection * worldToCamera (column-major, ui/hud.h Frame::vp) and, when `eye` is
+// set, the camera position. false = no camera / setup failed (also used by highlight.cpp).
+bool CameraFrame(float vp[16], float eye[3]);
 
 }  // namespace sr2::modules::debug_tools::hitboxes

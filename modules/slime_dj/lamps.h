@@ -53,6 +53,10 @@ public:
     void Tick(float dt, const std::vector<Channel>& channels);
     // Restores everything and forgets the lamps (setting off, no song, module disabled).
     void Clear();
+    // Every frame, music or not: `want` = debug_tools' highlighter is on (modules/common/debug_marks.h).
+    // Publishes boxes of the pulsing lamps, the loaded lamps that do not pulse and the glowing ice crystals;
+    // scans the zone's ice without music. Off: removes its categories.
+    void Debug(bool want);
     size_t Lamps() const;
 
 private:
