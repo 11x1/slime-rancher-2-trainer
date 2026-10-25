@@ -69,3 +69,11 @@ User, on r15ra1 ("Very NICE"):
 - Skipped this round: r15fl2 (replaced by B's toggle cases), r15sl5 (Slime Launcher per save).
 - Still untested: r12pg4, r12nc2, r12pg1, r12lp4, r11qs2-4, r11cr3.
 - Earlier: r7sb8, r9wx3, r9wx4, r10cr3, r10cr4, r7bd6, r9rs3, r10dj6, r10dp3, r9dp4, r9dp5, r7dr2, r4dr3, r10sh2-5, r9sh4, r9sh5, r9sh7, r8tp3, r4mm4, r6vu4, hc4, p7, ug2, ug3, sv2, ut6.
+
+## I. Stack decorations in gadget mode (`feature/gadget-stacking-r16`)
+User: "another crazy feature, put props on eachother to combine them?". When asked, the user chose "Stack decorations": gadget mode lets you place decorations and gadgets on top of each other, with no overlap block and snapping to the top surface, so you can build combos like a lamp on a pillar.
+- Find how gadget placement validates a spot: re/fabricator.md and re/hooks.md for gadget mode, plus re_lookup GadgetPlacement / GadgetDirector / CanPlace / overlap or ground checks. Allow placing a decoration onto another placed gadget's top surface: aim at it, and the preview sits on its top.
+- Placement must stay valid for the save. A stacked gadget is saved with its world position and rotation; check that it reloads in place and isn't snapped back to the ground or removed.
+- Respect plots and corrals: keep vanilla rules where a gadget isn't allowed at all (inside a plot, on water, out of the ranch). Only relax "something is in the way" when that something is another placed gadget.
+- Picking up the bottom gadget: decide what happens to the ones on top (they stay floating, fall, or get picked up too). Pick the least surprising option, say which, and log it.
+- Make it a setting (Ranch or Misc, default on) so it can be switched off.
