@@ -92,6 +92,12 @@ TextButton_NoneSelectable).
   set only by `UpdateAvailability(plot)` on a menu open; `RebuildUI` (buy / sell with the menu open) does
   not call it and a fresh clone says "available". `RefreshAvailability` calls `UpdateAvailability` /
   `UpdateHidden` for every list item at the end of `BeforeMenuUpdate`. Clones copy the checkmark sprite.
+- **Vanilla cards kept loaded** (round 12): every vanilla upgrade item of an injected menu gets
+  `HideFlags.DontUnloadUnusedAsset` (`KeepLoaded`). A card taken out of the shared list (a tier card stands in
+  for it) was referenced only by our GC handle, which does not survive `Resources.UnloadUnusedAssets`; the
+  Music Box item was destroyed and the Music Box II card lost its Sell button (log `vanilla menu item of
+  upgrade 2 not found`; now `... was destroyed` if it ever happens again). `RestoreVanilla` never puts a
+  destroyed item back (WARN).
 - **Texts** are registered in the pre hook too (a card swapped in there showed its template's text).
 - **Sell / Purchase buttons** (sell_upgrades `PlaceButtons`): only pivots / positions are set (the prefab
   lays itself out). Owned card: Sell in PURCHASED's place; tier card: Sell left, Purchase right, 16 px
@@ -112,12 +118,17 @@ User: "Add a button in the last empty corner (color it blue; like you did for si
 button open a menu to build a queue from". `SiloButtons` takes a `ButtonLook` (clone name prefix, plot
 type, plot-local place, tint colours, material name, log name, HUD owner); the silo uses the defaults,
 `radioButtons_` uses `RadioButtonLook()`: "sr2mods_RadioButton#<gen>" on corrals that own `corral_radio`,
-at the corral's (+x, -z) corner (5.58, 1.20, -5.58), 135 deg (the ground there is free: the auto-feeder hangs
-up on that post; the other corners hold the terminal, the Music Box speaker and the plort collector button),
+on the ground outside the (-x, +z) post (-5.58, 1.20, 5.58), 315 deg, below the Music Box speaker (round 12:
+"it should be in the opposite corner, as right now its in the auto feeder's corner"; round 11 had it at the
+feeder's (+x, -z) corner; the other corners hold the terminal and the plort collector button),
 blue cap material "sr2mods_blue (HDRP/Lit)" and blue palette tint on the base. Built / removed by the ~1 Hz
 tick like the silo button, removed at once when the radio is sold. A press (Activate detour ->
 `OnRadioButton`): animation + cue + 0.4 s rate limit, then slime_dj `OpenRadioMenu(plot, &why)`; a refusal
-("Slime DJ is off ...") shows as the orange world text above the button. The menu itself:
+("Slime DJ is off ...") is a game notification "Corral Radio: <why>" with the card's icon (round 12: "USE
+GAME's NOTIFICATIONS PLEASE"; `Notify` = `SaleNotices::QueueText`, `CardIcon` = the injected card's
+`_icon`, none before the corral menu was opened this session). The world text above the button
+(`SiloButtons::Message`) is only the fallback when the HUD can't take a notice. The Hen Collector button's
+result goes the same way. The menu itself:
 `modules/slime_dj/NOTES.md` "Corral Radio menu". Logs `corral radio button built on plot '...'`,
 `corral radio (plot '...'): playlist menu requested` / `no playlist menu (why)`.
 
@@ -495,8 +506,10 @@ toy prefabs).
 ## Corral Radio
 
 `corral_radio` (`api.h kCorralRadio`). No effect here: slime_dj asks `Owns(plot, kCorralRadio)` and plays
-the corral's own playlist (per-plot `slime_dj.radio`, key from `PlotKey`). Selling the Music Box is refused
-while the radio is owned; selling the radio keeps its playlist. Details: `modules/slime_dj/NOTES.md`
+the corral's own playlist (per-plot `slime_dj.radio`, key from `PlotKey`). Round 12: the Music Box can be
+sold while the radio is owned ("bought radio and i cant sell speakers I again"); `VanillaDependentOf` only
+counts tier chains, and `Visible` keeps an owned non-tier card listed without its prerequisite, so the radio
+stays sellable and plays again once the Music Box is bought back. Selling the radio keeps its playlist. Details: `modules/slime_dj/NOTES.md`
 "Channels".
 
 ## Vacpack upgrades (Fabricator)
