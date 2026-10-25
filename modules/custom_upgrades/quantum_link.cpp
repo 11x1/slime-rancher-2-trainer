@@ -164,8 +164,9 @@ constexpr int kStaleTicksEmpty = 60; // the same when the save has no Refinery L
 constexpr int32_t kTeleporterType = 1;  // GadgetDefinition.Types.TELEPORTER
 // The teleporter FX on top (round 9: "the portal effect is too big"; round 11: "teleport effect too big"). Its child
 // particle systems simulate in Local scaling mode, so the root's scale never reached them: each of those gets the
-// factor on its own transform too (ScaleParticles).
-constexpr float kGlowScale = 0.22f;
+// factor on its own transform too (ScaleParticles). Round 15 ("make the quantum blue effect bigger by a medium amount
+// that's coming from the top of it"): 0.22 -> 0.30.
+constexpr float kGlowScale = 0.30f;
 constexpr float kGlowHeight = 1.0f;
 constexpr double kUseCooldown = 1.5;    // Use on a link: the cloud menu / notices at most this often
 constexpr double kCloudOpenSeconds = 10.0;  // the Quantum Cloud menu must load within this time
@@ -249,6 +250,7 @@ struct Impl {
     Il2CppClass* jointClass = nullptr, *fabItemClass = nullptr, *cloudCtrlClass = nullptr, *teleNodeClass = nullptr;
     Il2CppClass* gadgetItemClass = nullptr, *interactableClass = nullptr;
     Il2CppClass* particleClass = nullptr, *uiDisplayIntClass = nullptr, *droneUiClass = nullptr;
+    Il2CppClass* lightClass = nullptr;  // optional: the glow's green point light goes (DropGreen)
     // offsets
     size_t offLocName = 0, offPrefab = 0, offIcon = 0, offRefId = 0, offHashInit = 0;
     size_t offDesc = 0, offCosts = 0, offVariantOf = 0, offGrad1 = 0, offGrad2 = 0, offGType = 0, offLinked = 0;
@@ -627,6 +629,7 @@ struct Impl {
     void MakeLook();
     void Glitch(Rec& rec, double now);
     int ScaleParticles(Il2CppObject* glow);
+    std::string DropGreen(Il2CppObject* glow);
     Il2CppObject* NamedChild(Il2CppObject* tr, std::string_view prefix);
     int SwapPortMesh(Il2CppObject* root, Rec* rec);
     void BuildGhost(Rec& rec, Il2CppObject* rootTr, Il2CppObject* holderTr);
@@ -1349,6 +1352,7 @@ bool Impl::Build(int64_t id, Il2CppObject* root, Rec& rec) {
         Il2CppObject* glow = unity::Instantiate(glowSrc, holderTr);
         if (unity::IsAlive(glow)) {
             Strip(glow);
+            const std::string dropped = DropGreen(glow);
             Il2CppObject* gtr = unity::TransformOf(glow);
             Vec3 pos{0.0f, kGlowHeight, 0.0f}, scale{kGlowScale, kGlowScale, kGlowScale};
             Call(trSetLocalPos, gtr, {&pos}, "Transform.set_localPosition");
@@ -1357,8 +1361,8 @@ bool Impl::Build(int64_t id, Il2CppObject* root, Rec& rec) {
             const int scaled = ScaleParticles(glow);
             if (!loggedParticles) {
                 loggedParticles = true;
-                SR2_INFO("[{}] quantum link: glow at {:.2f} size, {} local-scaled particle system(s) shrunk with it", module,
-                         kGlowScale, scaled);
+                SR2_INFO("[{}] quantum link: glow at {:.2f} size, {} local-scaled particle system(s) shrunk with it; green "
+                         "parts removed: {}", module, kGlowScale, scaled, dropped.empty() ? "none found" : dropped);
             }
             unity::SetActive(glow, true);  // still inactive in the hierarchy (holder)
             TintRenderers(glow, nullptr, "glow");
@@ -1719,6 +1723,31 @@ void Impl::PhaseOff(Rec& rec) {
     }
 }
 
+// Round 15 ("Remove the green halo coming from the center of it"): the teleporter FX (fx_telepadTwoWay, data) has a
+// green Point light (colour 0.24 / 1 / 0, intensity 229, range 3: a range ignores the transform's scale, so it lit
+// the whole link) under model_telepadTwoWay and a green "Waves" particle system (start colour 0.18 / 1 / 0.02, size
+// 3) at the spinner's centre. Both go (every Light, every object named "Waves"). Returns what went, for the log.
+std::string Impl::DropGreen(Il2CppObject* glow) {
+    std::string out;
+    int lights = 0;
+    if (lightClass)
+        for (Il2CppObject* l : AllInChildren(glow, lightClass)) {
+            DestroyNow(unity::GameObjectOf(l));
+            ++lights;
+        }
+    if (lights) out = std::format("{} light(s)", lights);
+    std::vector<Il2CppObject*> todo{unity::TransformOf(glow)}, waves;
+    for (size_t i = 0; i < todo.size() && i < 256; ++i)
+        for (Il2CppObject* child : todo[i] ? ChildTransforms(todo[i]) : std::vector<Il2CppObject*>{}) {
+            Il2CppObject* go = unity::GameObjectOf(child);
+            if (go && unity::GetName(go) == "Waves") waves.push_back(go);
+            else todo.push_back(child);
+        }
+    for (Il2CppObject* go : waves) DestroyNow(go);
+    if (!waves.empty()) out += std::format("{}{} 'Waves'", out.empty() ? "" : ", ", waves.size());
+    return out;
+}
+
 // Every particle system under the glow (not its root) that simulates in Local scaling mode ignores its parents'
 // scale: its own transform gets the glow factor. Returns how many were scaled.
 int Impl::ScaleParticles(Il2CppObject* glow) {
@@ -1925,21 +1954,32 @@ std::string Impl::HideListHints(Il2CppObject* menu) {
     return out;
 }
 
-// Switches the hints of `configs` (InputHintConfigurations; repeated events skipped) off on `legend` (an
-// IInputLegend: InputLegend / InputLegendFocusRegistrar) with SetItemEnabled(event, false), except events named
-// cancel / back / close / exit. Returns "hid 'Label' [Event], ...; kept ...".
+// Takes the hints of `configs` (InputHintConfigurations; repeated events skipped) off `legend` (an IInputLegend:
+// InputLegend / InputLegendFocusRegistrar), except events named cancel / back / close / exit. Round 15 ("[SPACE]
+// Go To is still there but grayed out this time"): SetItemEnabled(event, false) only greys a hint
+// (InputHint.SetEnabled: SRButton disabled / alpha 0.5), so the legend now gets the kept hints alone through
+// SetInputHints(InputHintConfiguration[], true): the hints left out are hidden (InputLegend.ConfigureHints sets
+// up one element per current hint). On a registrar the list is its _currentHints, pushed to the shared legend now
+// when it has focus and on every focus it gets (UpdateHintsInPassThrough), and its _currentConfiguration is
+// cleared, so the default configuration does not come back. SetItemEnabled stays the fallback (no kept hint, or
+// the array / method missing). Returns "hid 'Label' [Event], ...; kept ...".
 std::string Impl::HideHints(Il2CppObject* legend, const std::vector<Il2CppObject*>& configs) {
     Resolver& R = Resolver::Get();
-    const MethodInfo* setEnabled = R.Method(api().il2cpp_object_get_class(legend), "SetItemEnabled", 2, nullptr);
-    if (!setEnabled) return std::format("{}.SetItemEnabled not found", unity::ClassName(legend));
+    Il2CppClass* lk = api().il2cpp_object_get_class(legend);
+    const MethodInfo* setEnabled = R.Method(lk, "SetItemEnabled", 2, nullptr);
+    const MethodInfo* setHints = R.Method(lk, "SetInputHints", 2, nullptr);
     std::unordered_set<Il2CppObject*> seen;
-    std::string hid, kept;
+    std::vector<Il2CppObject*> keep;
+    std::vector<std::pair<Il2CppObject*, std::string>> drop;  // event, log entry
+    std::string kept;
+    Il2CppClass* cfgClass = nullptr;
     for (Il2CppObject* h : configs) {
         Il2CppClass* hk = api().il2cpp_object_get_class(h);
         auto evOff = R.FieldOffset(hk, "InputEvent");
         auto lblOff = R.FieldOffset(hk, "Label");
         Il2CppObject* ev = evOff ? unity::Field<Il2CppObject*>(h, *evOff) : nullptr;
         if (!unity::IsAlive(ev) || !seen.insert(ev).second) continue;
+        cfgClass = hk;
         std::string label;
         if (Il2CppObject* ls = lblOff ? unity::Field<Il2CppObject*>(h, *lblOff) : nullptr; ls && lsGetString) {
             bool ok = false;
@@ -1952,14 +1992,37 @@ std::string Impl::HideHints(Il2CppObject* legend, const std::vector<Il2CppObject
         const std::string entry = std::format("'{}' [{}]", label, evName);
         if (lower.find("cancel") != std::string::npos || lower.find("back") != std::string::npos ||
             lower.find("close") != std::string::npos || lower.find("exit") != std::string::npos) {
+            keep.push_back(h);
             kept += (kept.empty() ? "" : ", ") + entry;
             continue;
         }
-        bool off = false, ok = false;
-        Call(setEnabled, legend, {ev, &off}, "IInputLegend.SetItemEnabled", &ok);
-        if (ok) hid += (hid.empty() ? "" : ", ") + entry;
+        drop.emplace_back(ev, entry);
     }
-    return std::format("hid {}; kept {}", hid.empty() ? "nothing" : hid, kept.empty() ? "nothing" : kept);
+    std::string hid, how;
+    if (!drop.empty() && !keep.empty() && setHints && arrayNew && cfgClass) {
+        Il2CppObject* arr = arrayNew(cfgClass, keep.size());
+        if (arr && unity::ArrayData<Il2CppObject*>(arr)) {
+            for (size_t i = 0; i < keep.size(); ++i) SetElem(arr, i, keep[i]);
+            bool repopulate = true, ok = false;
+            Call(setHints, legend, {arr, &repopulate}, "IInputLegend.SetInputHints", &ok);
+            if (ok) {
+                for (const auto& d : drop) hid += (hid.empty() ? "" : ", ") + d.second;
+                how = " (removed from the legend)";
+                drop.clear();
+            }
+        }
+    }
+    if (!drop.empty()) {  // fallback: greyed out
+        if (!setEnabled) return std::format("{}.SetItemEnabled / SetInputHints not usable", unity::ClassName(legend));
+        for (const auto& d : drop) {
+            bool off = false, ok = false;
+            Call(setEnabled, legend, {d.first, &off}, "IInputLegend.SetItemEnabled", &ok);
+            if (ok) hid += (hid.empty() ? "" : ", ") + d.second;
+        }
+        how = " (greyed out only: SetInputHints not usable)";
+    }
+    return std::format("hid {}{}; kept {}", hid.empty() ? "nothing" : hid, hid.empty() ? "" : how,
+                       kept.empty() ? "nothing" : kept);
 }
 
 std::string Impl::NameOf(Il2CppObject* type) {
@@ -2555,6 +2618,7 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
                      "Use shows HUD notices", p->module);
         // optional: the glow's local-scaled particle systems (ScaleParticles)
         p->particleClass = R.Class("UnityEngine.ParticleSystemModule", "UnityEngine", "ParticleSystem", nullptr);
+        p->lightClass = R.Class("UnityEngine.CoreModule", "UnityEngine", "Light", nullptr);
         using ResolveIcallFn = void* (*)(const char*);
         auto resolveIcall = reinterpret_cast<ResolveIcallFn>(exp("il2cpp_resolve_icall"));
         p->psScalingMode = resolveIcall ? reinterpret_cast<Impl::ScalingModeFn>(

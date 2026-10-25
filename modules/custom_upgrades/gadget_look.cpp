@@ -139,6 +139,13 @@ struct Impl {
     size_t obsValue = 0;
     // methods
     const MethodInfo* identTypeAsDef = nullptr;
+    // Round 15: outside gadget mode the label is TargetingUI's (GetGadgetTargetInfo), for its raycast target, not
+    // the director's TargetedGadget. All optional: without them that label stays vanilla.
+    const MethodInfo* tuInstance = nullptr, *tuTargetObject = nullptr, *goInParent = nullptr;
+    Il2CppClass* gadgetClass = nullptr;
+    size_t offTuPlayer = 0, offGadgetMode = 0, offObsBool = 0;
+    bool loggedLookAt = false;
+    Il2CppObject* LookAtGadget();
     const MethodInfo* rendGetMaterials = nullptr, *matPropNames = nullptr, *matGetColor = nullptr, *matSetColor = nullptr,
                       *matGetShader = nullptr, *compsInChildren = nullptr;
     const MethodInfo* spriteTexture = nullptr, *spriteTexRect = nullptr, *spriteTexOffset = nullptr, *spriteRect = nullptr, *spritePivot = nullptr,
@@ -234,8 +241,30 @@ TargetInfo* InfoDetour(TargetInfo* ret, Il2CppObject* self, Il2CppObject* def, b
     return r;
 }
 
-// The label is for an aimed-at placed gadget (not the held one, GadgetLabelDisplay.UpdateLabels: held
-// when SelectedSlottedGadget is set and _isTargetingPlaceholder) whose definition is `def`.
+// The placed gadget TargetingUI looks at outside gadget mode (its own label above "[T] Enter gadget mode", round 15:
+// "it still shows up as 'Refinery Link' at the top"): TargetingUI.GetTargetObject (a raycast) and the Gadget in its
+// parents. nullptr in gadget mode (TargetingUI shows no gadget label then) or when nothing is aimed at.
+Il2CppObject* Impl::LookAtGadget() {
+    if (!tuInstance || !tuTargetObject || !goInParent || !gadgetClass) return nullptr;
+    bool ok = false;
+    Il2CppObject* tu = Call(tuInstance, nullptr, {}, "SRSingleton<TargetingUI>.get_Instance", &ok);
+    if (!ok || !unity::IsAlive(tu)) return nullptr;
+    Il2CppObject* player = offTuPlayer ? unity::Field<Il2CppObject*>(tu, offTuPlayer) : nullptr;
+    if (Il2CppObject* mode = player && offGadgetMode ? unity::Field<Il2CppObject*>(player, offGadgetMode) : nullptr) {
+        if (!offObsBool)  // ObservableValue<bool>._value
+            if (auto o = Resolver::Get().FieldOffset(api().il2cpp_object_get_class(mode), "_value")) offObsBool = *o;
+        if (offObsBool && unity::Field<bool>(mode, offObsBool)) return nullptr;
+    }
+    Il2CppObject* go = Call(tuTargetObject, tu, {}, "TargetingUI.GetTargetObject", &ok);
+    if (!ok || !unity::IsAlive(go)) return nullptr;
+    bool inactive = false;
+    Il2CppObject* gadget = Call(goInParent, go, {unity::TypeOf(gadgetClass), &inactive}, "GameObject.GetComponentInParent", &ok);
+    return ok && unity::IsAlive(gadget) ? gadget : nullptr;
+}
+
+// The label is for an aimed-at placed gadget whose definition is `def`: outside gadget mode TargetingUI's target
+// (LookAtGadget); in gadget mode the director's TargetedGadget, unless it is the held gadget's label
+// (GadgetLabelDisplay.UpdateLabels: held when SelectedSlottedGadget is set and _isTargetingPlaceholder).
 Il2CppObject* Impl::PlacedLabelFor(Il2CppObject* director, Il2CppObject* def) {
     std::vector<PlacedLabel> providers;
     {
@@ -243,15 +272,26 @@ Il2CppObject* Impl::PlacedLabelFor(Il2CppObject* director, Il2CppObject* def) {
         if (placed.empty()) return nullptr;
         providers = placed;
     }
-    if (unity::Field<bool>(director, offTargetingPlaceholder) &&
-        unity::IsAlive(ObsValue(unity::Field<Il2CppObject*>(director, offSelected))))
-        return nullptr;  // the held gadget's label
-    Il2CppObject* gadget = ObsValue(unity::Field<Il2CppObject*>(director, offTargeted));
-    if (!unity::IsAlive(gadget)) return nullptr;
+    Il2CppObject* gadget = LookAtGadget();
+    const bool lookAt = gadget != nullptr;
+    if (!lookAt) {
+        if (unity::Field<bool>(director, offTargetingPlaceholder) &&
+            unity::IsAlive(ObsValue(unity::Field<Il2CppObject*>(director, offSelected))))
+            return nullptr;  // the held gadget's label
+        gadget = ObsValue(unity::Field<Il2CppObject*>(director, offTargeted));
+        if (!unity::IsAlive(gadget)) return nullptr;
+    }
     bool ok = false;
     if (Call(identTypeAsDef, gadget, {}, "Gadget.get_IdentTypeAsDefinition", &ok) != def || !ok) return nullptr;
     for (const PlacedLabel& p : providers)
-        if (Il2CppObject* l = p(gadget, def)) return l;
+        if (Il2CppObject* l = p(gadget, def)) {
+            if (lookAt && !loggedLookAt) {
+                loggedLookAt = true;
+                SR2_INFO("[{}] gadget look: look-at label (outside gadget mode) of a placed '{}' replaced", module,
+                         unity::GetName(def));
+            }
+            return l;
+        }
     return nullptr;
 }
 
@@ -644,6 +684,19 @@ bool Setup(sr2::core::ModuleContext& ctx, const char* module, std::string& why, 
     off(gadgetDir, "<SelectedSlottedGadget>k__BackingField", p->offSelected);
     off(gadgetDir, "_isTargetingPlaceholder", p->offTargetingPlaceholder);
     p->identTypeAsDef = method(gadget, "get_IdentTypeAsDefinition", 0);
+    if (Il2CppClass* tu = R.Class(kImage, "MonomiPark.SlimeRancher.UI", "TargetingUI")) {  // optional (round 15)
+        Il2CppClass* go = R.Class(kCore, "UnityEngine", "GameObject");
+        Il2CppClass* ps = R.Class(kImage, "", "PlayerState");
+        p->tuInstance = parentOf(tu) ? R.Method(parentOf(tu), "get_Instance", 0) : nullptr;
+        p->tuTargetObject = R.Method(tu, "GetTargetObject", 0);
+        p->goInParent = go ? R.MethodByParams(go, "GetComponentInParent", {"System.Type", "System.Boolean"}) : nullptr;
+        p->gadgetClass = gadget;
+        if (auto o = R.FieldOffset(tu, "_player")) p->offTuPlayer = *o;
+        if (auto o = ps ? R.FieldOffset(ps, "<GadgetModeActive>k__BackingField") : std::nullopt) p->offGadgetMode = *o;
+        if (!p->tuInstance || !p->tuTargetObject || !p->goInParent)
+            SR2_INFO("[{}] gadget look: TargetingUI members missing - placed-gadget labels outside gadget mode stay vanilla",
+                     module);
+    }
     p->rendGetMaterials = method(p->rendererClass, "get_materials", 0);
     p->matPropNames = byParams(material, "GetPropertyNames", {"UnityEngine.MaterialPropertyType"});
     p->matGetColor = byParams(material, "GetColor", {"System.String"});

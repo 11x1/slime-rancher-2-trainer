@@ -309,7 +309,9 @@ GadgetItem, Fabricator categories), re/save.md (GetPersistenceId, `_reverseIndex
   quantum <-> plain in place.
 - **Look** (tick): materials instanced, colours 30 % purple (round 14, was 60 %: "the purple is too strong";
   the placement preview too), emission cyan, tagged ` [sr2q]` (originals back when plain). Holder
-  `sr2qlink#<gen>`: a teleporter `_activeFX` clone (0.22 size, 1 m up; its child particle systems in Local scaling
+  `sr2qlink#<gen>`: a teleporter `_activeFX` clone (0.30 size, round 15: was 0.22, "make the quantum blue effect
+  bigger by a medium amount"; 1 m up; its green `Point light` and green `Waves` particles destroyed, round 15:
+  "Remove the green halo coming from the center of it", `DropGreen`, re/fabricator.md "Teleporter FX"; its child particle systems in Local scaling
   mode get the factor on their own transforms, `ScaleParticles`) that never switches off (round 11: the old
   drop-out restarted the particles, "disappears in like 6-7s intervals"). Icon: a purple copy of the Refinery Link
   sprite (`TintedSprite`) in `icon`; `quantum::SourceIcon()` = the same on a square canvas (round 11: the drone
@@ -334,7 +336,12 @@ GadgetItem, Fabricator categories), re/save.md (GetPersistenceId, `_reverseIndex
     placement preview). The link's own mesh is kept and put back when plain.
   - **Label**: the placed-label provider (`gadget_look::AddPlacedLabel`) existed since round 9, yet the user saw
     "Refinery Link" in round 14; it now logs `gadget-mode label of a placed link (actor N) = Quantum Storage Link`
-    once, so the next log tells whether it runs. GadgetLabelDisplay shows the HELD gadget's name while the
+    once, so the next log tells whether it runs (round 14 log: it does). Round 15 ("in non-gadget placement view
+    it still shows up as 'Refinery Link'"): the look-at label outside gadget mode is TargetingUI's
+    (`GetGadgetTargetInfo` -> the same `GetTargetGadgetInfo` detour), for its raycast target, not the director's
+    `TargetedGadget`; `gadget_look::LookAtGadget` finds that gadget (`TargetingUI.GetTargetObject` + the Gadget
+    in its parents, only while gadget mode is off) and asks the providers with it. Logs `look-at label (outside
+    gadget mode) of a placed 'RefineryLink' replaced` once. GadgetLabelDisplay shows the HELD gadget's name while the
     placement footprint is visible (`GadgetItem.UpdateFootprint` -> `SetTargetGadget(..., preferPlaceholder)`,
     `_isTargetingPlaceholder`), so aiming near a link while holding a plain Refinery Link reads "Refinery Link".
 - **Use** (the link's `ScienceUIDisplayActivator`, a UIDisplayInteractable): opens the game's Quantum Cloud
@@ -364,8 +371,13 @@ GadgetItem, Fabricator categories), re/save.md (GetPersistenceId, `_reverseIndex
   `GoToInMapRequested`, which only the map's drone panel subscribes to, so Space already does nothing here.
   `HideListHints` switches the hints off (except cancel / back / close / exit) on every
   `InputLegendFocusRegistrar` / `InputLegend` under `DroneMenuUI._droneList`, events read from their
-  configurations and hint entries (`HideHints`, shared with `HideCloudHints`). Not seen in game: which
-  component holds that page's legend (the log names it, or says `no legend under the drone list page`).
+  configurations and hint entries (`HideHints`, shared with `HideCloudHints`). Round 14 log: the
+  `InputLegendFocusRegistrar 'DroneListPage'` holds it.
+  Round 15 ("[SPACE] Go To is still there but grayed out this time, magnifying glass and [SPACE] still show"):
+  `SetItemEnabled(false)` only greys a hint. `HideHints` now gives the legend the kept hints alone with
+  `SetInputHints(InputHintConfiguration[], true)`, so the others are not shown at all (on the registrar the list
+  survives focus changes; RE: re/ui.md "Hiding a hint"); `SetItemEnabled` stays the fallback when no hint is kept
+  or the call is missing. The log says `hid 'Go To' [Submit] (removed from the legend)` or `(greyed out only: ...)`.
 - **Drone source** (`0x53520110`, after Silo, every target, while a link with a drone port is built):
   `GetSources` returns hidden storages (`sr2qstore`: `SiloStorage`, 8 slots, no type group, 999 each,
   own `AmmoModel`, active in hierarchy); catcher = the link's own `SiloCatcher`. Accepted cloud types
