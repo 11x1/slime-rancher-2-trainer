@@ -11,7 +11,7 @@ Options:
   -g TEXT      class view: only members whose line contains TEXT
   -a           class view: include compiler-generated nested types (<>c, d__N, DisplayClass)
   -n N         max lines per class / search (default 60; 0 = no limit)
-  --rebuild    rebuild the index (otherwise built once, ~30 s, kept next to the dump)
+  --rebuild    rebuild the index (otherwise built once, ~10 s, kept next to the dump)
 
 The dump lives only in the main checkout (re/dump/, not in git); found via
 `git rev-parse --git-common-dir`, so it works from a worktree. Override with SR2_DUMP.
