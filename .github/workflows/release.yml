@@ -1,0 +1,185 @@
+# Builds version.dll on a clean GitHub-hosted Windows runner and publishes it as a GitHub Release.
+#
+# - push to develop -> a pre-release tagged dev-<yyyyMMdd-HHmm>-<sha7> (commit time, UTC), one per push
+# - push to master  -> a release tagged v0.<N> (N = newest v0.* tag + 1)
+# - manual run      -> build and verify only, nothing published
+#
+# Release notes: .github/scripts/release_notes.py, grouped by the branches merged into develop
+# since the previous tag of the same kind (preview locally: python .github/scripts/release_notes.py).
+# Assets: version.dll, version.dll.sha256, INSTALL.txt, THIRD-PARTY-NOTICES.txt. No game files.
+#
+# The build uses only what is in git: build.ps1 runs assets/icons/src/gen_inc.py, which embeds the
+# assets/icons/*.png of the checkout into ui/mod_icons_data.inc. Icons that exist only in a local
+# checkout (gitignored) are not in a release; the mod shows the game's own icon for those.
+
+name: release
+
+on:
+  push:
+    branches: [develop, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  # master: one at a time, so two quick pushes can't compute the same v0.<N>.
+  # develop: every push has its own tag (date + sha), so runs don't race; one group per commit.
+  group: ${{ github.ref == 'refs/heads/master' && 'release-master' || format('release-{0}', github.sha) }}
+  cancel-in-progress: false
+
+env:
+  FIRST_MINOR: 1   # first numbered release when there is no v0.* tag yet: v0.1
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout (full history and tags, for the version and the notes)
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Version
+        id: version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sha7 = (git rev-parse --short=7 HEAD).Trim()
+          $publish = 'false'; $kind = ''; $tag = ''; $title = ''; $version = "0.0-manual+$sha7"
+          if ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -eq 'refs/heads/master') {
+            $kind = 'master'; $publish = 'true'
+            # a re-run of the same commit reuses its tag
+            $own = git tag --points-at HEAD --list 'v0.*' | Select-Object -First 1
+            if ($own) { $tag = $own.Trim() } else {
+              $nums = @(git tag --list 'v0.*' | ForEach-Object { if ($_ -match '^v0\.(\d+)$') { [int]$Matches[1] } })
+              $next = if ($nums.Count) { ($nums | Measure-Object -Maximum).Maximum + 1 } else { [int]$env:FIRST_MINOR }
+              $tag = "v0.$next"
+            }
+            $version = $tag.Substring(1)
+            $title = "sr2mods $tag"
+          } elseif ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -eq 'refs/heads/develop') {
+            $kind = 'dev'; $publish = 'true'
+            $when = [DateTimeOffset]::FromUnixTimeSeconds([long](git log -1 --format=%ct HEAD)).UtcDateTime
+            $tag = 'dev-{0}-{1}' -f $when.ToString('yyyyMMdd-HHmm'), $sha7
+            $version = $tag
+            $title = 'Development build {0} UTC ({1})' -f $when.ToString('yyyy-MM-dd HH:mm'), $sha7
+          }
+          "publish=$publish", "kind=$kind", "tag=$tag", "version=$version", "title=$title" |
+            Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "kind '$kind', tag '$tag', version '$version', publish $publish"
+
+      - name: Asset gate (no game files in git)
+        shell: pwsh
+        run: |
+          $bad = git ls-files -- 'assets/icons/game/*' 're/dump/*' 're/ida/*' 're/input/*' '*.i64' '*.dll' '*.exe' '*.sav' 'save-backups/*'
+          if ($bad) { Write-Host "::error::Game files or binaries are tracked in git:"; $bad; exit 1 }
+
+      - name: Python tools
+        shell: pwsh
+        run: |
+          python --version
+          python -m pip install --disable-pip-version-check pefile
+          if ($LASTEXITCODE -ne 0) { throw 'pip install pefile failed' }
+
+      - name: Embed icons (ui/mod_icons_data.inc from assets/icons/*.png)
+        shell: pwsh
+        run: |
+          python assets/icons/src/gen_inc.py
+          if ($LASTEXITCODE -ne 0) { throw 'gen_inc.py failed' }
+          if (-not (Test-Path ui/mod_icons_data.inc)) { throw 'ui/mod_icons_data.inc was not generated' }
+
+      - name: Build (Release, MSVC x64, Ninja; build.ps1 also runs verify_exports)
+        shell: pwsh
+        env:
+          SR2MODS_VERSION_STRING: ${{ steps.version.outputs.version }}
+        run: .\build.ps1 -Config Release
+
+      - name: Verify exports
+        shell: pwsh
+        run: |
+          python proxy/verify_exports.py build/Release/version.dll
+          if ($LASTEXITCODE -ne 0) { throw 'Export verification FAILED' }
+
+      - name: Package
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item build/Release/version.dll out/
+          $hash = (Get-FileHash -Algorithm SHA256 out/version.dll).Hash.ToLowerInvariant()
+          # sha256sum format: "<hash> *<file>"
+          "$hash *version.dll" | Set-Content out/version.dll.sha256 -Encoding ascii -NoNewline
+          @(
+            "sr2mods $env:VERSION for Slime Rancher 2 1.3.0 (Steam, Windows)"
+            ""
+            "Install"
+            "1. Close the game and back up your saves:"
+            "   %USERPROFILE%\AppData\LocalLow\MonomiPark\SlimeRancher2"
+            "2. Copy version.dll into the game folder, next to SlimeRancher2.exe"
+            "   (Steam: right-click Slime Rancher 2 > Manage > Browse local files)."
+            "3. Start the game. Settings: the Mods tab in the game's Options menu."
+            "   sr2mods.json (settings) and sr2mods.log are created next to the DLL."
+            ""
+            "Update: replace version.dll; your sr2mods.json stays."
+            "Uninstall: delete version.dll (and sr2mods.json, sr2mods.log if you want)."
+            ""
+            "SHA-256 of version.dll: $hash"
+            "More: https://github.com/$env:GITHUB_REPOSITORY#readme"
+          ) | Set-Content out/INSTALL.txt -Encoding utf8
+          $notices = @(
+            @('MinHook', 'third_party/minhook/LICENSE.txt'),
+            @('Dear ImGui', 'third_party/imgui/LICENSE.txt'),
+            @('stb (stb_image, stb_vorbis)', 'third_party/stb/LICENSE.txt'),
+            @('dr_libs (dr_mp3, dr_wav)', 'third_party/dr_libs/LICENSE')
+          )
+          $text = @("version.dll contains the following third-party code and fonts.", "")
+          foreach ($n in $notices) { $text += "==== $($n[0]) ===="; $text += Get-Content $n[1]; $text += "" }
+          foreach ($f in Get-ChildItem ui/fonts/OFL-*.txt) { $text += "==== Font: $($f.BaseName -replace '^OFL-','') ===="; $text += Get-Content $f.FullName; $text += "" }
+          $text | Set-Content out/THIRD-PARTY-NOTICES.txt -Encoding utf8
+          Get-ChildItem out | Format-Table Name, Length
+          Write-Host "version.dll sha256 $hash"
+
+      - name: Release notes
+        if: steps.version.outputs.publish == 'true'
+        shell: pwsh
+        env:
+          KIND: ${{ steps.version.outputs.kind }}
+          TITLE: ${{ steps.version.outputs.title }}
+        run: |
+          python .github/scripts/release_notes.py --kind $env:KIND --out out/notes-body.md
+          if ($LASTEXITCODE -ne 0) { throw 'release_notes.py failed' }
+          $hash = (Get-FileHash -Algorithm SHA256 out/version.dll).Hash.ToLowerInvariant()
+          $head = if ($env:KIND -eq 'dev') {
+            "Pre-release from develop ($env:GITHUB_SHA). Untested in game; numbered releases (v0.N) come from master."
+          } else { "Release from master ($env:GITHUB_SHA)." }
+          @($head, "", "Install: copy ``version.dll`` next to ``SlimeRancher2.exe`` (see INSTALL.txt). SHA-256: ``$hash``", "") +
+            (Get-Content out/notes-body.md -Encoding utf8) | Set-Content out/notes.md -Encoding utf8
+          Get-Content out/notes.md
+
+      - name: Publish release
+        if: steps.version.outputs.publish == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          TITLE: ${{ steps.version.outputs.title }}
+          KIND: ${{ steps.version.outputs.kind }}
+        run: |
+          $assets = 'out/version.dll', 'out/version.dll.sha256', 'out/INSTALL.txt', 'out/THIRD-PARTY-NOTICES.txt'
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            # re-run of the same commit: refresh the assets, keep the release
+            Write-Host "release $env:TAG exists, replacing its assets"
+            gh release upload $env:TAG @assets --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'gh release upload failed' }
+            exit 0
+          }
+          $flags = if ($env:KIND -eq 'dev') { @('--prerelease', '--latest=false') } else { @('--latest') }
+          gh release create $env:TAG @assets --target $env:GITHUB_SHA --title $env:TITLE --notes-file out/notes.md @flags
+          if ($LASTEXITCODE -ne 0) { throw 'gh release create failed' }

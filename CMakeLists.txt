@@ -9,6 +9,16 @@ if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "sr2mods must be built for x64 (run from an x64 VS developer environment).")
 endif()
 
+# Version reported in the log and the overlay. Local builds use the project version; the release
+# workflow (.github/workflows/release.yml) sets the environment variable SR2MODS_VERSION_STRING
+# (e.g. 0.3 or dev-20261026-1412-315cf6f) before build.ps1, or pass -DSR2MODS_VERSION_STRING=...
+if(DEFINED ENV{SR2MODS_VERSION_STRING} AND NOT "$ENV{SR2MODS_VERSION_STRING}" STREQUAL "")
+  set(SR2_DEFAULT_VERSION "$ENV{SR2MODS_VERSION_STRING}")
+else()
+  set(SR2_DEFAULT_VERSION "${PROJECT_VERSION}")
+endif()
+set(SR2MODS_VERSION_STRING "${SR2_DEFAULT_VERSION}" CACHE STRING "Version string compiled into the DLL")
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -165,7 +175,7 @@ target_compile_definitions(sr2mods PRIVATE
   NOMINMAX
   UNICODE
   _UNICODE
-  SR2MODS_VERSION="${PROJECT_VERSION}"
+  SR2MODS_VERSION="${SR2MODS_VERSION_STRING}"
 )
 
 target_compile_options(sr2mods PRIVATE
