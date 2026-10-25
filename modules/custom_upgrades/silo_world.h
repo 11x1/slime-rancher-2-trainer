@@ -10,6 +10,7 @@
 // SceneContext.GameModel.GetLandPlotModel(id) for the ids module.cpp passes. No GC handles on
 // plots or clones, no FindObjectsOfTypeAll.
 
+#include <cstdint>
 #include <functional>
 #include <set>
 #include <string>
@@ -23,10 +24,37 @@ class Resolver;
 
 namespace sr2::modules::custom_upgrades::world {
 
+// What a button looks like and where it goes (defaults: the silo's gold Sell-All button). Round 11:
+// a second instance builds the blue Corral Radio button with kRadioButtonLook.
+struct ButtonLook {
+    const char* name = "sr2mods_SiloSellButton#";  // clone name prefix (+ generation)
+    int32_t plotType = 5;                           // LandPlot.Id of the plots it goes on (SILO)
+    float pos[3] = {5.58f, 1.20f, -5.58f};          // plot-local: outer (+x, -z) corner
+    float rot[4] = {0.0f, 0.92387953f, 0.0f, 0.38268343f};  // 135 deg about y: faces outwards
+    float tint[3] = {1.0f, 0.78f, 0.18f};           // palette tint of the base (gold)
+    float lit[3] = {1.0f, 0.74f, 0.16f};            // the cap's own HDRP/Lit _BaseColor
+    const char* material = "sr2mods_gold";          // name of our materials
+    const char* what = "silo sell button";          // in the log
+    const char* hudOwner = "custom_upgrades.silo_button";  // ui::hud owner of its world message
+};
+
+// The Corral Radio button: corral plots, the free (+x, -z) corner (see silo_world.cpp), blue.
+inline ButtonLook RadioButtonLook() {
+    ButtonLook l;
+    l.name = "sr2mods_RadioButton#";
+    l.plotType = 2;  // CORRAL
+    l.tint[0] = 0.22f, l.tint[1] = 0.55f, l.tint[2] = 1.0f;
+    l.lit[0] = 0.16f, l.lit[1] = 0.48f, l.lit[2] = 1.0f;
+    l.material = "sr2mods_blue";
+    l.what = "corral radio button";
+    l.hudOwner = "custom_upgrades.radio_button";
+    return l;
+}
+
 class SiloButtons {
 public:
     // Worker thread: resolve by name. false = no world button (the menu action still works).
-    bool Setup(sr2::il2cpp::Resolver& R, const char* module, std::string& why);
+    bool Setup(sr2::il2cpp::Resolver& R, const char* module, std::string& why, const ButtonLook& look = {});
     bool Ready() const { return ready_; }
 
     // Main thread, ~1 Hz. `wanted` = LandPlotLocation ids of silos that own the upgrade.

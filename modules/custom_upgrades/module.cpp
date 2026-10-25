@@ -248,6 +248,7 @@
 #include "modules/custom_upgrades/silo_world.h"
 #include "modules/custom_upgrades/shadow_catcher.h"
 #include "modules/custom_upgrades/vacpack_upgrades.h"
+#include "modules/slime_dj/api.h"
 #include "ui/mod_icons.h"
 
 namespace sr2::modules {
@@ -605,6 +606,7 @@ public:
     void WorldTick();
     bool OnSiloButton(Il2CppObject* activator);
     bool OnHenButton(Il2CppObject* activator);
+    bool OnRadioButton(Il2CppObject* activator);
     SiloSummary SellAllNow(Il2CppObject* plot, const std::string& id, const char* via, bool queueNotices,
                            const custom_upgrades::ui::Receipt* plan = nullptr);
     bool OpenReceipt(Il2CppObject* plot, Il2CppObject* activator, const std::string& id,
@@ -722,6 +724,7 @@ private:
     custom_upgrades::dj::DjBuildables dj_;               // Slime DJ booth / speakers / radio (dj_buildables.h)
     custom_upgrades::radio_shop::RadioShop radioShop_;   // the Slime Radio in the shop (radio_shop.h)
     custom_upgrades::world::SiloButtons silo_;  // Sell-All Button world button
+    custom_upgrades::world::SiloButtons radioButtons_;  // Corral Radio world button (blue; opens slime_dj's menu)
     custom_upgrades::world::PlotProps props_;   // decorative props of owned tiers (plot_props.h)
     custom_upgrades::vacpack::VacpackUpgrades vacpack_;  // Fabricator vacpack upgrades (vacpack_upgrades.h)
     custom_upgrades::drones::BatterySaver battery_;      // Drone Battery Saver effect (drone_battery.h)
@@ -1088,6 +1091,7 @@ void CustomUpgrades::ResetState(const char* why) {
     drones_.ResetSeen();  // the loaded save's Hen Collector programs are mapped back at the next tick
     programs_.ResetSeen();  // and its stations' extra programs come from its sidecar
     silo_.Reset();
+    radioButtons_.Reset();
     props_.Reset();
     notices_.Clear();
     DestroySliders();  // their value callbacks belong to the old state
@@ -1288,6 +1292,7 @@ void CustomUpgrades::LoadSidecar(const std::string& game) {
     Bump();
     world_.Reset();  // world objects built before belong to another state: rebuilt from this one
     silo_.Reset();
+    radioButtons_.Reset();
     props_.Reset();
 
     // The exact .sav this game was loaded from (AutoSaveDirector.Load), if we saw it.
@@ -2154,6 +2159,10 @@ void CustomUpgrades::Cleanup(const char* why) {
         silo_.RemoveAll();
         SR2_INFO("[{}] {}: silo sell buttons removed", kModule, why);
     }
+    if (radioButtons_.Ready() && main_thread::IsMainThread()) {
+        radioButtons_.RemoveAll();
+        SR2_INFO("[{}] {}: corral radio buttons removed", kModule, why);
+    }
     if (props_.Ready() && main_thread::IsMainThread()) {
         props_.RemoveAll();
         SR2_INFO("[{}] {}: plot props removed", kModule, why);
@@ -2198,6 +2207,7 @@ void CustomUpgrades::FrameCheck(float dt) {
     }
     if (On() && SliderActive()) g_sliderGuard.Run([&] { SliderTick(dt); });
     if (On() && silo_.Ready()) g_siloGuard.Run([&] { silo_.Frame(); });  // button message (cheap when none)
+    if (On() && radioButtons_.Ready()) g_siloGuard.Run([&] { radioButtons_.Frame(); });
     if (On() && notices_.Ready()) g_siloGuard.Run([&] { notices_.Frame(dt); });  // queued sale notices
     if (On() && receipt_.IsOpen()) g_siloGuard.Run([&] { ReceiptTick(dt); });   // Sell-All receipt input
     if (On() && vacpack_.Ready()) vacpack_.Frame();  // extra vacpack slots' number keys
@@ -2359,6 +2369,14 @@ void CustomUpgrades::WorldTick() {
         for (const auto& [id, ps] : state_.plots)
             if (d && ps.type == kPlotSilo && ps.owned.count(d->key)) wanted.push_back(id);
         silo_.Tick(wanted, [&]() { return LookupDirector(); });
+    }
+    if (radioButtons_.Ready() && !sr2::core::ModuleFaulted(kModule)) {
+        // Corrals that own the Corral Radio (round 11: a blue button on the free corner opens its playlist).
+        const UpgradeDef* d = FindDef(CORRAL_RADIO);
+        std::vector<std::string> wanted;
+        for (const auto& [id, ps] : state_.plots)
+            if (d && ps.type == kPlotCorral && ps.owned.count(d->key)) wanted.push_back(id);
+        radioButtons_.Tick(wanted, [&]() { return LookupDirector(); });
     }
     if (props_.Ready() && !sr2::core::ModuleFaulted(kModule))
         props_.Tick(WantedProps(), [&]() { return LookupDirector(); });
@@ -2541,6 +2559,7 @@ SiloSummary CustomUpgrades::SellAllNow(Il2CppObject* plot, const std::string& id
 bool CustomUpgrades::OnSiloButton(Il2CppObject* activator) {
     if (!main_thread::IsMainThread()) return false;
     if (OnHenButton(activator)) return true;
+    if (OnRadioButton(activator)) return true;
     if (!silo_.IsOurs(activator)) return false;
     if (!On()) return true;  // swallowed (the button is removed with the next frame)
     if (receipt_.IsOpen()) return true;  // a receipt is up (input is locked; never expected)
@@ -2660,6 +2679,32 @@ bool CustomUpgrades::OnHenButton(Il2CppObject* activator) {
     };
     const std::string text = world_.Activate(plot, query);
     if (silo_.Ready()) silo_.Message(activator, text, text.rfind("Collecting", 0) == 0);
+    return true;
+}
+
+// The Corral Radio's button (round 11, user: "Add a button in the last empty corner (color it blue; like
+// you did for silo's button) and let the button open a menu to build a queue from"): a second
+// SiloButtons with the blue look on the corral's free corner. A press opens slime_dj's playlist menu for
+// the corral (slime_dj/api.h OpenRadioMenu); when Slime DJ can't, the reason shows above the button.
+bool CustomUpgrades::OnRadioButton(Il2CppObject* activator) {
+    if (!radioButtons_.Ready() || !radioButtons_.IsOurs(activator)) return false;
+    if (!On()) return true;  // swallowed (the button is removed with the next frame)
+    Il2CppObject* plot = radioButtons_.OwnerPlot(activator);
+    if (!plot || !radioButtons_.Press(activator)) return true;  // no corral / pressed again within 0.4 s
+    const UpgradeDef* d = FindDef(CORRAL_RADIO);
+    std::string id;
+    if (!d || !OwnsKey(plot, *d, &id)) {
+        SR2_INFO("[{}] corral radio: pressed on a corral without the Corral Radio - button removed", kModule);
+        worldAccum_ = kWorldTickSeconds;
+        return true;
+    }
+    std::string why;
+    if (sr2::modules::slime_dj::OpenRadioMenu(plot, &why)) {
+        SR2_INFO("[{}] corral radio (plot '{}'): playlist menu requested", kModule, id);
+    } else {
+        SR2_INFO("[{}] corral radio (plot '{}'): no playlist menu ({})", kModule, id, why);
+        radioButtons_.Message(activator, why, false);
+    }
     return true;
 }
 
@@ -2966,6 +3011,7 @@ bool CustomUpgrades::RemoveCustom(Il2CppObject* plot, int32_t upg, std::string& 
     if (IsWorldUpgrade(d->id) && world_.Ready())
         world_.Remove(plot, d->id == COOP_AIR_NET, d->id == COOP_HEN_COLLECTOR);
     if (d->id == SILO_SELL_ALL && silo_.Ready()) silo_.Remove(plot);
+    if (d->id == CORRAL_RADIO && radioButtons_.Ready()) radioButtons_.Remove(plot);
     worldAccum_ = kWorldTickSeconds;  // props of a sold tier go at the next frame
     notes += "custom upgrade removed (saved with the next game save)";
     SR2_INFO("[{}] {} removed from plot '{}'", kModule, d->title, id);
@@ -3483,6 +3529,11 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         }
         // The Hen Collector keeps its button only with this detour (a null Collector would NRE in vanilla).
         world_.KeepHenButton(ok);
+        // The Corral Radio's button shares the detour (optional: the Slime DJ tab edits playlists too).
+        if (std::string berr; ok && !radioButtons_.Setup(R, kModule, berr, custom_upgrades::world::RadioButtonLook())) {
+            radioButtons_ = custom_upgrades::world::SiloButtons{};
+            SR2_WARN("[{}] corral radio button unavailable ({}) - playlists only in the Slime DJ tab", kModule, berr);
+        }
         if (!ok) {
             silo_ = custom_upgrades::world::SiloButtons{};  // not Ready(): no buttons are built
             g_offActCollector = 0;

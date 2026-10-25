@@ -12,7 +12,7 @@ per-system `re/*.md` files linked below. Each `.cpp` header comment has the file
 | `api.h` | for other modules: `Owns`, `Multiplier`, `CanSell` / `Remove`, `ChainSellTarget`, per-plot / per-save values, `PlotKey`, `HiddenMenuItem`, `IsModGadget` |
 | `coop_world.cpp` | Coop Air Net, Hen Collector (clone, vacuum, Activate, ranch drone linking) |
 | `plot_menu_slider.cpp` | reusable uGUI slider for the plot menu details panel (also used by drone_price_limit) |
-| `silo_world.cpp`, `silo_receipt.cpp`, `sale_notify.cpp` | Sell-All world button, receipt dialog, HUD notices |
+| `silo_world.cpp`, `silo_receipt.cpp`, `sale_notify.cpp` | Sell-All world button (and the Corral Radio button: same class, `ButtonLook`), receipt dialog, HUD notices |
 | `plot_props.cpp` | decorative props for owned tiers |
 | `drone_source.cpp`, `drone_programs.cpp`, `drone_battery.cpp` | drone sources, several programs per station, Battery Saver effect |
 | `quantum_link.cpp`, `variant_ext.h` | Quantum Storage Link; owns the gadget-variant hooks the DJ buildables plug into |
@@ -31,7 +31,7 @@ key: `0x0002 silo_sell_all_now`, `0x0010 corral_collector_2`, `0x0011 corral_col
 | 0x0001 | `silo_sell_all` | silo | - | 10000 | Sell-All world button + receipt |
 | 0x0060..63 | `silo_capacity_2..5` | silo | Storage Capacity / previous | 3000 / 4500 / 6500 / 9000 | 300 / 400 / 500 / 600 per slot |
 | 0x0013 | `corral_music_2` | corral | Music Box | 2000 | Music Box II, 2x calming |
-| 0x0014 | `corral_radio` | corral | Music Box | 1500 | Corral Radio (slime_dj plays the corral's own playlist) |
+| 0x0014 | `corral_radio` | corral | Music Box | 1500 | Corral Radio (slime_dj plays the corral's own playlist); blue world button opens its playlist menu |
 | 0x0020 / 21 | `coop_hens_1` / `_2` | coop | - / I | 2000 / 4000 | hens lay 1.5x / 2x |
 | 0x0030 / 31 | `garden_growth_1` / `_2` | garden | Sprinkler / II | 2000 / 4000 | Sprinkler II / III, crops 1.5x / 2x (keys from the old name Fast Growth) |
 | 0x0040 | `incinerator_ash_boost` | incinerator | Ash Trough | 1500 | 2x ash |
@@ -58,7 +58,7 @@ sell_upgrades' Ash Trough fill, `slime_dj.radio`). Per-save values: `custom_upgr
 
 MinHook allows one hook per address; other modules must not hook these:
 - module.cpp: `PlortCollectorActivator.Activate` (null Collector -> never the original; Sell-All buttons,
-  Hen Collector Activate), `LandPlot.HasUpgrade` / `AddUpgrade`, `LandPlotLocation.Replace`, the menu
+  Corral Radio buttons, Hen Collector Activate), `LandPlot.HasUpgrade` / `AddUpgrade`, `LandPlotLocation.Replace`, the menu
   update / `RebuildUI` hooks.
 - quantum_link.cpp (DJ buildables via `variant_ext.h`): `SaveReferenceTranslation.GetPersistenceId`,
   `GadgetDirector.HasBlueprint` / `GetItemCount`, `GadgetDirectorHelper.HasBlueprint`,
@@ -105,6 +105,21 @@ TextButton_NoneSelectable).
   (Music Box II, Sprinkler II, Ash Booster) sells that upgrade whenever owned; a vanilla card showing
   Purchase although owned offers Sell. Logs `no Sell button: ...` (why, once per reason), `sell offer:
   card '...' (...) sells X on plot '...' for +N`.
+
+## Corral Radio button (round 11)
+
+User: "Add a button in the last empty corner (color it blue; like you did for silo's button) and let the
+button open a menu to build a queue from". `SiloButtons` takes a `ButtonLook` (clone name prefix, plot
+type, plot-local place, tint colours, material name, log name, HUD owner); the silo uses the defaults,
+`radioButtons_` uses `RadioButtonLook()`: "sr2mods_RadioButton#<gen>" on corrals that own `corral_radio`,
+at the corral's (+x, -z) corner (5.58, 1.20, -5.58), 135 deg (the ground there is free: the auto-feeder hangs
+up on that post; the other corners hold the terminal, the Music Box speaker and the plort collector button),
+blue cap material "sr2mods_blue (HDRP/Lit)" and blue palette tint on the base. Built / removed by the ~1 Hz
+tick like the silo button, removed at once when the radio is sold. A press (Activate detour ->
+`OnRadioButton`): animation + cue + 0.4 s rate limit, then slime_dj `OpenRadioMenu(plot, &why)`; a refusal
+("Slime DJ is off ...") shows as the orange world text above the button. The menu itself:
+`modules/slime_dj/NOTES.md` "Corral Radio menu". Logs `corral radio button built on plot '...'`,
+`corral radio (plot '...'): playlist menu requested` / `no playlist menu (why)`.
 
 ## Demolish clears the plot
 
