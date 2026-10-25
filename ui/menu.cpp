@@ -1479,6 +1479,7 @@ SbxGrid g_ctxGrid = SbxGrid::Vacpack;
 int g_ctxSlot = -1;  // the vacpack slot the menu was opened on (its Fill / Empty entries); -1: a grid tile
 ImVec2 g_ctxAt;      // where the menu opens (the right-click; item_grid::Result::menuAt for a grid tile)
 ImVec2 g_ctxSize;    // the menu's size as its last frame laid it out (what the next frame places it by)
+int g_ctxFrames = 0;  // frames the menu was drawn since it opened (the second, its first shown, is logged)
 constexpr const char* kSbxCtx = "##sbx_item_ctx";
 constexpr const char* kCraftCtx = "##sbx_craft_ctx";  // the crafter's right-click menu (variants)
 uintptr_t g_craftCtx = 0;                             // the recipe it was opened on
@@ -2299,6 +2300,15 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                                 ImGuiCond_Always);
     }
     if (ImGui::BeginPopup(kSbxCtx)) {
+        if (++g_ctxFrames == 2) {
+            // The first frame shown: where it went, by which size, against the size it has (round 15: a menu opened
+            // upward was reported above the cursor; this line shows whether the two sizes differ).
+            const ImGuiViewport* vp = ImGui::GetMainViewport();
+            const ImVec2 pos = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize();
+            SR2_INFO("[sandbox] item menu: at ({:.0f}, {:.0f}), placed ({:.0f}, {:.0f}) by size {:.0f} x {:.0f}, window {:.0f} x "
+                     "{:.0f}, screen {:.0f} x {:.0f}",
+                     g_ctxAt.x, g_ctxAt.y, pos.x, pos.y, g_ctxSize.x, g_ctxSize.y, sz.x, sz.y, vp->WorkSize.x, vp->WorkSize.y);
+        }
         FloatingSurface(true);
         const sbx::Item* self = FindItem(s, g_ctxItem);
         const sbx::Relation* r = FindRelation(s, g_ctxItem);
@@ -2566,7 +2576,9 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                     ImGui::EndMenu();
                 }
             }
-            if (gives.empty() && largos.empty() && self->kind != sbx::Kind::Largo) {
+            // Not for a food (round 15: "for food. when no favourites, dont show" it): the menu is just its name then.
+            if (gives.empty() && largos.empty() && self->kind != sbx::Kind::Largo && self->kind != sbx::Kind::Food &&
+                self->kind != sbx::Kind::Animal) {
                 // Wrapped at the row width, not at the window's edge: the hidden first frame lays out at width 0,
                 // where a wrapped line is as tall as its words (see the placement above).
                 FontScope f(theme::Body(), theme::kSmallSize);
@@ -2579,11 +2591,10 @@ void ItemContextMenu(const sbx::Snapshot& s) {
         }
         if (PopupCancelled()) ImGui::CloseCurrentPopup();
         {
-            // This frame's layout, which ImGui's auto-fit sizes the window by next frame: the next frame's placement.
-            const ImGuiWindow* w = ImGui::GetCurrentWindow();
-            const ImVec2 pad = ImGui::GetStyle().WindowPadding;
-            g_ctxSize = ImVec2(std::max(w->DC.CursorMaxPos.x, w->DC.IdealMaxPos.x) - w->DC.CursorStartPos.x + pad.x * 2.0f,
-                               std::max(w->DC.CursorMaxPos.y, w->DC.IdealMaxPos.y) - w->DC.CursorStartPos.y + pad.y * 2.0f);
+            // The size ImGui's auto-fit gives the window next frame, from this frame's layout: the next frame's
+            // placement. ImGui's own calculation (round 15), not content + padding: that missed the clamps (minimum
+            // size, at most the screen less its safe area, a scrollbar) and a menu opened upward sat above the cursor.
+            g_ctxSize = ImGui::CalcWindowNextAutoFitSize(ImGui::GetCurrentWindow());
         }
         ImGui::EndPopup();
     }
@@ -2594,6 +2605,7 @@ void ItemContextMenu(const sbx::Snapshot& s) {
 void OpenItemContext(uintptr_t id, SbxGrid grid, int slot = -1, const ImVec2* at = nullptr) {
     g_ctxAt = at ? *at : ImGui::IsMousePosValid() ? ImGui::GetMousePos() : ImGui::GetItemRectMin();
     g_ctxSize = ImVec2(0, 0);  // measured on the menu's first (hidden) frame
+    g_ctxFrames = 0;
     g_ctxItem = id;
     g_ctxGrid = grid;
     g_ctxSlot = slot;
