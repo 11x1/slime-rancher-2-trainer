@@ -1426,6 +1426,8 @@ void Impl::MakeLook() {
     look.name = name != unity::Field<Il2CppObject*>(base, offLocName) ? name : nullptr;
     look.description = desc != unity::Field<Il2CppObject*>(base, offDesc) ? desc : nullptr;
     look.icon = icon;
+    look.artTint = {kPurple.r, kPurple.g, kPurple.b};  // details: the Refinery Link's full art in purple (round 12)
+    look.artAmount = 0.85f;
     look.dressPreview = [this](Il2CppObject* placeholder) {
         const int n = gadget_look::TintTree(placeholder, {kPurple.r, kPurple.g, kPurple.b}, 0.6f, {kCyan.r, kCyan.g, kCyan.b},
                                             "Quantum Storage Link preview");

@@ -132,6 +132,7 @@ struct StackBox {
 constexpr StackBox kStackBox{1.2f, 1.7f, 0.9f};
 constexpr float kRadioScale = 0.26f;
 constexpr float kRadioDamping = 0.6f;  // the radio's Rigidbody linear damping (at least)
+constexpr float kIconTint = 0.7f;      // card icon / details picture: how far the base's colours go to the family's
 // The booth (BuildBooth, DressPreview): desk top height, the middle boombox's scale and depth, the seat (bench) and its top.
 constexpr float kDeskTop = 1.22f, kDeck = 0.45f, kDeckZ = 0.05f, kSeatTop = 0.72f;
 constexpr StackBox kSeat{0.0f, 0.0f, -1.8f};
@@ -1212,6 +1213,9 @@ void Impl::RegisterLooks() {
     int n = 0;
     for (int f : {kBooth, kSpeaker, kRadio}) {
         Il2CppObject* icon = fams[f].defs.empty() ? nullptr : MakeIcon(f);
+        // Round 12 ("The icons are so low quality on the right pane"): a recoloured 128 px icon stretched
+        // up; the details picture is the base's 512 px full art recoloured the same way instead.
+        const bool drawn = fams[f].iconName && sr2::ui::mod_icons::Has(fams[f].iconName);
         for (Il2CppObject* def : fams[f].defs) {
             gadget_look::Look look;
             look.name = Label(def);
@@ -1220,7 +1224,11 @@ void Impl::RegisterLooks() {
             if (f != kRadio) look.dressPreview = [this, def](Il2CppObject* placeholder) { DressPreview(def, placeholder); };
             if (icon) {
                 SetRef(def, offIcon, icon);  // the grid tile (GadgetDefinition.get_Icon)
-                look.icon = icon;            // the details picture
+                look.icon = icon;            // the details picture (until the full art is recoloured)
+                if (!drawn) {
+                    look.artTint = {fams[f].tint.r, fams[f].tint.g, fams[f].tint.b};
+                    look.artAmount = kIconTint;
+                }
             }
             gadget_look::Register(def, std::move(look));
             ++n;
@@ -1241,7 +1249,7 @@ Il2CppObject* Impl::MakeIcon(int f) {
         }
     std::string why;
     const Rgb3 t = fams[f].tint;
-    Il2CppObject* tinted = unity::IsAlive(baseIcon) ? gadget_look::TintedSprite(baseIcon, {t.r, t.g, t.b}, 0.7f, why) : nullptr;
+    Il2CppObject* tinted = unity::IsAlive(baseIcon) ? gadget_look::TintedSprite(baseIcon, {t.r, t.g, t.b}, kIconTint, why) : nullptr;
     if (tinted) SR2_INFO("[{}] dj buildables: {} card icon = the {}'s icon recoloured", module, fams[f].label, fams[f].baseName);
     else SR2_INFO("[{}] dj buildables: {} card icon = the {}'s ({})", module, fams[f].label, fams[f].baseName,
                   unity::IsAlive(baseIcon) ? why : std::string("no base icon"));
