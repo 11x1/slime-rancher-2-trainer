@@ -71,16 +71,13 @@ if ($Regen) {
   if ($LASTEXITCODE -ne 0) { throw "gen_proxy.py failed" }
 }
 
-# ---- embedded icons: ui/mod_icons_data.inc from assets/icons/*.png ----------------
-# (rewritten only when an icon was added, changed or removed; without Python the
-# committed .inc is used as is)
+# ---- embedded icons -------------------------------------------------------------
+# CMake runs assets/icons/src/gen_inc.py (build/generated/sr2mods_icons_data.inc from
+# assets/icons/*.png + the local-only assets/icons/local/*.png); hand it the Python we find.
+$iconArgs = @()
 $py = Find-Python
-if ($py) {
-  & $py (Join-Path $root 'assets\icons\src\gen_inc.py')
-  if ($LASTEXITCODE -ne 0) { throw "gen_inc.py failed" }
-} else {
-  Write-Warning "Python not found - using the committed ui/mod_icons_data.inc (new icons in assets/icons are not embedded)"
-}
+if ($py) { $iconArgs = @("-DPython3_EXECUTABLE=$py") }
+else { Write-Warning "Python not found - building without the mod's icons (vanilla icons show)" }
 
 if ($Clean -and (Test-Path $buildDir)) { Remove-Item -Recurse -Force $buildDir }
 
@@ -88,7 +85,7 @@ if ($Clean -and (Test-Path $buildDir)) { Remove-Item -Recurse -Force $buildDir }
 $autotestFlag = if ($Autotest) { 'ON' } else { 'OFF' }
 Write-Host "Test harness: $autotestFlag"
 & $cmake -S $root -B $buildDir -G Ninja "-DCMAKE_BUILD_TYPE=$Config" "-DCMAKE_MAKE_PROGRAM=$ninja" `
-  -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl "-DSR2MODS_AUTOTEST=$autotestFlag"
+  -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl "-DSR2MODS_AUTOTEST=$autotestFlag" @iconArgs
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
 # a linked worktree (agent) has its own .git file; its git dir differs from the common dir
 $gitDir = (& git -C $root rev-parse --path-format=absolute --git-dir 2>$null)

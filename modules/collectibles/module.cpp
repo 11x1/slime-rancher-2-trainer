@@ -58,9 +58,9 @@
 // depositor counter icon, the page markers' sprites (gordos, plort doors,
 // teleporters, stabilizers), or a game sprite found by name (FindNamedSprites:
 // the Slimepedia's gordo and research drone icons, the explorer drone icon for
-// ghostly drones, the Slimepedia World tile for map data nodes). Only when the
-// game has no sprite, the script-drawn placeholder (<name>_placeholder.png),
-// else the text label. Ghostly drones: iconExplorerDronePedia (user's pick),
+// ghostly drones, the Slimepedia World tile for map data nodes). When that
+// sprite is not loaded, no icon: the count (with the short label when labels
+// are off); nothing script-drawn. Ghostly drones: iconExplorerDronePedia (user's pick),
 // which lives in the drone station menu's UI scene: that scene is preloaded for
 // a moment with the game's own preload API to find it (GhostIconTick).
 // Zones: the ranch islands (Conservatory + expansions) count as one zone
@@ -1501,8 +1501,7 @@ private:
         unity::SetActive(ui_.root.get(), v);
     }
 
-    // The user's drawing for a category (assets/icons/<name>.png). "<name>_placeholder" is the
-    // script-drawn stand-in, used only where the game has no sprite.
+    // The user's drawing for a category (assets/icons/<name>.png), when one is embedded.
     static const char* ModIconName(int cat) {
         switch (cat) {
             case kGordos: return "gordo";
@@ -1722,8 +1721,8 @@ private:
 
     // The user's drawing, else the game's sprite (gordos: the Slimepedia icon before the page
     // marker, which is not recognisable at tracker size; ghostly drones: iconExplorerDronePedia,
-    // user request; otherwise counter / marker / identifiable icon, then by name), else the
-    // script-drawn placeholder, else nullptr (text label).
+    // user request; otherwise counter / marker / identifiable icon, then by name), else nullptr
+    // (no icon: the count, with the short label when labels are off).
     Il2CppObject* IconFor(int cat) {
         namespace mi = sr2::ui::mod_icons;
         const char* own = ModIconName(cat);
@@ -1733,10 +1732,6 @@ private:
         if (catIcon_[cat].Alive()) return catIcon_[cat].get();
         if (cat == kGhostDrones && ghostIcon_.Alive()) return ghostIcon_.get();
         if (namedIcon_[cat].Alive()) return namedIcon_[cat].get();
-        if (own) {
-            const std::string ph = std::string(own) + "_placeholder";
-            if (mi::Has(ph)) return mi::Get(ph);
-        }
         return nullptr;
     }
 

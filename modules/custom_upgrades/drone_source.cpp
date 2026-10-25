@@ -130,8 +130,9 @@ constexpr KindInfo kKind[kKinds] = {
     {kElderSourceType, "drone_elder_source.stations", "Elder Collector", kSourceCoop},
     {kQuantumSourceType, "drone_quantum_source.stations", "Quantum Storage Link", kSourceSilo},
 };
-// The mod's own icons of the chicken kinds (assets/icons/<name>.png, embedded when present at build
-// time; build.ps1 regenerates ui/mod_icons_data.inc). Missing -> the game's Hen / elder hen sprite.
+// The user's icons of the chicken kinds (assets/icons/local/<name>.png: edits of the game's collector
+// art, so local-only and gitignored; embedded when present at build time). Missing (a clean checkout,
+// CI) -> the game's Hen / elder hen sprite.
 constexpr const char* kOwnIcon[kQuantum] = {"hen_collector_source", "elder_collector_source"};
 int KindOf(int32_t type) {
     for (int k = 0; k < kKinds; ++k)

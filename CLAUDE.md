@@ -9,6 +9,7 @@
 | `ideas.md` | unplanned ideas |
 | `round-18.md` | round 17 test feedback, split into agent tasks |
 | `autotest.md` | automated in-game tests of skipped cases (harness in the DLL, Python client) |
+| `history-rewrite.md` | rewriting the AI/script-drawn and game-derived icons out of git history (inventory, script, steps) |
 | `custom-icons.md` | replacing script-drawn icons with the user's drawings; vanilla icons meanwhile |
 
 ## Where the documentation lives

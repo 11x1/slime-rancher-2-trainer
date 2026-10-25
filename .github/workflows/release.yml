@@ -11,9 +11,10 @@
 # since the previous tag of the same kind (preview locally: python .github/scripts/release_notes.py).
 # Assets: version.dll, version.dll.sha256, INSTALL.txt, THIRD-PARTY-NOTICES.txt. No game files.
 #
-# The build uses only what is in git: build.ps1 runs assets/icons/src/gen_inc.py, which embeds the
-# assets/icons/*.png of the checkout into ui/mod_icons_data.inc. Icons that exist only in a local
-# checkout (gitignored) are not in a release; the mod shows the game's own icon for those.
+# The build uses only what is in git: a CMake custom command runs assets/icons/src/gen_inc.py, which
+# embeds the assets/icons/*.png of the checkout into build/<cfg>/generated/sr2mods_icons_data.inc.
+# Local-only icons (assets/icons/local/, gitignored) are not in a release; the mod shows the game's
+# own icon for those.
 
 name: release
 
@@ -93,12 +94,11 @@ jobs:
           python -m pip install --disable-pip-version-check pefile
           if ($LASTEXITCODE -ne 0) { throw 'pip install pefile failed' }
 
-      - name: Embed icons (ui/mod_icons_data.inc from assets/icons/*.png)
+      - name: Python for the icon embedding (CMake runs assets/icons/src/gen_inc.py at build time)
         shell: pwsh
         run: |
-          python assets/icons/src/gen_inc.py
-          if ($LASTEXITCODE -ne 0) { throw 'gen_inc.py failed' }
-          if (-not (Test-Path ui/mod_icons_data.inc)) { throw 'ui/mod_icons_data.inc was not generated' }
+          python --version
+          if ($LASTEXITCODE -ne 0) { throw 'Python not found: the build would embed no icons' }
 
       - name: Build (Release, MSVC x64, Ninja; build.ps1 also runs verify_exports)
         shell: pwsh

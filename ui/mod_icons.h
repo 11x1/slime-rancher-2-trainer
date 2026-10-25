@@ -1,5 +1,6 @@
 #pragma once
-// The mod's own icons (assets/icons/*.png, embedded in the DLL as ui/mod_icons_data.inc)
+// The mod's own icons (assets/icons/*.png + the local-only assets/icons/local/*.png, embedded
+// in the DLL by the build: gen_inc.py -> build/generated/sr2mods_icons_data.inc)
 // as UnityEngine.Sprite objects, for game UI that shows a sprite for a mod feature
 // (custom plot upgrades, the Options "Mods" tab).
 //
