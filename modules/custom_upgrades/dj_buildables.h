@@ -49,6 +49,8 @@ public:
     bool Ready() const { return ready_; }
     // Main thread, ~1 Hz while custom upgrades are on and a save is loaded.
     void Tick();
+    // Main thread, every frame while custom upgrades are on: the Slime Radios' hold state (cheap field reads).
+    void Frame();
     // Main thread: custom upgrades off / faulted. Everything undressed, our definitions out of the
     // favourite slots, the held gadget and the variant lists.
     void Cleanup(const char* why);

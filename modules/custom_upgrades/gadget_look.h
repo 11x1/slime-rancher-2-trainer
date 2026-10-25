@@ -85,10 +85,12 @@ void AddPlacedLabel(PlacedLabel provider);  // worker or main thread, before / d
 // `what` names the object in the one log line per new shader.
 int TintTree(Il2CppObject* root, Rgb tint, float amount, Rgb glow, const char* what);
 
-// A recoloured copy of `sprite` (same size, pivot and pixels per unit): every pixel towards `tint` by
-// `amount`, keeping its brightness and alpha. The texture is copied on the GPU (Graphics.Blit into a
-// RenderTexture, Texture2D.ReadPixels), so the source needs no Read/Write flag. Kept from unloading for
-// the session. nullptr and `why` on failure.
-Il2CppObject* TintedSprite(Il2CppObject* sprite, Rgb tint, float amount, std::string& why);
+// A recoloured copy of `sprite` (same rect size, pivot and pixels per unit; a trimmed atlas sprite keeps
+// its full rect with transparent padding): every pixel towards `tint` by `amount`, keeping its brightness
+// and alpha. `square`: the rect centred on a square canvas (for UI images that stretch the sprite to a
+// square box, e.g. the drone station's source icons). The texture is copied on the GPU (Graphics.Blit
+// into a RenderTexture, Texture2D.ReadPixels), so the source needs no Read/Write flag. Kept from
+// unloading for the session. nullptr and `why` on failure.
+Il2CppObject* TintedSprite(Il2CppObject* sprite, Rgb tint, float amount, std::string& why, bool square = false);
 
 }  // namespace sr2::modules::custom_upgrades::gadget_look

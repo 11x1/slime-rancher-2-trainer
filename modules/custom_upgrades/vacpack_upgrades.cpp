@@ -56,6 +56,7 @@
 #include <cstdint>
 #include <format>
 #include <initializer_list>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -299,6 +300,8 @@ struct State {
     using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
     ObjectNewFn objectNew = nullptr;
     bool shadowIcon = false, shadowCost = false;  // the card got the Shadow slime's icon / Shadow plort cost
+    bool shadowPedia = false;  // the card got the Shadow slime's pedia entry (its details picture)
+    int shadowPediaTries = 0;
     Il2CppObject* shadowRestored = nullptr;      // AmmoModel whose stashed shadow slimes were put back (identity)
     std::string shadowPending;                   // stash entries not put back yet ("v=count;...")
     bool loggedShadowWait = false;
@@ -1042,11 +1045,49 @@ const Ours* ShadowOurs() {
     return nullptr;
 }
 
+// The card's details picture: PlayerUpgradeFabricatableItem.get_FullArtReference / get_RequiresFullArt read
+// the UpgradeDefinition's _pediaEntry (UpgradeDefinition.get_FullArtReference 0x99A410), and the clone kept
+// Tank Booster's, so the Fabricator showed the vac tank art (round 11: "shows the vac slot amount in one stack
+// icon not the shadow catcher"). The Shadow slime's own pedia entry (PediaDirector.GetEntry, an
+// IdentifiablePediaEntry whose art is the slime's _fullArt / icon) replaces it, as the Battery Saver takes the
+// Drone Station's.
+void ShadowPedia(Il2CppObject* def, Il2CppObject* shadow) {
+    Resolver& R = Resolver::Get();
+    static Il2CppClass* scK = R.Class("Assembly-CSharp", "", "SceneContext");
+    static Il2CppClass* pdK = R.Class("Assembly-CSharp", "", "PediaDirector");
+    static const MethodInfo* inst = [] {
+        const auto& a = api();
+        for (Il2CppClass* c = scK; c; c = a.il2cpp_class_get_parent ? a.il2cpp_class_get_parent(c) : nullptr)
+            if (const MethodInfo* m = Resolver::Get().Method(c, "get_Instance", 0)) return m;
+        return static_cast<const MethodInfo*>(nullptr);
+    }();
+    static const std::optional<size_t> offPd = scK ? R.FieldOffset(scK, "<PediaDirector>k__BackingField") : std::nullopt;
+    static const MethodInfo* getEntry = pdK ? R.Method(pdK, "GetEntry", 1) : nullptr;
+    if (!inst || !offPd || !getEntry) {
+        g.shadowPedia = true;
+        SR2_WARN("[{}] vacpack: Shadow Catcher keeps Tank Booster's card picture (PediaDirector.GetEntry not found)", kModule);
+        return;
+    }
+    bool ok = false;
+    Il2CppObject* sc = Invoke(inst, nullptr, {}, "SceneContext.Instance", &ok);
+    Il2CppObject* pd = ok && unity::IsAlive(sc) ? unity::Field<Il2CppObject*>(sc, *offPd) : nullptr;
+    Il2CppObject* entry = unity::IsAlive(pd) ? Invoke(getEntry, pd, {shadow}, "PediaDirector.GetEntry", &ok) : nullptr;
+    if (!unity::IsAlive(entry)) {
+        if (++g.shadowPediaTries < 30) return;  // the scene's PediaDirector may come later
+        g.shadowPedia = true;
+        SR2_WARN("[{}] vacpack: Shadow Catcher keeps Tank Booster's card picture (no pedia entry for the Shadow slime)", kModule);
+        return;
+    }
+    g.shadowPedia = true;
+    SetRef(def, g.offUdPedia, entry);
+    SR2_INFO("[{}] vacpack: Shadow Catcher card picture = the Shadow slime's pedia entry '{}'", kModule, unity::GetName(entry));
+}
+
 // The card takes the Shadow slime's icon, and its first refinery item becomes 25 Shadow plorts, once
 // shadow_catcher.cpp found the Shadow slime (it may come after the card was made).
 void PatchShadowCard() {
     const Ours* o = ShadowOurs();
-    if (!o || (g.shadowIcon && g.shadowCost)) return;
+    if (!o || (g.shadowIcon && g.shadowCost && g.shadowPedia)) return;
     Il2CppObject* shadow = shadow::ShadowType();
     Il2CppObject* plort = shadow::ShadowPlort();
     if (!shadow) return;
@@ -1059,6 +1100,7 @@ void PatchShadowCard() {
                  unity::IsAlive(icon) ? std::format("the Shadow slime's icon '{}'", unity::GetName(icon))
                                       : std::string("Tank Booster's icon (the Shadow slime has none)"));
     }
+    if (!g.shadowPedia) ShadowPedia(o->def, shadow);
     if (!g.shadowCost && plort) {
         g.shadowCost = true;
         Il2CppObject* lvl = LevelAt(o->def, 0);

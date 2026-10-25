@@ -175,3 +175,10 @@ Patch data instead of hooking a shared getter. Small getters may also be inlined
 - mod: ui/modded_label.cpp, ui/options_tab.cpp, modules/minimap (placement via ui/hud_edit)
 
 ---
+
+## From round 11 (custom_upgrades buildables, debug_tools)
+
+- Sprites: a tightly packed / trimmed atlas sprite has `textureRect` smaller than `rect`; `textureRectOffset` is where the trimmed pixels sit in the rect. A copy of only `textureRect` is a different shape and a UI Image that stretches to its box draws it wider or taller (the Quantum Storage Link's tinted drone source icon). gadget_look.cpp `TintedSprite` copies into the full rect (`Texture2D.ReadPixels(rect, destX, destY)` at the offset) and can pad to a square.
+- `ParticleSystem.MainModule` is a struct `{ParticleSystem m_ParticleSystem}`; its getters / setters are icalls taking a pointer to that struct (`il2cpp_resolve_icall("UnityEngine.ParticleSystem/MainModule::get_scalingMode()")`, called with `&ps`). Scaling mode Local (1) = a system uses only its own transform's scale, so scaling a cloned FX root does not shrink its child systems (quantum_link.cpp `ScaleParticles`).
+- `PhysicsMaterial` (Unity 6 name; PhysicsModule): `new PhysicsMaterial(string)`, `set_dynamicFriction` / `set_staticFriction` / `set_bounciness` / `set_frictionCombine` / `set_bounceCombine` (PhysicsMaterialCombine Average 0, Minimum 2, Multiply 1, Maximum 3); `Collider.sharedMaterial`. `Rigidbody.linearDamping` (`drag` is the same body). Used by dj_buildables.cpp for the Slime Radio.
+- `Physics.OverlapSphere(Vector3, float, int layerMask, QueryTriggerInteraction)` 0x3511930 returns a new Collider[]: a physics query, fine every 0.5 s (debug_tools hitboxes.cpp). `Collider.get_bounds` = world AABB; `Transform.get_localToWorldMatrix` is column-major like Matrix4x4 memory.

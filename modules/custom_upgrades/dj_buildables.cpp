@@ -35,8 +35,8 @@
 //     persistence id, like the Quantum Storage Link.
 //   * Fabricator cards after the vanilla card (booth after the Scientist Desk, speaker and radio after the
 //     Boombox). Unlocked with the base's blueprint (the radio with the Boombox's).
-//   * Dressing a listed, loaded actor: booth = clutter hidden, a boombox lying face up on the desk (the
-//     deck), two small ones on the front corners, two big boomboxes on the floor beside it (emitters), a
+//   * Dressing a listed, loaded actor: booth = clutter hidden, a boombox upright in the middle of the desk,
+//     two small ones on the front corners, two big boomboxes on the floor beside it (emitters), a
 //     bench with the flower pillow and the game's slime attachment point behind it (largos allowed), E on
 //     the desk root; speaker = bench and boombox hidden, a stack of two boomboxes with one box collider, stacking allowed on top, an emitter; radio = the night light hidden,
 //     a small boombox instead, upright and box-shaped, an emitter. Every clone is script-free except the
@@ -96,6 +96,7 @@
 #include "modules/custom_upgrades/gadget_look.h"
 #include "modules/custom_upgrades/variant_ext.h"
 #include "modules/slime_dj/api.h"
+#include "ui/mod_icons.h"
 
 namespace sr2::modules::custom_upgrades::dj {
 namespace {
@@ -130,8 +131,9 @@ struct StackBox {
 };
 constexpr StackBox kStackBox{1.2f, 1.7f, 0.9f};
 constexpr float kRadioScale = 0.26f;
-// The booth (BuildBooth, DressPreview): desk top height, the deck boombox's scale, the seat (bench) and its top.
-constexpr float kDeskTop = 1.22f, kDeck = 0.45f, kSeatTop = 0.72f;
+constexpr float kRadioDamping = 0.6f;  // the radio's Rigidbody linear damping (at least)
+// The booth (BuildBooth, DressPreview): desk top height, the middle boombox's scale and depth, the seat (bench) and its top.
+constexpr float kDeskTop = 1.22f, kDeck = 0.45f, kDeckZ = 0.05f, kSeatTop = 0.72f;
 constexpr StackBox kSeat{0.0f, 0.0f, -1.8f};
 
 struct Vec3 {
@@ -144,14 +146,6 @@ struct Color {
     float r, g, b, a;
 };
 
-Quat Mul(const Quat& a, const Quat& b) {
-    return {a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y, a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
-            a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
-}
-Quat AxisX(float deg) {
-    const float h = deg * 3.14159265f / 360.0f;
-    return {std::sin(h), 0.0f, 0.0f, std::cos(h)};
-}
 Quat AxisY(float deg) {
     const float h = deg * 3.14159265f / 360.0f;
     return {0.0f, std::sin(h), 0.0f, std::cos(h)};
@@ -192,12 +186,17 @@ constexpr VariantSpec kRadioSpec = {
     "A little radio toy, a tiny speaker stack, that plays your Slime DJ song wherever it goes; slimes love to play "
     "with it. Fabricating one drops it right in front of you. Needs the Boombox blueprint."};
 
+struct Rgb3 {
+    float r, g, b;
+};
 struct Family {
     const char* label;
     const char* kitsKey;
     const char* actorsKey;
     const char* id;        // buildables.h id (sidecar override key)
     const char* baseName;  // the vanilla base's display name (unlock hint)
+    const char* iconName;  // assets/icons/<name>.png: the user's drawing when embedded (custom-icons.md)
+    Rgb3 tint;             // else the base's icon recoloured towards this
     Il2CppObject* base = nullptr;          // vanilla definition
     std::vector<Il2CppObject*> defs;       // our definitions (variants; radio: the card)
     Color c1{}, c2{};
@@ -227,7 +226,7 @@ struct Impl : variant_ext::Extension {
     Il2CppClass* fabItemClass = nullptr, *gameObjectClass = nullptr, *monoClass = nullptr, *colliderClass = nullptr;
     Il2CppClass* rigidbodyClass = nullptr, *jointClass = nullptr, *animatorClass = nullptr, *musicPlayerClass = nullptr;
     Il2CppClass* uiClass = nullptr, *attachClass = nullptr, *boxColliderClass = nullptr, *sphereColliderClass = nullptr;
-    Il2CppClass* sectrSourceClass = nullptr;
+    Il2CppClass* sectrSourceClass = nullptr, *vacuumableClass = nullptr, *physMatClass = nullptr;
     // offsets
     size_t offLocName = 0, offPrefab = 0, offIcon = 0, offRefId = 0, offHashInit = 0, offDesc = 0, offCosts = 0, offVariantOf = 0;
     size_t offGrad1 = 0, offGrad2 = 0, offLinked = 0, offPcCurrency = 0, offPcIdent = 0, offCostAmount = 0;
@@ -240,6 +239,7 @@ struct Impl : variant_ext::Extension {
     size_t offGmpMusic = 0, offGmpCue = 0, offGmpCooldown = 0, offGmpNext = 0, offGdCurrentPlayer = 0;
     size_t offUiPrompt = 0, offUiInput = 0, offUiBlock = 0, offUiDeactivate = 0;
     size_t offApAllowLargo = 0, offApSlime = 0, offApJointActive = 0, offApSpin = 0;
+    size_t offVacHeld = 0;
     size_t offSrcVolume = 0, offSrcPitch = 0, offSrcCue = 0, offSrcLoop = 0, offSrcPlayOnStart = 0, offSrcRestart = 0;
     // methods
     const MethodInfo* sceneInst = nullptr, *gameCtxInst = nullptr, *getRefId = nullptr, *setHideFlags = nullptr;
@@ -257,6 +257,10 @@ struct Impl : variant_ext::Extension {
     const MethodInfo* boxGetCenter = nullptr, *boxSetCenter = nullptr, *boxGetSize = nullptr, *boxSetSize = nullptr;
     const MethodInfo* sphereGetRadius = nullptr, *sphereSetRadius = nullptr, *rbGetConstraints = nullptr, *rbSetConstraints = nullptr;
     const MethodInfo* trGetEuler = nullptr, *trSetEuler = nullptr;
+    const MethodInfo* rbGetDamping = nullptr, *rbSetDamping = nullptr, *colGetMat = nullptr, *colSetMat = nullptr;
+    const MethodInfo* pmCtor = nullptr, *pmSetDyn = nullptr, *pmSetStatic = nullptr, *pmSetBounce = nullptr,
+                      *pmSetFricCombine = nullptr, *pmSetBounceCombine = nullptr;
+    Il2CppObject* radioMat = nullptr;  // our high-friction physics material for the radio's box (session object)
     const MethodInfo* onInteractMi = nullptr, *showDeactMi = nullptr, *getPlotPrefab = nullptr;
     FieldInfo* animHashField = nullptr;
     using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
@@ -268,9 +272,9 @@ struct Impl : variant_ext::Extension {
 
     // session objects (pinned, never freed)
     Family fams[kFamCount] = {
-        {"DJ Booth", "dj.booth_kits", "dj.booths", buildables::kDjBooth, "Scientist Desk"},
-        {"DJ Speaker Stack", "dj.speaker_kits", "dj.speakers", buildables::kDjSpeaker, "Boombox"},
-        {"Slime Radio", nullptr, kRadiosKey, buildables::kSlimeRadio, "Boombox"},
+        {"DJ Booth", "dj.booth_kits", "dj.booths", buildables::kDjBooth, "Scientist Desk", "dj_booth", {0.95f, 0.2f, 0.75f}},
+        {"DJ Speaker Stack", "dj.speaker_kits", "dj.speakers", buildables::kDjSpeaker, "Boombox", "dj_speaker", {1.0f, 0.55f, 0.1f}},
+        {"Slime Radio", nullptr, kRadiosKey, buildables::kSlimeRadio, "Boombox", "slime_radio", {0.15f, 0.8f, 1.0f}},
     };
     Il2CppObject* boomboxPrefab = nullptr, *pillowPrefab = nullptr, *toyDef = nullptr, *toyPrefab = nullptr;
     // The corral Music Box's own tune (round 9: "dj booth isnt playing standby music when no slime & activated (the
@@ -326,8 +330,13 @@ struct Impl : variant_ext::Extension {
         int spin = -1;                         // booth: spin applied (-1 = none yet)
         Il2CppObject* standby = nullptr;       // booth: our copy of the corral music box's SECTR audio source
         bool standbyOn = false;                // booth: Play() was called on it
-        Il2CppObject* rb = nullptr;            // radio: the toy's Rigidbody (rotation frozen)
+        Il2CppObject* rb = nullptr;            // radio: the toy's Rigidbody (rotation frozen while not held)
         int32_t rbWas = 0;
+        float dampWas = -1.0f;                 // radio: its linear damping before ours (-1 = untouched)
+        Il2CppObject* vac = nullptr;           // radio: the toy's Vacuumable (_held read every frame)
+        int held = -1;                         // radio: hold state applied (-1 = none yet)
+        Il2CppObject* matWas = nullptr;        // radio: the box collider's shared physics material before ours
+        bool matSet = false;
         Il2CppObject* sphere = nullptr;        // radio: the toy's ball collider (off)
         Il2CppObject* box = nullptr;           // radio: the toy's box collider (made the radio's size)
         Vec3 boxCenterWas{}, boxSizeWas{};
@@ -622,10 +631,14 @@ struct Impl : variant_ext::Extension {
     Il2CppObject* BuildStack(Rec& rec, Il2CppObject* parent, Vec3 at, float s, int* built);
     void BuildSpeaker(Rec& rec, std::string& what);
     void BuildRadio(Rec& rec, std::string& what);
+    void RadioHeld(Rec& rec, bool held);
+    Il2CppObject* RadioMaterial();
+    void FrameRadios();
     void AddBoothInteraction(Rec& rec);
     bool Build(int64_t id, Il2CppObject* root, Rec& rec);
     void Undress(Rec& rec, bool restore);
     void DropRec(int64_t id, bool restore);
+    void DressNow(int64_t id, Il2CppObject* gadget, int fam, int kind);
     // E / music state
     std::set<int64_t> OnIds();
     void SetOn(int64_t id, bool on);
@@ -668,6 +681,7 @@ struct Impl : variant_ext::Extension {
 
     // ---- gadget mode (gadget_look.h): the ghost and the label ----
     void RegisterLooks();
+    Il2CppObject* MakeIcon(int f);
     void DressPreview(Il2CppObject* def, Il2CppObject* placeholder);
     void SetLayerRecursive(Il2CppObject* goOrComp, int layer);
     Il2CppObject* Label(Il2CppObject* def);
@@ -1014,6 +1028,24 @@ void Impl::AfterPlace(Il2CppObject* gadgetItem, const variant_ext::PlaceCtx& ctx
     SetKits(ctx.family, kits - 1);
     SR2_INFO("[{}] dj buildables: {} placed (actor {}, kind {}, saved as '{}'; {} kit(s) left)", module, fams[ctx.family].label,
              id, ctx.kind, unity::GetName(fams[ctx.family].base), std::max(kits - 1, 0));
+    DressNow(id, last, ctx.family, ctx.kind);
+}
+
+// Dressed right away (placement / toggle), not at the next ~1 Hz tick: round 11 "on placement have to wait a
+// second for it to be the correct model". Scan keeps the record (same root, kind and a live holder).
+void Impl::DressNow(int64_t id, Il2CppObject* gadget, int fam, int kind) {
+    Il2CppObject* go = unity::IsAlive(gadget) ? unity::GameObjectOf(gadget) : nullptr;
+    if (!go || !defsBuilt) return;
+    DropRec(id, true);
+    Rec rec;
+    rec.fam = fam;
+    rec.kind = kind;
+    if (Build(id, go, rec)) {
+        recs[id] = std::move(rec);
+        Apply(recs[id]);
+    } else {
+        Undress(rec, true);
+    }
 }
 
 bool Impl::BeforePickup(Il2CppObject*, Il2CppObject* gadget) {
@@ -1053,6 +1085,7 @@ void Impl::ChangeVariant(Il2CppObject* gadget, Il2CppObject* variant) {
         if (kind + 1 < static_cast<int>(fams[f].defs.size())) {
             List(f, id, kind + 1);
             SR2_INFO("[{}] dj buildables: actor {} is now '{}'", module, id, unity::GetName(fams[f].defs[kind + 1]));
+            DressNow(id, gadget, f, kind + 1);
         } else {
             Unlist(f, id);
             SetKits(f, kits + 1);
@@ -1064,6 +1097,7 @@ void Impl::ChangeVariant(Il2CppObject* gadget, Il2CppObject* variant) {
         SetKits(f, kits - 1);
         SR2_INFO("[{}] dj buildables: '{}' (actor {}) turned into a {} ({} kit(s) left)", module, unity::GetName(fams[f].base), id,
                  fams[f].label, kits - 1);
+        DressNow(id, gadget, f, 0);
     } else {
         SR2_INFO("[{}] dj buildables: no {} kit left - actor {} stays as it is", module, fams[f].label, id);
     }
@@ -1163,17 +1197,42 @@ void Impl::RegisterLooks() {
         return;
     }
     int n = 0;
-    for (int f : {kBooth, kSpeaker})
+    for (int f : {kBooth, kSpeaker, kRadio}) {
+        Il2CppObject* icon = fams[f].defs.empty() ? nullptr : MakeIcon(f);
         for (Il2CppObject* def : fams[f].defs) {
             gadget_look::Look look;
             look.name = Label(def);
             Il2CppObject* desc = unity::Field<Il2CppObject*>(def, offDesc);
             look.description = desc != unity::Field<Il2CppObject*>(fams[f].base, offDesc) && IsA(desc, lsClass) ? desc : nullptr;
-            look.dressPreview = [this, def](Il2CppObject* placeholder) { DressPreview(def, placeholder); };
+            if (f != kRadio) look.dressPreview = [this, def](Il2CppObject* placeholder) { DressPreview(def, placeholder); };
+            if (icon) {
+                SetRef(def, offIcon, icon);  // the grid tile (GadgetDefinition.get_Icon)
+                look.icon = icon;            // the details picture
+            }
             gadget_look::Register(def, std::move(look));
             ++n;
         }
-    SR2_INFO("[{}] dj buildables: gadget looks registered for {} definition(s) (label, card text, dressed preview)", module, n);
+    }
+    SR2_INFO("[{}] dj buildables: gadget looks registered for {} definition(s) (label, card text, icon, dressed preview)", module, n);
+}
+
+// The Fabricator card icon (round 11: "fabricator icon is still the default"): the user's drawing
+// (assets/icons/<iconName>.png) when embedded, else the base's vanilla icon recoloured in the family's
+// colour (never generated art: custom-icons.md). nullptr: the base's icon stays.
+Il2CppObject* Impl::MakeIcon(int f) {
+    Il2CppObject* baseIcon = offIcon ? unity::Field<Il2CppObject*>(fams[f].base, offIcon) : nullptr;
+    if (fams[f].iconName && sr2::ui::mod_icons::Has(fams[f].iconName))
+        if (Il2CppObject* own = sr2::ui::mod_icons::Get(fams[f].iconName, unity::IsAlive(baseIcon) ? baseIcon : nullptr)) {
+            SR2_INFO("[{}] dj buildables: {} card icon = the mod icon '{}'", module, fams[f].label, fams[f].iconName);
+            return own;
+        }
+    std::string why;
+    const Rgb3 t = fams[f].tint;
+    Il2CppObject* tinted = unity::IsAlive(baseIcon) ? gadget_look::TintedSprite(baseIcon, {t.r, t.g, t.b}, 0.7f, why) : nullptr;
+    if (tinted) SR2_INFO("[{}] dj buildables: {} card icon = the {}'s icon recoloured", module, fams[f].label, fams[f].baseName);
+    else SR2_INFO("[{}] dj buildables: {} card icon = the {}'s ({})", module, fams[f].label, fams[f].baseName,
+                  unity::IsAlive(baseIcon) ? why : std::string("no base icon"));
+    return tinted;
 }
 
 // GameObject.layer of `goOrComp` and everything under it.
@@ -1209,7 +1268,7 @@ void Impl::DressPreview(Il2CppObject* def, Il2CppObject* placeholder) {
             parts += CloneBoombox(tmp, holder, {side * 1.75f, 0.0f, 0.1f}, AxisY(-side * 12.0f), 1.35f) ? 1 : 0;
             parts += CloneBoombox(tmp, holder, {side * 0.8f, kDeskTop, 0.3f}, AxisY(-side * 12.0f), 0.4f) ? 1 : 0;
         }
-        parts += CloneBoombox(tmp, holder, {0.0f, kDeskTop + 0.3f * kDeck, -0.2f}, Mul(AxisY(180.0f), AxisX(-90.0f)), kDeck) ? 1 : 0;
+        parts += CloneBoombox(tmp, holder, {0.0f, kDeskTop, kDeckZ}, {0, 0, 0, 1}, kDeck) ? 1 : 0;
         if (Il2CppObject* src = boomboxPrefab ? Find(boomboxPrefab, "ranchHouseBench") : nullptr) {
             Il2CppObject* bench = unity::Instantiate(src, unity::TransformOf(holder));
             if (unity::IsAlive(bench)) {
@@ -1265,10 +1324,9 @@ void Impl::BuildBooth(Rec& rec, std::string& what) {
     int parts = 0;
     for (float side : {-1.0f, 1.0f})
         parts += CloneBoombox(rec, holder, {side * 0.8f, kTop, 0.3f}, AxisY(-side * 12.0f), 0.4f) ? 1 : 0;
-    // The DJ's deck: a boombox lying face up in the middle (its two speaker cones are the turntables),
-    // its handle towards the audience. Lying back turns its height towards -z (yaw 180: +z) and its depth
-    // downwards, so it is lifted by its half depth and starts 0.2 m behind the middle.
-    parts += CloneBoombox(rec, holder, {0.0f, kTop + 0.3f * kDeck, -0.2f}, Mul(AxisY(180.0f), AxisX(-90.0f)), kDeck) ? 1 : 0;
+    // The middle speaker: upright on the desk, facing the audience like the others. It used to lie face up as
+    // a "deck" (round 11: "the middle small speaker is looking up").
+    parts += CloneBoombox(rec, holder, {0.0f, kTop, kDeckZ}, {0, 0, 0, 1}, kDeck) ? 1 : 0;
     // The DJ's seat: the Boombox's bench (its colliders kept) with the Flower Pillow on top - mesh,
     // colliders and the game's slime attachment point with its scripts - so the slime sits high enough to
     // be seen over the desk. Largos allowed (larger trigger), far enough back not to clip into the desk.
@@ -1512,8 +1570,90 @@ void Impl::BuildRadio(Rec& rec, std::string& what) {
         if (ok) Keep(rec, rec.sphere);
         else rec.sphere = nullptr;
     }
-    what = std::format("night light {}, stack of {} boombox(es), upright {}, box collider {}", rec.hidden.empty() ? "not found" : "hidden",
-                       built, rec.rb ? "yes" : "no", rec.sphere ? "yes" : "no");
+    // Round 11: "It slides so much when moved". The toy's ball had the toy's slippery material and no
+    // damping; the box gets a high-friction, non-bouncy material and some linear damping.
+    if (rec.box) {
+        bool got = false;
+        if (Il2CppObject* mat = RadioMaterial()) {
+            rec.matWas = Call(colGetMat, rec.box, {}, "Collider.get_sharedMaterial", &got);
+            if (got) Call(colSetMat, rec.box, {mat}, "Collider.set_sharedMaterial", &got);
+            rec.matSet = got;
+            if (got && rec.matWas) Keep(rec, rec.matWas);
+        }
+    }
+    if (rec.rb && rbGetDamping && rbSetDamping) {
+        bool got = false;
+        const float was = Value<float>(Call(rbGetDamping, rec.rb, {}, "Rigidbody.get_linearDamping", &got));
+        if (got) {
+            float d = std::max(was, kRadioDamping);
+            Call(rbSetDamping, rec.rb, {&d}, "Rigidbody.set_linearDamping", &got);
+            if (got) rec.dampWas = was;
+        }
+    }
+    // Round 11: "it disappears after vaccing for 1-2 secs". Held at the nozzle, the vacuum's lock joint turns
+    // the toy to face the player (VacuumItem.UpdateHeld); with rotation X / Z frozen the joint fought the
+    // constraints and threw the radio away. FrameRadios frees the rotation while Vacuumable._held is set.
+    if ((rec.vac = vacuumableClass ? unity::GetComponent(rec.root, vacuumableClass) : nullptr) != nullptr) Keep(rec, rec.vac);
+    what = std::format("night light {}, stack of {} boombox(es), upright {}, box collider {}, grip {}, hold watch {}",
+                       rec.hidden.empty() ? "not found" : "hidden", built, rec.rb ? "yes" : "no", rec.sphere ? "yes" : "no",
+                       rec.matSet ? "yes" : "no", rec.vac && offVacHeld ? "yes" : "no");
+}
+
+// The radio's physics material (made once): grippy, no bounce; of two touching colliders the higher friction
+// and the lower bounce win.
+Il2CppObject* Impl::RadioMaterial() {
+    if (radioMat && unity::IsAlive(radioMat)) return radioMat;
+    if (!physMatClass || !pmCtor || !colSetMat || !colGetMat) return nullptr;
+    Il2CppObject* m = objectNew(physMatClass);
+    bool ok = false;
+    if (m) Call(pmCtor, m, {unity::NewString("sr2dj radio grip")}, "PhysicsMaterial..ctor", &ok);
+    if (!ok || !unity::IsAlive(m) || !unity::NewGCHandle(m)) return nullptr;
+    float dyn = 0.9f, stat = 1.0f, bounce = 0.0f;
+    int32_t maxCombine = 3, minCombine = 2;  // PhysicsMaterialCombine.Maximum / Minimum
+    Call(pmSetDyn, m, {&dyn}, "PhysicsMaterial.set_dynamicFriction");
+    Call(pmSetStatic, m, {&stat}, "PhysicsMaterial.set_staticFriction");
+    Call(pmSetBounce, m, {&bounce}, "PhysicsMaterial.set_bounciness");
+    Call(pmSetFricCombine, m, {&maxCombine}, "PhysicsMaterial.set_frictionCombine");
+    Call(pmSetBounceCombine, m, {&minCombine}, "PhysicsMaterial.set_bounceCombine");
+    radioMat = m;
+    return m;
+}
+
+// Held in the vacuum: rotation free (the lock joint turns it). Let go: upright again, X / Z frozen.
+void Impl::RadioHeld(Rec& rec, bool held) {
+    rec.held = held ? 1 : 0;
+    if (!rec.rb || !unity::IsAlive(rec.rb)) return;
+    bool ok = false;
+    if (held) {  // only our two bits off: whatever else the vacuum set stays
+        int32_t c = Value<int32_t>(Call(rbGetConstraints, rec.rb, {}, "Rigidbody.get_constraints", &ok));
+        if (ok && (c & (16 | 64)) != 0) {
+            c &= ~(16 | 64);
+            Call(rbSetConstraints, rec.rb, {&c}, "Rigidbody.set_constraints", &ok);
+        }
+    } else {
+        Il2CppObject* tr = unity::TransformOf(rec.root);
+        bool got = false;
+        Vec3 e = Value<Vec3>(Call(trGetEuler, tr, {}, "Transform.get_eulerAngles", &got));
+        if (got && (std::fabs(e.x) > 0.01f || std::fabs(e.z) > 0.01f)) {
+            e.x = 0.0f, e.z = 0.0f;
+            Call(trSetEuler, tr, {&e}, "Transform.set_eulerAngles");
+        }
+        int32_t c = rec.rbWas | 16 | 64;
+        Call(rbSetConstraints, rec.rb, {&c}, "Rigidbody.set_constraints", &ok);
+    }
+}
+
+void Impl::FrameRadios() {
+    if (!offVacHeld) return;
+    for (auto& [id, rec] : recs) {
+        if (rec.fam != kRadio || !rec.vac || !unity::IsAlive(rec.vac)) continue;
+        const bool held = unity::Field<bool>(rec.vac, offVacHeld);
+        if (rec.held == (held ? 1 : 0)) continue;
+        if (rec.held >= 0 || held)
+            SR2_INFO("[{}] dj buildables: Slime Radio actor {} {}", module, id, held ? "held in the vacuum (rotation free)" : "let go (upright)");
+        RadioHeld(rec, held);
+        if (Faulted()) return;
+    }
 }
 
 bool Impl::Build(int64_t id, Il2CppObject* root, Rec& rec) {
@@ -1561,7 +1701,11 @@ void Impl::Undress(Rec& rec, bool restore) {
         for (Il2CppObject* go : rec.hidden)
             if (unity::IsAlive(go)) unity::SetActive(go, true);
         if (unity::IsAlive(rec.gadget)) unity::Field<bool>(rec.gadget, offStackTop) = rec.stackWas;
-        if (unity::IsAlive(rec.rb)) Call(rbSetConstraints, rec.rb, {&rec.rbWas}, "Rigidbody.set_constraints", &ok);
+        if (unity::IsAlive(rec.rb)) {
+            Call(rbSetConstraints, rec.rb, {&rec.rbWas}, "Rigidbody.set_constraints", &ok);
+            if (rec.dampWas >= 0.0f) Call(rbSetDamping, rec.rb, {&rec.dampWas}, "Rigidbody.set_linearDamping", &ok);
+        }
+        if (rec.matSet && unity::IsAlive(rec.box)) Call(colSetMat, rec.box, {rec.matWas}, "Collider.set_sharedMaterial", &ok);
         if (unity::IsAlive(rec.box)) {
             Call(boxSetCenter, rec.box, {&rec.boxCenterWas}, "BoxCollider.set_center", &ok);
             Call(boxSetSize, rec.box, {&rec.boxSizeWas}, "BoxCollider.set_size", &ok);
@@ -1666,7 +1810,7 @@ void Impl::Dance(Rec& rec, bool on) {
 // a slime sits behind the desk), else the Boombox's own track as filler.
 void Impl::Apply(Rec& rec) {
     if (rec.fam == kRadio || !rec.player || !unity::IsAlive(rec.player)) {
-        if (rec.rb && unity::IsAlive(rec.rb)) {  // the vacuum may have reset the constraints
+        if (rec.rb && rec.held != 1 && unity::IsAlive(rec.rb)) {  // the vacuum may have reset the constraints
             bool ok = false;
             int32_t c = Value<int32_t>(Call(rbGetConstraints, rec.rb, {}, "Rigidbody.get_constraints", &ok));
             if (ok && (c & (16 | 64)) != (16 | 64)) {
@@ -2099,6 +2243,8 @@ bool DjBuildables::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& 
     p->boxColliderClass = cls(kPhysics, "UnityEngine", "BoxCollider");
     p->sphereColliderClass = cls(kPhysics, "UnityEngine", "SphereCollider");
     p->sectrSourceClass = cls(kImage, "", "SECTR_AudioSource");
+    p->vacuumableClass = R.Class(kImage, "MonomiPark.SlimeRancher", "Vacuumable");  // optional: radio hold watch
+    p->physMatClass = R.Class(kPhysics, "UnityEngine", "PhysicsMaterial");         // optional: radio grip
     Il2CppClass* baseUi = cls(kImage, "MonomiPark.SlimeRancher.UI", "BaseUIInteractable");
     Il2CppClass* fabCategory = cls(kImage, kFab, "GadgetFabricateCategory");
     Il2CppClass* gadgetDir = cls(kImage, "", "GadgetDirector");
@@ -2183,7 +2329,9 @@ bool DjBuildables::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& 
     if (!why.empty()) return fail();
     for (size_t* o : {&p->offPcCurrency, &p->offPcIdent})  // value-type field offsets include the object header
         *o = *o >= 2 * sizeof(void*) ? *o - 2 * sizeof(void*) : *o;
-    p->animHashField = R.Field(p->musicPlayerClass, "_gadgetActive", nullptr);  // optional (no dance without it)
+    p->animHashField = R.Field(p->musicPlayerClass, "_gadgetActive", nullptr);
+    if (p->vacuumableClass)  // optional: without it the radio's rotation stays frozen while held
+        if (auto o = R.FieldOffset(p->vacuumableClass, "_held")) p->offVacHeld = *o;  // optional (no dance without it)
 
     p->sceneInst = method(parentOf(sceneCtx), "get_Instance", 0);
     p->gameCtxInst = method(parentOf(gameCtx), "get_Instance", 0);
@@ -2238,6 +2386,19 @@ bool DjBuildables::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& 
     p->rbSetConstraints = method(p->rigidbodyClass, "set_constraints", 1);
     p->trGetEuler = method(transform, "get_eulerAngles", 0);
     p->trSetEuler = method(transform, "set_eulerAngles", 1);
+    // optional (the radio's grip): damping, collider material, PhysicsMaterial
+    p->rbGetDamping = R.Method(p->rigidbodyClass, "get_linearDamping", 0);
+    p->rbSetDamping = R.Method(p->rigidbodyClass, "set_linearDamping", 1);
+    p->colGetMat = R.Method(p->colliderClass, "get_sharedMaterial", 0);
+    p->colSetMat = R.Method(p->colliderClass, "set_sharedMaterial", 1);
+    if (p->physMatClass) {
+        p->pmCtor = R.MethodByParams(p->physMatClass, ".ctor", {"System.String"});
+        p->pmSetDyn = R.Method(p->physMatClass, "set_dynamicFriction", 1);
+        p->pmSetStatic = R.Method(p->physMatClass, "set_staticFriction", 1);
+        p->pmSetBounce = R.Method(p->physMatClass, "set_bounciness", 1);
+        p->pmSetFricCombine = R.Method(p->physMatClass, "set_frictionCombine", 1);
+        p->pmSetBounceCombine = R.Method(p->physMatClass, "set_bounceCombine", 1);
+    }
     p->onInteractMi = method(p->musicPlayerClass, "OnInteract", 0);
     p->showDeactMi = method(p->musicPlayerClass, "ShowDeactivatePrompt", 0);
     p->getPlotPrefab = R.Method(lookup, "GetPlotPrefab", 1, nullptr);  // optional: no standby tune without it
@@ -2282,6 +2443,11 @@ void DjBuildables::Tick() {
         const int n = p.SpawnRadios(std::min(owed, kMaxRadioSpawn), true);
         if (n > 0) p.SetCount(kOwedKey, owed - n);
     }
+}
+
+void DjBuildables::Frame() {
+    if (!ready_ || !g || !main_thread::IsMainThread() || g->Faulted() || g->recs.empty()) return;
+    g_guard.Run([] { g->FrameRadios(); });
 }
 
 void DjBuildables::Cleanup(const char* why) {
@@ -2374,7 +2540,7 @@ void Describe(std::vector<buildables::Info>& out) {
             i.hint = p.Hint(f);
             i.def = p.fams[f].defs[0];
             i.baseDef = p.fams[f].base;
-            Il2CppObject* icon = p.offIcon ? unity::Field<Il2CppObject*>(p.fams[f].base, p.offIcon) : nullptr;
+            Il2CppObject* icon = p.offIcon ? unity::Field<Il2CppObject*>(p.fams[f].defs[0], p.offIcon) : nullptr;
             i.icon = unity::IsAlive(icon) ? icon : nullptr;
             i.unlock = p.Override(f);
             i.baseUnlocked = p.BaseBlueprint(f);

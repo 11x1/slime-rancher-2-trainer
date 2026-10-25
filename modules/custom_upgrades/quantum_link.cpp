@@ -146,9 +146,13 @@ constexpr double kTakeFxSeconds = 1.5;
 constexpr int kStaleTicks = 5;       // ticks with a readable model list before a never-seen listed id is stale
 constexpr int kStaleTicksEmpty = 60; // the same when the save has no Refinery Link at all
 constexpr int32_t kTeleporterType = 1;  // GadgetDefinition.Types.TELEPORTER
-constexpr float kGlowScale = 0.3f;      // the teleporter FX on top (round 9: "the portal effect is too big")
+// The teleporter FX on top (round 9: "the portal effect is too big"; round 11: "teleport effect too big"). Its child
+// particle systems simulate in Local scaling mode, so the root's scale never reached them: each of those gets the
+// factor on its own transform too (ScaleParticles).
+constexpr float kGlowScale = 0.22f;
 constexpr float kGlowHeight = 1.0f;
-constexpr double kUseCooldown = 1.5;    // Use on a link: cloud notices at most this often
+constexpr double kUseCooldown = 1.5;    // Use on a link: the cloud menu / notices at most this often
+constexpr double kCloudOpenSeconds = 10.0;  // the Quantum Cloud menu must load within this time
 constexpr int kUseLines = 5;            // cloud types listed by Use
 
 struct Vec3 {
@@ -226,6 +230,7 @@ struct Impl {
     Il2CppClass* gameObjectClass = nullptr, *monoClass = nullptr, *colliderClass = nullptr, *rigidbodyClass = nullptr;
     Il2CppClass* jointClass = nullptr, *fabItemClass = nullptr, *cloudCtrlClass = nullptr, *teleNodeClass = nullptr;
     Il2CppClass* gadgetItemClass = nullptr, *interactableClass = nullptr;
+    Il2CppClass* particleClass = nullptr, *uiDisplayIntClass = nullptr, *droneUiClass = nullptr;
     // offsets
     size_t offLocName = 0, offPrefab = 0, offIcon = 0, offRefId = 0, offHashInit = 0;
     size_t offDesc = 0, offCosts = 0, offVariantOf = 0, offGrad1 = 0, offGrad2 = 0, offGType = 0, offLinked = 0;
@@ -272,6 +277,7 @@ struct Impl {
     Il2CppObject* cloudFx = nullptr;  // drone station: cloud withdraw FX prefab
     Il2CppObject* glowSrc = nullptr;  // teleporter active FX
     Il2CppObject* icon = nullptr;     // our purple copy of the Refinery Link's icon (nullptr: not made)
+    Il2CppObject* squareIcon = nullptr;  // the same on a square canvas: the drone source icon
     bool defFailed = false, slotDefTried = false, fxTried = false;
     std::string baseRefId;
 
@@ -330,6 +336,22 @@ struct Impl {
     std::unordered_set<Il2CppObject*> storages;  // identities of our storages (Decrement detour)
     std::unordered_set<Il2CppObject*> interactables;  // the links' Use components (OnInteract detours)
     double lastUse = 0.0;
+    // Use opens the game's Quantum Cloud menu: the drone station menu without a station (OpenCloudMenu / CloudFrame).
+    const MethodInfo* udmInstance = nullptr, *udmOpen = nullptr, *droneShowData = nullptr, *tabGoTo = nullptr;
+    size_t offUdiDisplay = 0, offMenuRoot = 0, offMenuTabs = 0, offMenuTabbed = 0, offMenuCloud = 0, offTabTarget = 0;
+    std::string cloudDisplay;          // the drone station menu's display name (from the station prefab)
+    bool cloudDisplayLooked = false;
+    Il2CppGCHandle cloudReq = nullptr; // UIDisplayRequestHandle of the menu being opened
+    double cloudReqAt = 0.0;
+    const void* reqClass = nullptr;
+    const MethodInfo* reqTryGet = nullptr;
+    const void* rtClass = nullptr;
+    size_t rtDisplayGo = 0;
+    // Local-mode particle systems under the glow (ScaleParticles): icall get_scalingMode(MainModule*)
+    using ScalingModeFn = int32_t (*)(void* mainModule);
+    ScalingModeFn psScalingMode = nullptr;
+    const MethodInfo* trGetLocalScale = nullptr;
+    bool loggedParticles = false;
     std::set<std::string> loggedInteractables;
     std::unordered_set<int64_t> seenIds;         // listed ids seen present since the load
     int stableTicks = 0;
@@ -564,6 +586,10 @@ struct Impl {
     void Pulse(Rec& rec, Il2CppObject* at);
     void MakeLook();
     void Glitch(Rec& rec, double now);
+    int ScaleParticles(Il2CppObject* glow);
+    bool OpenCloudMenu();
+    void CloudFrame();
+    void EndCloudRequest();
     bool OnUse(Il2CppObject* interactable);
     std::string NameOf(Il2CppObject* type);
     // ---- slots ----
@@ -1256,6 +1282,12 @@ bool Impl::Build(int64_t id, Il2CppObject* root, Rec& rec) {
             Call(trSetLocalPos, gtr, {&pos}, "Transform.set_localPosition");
             Call(trSetLocalRot, gtr, {&id0}, "Transform.set_localRotation");
             Call(trSetLocalScale, gtr, {&scale}, "Transform.set_localScale");
+            const int scaled = ScaleParticles(glow);
+            if (!loggedParticles) {
+                loggedParticles = true;
+                SR2_INFO("[{}] quantum link: glow at {:.2f} size, {} local-scaled particle system(s) shrunk with it", module,
+                         kGlowScale, scaled);
+            }
             unity::SetActive(glow, true);  // still inactive in the hierarchy (holder)
             TintRenderers(glow, nullptr, "glow");
             rec.glow = glow;
@@ -1320,8 +1352,8 @@ bool Impl::Build(int64_t id, Il2CppObject* root, Rec& rec) {
             const std::string cn = unity::ClassName(c);
             if (loggedInteractables.insert(cn).second)
                 SR2_INFO("[{}] quantum link: Use component '{}' on '{}'{}", module, cn, unity::GetName(unity::GameObjectOf(c)),
-                         cn == "MonomiPark.SlimeRancher.UI.UIActivator" || cn == "MonomiPark.SlimeRancher.UI.UIDisplayInteractable"
-                             ? " - Use shows the Quantum Cloud"
+                         cn == "MonomiPark.SlimeRancher.UI.UIActivator" || IsA(c, uiDisplayIntClass)
+                             ? " - Use opens the Quantum Cloud"
                              : " - not hooked, Use keeps its vanilla action");
         }
     if (Il2CppGCHandle h = unity::NewGCHandle(root)) rec.handles.push_back(h);
@@ -1379,6 +1411,11 @@ void Impl::MakeLook() {
     if (icon) {
         SetRef(ours, offIcon, icon);
         SR2_INFO("[{}] quantum link: icon = a purple copy of the Refinery Link's", module);
+        // The drone station's source list stretches each icon to a square box; the Refinery Link sprite is
+        // taller than wide, so the source got its own square copy (round 11: "is wider than normally").
+        std::string whySq;
+        squareIcon = gadget_look::TintedSprite(baseIcon, {kPurple.r, kPurple.g, kPurple.b}, 0.85f, whySq, true);
+        if (!squareIcon) SR2_INFO("[{}] quantum link: no square drone source icon ({}) - the card icon is used", module, whySq);
     } else {
         SR2_INFO("[{}] quantum link: no purple icon ({}) - the Refinery Link's icon is used", module, why);
     }
@@ -1398,10 +1435,11 @@ void Impl::MakeLook() {
     gadget_look::Register(ours, std::move(look));
 }
 
-// The glow drops out and comes back in a stutter (on / off every 30-80 ms with a jitter in place and
-// size) for about half a second every 3.5-8 s. The ghost drones' look (ComponentAcquisitionDroneController:
-// a material float "_PhaseValue" faded 0 -> 1 in Update) is a property of their own shader, so it can't
-// be put on the teleporter FX; this stutter imitates it with transform and active state only.
+// The glow jitters in place and size (every 30-80 ms) for about half a second every 3.5-8 s. It used to drop
+// out too (SetActive off / on), which restarted its particle systems: the user saw the effect "disappear in like
+// 6-7 s intervals" (round 11). The ghost drones' look (ComponentAcquisitionDroneController: a material float
+// "_PhaseValue" faded 0 -> 1 in Update) is a property of their own shader, so it can't be put on the teleporter
+// FX; this jitter only hints at it with the transform.
 void Impl::Glitch(Rec& rec, double now) {
     auto rnd = [&rec] {
         rec.rng ^= rec.rng << 13;
@@ -1422,19 +1460,125 @@ void Impl::Glitch(Rec& rec, double now) {
         Vec3 pos{0.0f, kGlowHeight, 0.0f}, scale{kGlowScale, kGlowScale, kGlowScale};
         Call(trSetLocalPos, tr, {&pos}, "Transform.set_localPosition");
         Call(trSetLocalScale, tr, {&scale}, "Transform.set_localScale");
-        unity::SetActive(rec.glow, true);
         return;
     }
     if (now < rec.nextFlip) return;
     rec.nextFlip = now + 0.03 + rnd() * 0.05;
-    const bool on = rnd() < 0.5f;
-    if (on) {
-        Vec3 pos{(rnd() - 0.5f) * 0.14f, kGlowHeight + (rnd() - 0.5f) * 0.1f, (rnd() - 0.5f) * 0.14f};
-        Vec3 scale{kGlowScale * (0.6f + rnd() * 0.7f), kGlowScale * (0.4f + rnd() * 0.8f), kGlowScale * (0.6f + rnd() * 0.7f)};
-        Call(trSetLocalPos, tr, {&pos}, "Transform.set_localPosition");
-        Call(trSetLocalScale, tr, {&scale}, "Transform.set_localScale");
+    Vec3 pos{(rnd() - 0.5f) * 0.08f, kGlowHeight + (rnd() - 0.5f) * 0.06f, (rnd() - 0.5f) * 0.08f};
+    Vec3 scale{kGlowScale * (0.8f + rnd() * 0.35f), kGlowScale * (0.7f + rnd() * 0.45f), kGlowScale * (0.8f + rnd() * 0.35f)};
+    Call(trSetLocalPos, tr, {&pos}, "Transform.set_localPosition");
+    Call(trSetLocalScale, tr, {&scale}, "Transform.set_localScale");
+}
+
+// Every particle system under the glow (not its root) that simulates in Local scaling mode ignores its parents'
+// scale: its own transform gets the glow factor. Returns how many were scaled.
+int Impl::ScaleParticles(Il2CppObject* glow) {
+    if (!particleClass || !psScalingMode || !trGetLocalScale) return 0;
+    Il2CppObject* rootGo = unity::GameObjectOf(glow) ? unity::GameObjectOf(glow) : glow;
+    int n = 0;
+    for (Il2CppObject* ps : AllInChildren(glow, particleClass)) {
+        if (unity::GameObjectOf(ps) == rootGo) continue;  // the root carries kGlowScale itself
+        void* mainModule = ps;                          // ParticleSystem.MainModule { ParticleSystem m_ParticleSystem }
+        if (psScalingMode(&mainModule) != 1) continue;   // ParticleSystemScalingMode.Local
+        Il2CppObject* tr = unity::TransformOf(ps);
+        bool ok = false;
+        Vec3 s = Value<Vec3>(Call(trGetLocalScale, tr, {}, "Transform.get_localScale", &ok));
+        if (!ok) continue;
+        s = {s.x * kGlowScale, s.y * kGlowScale, s.z * kGlowScale};
+        Call(trSetLocalScale, tr, {&s}, "Transform.set_localScale", &ok);
+        n += ok ? 1 : 0;
     }
-    unity::SetActive(rec.glow, on);
+    return n;
+}
+
+// Use on a link opens the game's own Quantum Cloud menu (round 11: "[E] should open the quantum cloud GUI menu like it
+// shows in drones menu"): the drone station menu (its display name read from the Drone Station prefab's
+// UIDisplayInteractable._display) opened with UIDisplayManager.OpenDisplay and, once loaded (CloudFrame), shown
+// without a station: DroneUIDisplay's IDisplayShowDataHandler<IDroneTaskAssignable>.UpdateShowData(null) builds the
+// view model the map's drone panel uses (cloud view only, no withdraw; DroneMenuUI.SetViewModel drops the programming
+// tab), then the Quantum Cloud tab is selected.
+bool Impl::OpenCloudMenu() {
+    if (!udmInstance || !udmOpen || !droneShowData) return false;
+    if (cloudReq) return true;  // already opening
+    if (cloudDisplay.empty() && !cloudDisplayLooked) {
+        cloudDisplayLooked = true;
+        Il2CppObject* dd = SceneField(offScDrones);
+        Il2CppObject* st = unity::IsAlive(dd) ? unity::Field<Il2CppObject*>(dd, offStationType) : nullptr;
+        Il2CppObject* prefab = IsA(st, identTypeClass) ? unity::Field<Il2CppObject*>(st, offPrefab) : nullptr;
+        std::string classes;
+        if (unity::IsAlive(prefab))
+            for (Il2CppObject* c : AllInChildren(prefab, uiDisplayIntClass)) {
+                const std::string name = unity::ToUtf8(unity::Field<Il2CppString*>(c, offUdiDisplay));
+                classes += (classes.empty() ? "" : ", ") + unity::ClassName(c) + " '" + name + "'";
+                if (cloudDisplay.empty() && !name.empty()) cloudDisplay = name;
+            }
+        if (cloudDisplay.empty())
+            SR2_WARN("[{}] quantum link: the drone station menu's display was not found ({}) - Use shows HUD notices instead",
+                     module, !prefab ? "no Drone Station prefab" : classes.empty() ? "no UIDisplayInteractable on it" : classes);
+        else SR2_INFO("[{}] quantum link: Quantum Cloud menu = the drone station menu '{}' ({})", module, cloudDisplay, classes);
+    }
+    if (cloudDisplay.empty()) return false;
+    bool ok = false;
+    Il2CppObject* udm = Call(udmInstance, nullptr, {}, "UIDisplayManager.get_Instance", &ok);
+    if (!ok || !udm) return false;
+    Il2CppString* handle = unity::NewString(cloudDisplay);  // UIDisplayHandle = struct { string _name }
+    Il2CppObject* req = Call(udmOpen, udm, {&handle}, "UIDisplayManager.OpenDisplay", &ok);
+    if (!ok || !req) return false;
+    cloudReq = unity::NewGCHandle(req);
+    cloudReqAt = Now();
+    return cloudReq != nullptr;
+}
+
+void Impl::EndCloudRequest() {
+    if (cloudReq) unity::FreeGCHandle(cloudReq);  // frame callback, not a hook
+    cloudReq = nullptr;
+}
+
+// While the menu loads (every frame, at most kCloudOpenSeconds): the request's display -> its GameObject ->
+// DroneUIDisplay -> UpdateShowData(null), the Quantum Cloud tab.
+void Impl::CloudFrame() {
+    Il2CppObject* req = unity::GCHandleTarget(cloudReq);
+    if (!req || Now() - cloudReqAt > kCloudOpenSeconds) {
+        SR2_WARN("[{}] quantum link: the Quantum Cloud menu did not open within {:.0f} s", module, kCloudOpenSeconds);
+        return EndCloudRequest();
+    }
+    if (api().il2cpp_object_get_class(req) != reqClass) {
+        reqClass = api().il2cpp_object_get_class(req);
+        reqTryGet = Resolver::Get().Method(api().il2cpp_object_get_class(req), "TryGetRequestedDisplay", 1, nullptr);
+    }
+    if (!reqTryGet) {
+        SR2_WARN("[{}] quantum link: UIDisplayRequestHandle.TryGetRequestedDisplay not found - the menu opens as it is", module);
+        return EndCloudRequest();
+    }
+    Il2CppObject* display = nullptr;
+    bool ok = false;
+    if (!Value<bool>(Call(reqTryGet, req, {&display}, "UIDisplayRequestHandle.TryGetRequestedDisplay", &ok)) || !ok || !display) return;
+    if (api().il2cpp_object_get_class(display) != rtClass) {
+        rtClass = api().il2cpp_object_get_class(display);
+        auto o = Resolver::Get().FieldOffset(api().il2cpp_object_get_class(display), "_displayGameObject");
+        rtDisplayGo = o ? *o : 0;
+    }
+    Il2CppObject* go = rtDisplayGo ? unity::Field<Il2CppObject*>(display, rtDisplayGo) : nullptr;
+    if (!unity::IsAlive(go)) return;  // still loading
+    Il2CppObject* dui = InChildren(go, droneUiClass);
+    if (!dui) return;
+    EndCloudRequest();
+    Call(droneShowData, dui, {nullptr}, "DroneUIDisplay.UpdateShowData(null)", &ok);
+    if (!ok) return;
+    // The Quantum Cloud tab: the DroneTabSetup whose Target is the cloud inventory's transform.
+    Il2CppObject* menu = unity::Field<Il2CppObject*>(dui, offMenuRoot);
+    Il2CppObject* cloud = unity::IsAlive(menu) ? unity::Field<Il2CppObject*>(menu, offMenuCloud) : nullptr;
+    void* tabs = unity::IsAlive(menu) ? unity::Field<void*>(menu, offMenuTabs) : nullptr;
+    Il2CppObject* cloudTr = unity::IsAlive(cloud) ? unity::TransformOf(cloud) : nullptr;
+    int32_t index = -1;
+    for (size_t i = 0, n = unity::ListCount(tabs); cloudTr && i < n && i < 8; ++i)
+        if (auto* t = static_cast<Il2CppObject*>(unity::ListAt(tabs, i)); t && unity::Field<Il2CppObject*>(t, offTabTarget) == cloudTr)
+            index = static_cast<int32_t>(i);
+    Il2CppObject* tabbed = unity::IsAlive(menu) ? unity::Field<Il2CppObject*>(menu, offMenuTabbed) : nullptr;
+    bool switched = false;
+    if (index >= 0 && unity::IsAlive(tabbed)) switched = Value<bool>(Call(tabGoTo, tabbed, {&index}, "TabbedControl.GoToTab", &ok)) && ok;
+    SR2_INFO("[{}] quantum link: Quantum Cloud menu open ({}; view only, no station)", module,
+             switched ? std::format("cloud tab {}", index + 1) : index < 0 ? std::string("cloud tab not found") : std::string("already on the cloud tab"));
 }
 
 std::string Impl::NameOf(Il2CppObject* type) {
@@ -1447,9 +1591,15 @@ std::string Impl::NameOf(Il2CppObject* type) {
 
 // Use on a link: one burst of HUD notices - what the link is for, then the largest cloud amounts.
 bool Impl::OnUse(Il2CppObject* interactable) {
-    if (!host.notify) return false;
     const double now = Now();
     if (now - lastUse < kUseCooldown) return true;  // a held key / double press: no second burst
+    if (OpenCloudMenu()) {
+        lastUse = now;
+        SR2_INFO("[{}] quantum link: Use on '{}' - opening the Quantum Cloud menu instead of the refinery screen", module,
+                 unity::GetName(unity::GameObjectOf(interactable)));
+        return true;
+    }
+    if (Faulted() || !host.notify) return false;
     std::vector<std::pair<Il2CppObject*, std::string>> lines;
     lines.emplace_back(icon ? icon : unity::Field<Il2CppObject*>(base, offIcon),
                        "Quantum Storage Link: ranch drones set to this source take items from your Quantum Cloud here");
@@ -1851,6 +2001,7 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
     p->interactableClass = cls(kImage, "MonomiPark.SlimeRancher.UI", "BaseUIInteractable");
     Il2CppClass* uiActivator = cls(kImage, "MonomiPark.SlimeRancher.UI", "UIActivator");
     Il2CppClass* uiDisplay = cls(kImage, "MonomiPark.SlimeRancher.UI", "UIDisplayInteractable");
+    p->uiDisplayIntClass = uiDisplay;
     Il2CppClass* fabCategory = cls(kImage, kFab, "GadgetFabricateCategory");
     Il2CppClass* fabRuntime = cls(kImage, kFab, "GadgetFabricateCategoryRuntime");
     Il2CppClass* helper = cls(kImage, kFab, "GadgetDirectorHelper");
@@ -1990,6 +2141,49 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
     p->setFavorite = method(gadgetsModel, "SetFavorite", 2);
     p->setHeld = method(p->gadgetItemClass, "SetHeldGadget", 1);
     p->lsGetString = R.Method(p->lsClass, "GetLocalizedString", 0, nullptr);  // optional (type names in Use notices)
+    {  // optional: Use opens the Quantum Cloud menu (else HUD notices)
+        constexpr const char* kDisp = "MonomiPark.SlimeRancher.UI.Framework.Displays";
+        constexpr const char* kDroneUi = "MonomiPark.SlimeRancher.UI.Drone";
+        Il2CppClass* udm = R.Class(kImage, kDisp, "UIDisplayManager", nullptr);
+        p->droneUiClass = R.Class(kImage, kDroneUi, "DroneUIDisplay", nullptr);
+        Il2CppClass* menu = R.Class(kImage, kDroneUi, "DroneMenuUI", nullptr);
+        Il2CppClass* tabSetup = R.Class(kImage, kDroneUi, "DroneTabSetup", nullptr);
+        Il2CppClass* tabbed = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Framework.CommonControls", "TabbedControl", nullptr);
+        std::string sufErr;
+        const MethodInfo* show = nullptr;
+        if (p->droneUiClass && api().il2cpp_class_get_methods && api().il2cpp_method_get_name && api().il2cpp_method_get_param_count) {  // IDisplayShowDataHandler<IDroneTaskAssignable>.UpdateShowData (explicit)
+            void* it = nullptr;
+            while (const MethodInfo* m = api().il2cpp_class_get_methods(p->droneUiClass, &it)) {
+                const std::string_view n = api().il2cpp_method_get_name(m) ? api().il2cpp_method_get_name(m) : "";
+                if (api().il2cpp_method_get_param_count(m) == 1 && n.ends_with(".UpdateShowData") &&
+                    n.find("IDroneTaskAssignable") != std::string_view::npos)
+                    show = m;
+            }
+        }
+        auto fo = [&](Il2CppClass* k, const char* f, size_t& out) {
+            auto o = k ? R.FieldOffset(k, f) : std::nullopt;
+            out = o ? *o : 0;
+            return out != 0;
+        };
+        const bool fields = fo(uiDisplay, "_display", p->offUdiDisplay) && fo(p->droneUiClass, "_menuRoot", p->offMenuRoot) &&
+                            fo(menu, "_tabs", p->offMenuTabs) && fo(menu, "_tabbedControl", p->offMenuTabbed) &&
+                            fo(menu, "_cloudInventory", p->offMenuCloud) && fo(tabSetup, "Target", p->offTabTarget);
+        p->udmInstance = udm ? R.Method(udm, "get_Instance", 0, nullptr) : nullptr;
+        p->udmOpen = udm ? R.MethodByParams(udm, "OpenDisplay", {"MonomiPark.SlimeRancher.UI.Framework.Displays.UIDisplayHandle"}) : nullptr;
+        p->tabGoTo = tabbed ? R.Method(tabbed, "GoToTab", 1, nullptr) : nullptr;
+        p->droneShowData = fields && p->udmInstance && p->udmOpen ? show : nullptr;
+        if (!p->droneShowData)
+            SR2_WARN("[{}] quantum link: the Quantum Cloud menu can't be opened (DroneUIDisplay / UIDisplayManager members missing) - "
+                     "Use shows HUD notices", p->module);
+        // optional: the glow's local-scaled particle systems (ScaleParticles)
+        p->particleClass = R.Class("UnityEngine.ParticleSystemModule", "UnityEngine", "ParticleSystem", nullptr);
+        using ResolveIcallFn = void* (*)(const char*);
+        auto resolveIcall = reinterpret_cast<ResolveIcallFn>(exp("il2cpp_resolve_icall"));
+        p->psScalingMode = resolveIcall ? reinterpret_cast<Impl::ScalingModeFn>(
+                                              resolveIcall("UnityEngine.ParticleSystem/MainModule::get_scalingMode()"))
+                                        : nullptr;
+        p->trGetLocalScale = R.Method(transform, "get_localScale", 0, nullptr);
+    }
     if (!p->lsCtor || !p->ammoModelCtor || !p->fabItemCtor) why = "constructors not found";
     // hooks
     const MethodInfo* persistMi = byParams(saveRef, "GetPersistenceId", {"IdentifiableType"});
@@ -2067,7 +2261,9 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
 }
 
 void QuantumLink::Frame() {
-    if (!ready_ || !g || g->recs.empty() || !main_thread::IsMainThread() || g->Faulted()) return;
+    if (!ready_ || !g || !main_thread::IsMainThread() || g->Faulted()) return;
+    if (g->cloudReq) g_guard.Run([] { g->CloudFrame(); });
+    if (g->recs.empty() || g->Faulted()) return;
     const double now = Now();
     for (auto& [id, rec] : g->recs) {
         if (!rec.glow || (!rec.glitching && now < rec.glitchAt)) continue;
@@ -2185,6 +2381,7 @@ bool IsOurs(Il2CppObject* def) { return def && def == g_ours.load(std::memory_or
 
 Il2CppObject* SourceIcon() {
     if (!g || !g->base) return nullptr;
+    if (g->squareIcon && unity::IsAlive(g->squareIcon)) return g->squareIcon;  // our purple copy, square
     if (g->icon && unity::IsAlive(g->icon)) return g->icon;  // our purple copy
     Il2CppObject* icon = unity::Field<Il2CppObject*>(g->base, g->offIcon);
     return unity::IsAlive(icon) ? icon : nullptr;

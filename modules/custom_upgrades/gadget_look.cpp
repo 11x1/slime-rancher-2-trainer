@@ -99,7 +99,7 @@ struct Impl {
     const MethodInfo* identTypeAsDef = nullptr;
     const MethodInfo* rendGetMaterials = nullptr, *matPropNames = nullptr, *matGetColor = nullptr, *matSetColor = nullptr,
                       *matGetShader = nullptr, *compsInChildren = nullptr;
-    const MethodInfo* spriteTexture = nullptr, *spriteTexRect = nullptr, *spriteRect = nullptr, *spritePivot = nullptr,
+    const MethodInfo* spriteTexture = nullptr, *spriteTexRect = nullptr, *spriteTexOffset = nullptr, *spriteRect = nullptr, *spritePivot = nullptr,
                       *spritePpu = nullptr, *spriteCreate = nullptr, *texWidth = nullptr, *texHeight = nullptr,
                       *rtGetTemp = nullptr, *rtRelease = nullptr, *rtGetActive = nullptr, *rtSetActive = nullptr,
                       *blit = nullptr, *tex2dCtor = nullptr, *texRead = nullptr, *texGetPixels = nullptr,
@@ -298,6 +298,7 @@ bool Setup(sr2::core::ModuleContext& ctx, const char* module, std::string& why, 
     p->compsInChildren = byParams(component, "GetComponentsInChildren", {"System.Type", "System.Boolean"});
     p->spriteTexture = method(sprite, "get_texture", 0);
     p->spriteTexRect = method(sprite, "get_textureRect", 0);
+    p->spriteTexOffset = R.Method(sprite, "get_textureRectOffset", 0);  // optional: trimmed sprites keep their size
     p->spriteRect = method(sprite, "get_rect", 0);
     p->spritePivot = method(sprite, "get_pivot", 0);
     p->spritePpu = method(sprite, "get_pixelsPerUnit", 0);
@@ -451,7 +452,7 @@ int TintTree(Il2CppObject* root, Rgb tint, float amount, Rgb glow, const char* w
     return tinted;
 }
 
-Il2CppObject* TintedSprite(Il2CppObject* sprite, Rgb tint, float amount, std::string& why) {
+Il2CppObject* TintedSprite(Il2CppObject* sprite, Rgb tint, float amount, std::string& why, bool square) {
     if (!g || !g->armed || !main_thread::IsMainThread() || g->Faulted()) {
         why = "not available";
         return nullptr;
@@ -479,11 +480,37 @@ Il2CppObject* TintedSprite(Il2CppObject* sprite, Rgb tint, float amount, std::st
     Rect src = err.empty() ? Impl::Value<Rect>(boxed) : Rect{0, 0, 0, 0};
     const Rect full = Impl::Value<Rect>(p.Call(p.spriteRect, sprite, {}, "Sprite.get_rect", &ok));
     if (!err.empty() || src.w < 1 || src.h < 1) src = full;
+    // A trimmed atlas sprite (textureRect smaller than rect, e.g. iconGadgetRefineryLink_small: 99x125 of a
+    // square rect) draws its pixels at textureRectOffset inside the full rect. The copy keeps the full rect
+    // with the pixels at that offset: a copy of only the trimmed pixels was stretched to the square icon box
+    // (round 11: the quantum drone source icon "is wider than normally").
+    Vec2 off{0, 0};
+    if (err.empty() && p.spriteTexOffset && (src.w < full.w - 0.5f || src.h < full.h - 0.5f)) {
+        std::string offErr;
+        Il2CppObject* bo = Resolver::Get().Invoke(p.spriteTexOffset, sprite, nullptr, &offErr);
+        if (offErr.empty()) off = Impl::Value<Vec2>(bo);
+    }
     const int x = static_cast<int>(std::lround(src.x)), y = static_cast<int>(std::lround(src.y));
     const int w = static_cast<int>(std::lround(src.w)), h = static_cast<int>(std::lround(src.h));
     if (w < 1 || h < 1 || x < 0 || y < 0 || x + w > tw || y + h > th) {
         why = std::format("sprite rect ({}, {}, {}, {}) outside its {}x{} texture", x, y, w, h, tw, th);
         return nullptr;
+    }
+    // The copy's size (the sprite's full rect when trimmed) and where the pixels go in it.
+    int cwFull = w, chFull = h, ox = 0, oy = 0;
+    if (off.x != 0 || off.y != 0 || full.w > w + 0.5f || full.h > h + 0.5f) {
+        cwFull = std::max(w, static_cast<int>(std::lround(full.w)));
+        chFull = std::max(h, static_cast<int>(std::lround(full.h)));
+        ox = std::clamp(static_cast<int>(std::lround(off.x)), 0, cwFull - w);
+        oy = std::clamp(static_cast<int>(std::lround(off.y)), 0, chFull - h);
+        if (cwFull > 4096 || chFull > 4096) cwFull = w, chFull = h, ox = oy = 0;
+    }
+    int padX = 0, padY = 0;  // square: the full rect centred on a square canvas
+    if (square && cwFull != chFull) {
+        const int side = std::max(cwFull, chFull);
+        padX = (side - cwFull) / 2, padY = (side - chFull) / 2;
+        ox += padX, oy += padY;
+        cwFull = chFull = side;
     }
     const Vec2 pivotPx = Impl::Value<Vec2>(p.Call(p.spritePivot, sprite, {}, "Sprite.get_pivot", &ok));
     const float ppu = Impl::Value<float>(p.Call(p.spritePpu, sprite, {}, "Sprite.get_pixelsPerUnit", &ok), 100.0f);
@@ -502,12 +529,12 @@ Il2CppObject* TintedSprite(Il2CppObject* sprite, Rgb tint, float amount, std::st
     if (ok) p.Call(p.rtSetActive, nullptr, {rtex}, "RenderTexture.set_active", &ok);
     if (ok) copy = p.objectNew(p.tex2dClass);
     if (copy) {
-        int32_t cw = w, ch = h, cf = 4 /* RGBA32 */;
+        int32_t cw = cwFull, ch = chFull, cf = 4 /* RGBA32 */;
         bool mip = false, linear = false;
         p.Call(p.tex2dCtor, copy, {&cw, &ch, &cf, &mip, &linear}, "Texture2D..ctor", &ok);
         Rect rr{static_cast<float>(x), static_cast<float>(y), static_cast<float>(w), static_cast<float>(h)};
-        int32_t zero = 0;
-        if (ok) p.Call(p.texRead, copy, {&rr, &zero, &zero}, "Texture2D.ReadPixels", &ok);
+        int32_t dx = ox, dy = oy;
+        if (ok) p.Call(p.texRead, copy, {&rr, &dx, &dy}, "Texture2D.ReadPixels", &ok);
         read = ok;
     }
     if (prevOk) p.Call(p.rtSetActive, nullptr, {prev}, "RenderTexture.set_active");
@@ -518,7 +545,7 @@ Il2CppObject* TintedSprite(Il2CppObject* sprite, Rgb tint, float amount, std::st
     }
     // Recolour: towards tint x brightness, alpha kept.
     void* px = p.Call(p.texGetPixels, copy, {}, "Texture2D.GetPixels32", &ok);
-    const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h);
+    const size_t n = static_cast<size_t>(cwFull) * static_cast<size_t>(chFull);
     if (!ok || unity::ArrayLength(px) != n) {
         why = "GetPixels32 failed";
         return nullptr;
@@ -526,6 +553,11 @@ Il2CppObject* TintedSprite(Il2CppObject* sprite, Rgb tint, float amount, std::st
     Color32* c = unity::ArrayData<Color32>(px);
     size_t opaque = 0;
     for (size_t i = 0; i < n; ++i) {
+        const int px_ = static_cast<int>(i % static_cast<size_t>(cwFull)), py_ = static_cast<int>(i / static_cast<size_t>(cwFull));
+        if (px_ < ox || px_ >= ox + w || py_ < oy || py_ >= oy + h) {  // the padding round a trimmed sprite: clear
+            c[i] = {0, 0, 0, 0};
+            continue;
+        }
         if (c[i].a) ++opaque;
         const float lum = (0.30f * c[i].r + 0.59f * c[i].g + 0.11f * c[i].b) / 255.0f;
         const float k = std::min(lum * 1.35f + 0.08f, 1.0f);
@@ -537,8 +569,9 @@ Il2CppObject* TintedSprite(Il2CppObject* sprite, Rgb tint, float amount, std::st
     }
     p.Call(p.texSetPixels, copy, {px}, "Texture2D.SetPixels32", &ok);
     if (ok) p.Call(p.texApply, copy, {}, "Texture2D.Apply", &ok);
-    Rect rect{0, 0, static_cast<float>(w), static_cast<float>(h)};
-    Vec2 pivot{full.w > 0 ? pivotPx.x / full.w : 0.5f, full.h > 0 ? pivotPx.y / full.h : 0.5f};
+    Rect rect{0, 0, static_cast<float>(cwFull), static_cast<float>(chFull)};
+    Vec2 pivot{full.w > 0 ? (pivotPx.x + static_cast<float>(padX)) / static_cast<float>(cwFull) : 0.5f,
+               full.h > 0 ? (pivotPx.y + static_cast<float>(padY)) / static_cast<float>(chFull) : 0.5f};
     float useppu = ppu > 0 ? ppu : 100.0f;
     Il2CppObject* out = ok ? p.Call(p.spriteCreate, nullptr, {copy, &rect, &pivot, &useppu}, "Sprite.Create", &ok) : nullptr;
     if (!ok || !unity::IsAlive(out)) {
@@ -551,8 +584,10 @@ Il2CppObject* TintedSprite(Il2CppObject* sprite, Rgb tint, float amount, std::st
     (void)unity::NewGCHandle(copy);  // session objects, never freed
     (void)unity::NewGCHandle(out);
     unity::SetName(out, unity::GetName(sprite) + " (sr2 tint)");
-    SR2_INFO("[{}] gadget look: sprite '{}' recoloured ({}x{} px from its {}x{} texture, {} opaque)", p.module,
-             unity::GetName(sprite), w, h, tw, th, opaque);
+    SR2_INFO("[{}] gadget look: sprite '{}' recoloured ({}x{} px from its {}x{} texture{}, {} opaque)", p.module,
+             unity::GetName(sprite), w, h, tw, th,
+             cwFull != w || chFull != h ? std::format(", padded to its {}x{} rect at ({}, {})", cwFull, chFull, ox, oy) : std::string(),
+             opaque);
     return out;
 }
 

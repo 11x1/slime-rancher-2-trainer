@@ -2212,6 +2212,7 @@ void CustomUpgrades::FrameCheck(float dt) {
     if (On() && receipt_.IsOpen()) g_siloGuard.Run([&] { ReceiptTick(dt); });   // Sell-All receipt input
     if (On() && vacpack_.Ready()) vacpack_.Frame();  // extra vacpack slots' number keys
     if (On() && quantum_.Ready()) quantum_.Frame();  // the Quantum Storage Links' glow glitch
+    if (On() && dj_.Ready()) dj_.Frame();  // Slime Radios held in the vacuum: rotation free while held
     if (battery_.Ready()) {  // drone battery refunds (every ~2 s); off: forget the last looks
         if (On()) g_batteryGuard.Run([&] { battery_.Tick(dt); });
         else battery_.Reset();

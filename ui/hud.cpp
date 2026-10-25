@@ -46,7 +46,7 @@ bool HasContent() {
     unsigned long long now = GetTickCount64();
     std::lock_guard lk(g_mutex);
     for (const auto& [k, e] : g_frames)
-        if (!e.frame.markers.empty() && Fresh(e, now)) return true;
+        if ((!e.frame.markers.empty() || !e.frame.lines.empty()) && Fresh(e, now)) return true;
     return false;
 }
 
@@ -64,6 +64,31 @@ bool Project(const float* vp, float x, float y, float z, float w, float h, ImVec
     if (std::fabs(nx) > 1.05f || std::fabs(ny) > 1.05f) return false;  // off screen
     out = ImVec2((nx * 0.5f + 0.5f) * w, (1.0f - (ny * 0.5f + 0.5f)) * h);
     return true;
+}
+
+// A segment in clip space, cut at the near plane (w = 0.05), then to screen; false when wholly behind.
+bool ProjectLine(const float* vp, const Line& l, float w, float h, ImVec2& a, ImVec2& b) {
+    auto clip = [&](float x, float y, float z, float out[4]) {
+        out[0] = vp[0] * x + vp[4] * y + vp[8] * z + vp[12];
+        out[1] = vp[1] * x + vp[5] * y + vp[9] * z + vp[13];
+        out[3] = vp[3] * x + vp[7] * y + vp[11] * z + vp[15];
+    };
+    float p[4] = {}, q[4] = {};
+    clip(l.ax, l.ay, l.az, p);
+    clip(l.bx, l.by, l.bz, q);
+    constexpr float kNear = 0.05f;
+    if (!(p[3] > kNear) && !(q[3] > kNear)) return false;
+    if (!(p[3] > kNear) || !(q[3] > kNear)) {
+        float* back = p[3] > kNear ? q : p;
+        const float* front = p[3] > kNear ? p : q;
+        const float t = (kNear - front[3]) / (back[3] - front[3]);
+        for (int i : {0, 1, 3}) back[i] = front[i] + (back[i] - front[i]) * t;
+    }
+    for (float v : {p[0], p[1], p[3], q[0], q[1], q[3]})
+        if (!std::isfinite(v)) return false;
+    a = ImVec2((p[0] / p[3] * 0.5f + 0.5f) * w, (1.0f - (p[1] / p[3] * 0.5f + 0.5f)) * h);
+    b = ImVec2((q[0] / q[3] * 0.5f + 0.5f) * w, (1.0f - (q[1] / q[3] * 0.5f + 0.5f)) * h);
+    return std::fabs(a.x) < 1e5f && std::fabs(a.y) < 1e5f && std::fabs(b.x) < 1e5f && std::fabs(b.y) < 1e5f;
 }
 
 ImU32 WithAlpha(ImU32 c, float a) {
@@ -126,7 +151,7 @@ void Draw() {
         unsigned long long now = GetTickCount64();
         std::lock_guard lk(g_mutex);
         for (const auto& [k, e] : g_frames)
-            if (!e.frame.markers.empty() && Fresh(e, now)) frames.push_back(e.frame);
+            if ((!e.frame.markers.empty() || !e.frame.lines.empty()) && Fresh(e, now)) frames.push_back(e.frame);
     }
     if (frames.empty()) return;
     ImGuiIO& io = ImGui::GetIO();
@@ -134,6 +159,10 @@ void Draw() {
     if (w <= 0 || h <= 0) return;
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     for (const Frame& f : frames) {
+        for (const Line& l : f.lines) {
+            ImVec2 a, b;
+            if (ProjectLine(f.vp, l, w, h, a, b)) dl->AddLine(a, b, l.color, 1.5f);
+        }
         float r = std::clamp(h * 0.0105f * f.size, 4.0f, 64.0f);
         for (const Marker& m : f.markers) {
             ImVec2 p;

@@ -26,6 +26,7 @@
 - Save format `AmmoDataV02` = ID, EmotionData, Count, Appearance, Radiant (no max count).
 - `AmmoSlot` (MP.SR.Player) : IListItemViewModel — `OnSlotChanged` delegate +0x58. Upgrade NRE chain: re/upgrades.md.
 
+- holding (IDA, round 11): `Hold` 0x643C00 / `SetHeld` 0x6444F0 set `_held` (+0x70), the collider layer 13 (`UpdateColliderLayer` 0x644800: launched 9, held 13, tornadoed 15, captive 11) and `UpdateMaterialsHeldState` 0x644A00 (`_Held` int property block, shadows off) on its renderers (`GetComponentsInChildren<Renderer>(false)`, so also child renderers a mod adds). `VacuumItem.UpdateHeld` 0xA6AAE0 puts the held object at `LockJoint`'s position and connects `LockJoint` to its Rigidbody (anchors zero); the joint turns it to the nozzle. A Rigidbody with frozen rotation axes fights that joint: the Slime Radio (rotation X / Z frozen) was thrown away 1-2 s after it was vacuumed (dj_buildables.cpp frees the axes while `_held`).
 ### Vacuumable
 `Size` (0 NORMAL), `CanCapture`, `TryConsume` 0x644640, `Hold` (held layer, `_Held` renderer property; toys are held, not stored), `_preventForcesFromWeaponVacuum`.
 
