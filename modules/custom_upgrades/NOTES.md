@@ -61,6 +61,12 @@ drawing '<name>'`), `Cleanup` writes the vanilla sprite back (`RestoreVanillaIco
 field write). The item is a shared asset, so the swap shows on every plot of that type. Our tiers that borrow
 that card's icon (`iconFrom`: Sprinkler III, Music Box II, Corral Radio) read the vanilla sprite through
 `ItemIcon`, not the drawing.
+The swap changes only the sprite, never the card Image's rect, anchors or pivot, so the drawing's place on
+the card comes from the PNG: the user draws on the vanilla 512 px canvas, and `pad_icon.py --keep-place`
+keeps that canvas (1/2 scale, no crop). Round 16 cropped and centred them, which moved the Sprinkler base
+(vanilla: bottom of the icon, under the water drops) to the middle and nudged the Music Box. Both are square
+full-rect sprites like the vanilla ones (`PpuLike` matches the native size), so nothing else shifts them.
+`growth_1` (Sprinkler II, same row) is made the same way.
 Game sprites by name for our cards (`GameSpriteName`, the user's pick; a drawing under `ModIconName` wins):
 the Corral Radio shows the Slimepedia's `iconPediaHomeMusicPlayer`. `GameSpriteIcons` (menu pre-hook, text
 sink on) scans `Resources.FindObjectsOfTypeAll(Sprite)` while one is missing, at most 3 times per session and

@@ -1,11 +1,16 @@
 """Turns a hand-drawn icon into an embeddable one (offline tool, Pillow).
 
-python pad_icon.py <drawing.png> <name> [size]
+python pad_icon.py [--keep-place] <drawing.png> <name> [size]
 Writes assets/icons/<name>.png: the drawing cropped to its visible pixels, centred on a
 transparent square canvas and reduced by a whole factor (2x, 3x, ... box filter, never a
 fractional resize) so it fits the 256 x 256 the other icons use (or `size`, e.g. 512 for a
 `<name>_large` copy: the Fabricator details picture of a buildable). A drawing that already
 fits is padded unscaled. The input file is not changed.
+
+--keep-place: no crop, the whole canvas is kept (only reduced, and padded to a square around
+its centre if it is not one). For a drawing made on the vanilla icon's canvas (e.g. a 512 px
+redraw of iconPatchGardenSprinkler), so it keeps the vanilla icon's position and size on the
+card instead of being centred (round 16: the Sprinkler and Music Box drawings moved).
 """
 
 import math
@@ -21,16 +26,19 @@ SIZE = 256
 
 def main():
     global SIZE
-    if len(sys.argv) not in (3, 4):
+    args = sys.argv[1:]
+    keep = "--keep-place" in args
+    args = [a for a in args if a != "--keep-place"]
+    if len(args) not in (2, 3):
         sys.exit(__doc__)
-    src, name = sys.argv[1], sys.argv[2]
-    if len(sys.argv) == 4:
-        SIZE = int(sys.argv[3])
+    src, name = args[0], args[1]
+    if len(args) == 3:
+        SIZE = int(args[2])
     im = Image.open(src).convert("RGBA")
     box = im.getchannel("A").getbbox()
     if not box:
         sys.exit(f"{src}: fully transparent")
-    art = im.crop(box)
+    art = im if keep else im.crop(box)
     n = max(1, math.ceil(max(art.size) / SIZE))  # whole reduction factor
     side = SIZE * n
     canvas = Image.new("RGBA", (side, side), (0, 0, 0, 0))
@@ -43,7 +51,8 @@ def main():
         canvas = canvas.convert("RGBa").reduce(n).convert("RGBA")
     out = os.path.join(ICONS, name + ".png")
     canvas.save(out, optimize=True)
-    print(f"wrote {out}: art {art.size} from {im.size}, 1/{n} scale, {SIZE}x{SIZE}")
+    what = "canvas kept" if keep else "art"
+    print(f"wrote {out}: {what} {art.size} from {im.size}, 1/{n} scale, {SIZE}x{SIZE}")
 
 
 if __name__ == "__main__":
