@@ -34,7 +34,10 @@ std::vector<Category> Spec() {
     Tab ranchGeneral;
     ranchGeneral.title = "General";
     ranchGeneral.kind = TabKind::Cards;
-    ranchGeneral.columns = {{"custom_upgrades"}, {"plot_upgrades", "sell_upgrades"}};
+    // Plot Upgrades and Sell Upgrades work on the plot upgrades Custom Upgrades adds: their cards sit
+    // under its card (round 11), side by side.
+    ranchGeneral.columns = {{"custom_upgrades"}, {"plot_upgrades"}, {"sell_upgrades"}};
+    ranchGeneral.stacked = true;
     ranchGeneral.cardHelp = {
         {"custom_upgrades",
          "Adds extra plot upgrades and Fabricator upgrades to the game's menus. Stays on while a save that uses "

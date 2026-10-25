@@ -1026,19 +1026,23 @@ void DrawNested(const Host& h, const ModuleView& nmv) {
     ImGui::EndDisabled();
 }
 
-// Misc > General: one card per module, the module's switch in the card header.
+// Misc > General, Ranch > General: one card per module, the module's switch in the card header, in two
+// columns. A stacked tab (Ranch) has its first column full width and the next two side by side under it.
 void DrawCardsPage(const Host& h, const Tab& tab, const std::vector<ModuleView>& views) {
     const Palette& P = theme::Colors();
     const float w = ColumnWidth();
-    for (size_t c = 0; c < tab.columns.size() && c < 2; ++c) {
-        if (c == 1) ImGui::SameLine(0, U(kGap));
+    const size_t first = tab.stacked ? 1 : 0;  // the first of the two side-by-side columns
+    const size_t end = std::min(tab.columns.size(), first + 2);
+    for (size_t c = 0; c < end; ++c) {
+        if (c > first) ImGui::SameLine(0, U(kGap));
+        const float cw = c < first ? ImGui::GetContentRegionAvail().x : w;
         ImGui::BeginGroup();
         for (const auto& m : tab.columns[c]) {
             const ModuleView* mv = FindView(views, m);
             if (!mv) continue;
             ImGui::PushID(m.c_str());
             const bool on = ModuleOn(*mv);
-            BeginCard("card", w);
+            BeginCard("card", cw);
             const float avail = ImGui::GetContentRegionAvail().x, x0 = ImGui::GetCursorPosX();
             {
                 FontScope f(theme::Display(), theme::kDisplaySize);
