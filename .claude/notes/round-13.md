@@ -2,6 +2,9 @@
 
 Build tested: 78aeb0d (develop). The Slime Radio drawing (4fd1a0c) came after it. Results are in the work-account checklist https://claude.ai/artifact/12HrkuKyWbJs1PtsufwVvE (collection `results`, ids `r12*`; free text in `misc/notes`). User quotes are verbatim.
 
+## Status (2026-10-25)
+All tasks A-H are merged and deployed (5acbad3, DLL af2af341; one build for the round). Checklist: round 13 is published to https://claude.ai/artifact/12HrkuKyWbJs1PtsufwVvE (27 new cases in `.claude/checklist/r13-cases.json`, carried-over cases under Skipped). Open: the release workflow draft on branch `chore/ci-release-research` (not merged; waiting for the user's call on the release audience and the two collector icons).
+
 ## How to run this round
 The same as round 12 (see the auto-memory: orchestrator mode, Opus subagents at medium effort in worktrees, git workflow, no session link, plain commands, checklist conventions, read logs yourself, deploy once per round):
 1. One agent per task below, up to 9 at a time. Each prompt is "Read `.claude/agent-brief.md` and follow it", the task's section from this file, and the branch name.

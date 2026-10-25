@@ -1,0 +1,288 @@
+[
+[
+"Menu only",
+"r13ug1",
+"Ranch > Upgrades: two sections",
+[
+"Open the overlay, Ranch > Upgrades: the Custom Upgrades card has two headings, \"Plot upgrades\" and \"Refinery upgrades\", and no \"Sell upgrades\".",
+"Under Plot upgrades: \"Tier effects\", then \"Sell back for half price\".",
+"Turn Custom Upgrades off: Tier effects dims; Sell back can still be switched."
+]
+],
+[
+"Menu only (Sandbox on, save loaded)",
+"r13sp6",
+"Short filter tooltips",
+[
+"Hover the Slimes filter tab in the spawner: a small \"Slimes\" box, not a wide panel.",
+"Same in the Vacpack picker."
+]
+],
+[
+"Menu only (Sandbox on, save loaded)",
+"r13nc1",
+"Noclip card: key only",
+[
+"Sandbox > General: the Noclip card has no switch, only a status line and the key row (your Mouse 4 stays bound).",
+"Unbind the key and close the overlay: nothing toggles noclip; the card says to bind a key.",
+"Bind it again, close the overlay, press it: \"Noclip on\".",
+"Press it again: \"Noclip off\", you fall and land.",
+"Noclip on, open the overlay, turn Sandbox off: noclip ends, you fall, collision works."
+]
+],
+[
+"Ranch: anywhere (Sandbox on)",
+"r13sp1",
+"Spawn the plain slime",
+[
+"Sandbox > Spawn & Craft > Spawner, Slimes tab: right-click Pink Slime: \"Spawn: Pink Slime\" and \"Spawn: Radiant Pink Slime\" are listed.",
+"Click \"Spawn: Pink Slime\": a normal Pink Slime appears in front of you."
+]
+],
+[
+"Ranch: anywhere (Sandbox on)",
+"r13sp2",
+"Largo radiant submenu",
+[
+"Right-click Pink Slime, hover \"Largos (N)\": the largo list opens.",
+"Click the Pink Tabby row: that largo spawns and the menus close.",
+"Reopen and hover the Pink Tabby row without clicking: a submenu with \"Spawn: Pink Tabby Largo\", \"(radiant Pink)\", \"(radiant Tabby)\".",
+"Click \"(radiant Tabby)\": a radiant largo with the Tabby look spawns."
+]
+],
+[
+"Ranch: anywhere (Sandbox on)",
+"r13sp3",
+"Radiant icons",
+[
+"Right-click Pink Slime: the radiant row shows the Slimepedia's radiant Pink icon, not the plain one.",
+"Right-click a largo in the Largos tab: the \"(radiant X)\" rows show radiant icons."
+]
+],
+[
+"Ranch: anywhere (Sandbox on)",
+"r13sp4",
+"Menu at the cursor",
+[
+"Spawner, Slimes tab: scroll so a row is half cut off at the bottom of the grid.",
+"Right-click Lucky Slime: the menu opens right at the cursor, never up under the search bar.",
+"Right-click a tile on the half-hidden bottom row: same, growing upward near the bottom of the screen."
+]
+],
+[
+"Ranch: anywhere (Sandbox on)",
+"r13sp5",
+"Gold, Lucky, Tarr greyed in the Vacpack picker",
+[
+"Sandbox > Vacpack, Slimes tab: Gold Slime, Lucky Slime and Tarr are in the grid, greyed out.",
+"Hover Gold Slime: the tooltip says the vacpack can't hold it.",
+"Click it: only a status line; nothing goes into a slot.",
+"Right-click it: the menu opens with \"Spawn: Gold Slime\" and a greyed \"Give\"."
+]
+],
+[
+"Ranch: anywhere",
+"r13bd2",
+"Hitboxes stay up close",
+[
+"Debug > Show entity hitboxes, range 17 m.",
+"Walk right up to a slime, a toy and a placed gadget: their wireframes stay visible, no flicker on refresh.",
+"Turn on Show triggers and stand within 5 m of a toy: its big yellow trigger sphere stays drawn.",
+"Look down at yourself: no wireframe of the player around the camera."
+]
+],
+[
+"Ranch: Fabricator",
+"r13cp1",
+"Sharp DJ pictures",
+[
+"Open the Fabricator, go to the DJ cards.",
+"Select DJ Booth: the big picture on the right is sharp, crisp lines like a vanilla gadget's.",
+"Select DJ Speaker Stack, then Slime Radio: both sharp, your drawings, never a grey box.",
+"Select the Boombox and compare: about the same sharpness.",
+"The small grid tiles look as before, no shimmer."
+]
+],
+[
+"Ranch: Fabricator",
+"r13cp2",
+"Quantum Storage Link picture",
+[
+"Select the Quantum Storage Link card and wait about 1 s: the Refinery Link's big picture in purple, sharp, not a stretched small icon or a grey box.",
+"Close and reopen the Fabricator, select it again: the purple picture shows at once."
+]
+],
+[
+"Ranch: open ground",
+"r13bd1",
+"Slime Radio tips and rolls",
+[
+"Fabricate a Slime Radio: it spawns upright, the stack standing on the ground.",
+"Debug > Show entity hitboxes: a box at the bottom and a tall egg-shaped capsule around it, no round ball.",
+"Walk into it or shoot it lightly: it tips over and rolls on its side, doesn't snap back upright.",
+"Vacuum it up and let go: it drops normally.",
+"Leave it near a slope: it may roll down slowly, without sliding far."
+]
+],
+[
+"Ranch: open ground",
+"r13lp1",
+"Lamp brightness grows with speakers",
+[
+"Place an Electric Pillar Lamp and one Music Box or Slime Radio about 3 m away, play a song: the lamp pulses gently, clearly weaker than last round.",
+"Add 2-3 more speakers near the lamp: the pulse gets clearly stronger and more colourful.",
+"Remove the extra speakers: within a few seconds it's back to the gentle pulse."
+]
+],
+[
+"Ranch: open ground",
+"r13lp2",
+"New lamps pulse",
+[
+"Place a Pink Striped Lamp, a Conservatory Lamp, a Blue Lava Lamp and an Ice Lamp within about 8 m of a playing speaker: each one's light and glow pulse with the beat and shift colour.",
+"Place another colour of lava lamp (or a Blue / Mint / Prismatic striped lamp): it pulses too.",
+"Pause the song: all go back to normal; the Ice Lamp keeps its own slow colour shift.",
+"Turn off \"Lamps pulse to the music\" while a song plays: all lamps go back to normal."
+]
+],
+[
+"Ranch: placed Quantum Storage Link",
+"r13bd3",
+"Link opens on the Quantum Cloud tab",
+[
+"Press E on a Quantum Storage Link: the menu opens on the Quantum Cloud tab.",
+"Hint row: no \"[SPACE] Go To\", no magnifier.",
+"Close it and press E again: Quantum Cloud tab again.",
+"Open a real drone station: its programming tab and normal hints are all there."
+]
+],
+[
+"Ranch: corral with Corral Radio",
+"r13ra1",
+"Notification without parentheses",
+[
+"Turn Slime DJ off in the overlay.",
+"Press the blue radio button: \"Corral Radio: Slime DJ is off, turn it on in the overlay under Ranch > Slime DJ\", no parentheses.",
+"Turn Slime DJ back on."
+]
+],
+[
+"Ranch: corral with Corral Radio",
+"r13ra2",
+"Radio menu: game buttons, readable playing row",
+[
+"Open the radio menu with songs in the playlist and the radio on: no \"Now playing\" line; the header buttons are the game's pink buttons with key caps R, F, C.",
+"Look at the playing song without hovering: teal row, white name, a pink \">\" outside the row on its left.",
+"Hover it: dark blue row, white text.",
+"Press F: Shuffle toggles. Press C twice: Clear asks once, then empties the playlist.",
+"Click Radio: it switches on and off."
+]
+],
+[
+"Ranch: corral with Corral Radio",
+"r13ra3",
+"No Music Box: greyed playlist with a warning",
+[
+"Sell the corral's Music Box (keep the Corral Radio).",
+"Open the radio menu: the saved playlist shows greyed (not empty), an orange \"No Music Box on this corral...\" pill at the top, header buttons grey.",
+"Click a song: the same warning shows as the note under the lists."
+]
+],
+[
+"Ranch: corral with Corral Radio",
+"r13ra4",
+"Real radio keeps playing",
+[
+"With the radio playing, note the song and where it is.",
+"Sell the Music Box, wait about 1 minute, buy it again: the radio comes back about 1 minute further on (or a later song), not from the start.",
+"Walk away until the speaker stops, wait about 30 s, come back: the song is about 30 s further on.",
+"Leave the ranch for a few minutes and return: further along the playlist, mid-song."
+]
+],
+[
+"Ranch: silo",
+"r13ug2",
+"Sell-All Button still appears",
+[
+"Buy the Sell-All Button on a silo: the button appears within about a second, as before."
+]
+],
+[
+"Ranch: drone station",
+"r13dp1",
+"Programs entry in the key bar",
+[
+"Open a station (Scheduler bought, custom upgrades on) on the Programming page: \"[P] Programs\" sits in the bottom key bar between \"[Z] Clear All\" and \"[ESC] Close\"; no pill next to Change.",
+"Click the entry: the programs dialog opens.",
+"Close it, press P: it opens again.",
+"With 2 programs: the bar reads \"Program 1/2\"."
+]
+],
+[
+"Ranch: drone station",
+"r13dp2",
+"Program rows as long buttons",
+[
+"Open the dialog with 2 programs: one long row each, \"[SPACE] Edit\" on the left, \"[Z] Delete\" on the right; the running row tinted, active icon, teal frame.",
+"Press Down / S / Up / W and the arrow keys: the frame moves row by row (programs, Add program, Next program).",
+"Move the mouse over another row: the frame jumps to it.",
+"Press Space on the non-running row: the dialog closes, the page shows that program, the bar reads \"Program 2/2\".",
+"Reopen, focus a row, press Z: that program is deleted and the dialog rebuilds.",
+"Click \"[Z] Delete\" on a row: that program is deleted.",
+"With a gamepad: d-pad moves, A edits, the Clear All button deletes."
+]
+],
+[
+"Ranch: drone station",
+"r13dp3",
+"Add program and the limit",
+[
+"With 1 or 2 programs, focus \"[SPACE] Add program\" and press Space (or click it): the dialog closes and there is one more program.",
+"With 3 programs, open the dialog: the line \"A station can have up to 3 programs.\" instead of the button."
+]
+],
+[
+"Ranch: drone station",
+"r13dp4",
+"Next program selector, footer",
+[
+"With 2+ programs, focus the Next program row, press Left / Right: it toggles \"When idle\" / \"After each delivery\".",
+"Press Space on it: the value steps. Click < and >: it changes.",
+"Close and reopen: the choice is kept.",
+"Footer: no \"Arrows: choose ...\" line, only \"[P] Close\".",
+"P, Esc and a click on the backdrop each close the dialog."
+]
+],
+[
+"Ranch: coast (Sandbox on)",
+"r13nc2",
+"Noclip under the slime sea",
+[
+"Turn noclip on at the ranch's edge.",
+"Fly down into the slime sea and stay under it a few seconds: no knockout, no fade, no respawn.",
+"Fly back up above ground and turn noclip off: you land normally.",
+"With noclip off, jump into the sea: the normal knockout."
+]
+],
+[
+"Powderfall Bluffs",
+"r13lp3",
+"Glowing ice pulses",
+[
+"Carry a Slime Radio next to the glowing green-cyan ice crystals and play a song.",
+"Wait about 10 s: the nearby crystals pulse their glow and light with the beat.",
+"Stop the song: the crystals go back to their normal glow.",
+"Walk around for a minute with the song playing: no stutter."
+]
+],
+[
+"Grey Labyrinth (Sandbox on)",
+"r13nc3",
+"Noclip under the cloud ocean",
+[
+"Turn noclip on by the clouds.",
+"Fly down below the cloud surface: no knockout.",
+"Fly back onto solid ground and turn noclip off: you stand there normally."
+]
+]
+]
