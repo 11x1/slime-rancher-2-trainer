@@ -123,6 +123,8 @@ struct Impl {
     size_t offPlexer = 0, offAmmo = 0, offCurrBehaviour = 0, offProgramPlexer = 0;
     const MethodInfo* ammoIsEmpty = nullptr, *droneEnergy = nullptr, *maybeHasGather = nullptr;
     std::unordered_map<Il2CppClass*, const MethodInfo*> stateStr;  // GetProgramStateStr per behaviour class
+    std::function<int()> owned;  // Drone Program Scheduler owned: 1 / 0 / -1 unknown (empty: always)
+    int unlocked = -1;           // its state at the last tick since the load / enable (-1: not looked yet)
 
     std::mutex mu;  // entries (the Pull detour reads them from the saving thread)
     std::unordered_map<int64_t, Entry> entries;
@@ -169,7 +171,9 @@ struct Impl {
     Il2CppObject* IdentByName(const std::string& name);
     void Persist(int64_t id, const Entry& e);
     void Drop(int64_t id, const char* why);
-    void Load(int64_t id, Il2CppObject* model, const ProgramData& live);
+    void Load(int64_t id, Il2CppObject* model, const ProgramData& live, bool locked);
+    void Lock();
+    int OwnedNow() const { return owned ? owned() : 1; }
     void Rotate(int64_t id, Entry& e, uint64_t now);
     int NextValid(const Entry& e) const;
     std::string BehaviourInfo(Il2CppObject* beh);
@@ -309,7 +313,9 @@ void Impl::Drop(int64_t id, const char* why) {
 }
 
 // First sight of a station since the load / enable: its sidecar entry, checked against the save.
-void Impl::Load(int64_t id, Il2CppObject* model, const ProgramData& live) {
+// Locked (Drone Program Scheduler not owned): the entry is restored all the same (program 1 with its
+// true source runs, page edits keep it in sync with the save), it just does not rotate.
+void Impl::Load(int64_t id, Il2CppObject* model, const ProgramData& live, bool locked) {
     const std::string raw = custom_upgrades::SaveValue(Key(id));
     const bool wasReverted = reassign.erase(id) > 0;
     if (raw.empty()) return;
@@ -339,8 +345,37 @@ void Impl::Load(int64_t id, Il2CppObject* model, const ProgramData& live) {
     if (live != p0 || wasReverted)
         drones::AssignProgram(model, p0, live != p0 ? "program 1 restored from the sidecar (true source)"
                                                     : "program 1 again after custom upgrades were off");
-    SR2_INFO("[{}] drone programs: station {}: {} programs restored from the sidecar ({}), program 1 runs", module, id,
-             e.progs.size(), ModeName(e.mode));
+    if (locked)
+        SR2_INFO("[{}] drone programs: station {}: {} programs stored in the sidecar, inactive until the {} is bought "
+                 "(program 1 runs, the others are kept)", module, id, e.progs.size(), kUpgradeName);
+    else
+        SR2_INFO("[{}] drone programs: station {}: {} programs restored from the sidecar ({}), program 1 runs", module, id,
+                 e.progs.size(), ModeName(e.mode));
+}
+
+// The Drone Program Scheduler is no longer owned (the Sandbox lowered it): every station back on program 1
+// (its true source; the rotation never switched with cargo, this does: rare). The entries stay, so the
+// sidecar keeps every program.
+void Impl::Lock() {
+    std::vector<std::pair<Il2CppObject*, ProgramData>> todo;
+    {
+        std::lock_guard lk(mu);
+        for (auto& [id, e] : entries) {
+            if (e.active == 0 || e.progs.empty() || !e.model) continue;
+            e.active = 0;
+            e.lastSwitch = NowMs();
+            e.idleTicks = e.idleRound = 0;
+            todo.push_back({e.model, e.progs[0]});
+        }
+    }
+    for (const auto& [model, p0] : todo) drones::AssignProgram(model, p0, nullptr);
+    size_t n = 0;
+    {
+        std::lock_guard lk(mu);
+        n = entries.size();
+    }
+    SR2_INFO("[{}] drone programs: {} not owned (any more): {} station(s) with stored programs run program 1 "
+             "({} switched back), the other programs stay stored", module, kUpgradeName, n, todo.size());
 }
 
 int Impl::NextValid(const Entry& e) const {
@@ -497,6 +532,8 @@ const char* ModeName(Mode m) { return m == Mode::kAfterDelivery ? "after each de
 
 bool Available() { return g && custom_upgrades::Active() && !Impl::Faulted(g->module); }
 
+bool Owned() { return Available() && main_thread::IsMainThread() && g->OwnedNow() == 1; }
+
 bool Get(Il2CppObject* stationModel, View& out) {
     out = {};
     if (!Available() || !main_thread::IsMainThread()) return false;
@@ -517,7 +554,7 @@ bool Get(Il2CppObject* stationModel, View& out) {
 }
 
 bool Add(Il2CppObject* stationModel) {
-    if (!Available() || !main_thread::IsMainThread()) return false;
+    if (!Owned() || !main_thread::IsMainThread()) return false;
     const int64_t id = drones::StationIdOf(stationModel);
     ProgramData live;
     if (!id || !drones::ReadProgram(stationModel, live) || !live.Valid()) return false;
@@ -552,7 +589,7 @@ bool Add(Il2CppObject* stationModel) {
 }
 
 bool Remove(Il2CppObject* stationModel, int index) {
-    if (!Available() || !main_thread::IsMainThread()) return false;
+    if (!Owned() || !main_thread::IsMainThread()) return false;
     const int64_t id = drones::StationIdOf(stationModel);
     Impl& p = *g;
     Entry snapshot;
@@ -584,7 +621,7 @@ bool Remove(Il2CppObject* stationModel, int index) {
 }
 
 bool Run(Il2CppObject* stationModel, int index) {
-    if (!Available() || !main_thread::IsMainThread()) return false;
+    if (!Owned() || !main_thread::IsMainThread()) return false;
     const int64_t id = drones::StationIdOf(stationModel);
     Impl& p = *g;
     ProgramData want, live;
@@ -614,7 +651,7 @@ bool Run(Il2CppObject* stationModel, int index) {
 }
 
 bool SetMode(Il2CppObject* stationModel, Mode m) {
-    if (!Available() || !main_thread::IsMainThread()) return false;
+    if (!Owned() || !main_thread::IsMainThread()) return false;
     const int64_t id = drones::StationIdOf(stationModel);
     Impl& p = *g;
     Entry snapshot;
@@ -639,9 +676,10 @@ void NoteMenuOpen(int64_t station) {
 
 // ---------------------------------------------------------------- rotation --
 
-bool Rotation::Setup(Resolver& R, const char* module, std::string& why) {
+bool Rotation::Setup(Resolver& R, const char* module, std::function<int()> owned, std::string& why) {
     auto* p = new Impl();
     p->module = module;
+    p->owned = std::move(owned);
     auto parentOf = [](Il2CppClass* c) { return api().il2cpp_class_get_parent ? api().il2cpp_class_get_parent(c) : nullptr; };
     auto cls = [&](const char* ns, const char* name) -> Il2CppClass* {
         std::string err;
@@ -701,6 +739,19 @@ bool Rotation::Setup(Resolver& R, const char* module, std::string& why) {
 void Rotation::Tick() {
     if (!ready_ || !g || !main_thread::IsMainThread() || Impl::Faulted(g->module) || !custom_upgrades::Active()) return;
     Impl& p = *g;
+    // The Drone Program Scheduler: not known yet (save still loading) -> wait; not owned -> program 1 only.
+    const int own = p.OwnedNow();
+    if (own < 0) return;
+    const bool locked = own == 0;
+    if (p.unlocked != own) {
+        if (p.unlocked == 1 && locked) p.Lock();
+        else if (p.unlocked == 0 && !locked)
+            SR2_INFO("[{}] drone programs: {} owned now: stored programs take turns again", p.module, kUpgradeName);
+        else
+            SR2_INFO("[{}] drone programs: {} {} in this save{}", p.module, kUpgradeName, locked ? "not owned" : "owned",
+                     locked ? " - one program per station (stored extra programs wait for it)" : "");
+        p.unlocked = own;
+    }
     std::vector<Il2CppObject*> stations;
     if (!drones::StationModels(stations)) return;
     const uint64_t now = NowMs();
@@ -711,7 +762,7 @@ void Rotation::Tick() {
         if (!id || !drones::ReadProgram(model, live)) continue;
         present.insert(id);
         if (p.seen.insert(id).second) {
-            p.Load(id, model, live);
+            p.Load(id, model, live, locked);
             continue;  // restored programs start at the next tick
         }
         Entry* e = nullptr;
@@ -734,7 +785,7 @@ void Rotation::Tick() {
             p.Persist(id, snapshot);
             SR2_INFO("[{}] drone programs: station {}: program {} changed ({})", p.module, id, e->active + 1, p.Describe(live));
         }
-        if (p.MenuOpen(id)) continue;
+        if (locked || p.MenuOpen(id)) continue;
         p.Rotate(id, *e, now);
         if (Impl::Faulted(p.module)) return;
     }
@@ -752,7 +803,9 @@ void Rotation::ResetSeen() {
     if (!g) return;
     g->ClearAll();  // now: a save before the next tick must not see the old game's programs
     main_thread::Post([] {
-        if (g) g->seen.clear();
+        if (!g) return;
+        g->seen.clear();
+        g->unlocked = -1;  // the new save's Drone Program Scheduler state is logged again
     });
 }
 
@@ -787,6 +840,7 @@ void Rotation::Revert(bool gameCalls, const char* why) {
         p.ClearAll();
         p.seen.clear();
         p.reassign.clear();
+        p.unlocked = -1;
     }
     if (n) SR2_INFO("[{}] drone programs: {} station(s) back on program 1 ({}{})", p.module, n, why,
                     calls ? "" : "; program data only");

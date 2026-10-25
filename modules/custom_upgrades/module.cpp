@@ -26,7 +26,8 @@
 //   more levels of the vanilla Extra Tank card) and Drone Battery Saver I-IV (own card; every drone
 //   station uses 1/1.25 .. 1/2 of the battery; effect in drone_battery.cpp) and Shadow Catcher (own
 //   card; the vacpack holds shadow slimes, they stay and eat on the ranch; effect in
-//   shadow_catcher.cpp), in vacpack_upgrades.cpp
+//   shadow_catcher.cpp) and Drone Program Scheduler (own card; unlocks several programs per drone
+//   station, drone_programs.cpp), in vacpack_upgrades.cpp
 //   (own hooks, levels and extra slot contents in this module's sidecar as per-save values).
 //
 //   Silo capacity (vanilla, prefab + disassembly): the silo's SiloStorage has 12 slot definitions
@@ -3383,10 +3384,14 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
                       "Hen Collector through Coop", kModule, derr);
     }
     // Several programs per drone station (optional; needs the drone sources' Pull detour and helpers).
+    // Locked behind the Drone Program Scheduler card (vacpack upgrades, set up below); without the
+    // vacpack upgrades the card can't be bought, so the feature is not locked then.
     if (drones_.Ready()) {
         std::string perr;
-        if (programs_.Setup(R, kModule, perr)) SR2_INFO("[{}] drone programs ready (up to {} per station)", kModule,
-                                                       custom_upgrades::drone_programs::kMaxPrograms);
+        auto owned = [this] { return vacpack_.Ready() ? vacpack_.DroneProgramsOwned() : 1; };
+        if (programs_.Setup(R, kModule, owned, perr))
+            SR2_INFO("[{}] drone programs ready (up to {} per station, with the {})", kModule,
+                     custom_upgrades::drone_programs::kMaxPrograms, custom_upgrades::drone_programs::kUpgradeName);
         else SR2_WARN("[{}] drone programs unavailable ({}) - one program per station", kModule, perr);
     } else {
         SR2_WARN("[{}] drone programs unavailable (they need the drone sources) - one program per station", kModule);
@@ -3611,7 +3616,8 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         std::string verr, vreport;
         if (vacpack_.Setup(ctx, std::move(host), verr, vreport)) report += vreport;
         else SR2_WARN("[{}] vacpack upgrades unavailable ({}) - Tank Booster IX-XII, Extra Tank III-IV, Drone Battery "
-                      "Saver I-IV and Shadow Catcher are not offered", kModule, verr);
+                      "Saver I-IV, Shadow Catcher and Drone Program Scheduler are not offered (several programs per drone "
+                      "station unlocked)", kModule, verr);
     }
     // Shadow Catcher effect (optional; needs the vacpack upgrades, which sell it and publish its state).
     if (vacpack_.Ready()) {
