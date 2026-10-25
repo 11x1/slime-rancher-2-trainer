@@ -14,6 +14,7 @@
 
 - `re/INDEX.md`: start here. Map of game systems (`re/<system>.md`: classes, RVAs, fields, gotchas), `re/hooks.md` (every hook; check before hooking), core helpers and UI components, and `re/re_lookup.py` (offline dump lookup).
 - `.claude/agent-brief.md`: rules for every agent (context, fault policy, git, build, report format).
+- `.claude/checklist/`: the user's in-game test checklist (artifact source, round builder, conventions).
 - `README.md`: what the mod is, build, install, settings and profiles.
 - `ui/NOTES.md`: the in-game Options tab and the ImGui overlay (layout, theme, fonts, Slimepedia slime logo).
 - `modules/<name>/NOTES.md`: each module's design and findings.
