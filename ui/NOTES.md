@@ -9,10 +9,12 @@ The UI's own settings (module `ui`; never in a profile):
 | key | kind | default | label |
 |---|---|---|---|
 | `overlay_hotkey` | Key | `VK_F8` | "Overlay hotkey" |
-| `overlay_hint` | Bool | on | "Show overlay hint at startup" ("Press F8 for mod settings" top left for 10 s after the first frame) |
+| `overlay_hint` | Bool | on | "Show overlay hint at startup" ("Press F8 for mod settings" top left for 10 s after the first frame; plus "All features start off; enable what you want" while every module is off) |
 | `overlay_theme` | Enum | Dark | "Overlay theme": Dark / Light (also the Dark/Light tabs at the bottom of the sidebar) |
 
 There is no automatic `ui.enabled` toggle: turning the UI off would lock you out of it.
+
+**Stripped defaults (defaults_rev 2).** A new install starts with every feature module off (`Module::DefaultEnabled()` is false; only `plot_upgrades`, Custom Upgrades' "Tier effects" sub-switch, stays on, and it does nothing without Custom Upgrades). What stays on because it is not a feature: the overlay and its hotkey, the startup hint, the Options > Mods tab, the `[modded]` label (no module), logging, the version guard and perf logging. Existing configs keep their old defaults: see `core/config.h` `kDefaultsRev` and `core/module_manager.cpp` `kLegacyDefaultOn` (README "First start"). While no module that defaults to off is on (`AllModulesOff` in `overlay.cpp`, settings only, re-read once a second), the startup hint adds a dim second line "All features start off; enable what you want" (`Host::allOff`).
 
 RE for everything below: `re/ui.md` (Options menu classes, input system, CursorManager, main menu prefab, D3D11/Steam overlay) and `re/unity.md` (textures, sprites, GC handles, Cursor).
 

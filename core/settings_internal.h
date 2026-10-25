@@ -21,6 +21,8 @@ void Init(const json::Value& document, const std::filesystem::path& file);
 // document dirty (debounced save like a setting change).
 std::string RootString(std::string_view key);
 void SetRootString(std::string_view key, std::string value);
+// Top-level number (e.g. "defaults_rev"), same rules as SetRootString.
+void SetRootNumber(std::string_view key, double value);
 
 // Stores a saved value for a setting that is NOT registered (yet), e.g. a
 // setting of a module that has not run Setup(). It is written to

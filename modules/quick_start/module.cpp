@@ -202,7 +202,6 @@ bool IsNativeFault(const std::string& invokeErr) { return invokeErr.starts_with(
 class QuickStart final : public sr2::core::Module {
 public:
     const char* Name() const override { return kModule; }
-    bool DefaultEnabled() const override { return true; }
     bool Setup(sr2::core::ModuleContext& ctx) override;
     void OnEnable() override { enabled_.store(true); }
     void OnDisable() override {

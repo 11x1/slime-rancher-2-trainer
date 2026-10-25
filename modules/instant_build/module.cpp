@@ -76,7 +76,6 @@ bool IsA(Il2CppObject* obj, Il2CppClass* k) {
 class InstantBuild final : public sr2::core::Module {
 public:
     const char* Name() const override { return kModule; }
-    bool DefaultEnabled() const override { return true; }
     bool Setup(sr2::core::ModuleContext& ctx) override;
     void OnEnable() override { enabled_.store(true); }
     void OnDisable() override { enabled_.store(false); }

@@ -5239,6 +5239,8 @@ void DrawHint(const Host& h) {
             ImGui::TextColored(key, "%s", h.hotkeyName.c_str());
             ImGui::SameLine(0, 0);
             ImGui::TextUnformatted(" for mod settings");
+            if (h.allOff)
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.soft), "All features start off; enable what you want");
             if (h.versionMismatch)
                 ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.warn), "Version warning: %s", h.versionStatus.c_str());
             next();

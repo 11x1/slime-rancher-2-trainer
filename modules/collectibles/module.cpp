@@ -1994,7 +1994,6 @@ private:
 class CollectiblesModule final : public core::Module {
 public:
     const char* Name() const override { return kModule; }
-    bool DefaultEnabled() const override { return true; }
     bool Setup(core::ModuleContext& ctx) override { return impl_->Setup(ctx); }
     void OnEnable() override { impl_->OnEnable(); }
     void OnDisable() override { impl_->OnDisable(); }

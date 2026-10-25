@@ -23,6 +23,7 @@ struct Host {
     // Startup notes (DrawHint): the "press <hotkey>" note, and quick_start's auto-continue
     // note (0 none, 1 "Hold Shift..." pending, 2 "Staying in the main menu").
     bool menuHint = false;
+    bool allOff = false;               // no module switched on: the note adds "All features start off..."
     int quickHint = 0;
     float quickSeconds = -1;           // countdown of the pending auto-continue, < 0 = unknown
     // Key capture (overlay polls the keyboard): start, and whether `d` is being captured.

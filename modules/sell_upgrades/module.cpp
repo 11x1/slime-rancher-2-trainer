@@ -301,7 +301,6 @@ struct Rect {
 class SellUpgrades final : public sr2::core::Module {
 public:
     const char* Name() const override { return kModule; }
-    bool DefaultEnabled() const override { return true; }
     bool Setup(sr2::core::ModuleContext& ctx) override;
     void SetupExpansionPopup(sr2::core::ModuleContext& ctx);
     void OnEnable() override { enabled_.store(true); }

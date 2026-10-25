@@ -128,6 +128,9 @@ float Mult(Il2CppObject* key, Family f) { return custom_upgrades::Multiplier(key
 class PlotUpgrades final : public sr2::core::Module {
 public:
     const char* Name() const override { return kModule; }
+    // On by default although feature modules start off: it is Custom Upgrades' "Tier effects" switch
+    // and does nothing unless a tier is owned, which needs Custom Upgrades (off by default, or
+    // turned on by its per-save gate for a save that owns tiers: their effects then still apply).
     bool DefaultEnabled() const override { return true; }
     bool Setup(sr2::core::ModuleContext& ctx) override;
     void OnEnable() override {

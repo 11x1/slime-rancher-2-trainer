@@ -110,7 +110,6 @@ bool VacBoosted() { return g_vacFast.load(std::memory_order_relaxed) || g_vacMul
 class MiscTweaks final : public sr2::core::Module {
 public:
     const char* Name() const override { return kModule; }
-    bool DefaultEnabled() const override { return true; }  // every option is off / 1x by default
     bool Setup(sr2::core::ModuleContext& ctx) override;
     void OnEnable() override { g_enabled.store(true); }
     void OnDisable() override { g_enabled.store(false); }

@@ -21,9 +21,13 @@
   // Only remembered: startup never re-applies it, the values below are the live ones.
   "active_profile": "",
 
+  // Module on/off defaults generation - leave it at 2. With 2, every feature module that
+  // has no "enabled" below starts off; turn them on in the overlay (F8) or Options > Mods.
+  // (A config without this key is from an older version: modules it does not list keep
+  // their old default, and the mod then writes them out and sets this to 2.)
+  "defaults_rev": 2,
+
+  // Everything starts off. Example: "modules": { "minimap": { "enabled": true } }
   "modules": {
-    "minimap":       { "enabled": true },
-    "spawn_scaling": { "enabled": true },
-    "hl2_movement":  { "enabled": false }
   }
 }

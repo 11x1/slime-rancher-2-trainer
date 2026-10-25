@@ -322,7 +322,6 @@ public:
         for (auto& kv : objs_) kv.second.handle.h = nullptr;
     }
     const char* Name() const override { return kModule; }
-    bool DefaultEnabled() const override { return true; }
     bool Setup(sr2::core::ModuleContext& ctx) override;
     void OnEnable() override;
     void OnDisable() override;

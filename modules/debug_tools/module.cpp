@@ -62,7 +62,6 @@ std::atomic<bool> g_highlight{false};
 class DebugTools final : public sr2::core::Module {
 public:
     const char* Name() const override { return kModule; }
-    bool DefaultEnabled() const override { return true; }  // every tool is off by default
     bool Setup(sr2::core::ModuleContext& ctx) override;
     void OnEnable() override { g_enabled.store(true); }
     void OnDisable() override { g_enabled.store(false); }  // the frame callback tears the overlay down
