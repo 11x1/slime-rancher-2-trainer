@@ -80,7 +80,7 @@ Zone (`_lastNotNullZone`) -> `MapDirector.GetMapForZone` -> background sprite de
 - methods: `Start` 0x713C30 - `_inputRegistrar.BindCanceled(_closeInput, OnCloseInput)` (and `_toggleFiltersInput`, `_toggleDroneMenuInput`, also on *canceled*): the map closes on the RELEASE of its close input; UIInputFocusRegistrar applies the bindings when it receives focus (IDA)
 - methods: `ICancelHandler.OnCancel` 0x714C90 - only closes the filter menu / drone menu when they hold focus, never the map (IDA)
 - other: `MapUIRoot.TryOpenMap` 0x729D40 - `_openMapInput` *Performed* (press) -> `UIDisplayManager.OpenDisplay(_mapDisplay, WithData(_mapDirector))`; skipped in the ranch house, while dead, while time fast-forwards (IDA)
-- gotchas: round 13 "first M of a save opens and closes the map": a long mod frame right after the open (M still held) is the suspect; map_tools keeps the first 0.35 s of an open light (modules/map_tools/NOTES.md, "Open settle")
+- gotchas: round 13/14 "M opens and closes the map": the cause (round 15) was the overlay's input lock. It re-enabled the whole `Paused` map in gameplay, which armed `Paused/CloseMap` (also M), so the opening press started CloseMap and its release closed the map. CloseMap is a Button with no initial state check, so in vanilla the map's own Paused.Enable while M is held never starts it. Fixed in ui/game_input.cpp (re/ui.md "InputDirector"). The map_tools 0.35 s "Open settle" stays as a cheap safeguard
 - mod: MM (hook Awake: full-map-open detection, mapping, director), MT (hook LateUpdate; teleport close)
 
 ### MapUIRoot (MonomiPark.SlimeRancher.UI.Map)  -- scene object

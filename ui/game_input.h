@@ -11,7 +11,9 @@
 //    disable the menu map (InputDirector._paused: full map, pause menu, ...)
 //    and, for the pointer, the EventSystem's input module, so a game menu
 //    behind the overlay does not react to clicks, the wheel or keys meant for
-//    the overlay; both are re-enabled as soon as the pointer leaves;
+//    the overlay; both are re-enabled as soon as the pointer leaves. The menu
+//    map is held action by action and only the actions that were on come
+//    back (a whole-map Enable in gameplay armed CloseMap on M);
 //  - unlock the cursor (UnityEngine.Cursor.lockState = None) and show it
 //    (Cursor.visible = true: the full map hides the hardware cursor through
 //    CursorManager.HideCursorFor), then hand both back to the game's
