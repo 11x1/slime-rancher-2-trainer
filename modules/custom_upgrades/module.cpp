@@ -412,8 +412,8 @@ const UpgradeDef kDefs[] = {
      "Buy the Coop Air Net for this coop?"},
     {COOP_HEN_COLLECTOR, "coop_hen_collector", kPlotCoop, 0, 1000, kNoFamily, 1.0f, kUpgDeluxeCoop, 0,
      "Hen Collector",
-     "Vacs up the hens and roostros over this coop's limits (18 hens, 2 roostros). Chicks are safe! Set the limits "
-     "with the sliders.",
+     "A collector for your coop that gathers spare grown chickens every few hours and stores them for you or your "
+     "drones to pick up.",
      "Buy the Hen Collector for this coop?"},
 };
 
@@ -499,13 +499,6 @@ int ClampKeepHens(int64_t v) {
 int ClampKeepRoosters(int64_t v) {
     return static_cast<int>(
         std::clamp<int64_t>(v, custom_upgrades::world::kHenKeepRoostersMin, custom_upgrades::world::kHenKeepRoostersMax));
-}
-
-// Short enough for the details panel (vanilla upgrade texts are 44-156 characters).
-std::string HenDescription(int hens, int roosters) {
-    return std::format(
-        "Vacs up the hens and roostros over this coop's limits ({} hen{}, {} roostro{}). Chicks are safe!",
-        hens, hens == 1 ? "" : "s", roosters, roosters == 1 ? "" : "s");
 }
 
 int HenCount(const PlotState& ps) {
@@ -2080,22 +2073,11 @@ void CustomUpgrades::BeforeMenuUpdate(Il2CppObject* root) {
     if (sink) RegisterTexts(plot, *inj);
 }
 
-void CustomUpgrades::RegisterTexts(Il2CppObject* plot, const MenuInjection& inj) {
+void CustomUpgrades::RegisterTexts(Il2CppObject* /*plot*/, const MenuInjection& inj) {
     for (const Injected& in : inj.items) {
         if (!in.inList) continue;
         const UpgradeDef& d = *in.def;
-        if (d.id == COOP_HEN_COLLECTOR) {
-            // This coop's keep-limits (defaults until bought / set).
-            int hens = custom_upgrades::world::kHenKeepHensDefault, roosters = custom_upgrades::world::kHenKeepRoostersDefault;
-            const std::string id = PlotId(plot);
-            if (auto it = state_.plots.find(id); !id.empty() && it != state_.plots.end()) {
-                hens = ClampKeepHens(it->second.henKeepHens);
-                roosters = ClampKeepRoosters(it->second.henKeepRoosters);
-            }
-            SetTexts(in, d.title, HenDescription(hens, roosters), d.prompt);
-        } else {
-            SetTexts(in, d.title, d.description, d.prompt);
-        }
+        SetTexts(in, d.title, d.description, d.prompt);  // Hen Collector too: plain text, the limits are on its sliders
     }
 }
 

@@ -168,7 +168,14 @@ RE: re/plots.md (patchCoop corners, PlortCollector, PlortCollectorActivator, Coo
 re/custom-upgrades.md 2.1 / 2.4.
 
 - **Air Net**: the corral's `Base Air Net` cloned under the coop (`sr2mods_CoopAirNet#<gen>`), fitted every
-  tick to the top and footprint of the active CoopRegion (High Walls lift it).
+  tick to the top and footprint of the active CoopRegion (High Walls lift it). Round 16: the fit works from
+  the clone root's transform and the net collider's offsets read once from a fresh clone (`NetGeom`,
+  `MeasureNet`, log `net bottom N above the plot root`), not from the live collider bounds. Those stayed
+  stale for many ticks (round 15 log: the same "moved 0.00, 5.14, 0.00" every second, then `fit offset
+  (0.00, -190.33, 0.00) too large` 108 times): each tick moved the root again, the net drifted ~190 m up
+  until the bounds caught up. The too-large warning is logged once per coop.
+- **Description** (round 16, "should be generic upgrade text, nothing to do with the configuration of
+  it"): a fixed text; the keep-limits only show on the card's sliders.
 - **Hen Collector clone**: `Deluxe` cloned under the coop, TV removed, both slots one session clone of the
   elder slot definition (100 each, group MeatGroup, block list ElderGroup + UnstableMeat), local storage
   with its own `AmmoModel`, never linked to the plot model. Contents in the sidecar (`hen_collector`:
@@ -757,6 +764,12 @@ re/vacpack.md, re/fabricator.md (UpgradeChain, pips). Bought through the vanilla
 - **Circles** (`fabricator_levels.cpp`): pre-hooks clone the last circle / pip and lay out more than 8
   narrower (chain 12 x 27.8 px every 34.4 px; pips two rows of six). Without the chain hook Tank Booster
   keeps 8 levels (logged).
+- **"Next:" label** (round 16, r15sl1 "'Next: Tank Booster IV' ... uses wrong next label"): the details
+  panel puts the next level's Title in as a nested variable, which the text sink never sees, so our cloned
+  levels showed their template's title (Slime Launcher: Tank Booster IV; Tank Booster IX: V). A
+  `PlayerUpgradeDetails.Show` post-detour (`fabricator_levels.cpp`) swaps it for a `StringVariable` with
+  our title when that Title is registered in `text_override` (log once per title: `details panel 'Next:'
+  label shows '...'`). RE: re/fabricator.md "Fabricator details panel".
 - **Costs**: IX-XII = V-VIII's items doubled (+2 for the rare ones), 60,000 / 75,000 / 90,000 / 120,000;
   Extra Tank III / IV = VII / VIII's items, 25,000 / 50,000. No upgrade component (the world has no spares).
   Log `vacpack: TankBoosterTiers ready ...`.
