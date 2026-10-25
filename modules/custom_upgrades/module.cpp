@@ -374,8 +374,8 @@ const UpgradeDef kDefs[] = {
      "Buy Music Box II for this corral?"},
     // ---- Slime DJ (no effect of its own here: slime_dj asks Owns(plot, kCorralRadio)) ----
     {CORRAL_RADIO, "corral_radio", kPlotCorral, kUpgMusicBox, 1500, kNoFamily, 1.0f, kUpgMusicBox, 0, "Corral Radio",
-     "Tunes this corral's music box to its own station: pick its songs in the mod menu (Ranch > Slime DJ > Corral "
-     "radios).",
+     "Tunes this corral's music box to its own station. Press the blue button at the corral's corner to pick its "
+     "songs (or use the mod menu: Ranch > Slime DJ > Corral radios).",
      "Buy the Corral Radio for this corral?"},
     {COOP_HENS_1, "coop_hens_1", kPlotCoop, 0, 2000, F(Family::kCoop), 1.5f, kUpgDeluxeCoop, 0, "Faster Hens I",
      "Cozier nests help this coop's hens lay eggs 1.5x as fast.", "Buy Faster Hens I for this coop?"},
@@ -608,6 +608,9 @@ public:
     bool OnSiloButton(Il2CppObject* activator);
     bool OnHenButton(Il2CppObject* activator);
     bool OnRadioButton(Il2CppObject* activator);
+    Il2CppObject* CardIcon(int32_t id);
+    void KeepLoaded(Il2CppObject* asset);
+    bool Notify(Il2CppObject* icon, const std::string& text);
     SiloSummary SellAllNow(Il2CppObject* plot, const std::string& id, const char* via, bool queueNotices,
                            const custom_upgrades::ui::Receipt* plan = nullptr);
     bool OpenReceipt(Il2CppObject* plot, Il2CppObject* activator, const std::string& id,
@@ -828,6 +831,7 @@ public:
     const MethodInfo* itemUpdAvailMi_ = nullptr;   // PlotUpgradePurchaseItemModel.UpdateAvailability (optional)
     const MethodInfo* itemUpdHiddenMi_ = nullptr;  // PlotUpgradePurchaseItemModel.UpdateHidden (optional)
     const MethodInfo* setHideFlagsMi_ = nullptr;
+    const MethodInfo* getHideFlagsMi_ = nullptr;  // optional (KeepLoaded ORs the flag in)
 
     Bound<Il2CppObject*(Il2CppObject*)> getTransform_;
     Bound<Il2CppObject*(Il2CppObject*)> getParent_;
@@ -1626,6 +1630,9 @@ bool CustomUpgrades::Visible(Il2CppObject* plot, const UpgradeDef& d) {
     if (d.id == SILO_SELL_ALL && !silo_.Ready()) return false;  // its world button is all it does
     if (IsSiloCapacity(d) && !capacityOk_) return false;        // nothing could apply the capacity
     if (!d.needs) return true;
+    // An owned upgrade that is not a tier stays listed (sellable) without its prerequisite: the Corral Radio
+    // after its Music Box was sold (VanillaDependentOf).
+    if (d.family == kNoFamily && OwnsKey(plot, d)) return true;
     if (!custom_upgrades::IsCustomUpgrade(d.needs)) return VanillaOwned(plot, d.needs);  // vanilla prerequisite
     // A higher tier of a chain on a vanilla card needs that vanilla upgrade too: a save that owns Sprinkler II
     // without the Sprinkler (bought before round 9, when Sprinkler II needed nothing) keeps the vanilla Sprinkler
@@ -1873,7 +1880,7 @@ bool CustomUpgrades::BuildInjection(MenuInjection& inj, int32_t plotType) {
             if (!IsA(item, upgItemClass_) || !unity::IsAlive(item)) continue;
             const int32_t u = unity::Field<int32_t>(item, offItemUpgrade_);
             if (custom_upgrades::IsCustomUpgrade(u)) continue;
-            vanilla.emplace(u, item);
+            if (vanilla.emplace(u, item).second) KeepLoaded(item);
             void* costs = unity::Field<void*>(item, offItemCosts_);
             const size_t nc = unity::ListCount(costs);
             int score = (nc == 1 ? 2 : nc > 1 ? 1 : 0) + (u == kUpgStorageCapacity ? 4 : 0);
@@ -1921,6 +1928,27 @@ bool CustomUpgrades::BuildInjection(MenuInjection& inj, int32_t plotType) {
     SR2_INFO("[{}] plot type {}: {} custom item(s) cloned from '{}' (upgrade {})", kModule, plotType, inj.items.size(),
              unity::GetName(tpl), unity::Field<int32_t>(tpl, offItemUpgrade_));
     return !inj.items.empty();
+}
+
+// Round 12 ("cant sell speakers I again, same bug as before with there being no sell & only buy"; log: "Music
+// Box II: vanilla menu item of upgrade 2 not found" after selling Music Box II): a vanilla card we take out
+// of the shared list (a tier card stands in for it, merged storage cards) is referenced only by our GC
+// handle while it is out, and a GC handle does not keep an asset through Resources.UnloadUnusedAssets
+// (the same as slime_dj's song clip, re/audio.md): the asset was destroyed (m_CachedPtr 0), the chain card
+// lost its Sell button and RestoreVanilla would put a dead item back. HideFlags.DontUnloadUnusedAsset on
+// every vanilla upgrade item of an injected menu keeps them (they are part of the menu config anyway).
+void CustomUpgrades::KeepLoaded(Il2CppObject* asset) {
+    if (!setHideFlagsMi_ || !unity::IsAlive(asset)) return;
+    int32_t flags = 0;
+    if (getHideFlagsMi_) {
+        bool ok = false;
+        Il2CppObject* boxed = Invoke(getHideFlagsMi_, asset, {}, "Object.get_hideFlags", &ok);
+        if (!ok) return;
+        flags = Unbox<int32_t>(boxed);
+    }
+    if (flags & kHideFlagsDontUnloadUnusedAsset) return;
+    flags |= kHideFlagsDontUnloadUnusedAsset;
+    Invoke(setHideFlagsMi_, asset, {&flags}, "Object.set_hideFlags");
 }
 
 Il2CppObject* CustomUpgrades::GlobalUpgradeItem(int32_t upgrade) {
@@ -2123,6 +2151,10 @@ void CustomUpgrades::RestoreVanilla(MenuInjection& inj) {
     std::sort(inj.hidden.begin(), inj.hidden.end(),
               [](const HiddenVanilla& a, const HiddenVanilla& b) { return a.index < b.index; });
     for (const HiddenVanilla& h : inj.hidden) {
+        if (!unity::IsAlive(h.item)) {  // see KeepLoaded: a destroyed asset must not go back into the menu
+            SR2_WARN("[{}] a vanilla menu card taken out of the list was destroyed meanwhile - not put back", kModule);
+            continue;
+        }
         bool has = false;
         if (ListCall(inj.list, "Contains", h.item, &has) && !has) ListInsert(inj.list, h.index, h.item);
     }
@@ -2714,14 +2746,39 @@ bool CustomUpgrades::OnHenButton(Il2CppObject* activator) {
         return state_.loaded && WorldQuery(p, req);
     };
     const std::string text = world_.Activate(plot, query);
-    if (silo_.Ready()) silo_.Message(activator, text, text.rfind("Collecting", 0) == 0);
+    // Round 12 ("USE GAME's NOTIFICATIONS PLEASE"): the game's notification pop-up; the text above the
+    // button only when the HUD can't take one.
+    if (!Notify(CardIcon(COOP_HEN_COLLECTOR), text) && silo_.Ready())
+        silo_.Message(activator, text, text.rfind("Collecting", 0) == 0);
     return true;
+}
+
+// The menu icon of a custom card (the clone's _icon: the user's drawing or the borrowed vanilla icon), from
+// the plot menus built this session; nullptr before that menu was opened (the notice then has no icon).
+Il2CppObject* CustomUpgrades::CardIcon(int32_t id) {
+    for (auto& inj : injections_) {
+        if (inj->failed) continue;
+        for (const Injected& in : inj->items)
+            if (in.def && in.def->id == id && unity::IsAlive(in.item)) {
+                Il2CppObject* icon = unity::Field<Il2CppObject*>(in.item, offItemIcon_);
+                return unity::IsAlive(icon) ? icon : nullptr;
+            }
+    }
+    return nullptr;
+}
+
+// One of the game's notification pop-ups (the drone-style entry with our text, sale_notify.h QueueText).
+// false = the HUD can't show it now (no list, no text sink): the caller falls back to its own feedback.
+bool CustomUpgrades::Notify(Il2CppObject* icon, const std::string& text) {
+    if (text.empty() || !notices_.TextReady() || !notices_.Available()) return false;
+    return notices_.QueueText(icon, text);
 }
 
 // The Corral Radio's button (round 11, user: "Add a button in the last empty corner (color it blue; like
 // you did for silo's button) and let the button open a menu to build a queue from"): a second
 // SiloButtons with the blue look on the corral's free corner. A press opens slime_dj's playlist menu for
-// the corral (slime_dj/api.h OpenRadioMenu); when Slime DJ can't, the reason shows above the button.
+// the corral (slime_dj/api.h OpenRadioMenu); when Slime DJ can't, the reason is a game notification
+// (round 12; the text above the button only when the HUD can't take one).
 bool CustomUpgrades::OnRadioButton(Il2CppObject* activator) {
     if (!radioButtons_.Ready() || !radioButtons_.IsOurs(activator)) return false;
     if (!On()) return true;  // swallowed (the button is removed with the next frame)
@@ -2739,7 +2796,7 @@ bool CustomUpgrades::OnRadioButton(Il2CppObject* activator) {
         SR2_INFO("[{}] corral radio (plot '{}'): playlist menu requested", kModule, id);
     } else {
         SR2_INFO("[{}] corral radio (plot '{}'): no playlist menu ({})", kModule, id, why);
-        radioButtons_.Message(activator, why, false);
+        if (!Notify(CardIcon(CORRAL_RADIO), "Corral Radio: " + why)) radioButtons_.Message(activator, why, false);
     }
     return true;
 }
@@ -3054,10 +3111,13 @@ bool CustomUpgrades::RemoveCustom(Il2CppObject* plot, int32_t upg, std::string& 
     return true;
 }
 
+// Only a tier chain on the vanilla upgrade blocks its sale (Music Box II on the Music Box card). Round 12
+// ("bought radio and i cant sell speakers I again"): the Corral Radio (not a tier, only bought on top of the
+// Music Box) no longer does; it stays owned and listed (Visible), and plays again once the Music Box is back.
 std::string CustomUpgrades::VanillaDependentOf(Il2CppObject* plot, int32_t vanillaUpg) {
     if (custom_upgrades::IsCustomUpgrade(vanillaUpg) || !vanillaUpg) return {};
     for (const UpgradeDef& o : kDefs)
-        if (o.needs == vanillaUpg && OwnsKey(plot, o)) return o.title;
+        if (o.needs == vanillaUpg && o.family != kNoFamily && OwnsKey(plot, o)) return o.title;
     return {};
 }
 
@@ -3093,8 +3153,9 @@ bool CustomUpgrades::ChainSellTargetOf(Il2CppObject* plot, Il2CppObject* item, i
             // Chain on a vanilla upgrade (Music Box, Sprinkler, Ash Trough): the vanilla upgrade below, priced by
             // its own menu item. The card stands at the vanilla card's place whenever it is shown (Shown needs
             // the vanilla upgrade), so ownership is what counts; the item is the one BuildInjection pinned.
-            if (!in.base || !unity::IsAlive(in.base))
-                return no(std::format("{}: vanilla menu item of upgrade {} not found", d.title, d.needs));
+            if (!in.base) return no(std::format("{}: vanilla menu item of upgrade {} not found", d.title, d.needs));
+            if (!unity::IsAlive(in.base))
+                return no(std::format("{}: vanilla menu item of upgrade {} was destroyed", d.title, d.needs));
             if (!VanillaOwned(plot, d.needs)) return no(std::format("{}: vanilla upgrade {} not owned", d.title, d.needs));
             upgrade = d.needs;
             priceItem = in.base;
@@ -3338,6 +3399,7 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     slotCountMi_ = method(ammoMgr, "GetSlotCount", 1);
     decrementMi_ = byParams(ammoMgr, "Decrement", {"System.Int32", "System.Int32"});
     setHideFlagsMi_ = method(uobject, "set_hideFlags", 1, false);
+    getHideFlagsMi_ = method(uobject, "get_hideFlags", 0, false);
     bind(getTransform_, method(component, "get_transform", 0));
     bind(getParent_, method(transform, "get_parent", 0));
     bind(getComponent_, byParams(component, "GetComponent", {"System.Type"}));

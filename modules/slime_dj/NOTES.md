@@ -203,7 +203,7 @@ that changes channel stops, drops its clip and joins the other channel at its cl
   radio left on in the save starts.
 - Not per radio: `SongPlaying` / `SongName` follow the global song only. Walls dance per channel (round 12).
 
-### Corral Radio menu (round 11, `radio_menu.cpp`)
+### Corral Radio menu (rounds 11-12, `radio_menu.cpp`)
 
 User: "Add a button in the last empty corner (color it blue; like you did for silo's button) and let the
 button open a menu to build a queue from". custom_upgrades builds the button (a second `SiloButtons` with
@@ -214,19 +214,33 @@ DJ is off, the menu unavailable or already open; custom_upgrades shows the reaso
 next tick counts as active (box scan now, so the radio channel exists), then opens the menu.
 
 - *Look*: a runtime uGUI panel like custom_upgrades' Sell-All receipt (same palette, SDF shapes, the HUD's
-  TMP font, overlay Canvas 1920 x 1080 + UIInputLocker: game paused, cursor free). Title, corral name,
-  status line, two virtual lists (Songs sorted by name; the playlist numbered, the playing entry pink with
-  `>`), a feedback line, buttons Radio on/off, Shuffle, Clear (press twice), Done under the songs and Play,
-  Up, Down, Remove for the selected entry under the playlist, key hints. 5..11 rows per list (canvas
-  height); only changed texts / colours are written.
-- *Input*: polled (InputSystem devices, Toggle clicks), 0.3 s grace; see the `radio_menu.h` header for the
-  key map (keyboard, pad, mouse wheel over a list, click a song = add, click an entry = select).
+  TMP font, overlay Canvas 1920 x 1080 + UIInputLocker: game paused, cursor free). Title with the header
+  buttons Radio on/off, Shuffle, Clear (press twice) on its right, corral name, status line, two virtual
+  lists (Songs sorted by name; the playlist numbered, the playing entry pink with `>`), a feedback line.
+  5..11 rows per list (canvas height); only changed texts / colours are written.
+- *Round 12* (user: "the playlist could use more slime ranchification, we dont need keybinds when we put
+  the list items as slime rancher's buttons (or design similiar to it, like Silo's sell all hud), what way
+  we can remove the bottom hint, DONE PLAY UP DOWN REMOVE buttons"): every row is a pill in the game
+  button's colours (`ButtonAnimator.ColorNormal` / `ColorMouseOver` and its label colour, read from the
+  popup's Cancel button at each open; menu palette if unreadable; re/ui.md). Hover lights the row and moves
+  the cursor there; the focused song row shows "+ Add", the focused entry "Play". Click a song = add, click
+  an entry = play it now; each entry has three small round buttons (move up, move down, remove; glyphs are
+  rotated SDF bars, letters without `Transform.set_localRotation`). The header buttons are clones of the
+  popup's Cancel button (as the receipt's; `Icon Background` key glyph hidden, LayoutManager, x0.72; the
+  key focus colours the label pink), own pills if the clone fails. No key hint bar, no Done / Play / Up /
+  Down / Remove buttons. The clone code is a self-contained copy of the receipt's (`GameButton`,
+  `GameClicked`) for a later shared helper.
+- *Input*: polled (InputSystem devices, Toggle clicks, the clones' `Selectable.IsPressed` + pointer inside),
+  0.3 s grace; hover from `Selectable.get_isPointerInside` (the list box, then its rows, then the hovered
+  entry's small buttons: about 16 calls per frame). The keys of round 11 still work, unprinted (see the
+  `radio_menu.h` header).
 - *Edits* go through `HandleRadio` (the tab's requests), so the sidecar is written and playback reacts the
   same way; the menu's state refreshes every 0.25 s and after each action.
 - While open the game is paused, so the speakers pause too (status says so); the radio plays after Done.
 - No search box (a TMP input field was not attempted); Page Up / Down (pad LT / RT), Home / End and the
   wheel move through long lists.
-- Closed on Done / Esc / pad B / backdrop click, module off, and before a fault stops the module.
+- Closed on Esc / pad B / backdrop click (no Done button since round 12), module off, and before a fault
+  stops the module.
 
 ### Muffle behind High Walls (`muffle_walls`, default on)
 
@@ -335,8 +349,10 @@ All prefixed `slime_dj:`; grep for these when reading `sr2mods.log`:
   song); walls restored`, `'Walls dance to the music' unavailable (…)`
 - mix: `N speaker(s) of '...' add up to X.XXx full scale here; turned down to stay clean (logged once)`
 - radio menu: `radio menu ready[; NOT available: ...]`, `radio menu for 'Corral NNNN' (plot '...')[: its radio is not
-  found yet (scanning)]`, `radio menu opened (N rows per list, M song(s), font ...)` (first), `radio menu closed (why)`,
-  `radio menu not opened: ...`
+  found yet (scanning)]`, `radio menu opened (N rows per list, M song(s), font ..., header buttons cloned from the
+  game's popup|own pills, rows in the game button's colours|in the menu palette)` (first), `radio menu rows in the
+  game button's colours: normal (...) ..., mouse-over (...), label (...)` (once), `radio menu: game button not cloned
+  (...) - own buttons`, `radio menu closed (why)`, `radio menu not opened: ...`
 - corrals / muffle / radio: `N corral(s) with a music box, M with High Walls / Air Net …`, `'Muffle behind High
   Walls' unavailable (…)`, `AudioLowPassFilter could not be added; …`, `Corral Radio unavailable (…)`,
   `radio 'Corral NNNN' (plot '…'): N song(s) in its playlist, on|off[, shuffle]`, `radio '…' playing|switched

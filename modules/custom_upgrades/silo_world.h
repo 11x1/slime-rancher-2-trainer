@@ -38,11 +38,15 @@ struct ButtonLook {
     const char* hudOwner = "custom_upgrades.silo_button";  // ui::hud owner of its world message
 };
 
-// The Corral Radio button: corral plots, the free (+x, -z) corner (see silo_world.cpp), blue.
+// The Corral Radio button: corral plots, blue, on the ground outside the (-x, +z) post (round 12: "it should
+// be in the opposite corner, as right now its in the auto feeder's corner"; the Music Box speaker hangs up
+// on that post, 2.5 m high and inwards, so the ground below is free). 315 deg about y faces outwards.
 inline ButtonLook RadioButtonLook() {
     ButtonLook l;
     l.name = "sr2mods_RadioButton#";
     l.plotType = 2;  // CORRAL
+    l.pos[0] = -5.58f, l.pos[1] = 1.20f, l.pos[2] = 5.58f;
+    l.rot[0] = 0.0f, l.rot[1] = -0.38268343f, l.rot[2] = 0.0f, l.rot[3] = 0.92387953f;
     l.tint[0] = 0.22f, l.tint[1] = 0.55f, l.tint[2] = 1.0f;
     l.lit[0] = 0.16f, l.lit[1] = 0.48f, l.lit[2] = 1.0f;
     l.material = "sr2mods_blue";

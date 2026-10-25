@@ -111,7 +111,7 @@ Cloning: `Object.Instantiate(childOfPrefab, plotTransform)` copies the sub-hiera
 - `Music Box/techCorralMusicBox/MusicBox/Music` = Music Box speaker (Animator, a game script, capsule collider; children bone_musicBase -> bone_musicEmmit -> "FX Music" particles + "musicbox (1)" mesh, skinned "musicbox"); container turned 180 deg, inner offsets cancel -> (-x, +z) corner post, head ~0.8 m inwards at 2.5 m
 - `Music Box/techCorralMusicBox/MusicBox` carries a `SECTR_AudioSource` (concrete subclass; see re/audio.md)
 - corners: terminal (-x, -z) outside the post at ground height, speaker (-x, +z), plort collector (+x, +z), auto-feeder distributor (+x, -z) at 2.5 m
-- the ground outside the (+x, -z) post is free (the feeder hangs up on the post): the mod's blue Corral Radio button stands there, plot-local (5.58, 1.20, -5.58) turned 135 deg, the same spot and turn as the silo's Sell-All button (silo_world.cpp `RadioButtonLook`)
+- the ground outside the (+x, -z) post is free (the feeder hangs up on the post), and so is the ground outside the (-x, +z) post (the speaker is 2.5 m up and leans inwards): the mod's blue Corral Radio button stands at (-5.58, 1.20, 5.58) turned 315 deg since round 12 (round 11: (5.58, 1.20, -5.58), 135 deg, below the feeder; silo_world.cpp `RadioButtonLook`)
 - Solar Shield: children "Base SolarShield" / "High SolarShield" (`SolarShieldUpgrader.Shields`, inactive until bought), each with a "Cave Trigger" child: BoxCollider layer 22, 10 x 5 x 10 / 10 x 8 x 10 m, `CaveTrigger` component
 - Air Net: Base net y 3.39..3.99; coop high-walls CoopRegion top 2.75
 - mod: plot_props.cpp (Music Box II speaker), shadow_catcher.cpp (shade test), dj_buildables.cpp (standby tune), coop_world.cpp (Air Net)
