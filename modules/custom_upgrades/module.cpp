@@ -255,6 +255,7 @@
 #include "modules/custom_upgrades/silo_world.h"
 #include "modules/custom_upgrades/feeder_lock.h"
 #include "modules/custom_upgrades/shadow_catcher.h"
+#include "modules/custom_upgrades/slime_launcher.h"
 #include "modules/custom_upgrades/vacpack_upgrades.h"
 #include "modules/slime_dj/api.h"
 #include "ui/mod_icons.h"
@@ -747,6 +748,7 @@ private:
     custom_upgrades::vacpack::VacpackUpgrades vacpack_;  // Fabricator vacpack upgrades (vacpack_upgrades.h)
     custom_upgrades::drones::BatterySaver battery_;      // Drone Battery Saver effect (drone_battery.h)
     custom_upgrades::shadow::ShadowCatcher shadow_;      // Shadow Catcher effect (shadow_catcher.h)
+    custom_upgrades::launcher::SlimeLauncher launcher_;  // Slime Launcher effect (slime_launcher.h)
     std::vector<custom_upgrades::world::PropRequest> WantedProps() const;
     custom_upgrades::ui::PlotMenuSlider sliderHens_;      // Hen Collector limits, side by side (one pair
     custom_upgrades::ui::PlotMenuSlider sliderRoosters_;  // at a time; the hens slider builds the row)
@@ -3945,6 +3947,12 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         std::string ferr, freport;
         if (feeder_.Setup(ctx, ferr, freport)) report += freport;
         else SR2_WARN("[{}] auto-feeder food lock unavailable ({}) - feeders take any food", kModule, ferr);
+    }
+    // Slime Launcher effect (optional; the vacpack upgrades sell it and publish its level).
+    if (vacpack_.Ready()) {
+        std::string lerr, lreport;
+        if (launcher_.Setup(ctx, lerr, lreport)) report += lreport;
+        else SR2_WARN("[{}] slime launcher unavailable ({}) - owning the upgrade changes nothing", kModule, lerr);
     }
 
     main_thread::AddFrameCallback(kModule, [](float dt) {

@@ -19,7 +19,7 @@ per-system `re/*.md` files linked below. Each `.cpp` header comment has the file
 | `quantum_link.cpp`, `variant_ext.h` | Quantum Storage Link; owns the gadget-variant hooks the DJ buildables plug into |
 | `dj_buildables.cpp`, `radio_shop.cpp` | DJ Booth, DJ Speaker Stack, Slime Radio; the radio in the shop |
 | `gadget_look.cpp`, `buildables.cpp` | UI looks of mod gadget definitions; `buildables.h` API for the Sandbox |
-| `vacpack_upgrades.cpp`, `fabricator_levels.cpp`, `shadow_catcher.cpp` | Fabricator vacpack upgrades, extra level circles, Shadow Catcher effect |
+| `vacpack_upgrades.cpp`, `fabricator_levels.cpp`, `shadow_catcher.cpp`, `slime_launcher.cpp` | Fabricator vacpack upgrades, extra level circles, Shadow Catcher and Slime Launcher effects |
 
 ## Plot upgrades (ids, keys)
 
@@ -97,6 +97,7 @@ MinHook allows one hook per address; other modules must not hook these:
   Relevancy, DoAlert, Action), `ProducePlortsOnHit.ProducePlort`.
 - feeder_lock.cpp: `SiloStorage.CanSpecificSlotAccept` / `CanAnySlotAccept` / `MaybeAddToSpecificSlot` /
   `MaybeAddToAnySlot` / `MaybeAddAsResource` (pass-through except for a locked feeder's storage).
+- slime_launcher.cpp: `VacuumItem.Expel(AmmoMetadata, bool, float, bool)`, `VacuumItem.ExpelHeld`.
 - radio_shop.cpp: `ShopCategoryRuntime.GetRuntimeItems`, `ShopRuntimeItem.get_Asset` / `get_Description` /
   `TryPurchase`, `ShopDirector.SpawnNextItem`.
 
@@ -739,6 +740,7 @@ re/vacpack.md, re/fabricator.md (UpgradeChain, pips). Bought through the vanilla
 | Drone Battery Saver I-IV (`0x53520103`) | 4 | drones use 80 / 67 / 57 / 50 % battery | own card, needs the Drone Station blueprint |
 | Shadow Catcher (`0x53520104`) | 1 | vacpack holds shadow slimes; they stay and eat on the ranch | own card, always shown |
 | Drone Program Scheduler (`0x53520105`) | 1 | up to 3 programs per drone station ("Several programs per drone") | own card, needs the Drone Station blueprint |
+| Slime Launcher I-III (`0x53520106`) | 3 | slimes and held largos shot 1.2x / 1.4x / 1.6x as fast | own card, always shown |
 
 ### Tiers on the vanilla cards
 
@@ -811,6 +813,29 @@ re/vacpack.md, re/fabricator.md (UpgradeChain, pips). Bought through the vanilla
 - Effect and lock behaviour: "Several programs per drone". Sandbox: listed in its upgrades manager like
   every card in the player's upgrade list; a level change there goes through the `SetUpgradeLevel` detour.
 
+### Slime Launcher
+
+Card in `vacpack_upgrades.cpp` (`Kind::kSlimeLauncher`, id `0x53520106`), effect in `slime_launcher.cpp`
+(round 15). RE: re/vacpack.md "VacuumItem - shooting".
+
+- **Name**: "Slime Launcher I-III" (the user asked for something gentler than "Slime Punch"; it reads like the
+  game's own tech names, Tank Booster / Pulse Wave).
+- **Card**: like the Shadow Catcher, always shown, empty effect list. Value `custom_upgrades.vacpack.slime_launcher`
+  (owned level, 0-based). 5,000 / 12,000 / 25,000 Newbucks + Tank Booster III-V's refinery items unchanged.
+  Art: the drawing `slime_launcher` when embedded (`mod_icons::Has`), else the Pink slime's icon; details
+  picture the Pink slime's pedia entry (logs `Slime Launcher card uses ...` / `card picture = ...`). Until the
+  Pink SlimeDefinition is loaded (polled every ~10 s) it keeps Tank Booster's.
+- **Effect**: slime shots 1.2x / 1.4x / 1.6x as fast (`launcher::kSpeedFactor`; distance about 1.44x / 1.96x /
+  2.56x on flat ground). The vacpack tick publishes the owned level every second (`launcher::SetLevel`, from the
+  UpgradeModel, so a Sandbox raise / lower applies within a second); Cleanup and a load set 0.
+- **Hooks**: `VacuumItem.Expel(AmmoMetadata, bool, float, bool)` (slot shots; skipped when the caller passes a
+  velocityOverride) and `VacuumItem.ExpelHeld(float)` (held largos). Both scale the VacuumItem's `EjectSpeed`
+  for that one call when the type is a `SlimeDefinition` (largos included) and put the remembered vanilla value
+  back after it. Food, plorts, toys, water: vanilla. Log `slime launcher: vacpack slime / held slime '<type>' shot
+  at 1.4x speed (EjectSpeed a -> b ...)` once per level and path, and `slime launcher: level a -> b`.
+- Also affects the boss fight's vacpack slime shots (`BossFightController.<ExpelAmmo>d__106` calls the same
+  Expel), consistent with "slimes shot from the vacpack".
+
 ### Shadow Catcher
 
 Card in `vacpack_upgrades.cpp` (`kShadowCatcher`), effect in `shadow_catcher.cpp`. RE: re/slimes.md
@@ -876,7 +901,7 @@ for shot lava.
 - Props: Music Box II speaker animation, sizes, `Glow` / `Embers` playing, ember spots, plush hen facing.
 - Auto-Feeder food lock: the whole feature (slider, drones, shots, save + reload).
 - Vacpack: 12 circles / pips, buying the tiers, save + reload, mod-free load, extra slots and keys, centred
-  row. Shadow Catcher: the whole feature.
+  row. Shadow Catcher: the whole feature. Slime Launcher: the whole feature (round 15).
 
 ## History
 

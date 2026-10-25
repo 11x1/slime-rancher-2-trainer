@@ -211,6 +211,8 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | UpgradeModel.Pull(1) | 0xAD99C0 | custom_upgrades.UpgradeModel.Pull | custom_upgrades/vacpack_upgrades.cpp | clamp save to vanilla max |
 | UpgradeModel.SetUpgradeLevel(2) | 0xAD9C20 | custom_upgrades.UpgradeModel.SetUpgradeLevel | custom_upgrades/vacpack_upgrades.cpp | custom tiers + sidecar |
 | VacuumItem.Expel(float) | 0xA66C00 | misc_tweaks.VacuumItem.Expel | misc_tweaks/module.cpp | shot volume floor (opt); MethodByParams (private overload) |
+| VacuumItem.Expel(AmmoMetadata,bool,float,bool) | 0xA66E40 | custom_upgrades.VacuumItem.Expel(AmmoMetadata) | custom_upgrades/slime_launcher.cpp | Slime Launcher: slot slimes shot faster; Method(name, 4) |
+| VacuumItem.ExpelHeld(1) | 0xA66730 | custom_upgrades.VacuumItem.ExpelHeld | custom_upgrades/slime_launcher.cpp | Slime Launcher: held largos shot faster |
 | VacuumItem.GetShootSpeedFactor(1) | 0xA67940 | misc_tweaks.VacuumItem.GetShootSpeedFactor | misc_tweaks/module.cpp | shoot speed |
 | VacuumItem.NextSlot(1) | 0xA67D00 | hl2_movement.VacuumItem.NextSlot | hl2_movement/module.cpp | scroll-wheel jump (opt) |
 | VacuumItem.PreviousSlot(1) | 0xA68F80 | hl2_movement.VacuumItem.PreviousSlot | hl2_movement/module.cpp | scroll-wheel jump (opt) |
