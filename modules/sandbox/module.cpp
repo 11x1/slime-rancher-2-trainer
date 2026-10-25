@@ -326,6 +326,7 @@ private:
     Il2CppObject* NamedGroup(const char* name);
     bool EnsureNamedSprites();
     uint32_t NamedSprite(std::initializer_list<const char*> names);
+    uint32_t NewbuckIcon(Il2CppObject* currency);
     void EnsureGroupIcons();
     void EnsureRelations();
     bool RenderNextIcon();
@@ -439,6 +440,8 @@ private:
     bool typeGroupsBuilt_ = false;
     std::unordered_map<std::string, uint32_t> namedSprites_;  // the few game sprites looked up by name (tab icons)
     bool spritesScanned_ = false;
+    uint32_t newbuckIcon_ = 0;      // the game's 'iconNewBuck' sprite (cost rows, the Newbucks card)
+    bool newbuckLogged_ = false, newbuckCurrencyChecked_ = false;
     uint32_t groupIcons_[bridge::kGroupCount] = {};  // icons of the group tabs
     bool groupIconsBuilt_ = false;
     std::shared_ptr<const bridge::Relations> relations_;  // slime diets, built once after the spawn list
@@ -489,6 +492,7 @@ private:
     size_t offPlayerModel_ = 0;     // PlayerState._model
     size_t offMaxCurrency_ = 0;     // PlayerModel.maxCurrency
     size_t offPersistenceId_ = 0;   // CurrencyDefinition._persistenceId
+    size_t offCurrencyIcon_ = 0;    // CurrencyDefinition._icon (optional: the Newbucks sprite)
     size_t offSlotId_ = 0;          // AmmoSlot._id
     size_t offSlotCount_ = 0;       // AmmoSlot._count
     size_t offSlotDef_ = 0;         // AmmoSlot.Definition
@@ -772,6 +776,7 @@ bool Sandbox::Setup(sr2::core::ModuleContext& ctx) {
     off(playerStateClass_, "_model", offPlayerModel_);
     off(playerModelClass_, "maxCurrency", offMaxCurrency_);
     off(currencyClass_, "_persistenceId", offPersistenceId_);
+    if (auto o = R.FieldOffset(currencyClass_, "_icon")) offCurrencyIcon_ = *o;  // optional
     off(ammoSlotClass_, "_id", offSlotId_);
     off(ammoSlotClass_, "_count", offSlotCount_);
     off(ammoSlotClass_, "Definition", offSlotDef_);
@@ -1482,7 +1487,7 @@ bool Sandbox::EnsureNamedSprites() {
     if (!spriteClass_) return false;
     static const char* const kWanted[] = {"iconCategorySlimes", "pediaHomeSlimes", "iconLargoPedia_small", "iconLargoPedia",
                                           "iconCategoryUtilities", "iconCategoryWarptech", "iconCategoryDecorations",
-                                          "iconCategoryCurios"};
+                                          "iconCategoryCurios", "iconNewBuck"};
     const unsigned long long t0 = GetTickCount64();
     size_t seen = 0;
     std::string found;
@@ -1511,6 +1516,29 @@ uint32_t Sandbox::NamedSprite(std::initializer_list<const char*> names) {
     for (const char* n : names)
         if (auto it = namedSprites_.find(n); it != namedSprites_.end() && it->second) return it->second;
     return 0;
+}
+
+// The game's Newbucks sprite 'iconNewBuck' (the Fabricator's and the Slimepedia's cost icon; round 17: "the newbucks
+// icon is wrong"), for cost rows and the Newbucks card. The Newbucks CurrencyDefinition's _icon when that is the
+// sprite (no scan needed), else the one-time sprite scan's find (EnsureNamedSprites). 0 until found: the UI draws a
+// coin instead. Main thread.
+uint32_t Sandbox::NewbuckIcon(Il2CppObject* currency) {
+    if (newbuckIcon_) return newbuckIcon_;
+    std::string via;
+    if (!newbuckCurrencyChecked_ && currency && offCurrencyIcon_ && IsA(currency, currencyClass_) && unity::IsAlive(currency)) {
+        newbuckCurrencyChecked_ = true;
+        Il2CppObject* icon = unity::Field<Il2CppObject*>(currency, offCurrencyIcon_);
+        if (icon && unity::IsAlive(icon) && (!spriteClass_ || IsA(icon, spriteClass_))) {
+            const std::string n = unity::GetName(icon);
+            if (n == "iconNewBuck" && (newbuckIcon_ = SpriteIcon(icon))) via = "the Newbucks currency's icon";
+            else SR2_INFO("[{}] Newbucks icon: the currency's icon is '{}', not iconNewBuck", kModule, n);
+        }
+    }
+    if (!newbuckIcon_ && (newbuckIcon_ = NamedSprite({"iconNewBuck"}))) via = "the sprite scan";
+    if (newbuckIcon_) SR2_INFO("[{}] Newbucks icon: iconNewBuck from {}", kModule, via);
+    else if (spritesScanned_ && !newbuckLogged_) SR2_INFO("[{}] Newbucks icon: no iconNewBuck sprite loaded (drawn coin)", kModule);
+    if (newbuckIcon_ || spritesScanned_) newbuckLogged_ = true;
+    return newbuckIcon_;
 }
 
 // Icon of the type's own group (IdentifiableType.groupType), else of the first group with an icon
@@ -2146,7 +2174,7 @@ std::string Sandbox::RecipeCost(Il2CppObject* def, std::vector<bridge::CostLine>
 std::string Sandbox::CostOf(const char* costs, std::vector<bridge::CostLine>* lines) {
     std::string out;
     auto add = [&](const std::string& s) { out += (out.empty() ? "" : ", ") + s; };
-    auto line = [&](const std::string& s, Il2CppObject* type) {
+    auto line = [&](const std::string& s, Il2CppObject* type, Il2CppObject* bucks = nullptr) {
         if (!lines) return;
         bridge::CostLine l;
         l.text = s;
@@ -2155,6 +2183,7 @@ std::string Sandbox::CostOf(const char* costs, std::vector<bridge::CostLine>* li
             l.kind = ItemKind(type);
         } else {
             l.currency = true;
+            if (bucks) l.icon = NewbuckIcon(bucks);  // the game's iconNewBuck (0: a drawn coin)
         }
         lines->push_back(std::move(l));
     };
@@ -2184,7 +2213,8 @@ std::string Sandbox::CostOf(const char* costs, std::vector<bridge::CostLine>* li
         if (amount <= 0) continue;
         const bool bucks = c && IsA(c, currencyClass_) && unity::Field<int32_t>(c, offPersistenceId_) == kNewbuckPersistenceId;
         add(std::format("{} {}", Thousands(amount), bucks ? std::string("Newbucks") : c ? unity::GetName(c) : std::string("?")));
-        line(std::format("{} {}", Thousands(amount), bucks ? std::string("Newbucks") : c ? unity::GetName(c) : std::string("?")), nullptr);
+        line(std::format("{} {}", Thousands(amount), bucks ? std::string("Newbucks") : c ? unity::GetName(c) : std::string("?")), nullptr,
+             bucks ? c : nullptr);
     }
     return out;
 }
@@ -2954,6 +2984,7 @@ void Sandbox::Refresh() {
         bool built = EnsureTypeGroups();
         if (c.currency) {
             s.haveNewbucks = CallValue(getCurrency_, c.player, {c.currency}, "PlayerState.GetCurrency", s.newbucks);
+            s.newbucksIcon = NewbuckIcon(c.currency);
             s.maxNewbucks = unity::Field<int32_t>(c.model, offMaxCurrency_);
         }
         CallValue(getHealth_, c.player, {}, "PlayerState.GetCurrHealth", s.health);

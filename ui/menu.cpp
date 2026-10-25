@@ -1719,6 +1719,15 @@ void SandboxNewbucks(const sbx::Snapshot& s, float w) {
     }
     {
         FontScope f(theme::Display(), theme::kDisplaySize + 12);
+        if (s.newbucksIcon) {
+            // The game's Newbucks icon (iconNewBuck) in front of the amount, the text's height.
+            const float e = ImGui::GetTextLineHeight();
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            if (item_grid::DrawIcons(ImGui::GetWindowDrawList(), s.newbucksIcon, 0, p, ImVec2(p.x + e, p.y + e))) {
+                ImGui::Dummy(ImVec2(e, e));
+                ImGui::SameLine(0, U(6));
+            }
+        }
         ImGui::TextUnformatted(Thousands(s.newbucks).c_str());
     }
     DimText("Maximum " + Thousands(s.maxNewbucks));
@@ -2043,7 +2052,7 @@ void TipKeys(const std::vector<KeyRow>& keys) {
 }
 
 // Fabricator cost inside a tooltip: a "Fabricator cost" heading, one line per ingredient, each with its icon
-// (Newbucks: a drawn coin). The crafter's item tooltips and the upgrade entries' (RichTooltip).
+// (Newbucks: the game's iconNewBuck, a drawn coin until that sprite is found). The crafter's item tooltips and the upgrade entries' (RichTooltip).
 void CostRows(const std::vector<sbx::CostLine>& costs) {
     const Palette& P = theme::Colors();
     FontScope f(theme::Body(), theme::kSmallSize);
@@ -2056,12 +2065,14 @@ void CostRows(const std::vector<sbx::CostLine>& costs) {
     for (const sbx::CostLine& c : costs) {
         const ImVec2 p = ImGui::GetCursorScreenPos();
         const float y = p.y + (ImGui::GetFrameHeight() - e) * 0.5f;
-        if (c.currency) {
-            // Newbucks (or another currency): a small coin.
+        if (item_grid::DrawIcons(dl, c.icon, 0, ImVec2(p.x, y), ImVec2(p.x + e, y + e))) {
+            // the item's / component's icon, or Newbucks' iconNewBuck
+        } else if (c.currency) {
+            // Newbucks without its sprite (or another currency): a small coin.
             const ImVec2 cc(p.x + e * 0.5f, y + e * 0.5f);
             dl->AddCircleFilled(cc, e * 0.38f, IM_COL32(0xF0, 0xC2, 0x4B, 0xFF));
             dl->AddCircle(cc, e * 0.38f, IM_COL32(0xA8, 0x7A, 0x1E, 0xFF), 0, std::max(1.0f, U(1.5f)));
-        } else if (!item_grid::DrawIcons(dl, c.icon, 0, ImVec2(p.x, y), ImVec2(p.x + e, y + e))) {
+        } else {
             dl->AddCircleFilled(ImVec2(p.x + e * 0.5f, y + e * 0.5f), e * 0.25f, KindAccent(c.kind));
         }
         ImGui::Dummy(ImVec2(e, ImGui::GetFrameHeight()));
@@ -2133,6 +2144,14 @@ void RichTooltip(const sandbox_upgrades::Tip& t) {
         {
             FontScope f(theme::Body(), theme::kSmallSize);
             ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + U(260));
+            if (!t.text.empty()) {
+                // The entry text (the Fabricator's description), as the Slimepedia slime tooltips show theirs.
+                ImGui::Dummy(ImVec2(0, U(1)));
+                ImGui::PushStyleColor(ImGuiCol_Text, P.text);
+                ImGui::TextUnformatted(t.text.c_str());
+                ImGui::PopStyleColor();
+                if (!t.lines.empty()) ImGui::Dummy(ImVec2(0, U(2)));
+            }
             for (const auto& [text, col] : t.lines) {
                 ImGui::PushStyleColor(ImGuiCol_Text, col ? col : P.soft);
                 ImGui::TextUnformatted(text.c_str());

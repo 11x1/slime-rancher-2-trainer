@@ -344,6 +344,7 @@ void UpgradesTab(const Helpers& h, const ub::State& st) {
         if (tipHover && level == u.level && !ImGui::IsPopupOpen(kUpgradeCtx) &&
             ImGui::GetIO().MousePos.x < b.x - pad - 2 * btn - U(4)) {
             Tip tip;
+            tip.text = u.description;
             if (u.nextTitle.empty()) {
                 tip.name = u.name;
                 tip.lines.push_back({"Fully upgraded: the Fabricator has nothing left to sell.", 0});

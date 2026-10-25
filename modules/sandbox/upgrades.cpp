@@ -94,6 +94,7 @@ size_t g_offUmDefs = 0;                           // UpgradeModel.upgradeDefinit
 size_t g_offUdIcon = 0, g_offUdRequire = 0, g_offUdId = 0, g_offUdLevels = 0;  // UpgradeDefinition fields
 size_t g_offCostComponents = 0;                   // PurchaseCost.ComponentCosts, inside the struct (no header)
 size_t g_offUlCosts = 0, g_offUlTitle = 0;        // UpgradeLevelDefinition._costs / Title (nested class: from a live object)
+size_t g_offUlDesc = 0;                           // UpgradeLevelDefinition.Description (the Fabricator's text for the level)
 
 std::string g_discoverWhy;                         // "" = discover / undiscover available
 const MethodInfo* g_tryGetSpendable = nullptr;     // SceneContextUtility.TryGetSpendableDirector(out SpendableDirector)
@@ -187,17 +188,18 @@ std::string Tier(const std::string& name, int level) {
     return level < 0 ? name + " (not bought)" : std::format("{} {}", name, Roman(level + 1));
 }
 
-std::string CleanText(const std::string& s) {
+// Rich-text tags and line breaks dropped (`keepLines`: line breaks kept, for descriptions).
+std::string CleanText(const std::string& s, bool keepLines = false) {
     std::string out;
     bool tag = false;
     for (char c : s) {
         if (c == '<') tag = true;
         else if (c == '>' && tag) tag = false;
-        else if (!tag && c != '\r' && c != '\n') out += c;
+        else if (!tag && c != '\r' && (c != '\n' || keepLines)) out += c;
     }
-    const size_t a = out.find_first_not_of(" \t");
+    const size_t a = out.find_first_not_of(" \t\n");
     if (a == std::string::npos) return {};
-    return out.substr(a, out.find_last_not_of(" \t") - a + 1);
+    return out.substr(a, out.find_last_not_of(" \t\n") - a + 1);
 }
 
 // --------------------------------------------------------------- player ----
@@ -257,18 +259,19 @@ Il2CppObject* LevelDef(Il2CppObject* def, int level) {
         Il2CppClass* k = api().il2cpp_object_get_class(l);
         if (auto o = Resolver::Get().FieldOffset(k, "_costs")) g_offUlCosts = *o;
         if (auto o = Resolver::Get().FieldOffset(k, "Title")) g_offUlTitle = *o;
+        if (auto o = Resolver::Get().FieldOffset(k, "Description")) g_offUlDesc = *o;
     }
     return l;
 }
 
-std::string Localized(Il2CppObject* ls) {
+std::string Localized(Il2CppObject* ls, bool keepLines = false) {
     if (!ls) return {};
     // The mod's cloned upgrades (custom_upgrades: Drone Battery Saver) keep the template's table entry
     // ("Tank Booster I") and register their own text for the instance; the game shows that one.
-    if (std::string own; sr2::core::text_override::Lookup(ls, own)) return CleanText(own);
+    if (std::string own; sr2::core::text_override::Lookup(ls, own)) return CleanText(own, keepLines);
     if (!g_locGet) return {};
     auto* s = reinterpret_cast<Il2CppString*>(Call(g_locGet, ls, {}, "LocalizedString.GetLocalizedString"));
-    std::string t = CleanText(Resolver::Get().ToUtf8(s));
+    std::string t = CleanText(Resolver::Get().ToUtf8(s), keepLines);
     return t.rfind("!!", 0) == 0 ? std::string() : t;
 }
 
@@ -296,6 +299,7 @@ const DefInfo& Info(Il2CppObject* def) {
 struct LevelCost {
     unsigned long long tick = 0;
     std::string title;
+    std::string description;  // the level's Description, as the Fabricator shows it
     std::vector<sr2::ui::sandbox::CostLine> lines;
 };
 std::unordered_map<uintptr_t, LevelCost> g_levelCost;
@@ -310,6 +314,7 @@ const LevelCost* CostOfLevel(Il2CppObject* def, int level, unsigned long long no
     c = LevelCost{};
     c.tick = now;
     if (g_offUlTitle) c.title = Localized(unity::Field<Il2CppObject*>(l, g_offUlTitle));
+    if (g_offUlDesc) c.description = Localized(unity::Field<Il2CppObject*>(l, g_offUlDesc), true);
     if (!g_offUlCosts) return &c;
     const char* costs = reinterpret_cast<const char*>(l) + g_offUlCosts;
     if (g_host.costLines) g_host.costLines(costs, c.lines);
@@ -451,11 +456,15 @@ void Publish() {
             const auto gate = spend ? GateComponents(def) : std::vector<Il2CppObject*>();
             u.discoverable = !gate.empty();
             u.discovered = !Hidden(spend, gate, u.level);
-            if (u.level + 1 < levels)
+            if (u.level + 1 < levels) {
                 if (const LevelCost* next = CostOfLevel(def, u.level + 1, st.tick)) {
                     u.nextTitle = next->title.empty() ? u.name : next->title;
                     u.nextCosts = next->lines;
+                    u.description = next->description;
                 }
+            } else if (const LevelCost* last = CostOfLevel(def, levels - 1, st.tick)) {
+                u.description = last->description;  // fully upgraded: what the last level does
+            }
             st.upgrades.push_back(std::move(u));
         }
         if (st.upgrades.empty()) st.why = "The player's upgrade list is empty.";

@@ -58,5 +58,6 @@
 ### MarketUIConfiguration
 - `_plorts` (PlortEntry `IdentType`): the market terminal's plort order (MarketUI uses the same asset type); ranch terminal `PriceEntry` = item icon + coin icon + amount
 - coin icon: `LookupDirector._currencyList._currencies[0]._icon` (default currency, Newbucks)
+- the Fabricator / Slimepedia / shop Newbucks sprite is `iconNewBuck` (asset copies under ui/fabricator, ui/pedia, ui/shop, lookupdata; the caretaker shop's `iconNewbuck` is a different one) (data). sandbox's `NewbuckIcon` takes the currency's `_icon` when it has that name, else finds it in its one-time sprite scan; it logs `Newbucks icon: iconNewBuck from ...` or the currency icon's real name (log line still to be seen)
 - mod: drone_price_limit (cheat sheet)
 
