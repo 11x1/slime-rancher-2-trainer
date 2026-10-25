@@ -53,7 +53,8 @@ Status: built, not yet tested in game.
 
 The data and the rotation are custom_upgrades' (`modules/custom_upgrades/drone_programs.h`, NOTES
 "Several programs per drone"); the UI is here because this module owns the station menu hooks (one hook
-per address). It shows only while custom_upgrades is on (`drone_programs::Available`).
+per address). It shows only while custom_upgrades is on and the save owns the Drone Program Scheduler
+upgrade (`drone_programs::Owned`; round 12: hidden without it, the station has one program as vanilla).
 
 - Programming page: a second pill `[P] Programs` (one program) / `[P] Program 2/3` right of the
   **target's** Change pill (a clone of the target's PromptContainer, no wrap, fitted to the label).

@@ -16,6 +16,11 @@
 // has program 1. After a load the first ~1 Hz tick checks that the save's program is the sidecar's
 // program 1 (else the extra programs are dropped, logged) and runs program 1 with its true source.
 //
+// Locked behind the "Drone Program Scheduler" vacpack upgrade (vacpack_upgrades.cpp, bought in the
+// Fabricator like the Battery Saver; per save). Without it every station runs program 1 only and the
+// UI hides its action; programs a save already stores stay in the sidecar (program 1 keeps running,
+// edits on the page still update it) and take turns again once the upgrade is owned.
+//
 // The UI (the "Programs" action and dialog in the drone station menu) lives in drone_price_limit's
 // station_dialog.cpp, which owns the menu hooks; it calls the functions below. Details and findings:
 // drone_programs.cpp and modules/custom_upgrades/NOTES.md ("Several programs per drone").
@@ -23,6 +28,7 @@
 // Threading: Setup on the worker thread; everything else on the Unity main thread unless noted.
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -37,6 +43,7 @@ class Resolver;
 namespace sr2::modules::custom_upgrades::drone_programs {
 
 inline constexpr int kMaxPrograms = 3;
+inline constexpr const char* kUpgradeName = "Drone Program Scheduler";  // the card's title (logs, hints)
 
 enum class Mode : int { kWhenIdle = 0, kAfterDelivery = 1 };
 
@@ -46,8 +53,11 @@ struct View {
     Mode mode = Mode::kWhenIdle;
 };
 
-// custom_upgrades on and the rotation set up (the UI shows its action only then).
+// custom_upgrades on and the rotation set up.
 bool Available();
+// Available and the Drone Program Scheduler is owned in this save (the UI shows its action only then;
+// Add / Remove / Run / SetMode refuse otherwise).
+bool Owned();
 // The station's programs (a station without extra programs: its one live program).
 bool Get(Il2CppObject* stationModel, View& out);
 // A copy of the running program is appended and becomes the running one (the page already shows it,
@@ -65,8 +75,10 @@ const char* ModeName(Mode m);
 
 class Rotation {
 public:
-    // Worker thread. false = unavailable (`why`); stations keep one program.
-    bool Setup(sr2::il2cpp::Resolver& R, const char* module, std::string& why);
+    // Worker thread. false = unavailable (`why`); stations keep one program. `owned` (main thread):
+    // the Drone Program Scheduler is owned in the loaded save, 1 / 0, -1 = not known yet (the tick
+    // waits); empty = always owned.
+    bool Setup(sr2::il2cpp::Resolver& R, const char* module, std::function<int()> owned, std::string& why);
     bool Ready() const { return ready_; }
     // Main thread, ~1 Hz while custom upgrades are on and a save is loaded (after the drone sources).
     void Tick();

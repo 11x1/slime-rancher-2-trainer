@@ -195,8 +195,18 @@ re/custom-upgrades.md 2.1 / 2.4.
 ## Several programs per drone
 
 `drone_programs.cpp`; UI (`[P] Programs` pill and dialog) in drone_price_limit `station_dialog.cpp`, only
-while custom upgrades are on. RE: re/drones.md (AssignRanchTask, DroneBehaviorPlexer,
-RanchDroneSourceProgramDynamic).
+while custom upgrades are on and the save owns the **Drone Program Scheduler** (below). RE: re/drones.md
+(AssignRanchTask, DroneBehaviorPlexer, RanchDroneSourceProgramDynamic).
+
+- **Upgrade** (round 12, "this should be behind a refinery upgrade"): Fabricator card Drone Program
+  Scheduler (`vacpack_upgrades.cpp`, "Vacpack upgrades" below). Without it: the pill is hidden, Add /
+  Remove / Run / SetMode refuse (`drone_programs::Owned`), no rotation. Stored programs are not touched:
+  `Load` still restores the entry (program 1 with its true source runs; page edits keep updating program 1,
+  so the sidecar matches the save), logged `station N: K programs stored in the sidecar, inactive until the
+  Drone Program Scheduler is bought`. Once owned they take turns again (`... owned now: stored programs take
+  turns again`). Lowered again (Sandbox): every station back on program 1 at once, even with cargo (rare;
+  `... not owned (any more): ...`). The tick waits while the state is unknown (save loading). Without the
+  vacpack upgrades (setup failed, card not created) the feature is not locked.
 
 - Up to 3 programs per station; the game keeps one (`_taskData`); switching = `DroneStation.AssignRanchTask`
   (what Start Program does).
@@ -500,6 +510,7 @@ re/vacpack.md, re/fabricator.md (UpgradeChain, pips). Bought through the vanilla
 | Extra Tank III-IV | 2 | 7th / 8th slot, before water | levels 3-4 of the vanilla card |
 | Drone Battery Saver I-IV (`0x53520103`) | 4 | drones use 80 / 67 / 57 / 50 % battery | own card, needs the Drone Station blueprint |
 | Shadow Catcher (`0x53520104`) | 1 | vacpack holds shadow slimes; they stay and eat on the ranch | own card, always shown |
+| Drone Program Scheduler (`0x53520105`) | 1 | up to 3 programs per drone station ("Several programs per drone") | own card, needs the Drone Station blueprint |
 
 ### Tiers on the vanilla cards
 
@@ -556,6 +567,21 @@ re/vacpack.md, re/fabricator.md (UpgradeChain, pips). Bought through the vanilla
   global level.
 - Rough edges: `ViewedItemsV02` may get its id (harmless); pinning it as a recipe unchecked for a mod-free
   load.
+
+### Drone Program Scheduler
+
+- **Card** (round 12): built exactly like the Battery Saver (`Kind::kDronePrograms`, `IsDroneCard`): one
+  level, empty effect list, shown once the Drone Station blueprint is owned, the Drone Station's icon and
+  pedia entry (vanilla art; log `DroneProgramScheduler card uses the '<gadget>' icon ...`). Value
+  `custom_upgrades.vacpack.drone_programs` ("0" = owned), read by `VacpackUpgrades::DroneProgramsOwned`
+  (1 / 0 / -1 unknown; 1 when the cards could not be created).
+- **Price**: 20,000 Newbucks + half of Tank Booster VI's refinery items (rounded up), like the Battery Saver
+  halves V-VIII: between Battery Saver II and III.
+- **Text**: "A scheduling chip for your drone stations: each station's drone can hold up to 3 programs and
+  switches to the next one when the current one runs out of work. Add programs with Programs in the drone
+  station's menu."
+- Effect and lock behaviour: "Several programs per drone". Sandbox: listed in its upgrades manager like
+  every card in the player's upgrade list; a level change there goes through the `SetUpgradeLevel` detour.
 
 ### Shadow Catcher
 

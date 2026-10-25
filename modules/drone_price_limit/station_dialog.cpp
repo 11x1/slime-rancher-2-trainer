@@ -1636,7 +1636,8 @@ void StationUi::Impl::Tick(float dt) {
         stateCountdown = kStateFrames;
         ReadState();
         const bool wantLimit = pageActive && marketSelected && haveStation;
-        const bool wantProg = pageActive && haveStation && progs::Available();
+        // Programs: only with the Drone Program Scheduler upgrade (custom_upgrades; vanilla one program without).
+        const bool wantProg = pageActive && haveStation && progs::Owned();
         SyncPill(limitPill, wantLimit, offMenuDest, "sr2mods_PriceLimitPrompt", "price-limit");
         SyncPill(progPill, wantProg, offMenuTarget, "sr2mods_ProgramsPrompt", "programs");
         // No program switch while the station menu is open (any tab: closing it from the Drone List tab

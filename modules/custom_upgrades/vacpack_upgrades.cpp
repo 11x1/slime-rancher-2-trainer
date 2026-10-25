@@ -71,6 +71,7 @@
 #include "core/text_override.h"
 #include "core/unity.h"
 #include "modules/custom_upgrades/api.h"
+#include "modules/custom_upgrades/drone_programs.h"
 #include "modules/custom_upgrades/fabricator_levels.h"
 #include "modules/custom_upgrades/shadow_catcher.h"
 #include "ui/overlay.h"
@@ -114,6 +115,7 @@ enum class Kind {
     kSlots,         // more levels of Extra Tank (ADD on AmmoSlotsAvailable)
     kDroneBattery,  // own card, no modifier (empty effect list); drone_battery.cpp reads the level
     kShadowCatcher, // own card, no modifier; shadow_catcher.cpp does the work while it is owned
+    kDronePrograms, // own card, no modifier; drone_programs.cpp rotates programs only while it is owned
 };
 struct Spec {
     int32_t id;         // own card: our _uniqueId (custom range); tiers: 0 (they are vanilla levels)
@@ -157,6 +159,11 @@ const Spec kSpecs[] = {
     // late game, and the plorts come from the place the slimes live.
     {custom_upgrades::kIdBase + 0x0104, 0, kShadowCatcherKey, "", "ShadowCatcher", 6, Kind::kShadowCatcher, 1,
      {{0.0f, 40000, "Shadow Catcher"}, {}, {}, {}}},
+    // Drone Program Scheduler (several programs per drone station): one level, 20k Newbucks plus half of
+    // Tank Booster VI's refinery items, the way the Battery Saver halves V-VIII: between Battery Saver II
+    // and III, next to the drone stations themselves.
+    {custom_upgrades::kIdBase + 0x0105, 0, kDroneProgramsKey, "", "DroneProgramScheduler", 5, Kind::kDronePrograms, 1,
+     {{0.0f, 20000, "Drone Program Scheduler"}, {}, {}, {}}},
 };
 constexpr int kSpecCount = static_cast<int>(sizeof(kSpecs) / sizeof(kSpecs[0]));
 
@@ -170,12 +177,15 @@ constexpr const char* kSlotKeyMigrated = "extra_slot_keys_v2";  // free-text mar
 int ScaleAmount(const Spec& s, int amount) {
     switch (s.kind) {
         case Kind::kSlots: return amount;
-        case Kind::kDroneBattery: return std::max(1, (amount + 1) / 2);
+        case Kind::kDroneBattery:
+        case Kind::kDronePrograms: return std::max(1, (amount + 1) / 2);
         case Kind::kShadowCatcher: return amount;
         default: return amount <= 5 ? amount + 2 : amount * 2;
     }
 }
 bool IsTier(const Spec& s) { return s.parentId != 0; }
+// Battery Saver and Program Scheduler: shown once the Drone Station blueprint is owned, its icon / pedia.
+bool IsDroneCard(const Spec& s) { return s.kind == Kind::kDroneBattery || s.kind == Kind::kDronePrograms; }
 
 using WBarrierFn = void (*)(Il2CppObject*, void**, void*);
 using ArrayNewFn = Il2CppArray* (*)(Il2CppClass*, uintptr_t);
@@ -203,6 +213,8 @@ struct Ours {
     Il2CppObject* levelObjs[4] = {};    // our UpgradeLevelDefinitions (deep copies, kept alive by def)
     bool extended = false;              // our levels are in parent._levels
     bool loggedSkip = false;
+    // drone cards only
+    bool art = false;                   // the Drone Station's icon / pedia entry are set
 };
 
 struct Player {
@@ -293,7 +305,6 @@ struct State {
     bool applying = false;                 // our own SetUpgradeLevel calls: not a purchase
     bool loggedNoSlots = false, loggedNoBlueprint = false, loggedRemap = false, loggedKeys = false;
     std::string cardState;  // the Fabricator cards' last logged state (logged when it changes)
-    bool batteryArt = false;  // the battery saver card has the Drone Station's icon / pedia entry
     bool migrated = false;    // old per-station battery tiers checked for this save
     bool tiersMigrated = false;  // old separate Tank Booster / Extra Tank cards checked for this save
     // Shadow Catcher
@@ -576,7 +587,7 @@ bool CreateDefs(Il2CppObject* items) {
             // list). It used to keep the cloned one as ADD 0 on AmmoLimit, so each of its level changes
             // re-evaluated the vacpack capacity and, when that threw (round 8), left Tank Booster-sized
             // modifiers behind (x1880 slots) - see NOTES.md "Drone Battery Saver".
-            if ((s.kind == Kind::kDroneBattery || s.kind == Kind::kShadowCatcher) &&
+            if ((IsDroneCard(s) || s.kind == Kind::kShadowCatcher) &&
                 (!ListRemoveRange(effects, 0, static_cast<int32_t>(unity::ListCount(effects))) || unity::ListCount(effects))) {
                 SR2_WARN("[{}] vacpack: {} level {} kept its vacpack modifier - no vacpack upgrades", kModule, s.name, k + 1);
                 return false;
@@ -611,6 +622,11 @@ bool CreateDefs(Il2CppObject* items) {
                        "hold them, and on your ranch they stay and eat fruit, veggies and meat, making shadow plorts. "
                        "Beware: shadow slimes can't stand the sun. Left out in daylight they soon fade away, so keep "
                        "them in a corral with a Solar Shield.";
+            } else if (s.kind == Kind::kDronePrograms) {
+                desc = std::format("A scheduling chip for your drone stations: each station's drone can hold up to {} "
+                                   "programs and switches to the next one when the current one runs out of work. Add "
+                                   "programs with Programs in the drone station's menu.",
+                                   drone_programs::kMaxPrograms);
             } else if (s.kind == Kind::kDroneBattery) {
                 const float f = s.level[k].value;
                 desc = std::format("Quantum power cells for your ranch drones: every drone station's drone uses {}% of its "
@@ -777,17 +793,17 @@ void MigrateTiers(Il2CppObject* dict) {
     }
 }
 
-// The Fabricator shows the Drone Battery Saver card once the Drone Station blueprint is owned
-// (unknown = shown) or a level is owned.
+// The Fabricator shows the drone cards (Battery Saver, Program Scheduler) once the Drone Station
+// blueprint is owned (unknown = shown) or a level is owned.
 bool Unlocked(const Ours& o, Il2CppObject* upgrades) {
     Il2CppObject* dict = upgrades ? unity::Field<Il2CppObject*>(upgrades, g.offUmLevels) : nullptr;
     if (!dict) return false;
     if (DictGet(dict, o.spec->id) >= 0) return true;
-    if (o.spec->kind == Kind::kDroneBattery) {
+    if (IsDroneCard(*o.spec)) {
         const int bp = g.host.droneBlueprint ? g.host.droneBlueprint() : -1;
         if (bp < 0 && !g.loggedNoBlueprint) {
             g.loggedNoBlueprint = true;
-            SR2_INFO("[{}] vacpack: Drone Station blueprint unknown - the Drone Battery Saver card is shown", kModule);
+            SR2_INFO("[{}] vacpack: Drone Station blueprint unknown - the drone upgrade cards are shown", kModule);
         }
         return bp != 0;
     }
@@ -804,23 +820,24 @@ size_t FieldOff(Il2CppObject* obj, const char* name) {
     return 0;
 }
 
-// The card takes the Drone Station gadget's icon and pedia entry (once the scene has its definition).
+// The drone cards take the Drone Station gadget's icon and pedia entry (once the scene has its definition).
 void DroneArt() {
-    if (g.batteryArt || !g.host.droneStation) return;
-    const Ours* o = nullptr;
-    for (const Ours& x : g.ours)
-        if (x.spec && x.spec->kind == Kind::kDroneBattery && x.def) o = &x;
-    Il2CppObject* gadget = o ? g.host.droneStation() : nullptr;
-    if (!o || !unity::IsAlive(gadget)) return;
-    g.batteryArt = true;
-    const size_t offIcon = FieldOff(gadget, "icon"), offPedia = FieldOff(gadget, "_pediaLink");
-    Il2CppObject* icon = offIcon ? unity::Field<Il2CppObject*>(gadget, offIcon) : nullptr;
-    Il2CppObject* pedia = offPedia ? unity::Field<Il2CppObject*>(gadget, offPedia) : nullptr;
-    if (unity::IsAlive(icon)) SetRef(o->def, g.offUdIcon, icon);
-    if (unity::IsAlive(pedia)) SetRef(o->def, g.offUdPedia, pedia);
-    SR2_INFO("[{}] vacpack: Drone Battery Saver card uses the '{}' icon ({}) and pedia entry ({})", kModule,
-             unity::GetName(gadget), unity::IsAlive(icon) ? unity::GetName(icon) : std::string("not found, Tank Booster's"),
-             unity::IsAlive(pedia) ? unity::GetName(pedia) : std::string("not found, Tank Booster's"));
+    if (!g.host.droneStation) return;
+    Il2CppObject* gadget = nullptr;
+    for (Ours& o : g.ours) {
+        if (!o.spec || !IsDroneCard(*o.spec) || !o.def || o.art) continue;
+        if (!gadget) gadget = g.host.droneStation();
+        if (!unity::IsAlive(gadget)) return;
+        o.art = true;
+        const size_t offIcon = FieldOff(gadget, "icon"), offPedia = FieldOff(gadget, "_pediaLink");
+        Il2CppObject* icon = offIcon ? unity::Field<Il2CppObject*>(gadget, offIcon) : nullptr;
+        Il2CppObject* pedia = offPedia ? unity::Field<Il2CppObject*>(gadget, offPedia) : nullptr;
+        if (unity::IsAlive(icon)) SetRef(o.def, g.offUdIcon, icon);
+        if (unity::IsAlive(pedia)) SetRef(o.def, g.offUdPedia, pedia);
+        SR2_INFO("[{}] vacpack: {} card uses the '{}' icon ({}) and pedia entry ({})", kModule, o.spec->name,
+                 unity::GetName(gadget), unity::IsAlive(icon) ? unity::GetName(icon) : std::string("not found, Tank Booster's"),
+                 unity::IsAlive(pedia) ? unity::GetName(pedia) : std::string("not found, Tank Booster's"));
+    }
 }
 
 // Old builds sold Battery Saver I-IV per drone station ("drone_battery.station.<id>" = 1..4). The
@@ -1794,6 +1811,12 @@ void VacpackUpgrades::Reset() {
 int VacpackUpgrades::DroneBatteryLevel() const {
     if (!ready_ || !On() || !g.host.saveReady || !g.host.saveReady() || !g.host.value) return 0;
     return std::clamp(SavedInt(kDroneBatteryKey) + 1, 0, 4);
+}
+
+int VacpackUpgrades::DroneProgramsOwned() const {
+    if (g.createFailed) return 1;  // the card can't be offered: the feature is not locked then
+    if (!ready_ || !On() || !g.host.saveReady || !g.host.saveReady() || !g.host.value) return -1;
+    return SavedInt(kDroneProgramsKey) >= 0 ? 1 : 0;
 }
 
 bool VacpackUpgrades::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& why, std::string& report) {

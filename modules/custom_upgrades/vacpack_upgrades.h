@@ -11,6 +11,8 @@
 //     I-IV                       the battery (effect: drone_battery.cpp)             Station blueprint is owned
 //   Shadow Catcher        1      the vacpack holds shadow slimes, they stay and eat  own card
 //                                on the ranch (effect: shadow_catcher.cpp)
+//   Drone Program         1      several programs per drone station (effect:         own card, like the
+//     Scheduler                  drone_programs.cpp; without it: one program)        Battery Saver
 //
 // Tiers: four / two more UpgradeLevelDefinitions (deep copies from Object.Instantiate of
 // "AmmoCapacity", with our values, costs and texts) appended to the vanilla definitions' _levels at
@@ -23,7 +25,8 @@
 // Shadow slimes in the vacpack never reach the vanilla save: AmmoModel.Pull gives the save an empty
 // slot in their place and writes "vanilla slot index=count" to the sidecar (kShadowStashKey); the tick
 // puts them back after a load (once the Shadow Catcher is known to be owned).
-// The Drone Battery Saver is its own card: a clone of "AmmoCapacity" with its own _uniqueId,
+// The Drone Battery Saver (and likewise the Program Scheduler and the Shadow Catcher) is its own card:
+// a clone of "AmmoCapacity" with its own _uniqueId,
 // appended to the player's UpgradeDefinitionList (+ the Fabricator category's list); its id is
 // removed from the save's copy, its level lives in the sidecar.
 // The extra slots are two more AmmoSlotDefinitions (clones of "ExpansionAmmoSlot 2", thresholds 7
@@ -55,6 +58,8 @@ inline constexpr const char* kDroneBatteryKey = "custom_upgrades.vacpack.drone_b
 // Old builds sold the Battery Saver per drone station: "<prefix><actor id>" = tier 1..4. Migrated
 // once into the global level (the highest tier wins) and then erased.
 inline constexpr const char* kOldBatteryPrefix = "drone_battery.station.";
+// Per-save value of the Drone Program Scheduler: "0" = owned ("" = not).
+inline constexpr const char* kDroneProgramsKey = "custom_upgrades.vacpack.drone_programs";
 // Per-save value of the Shadow Catcher: "0" = owned ("" = not).
 inline constexpr const char* kShadowCatcherKey = "custom_upgrades.vacpack.shadow_catcher";
 // Shadow slimes in the player's vanilla vacpack slots at the last game save: "v=count;..." (v = vanilla
@@ -98,6 +103,8 @@ public:
 
     // Main thread: the owned Drone Battery Saver level, 0 (none / no save / off) .. 4.
     int DroneBatteryLevel() const;
+    // Main thread: the Drone Program Scheduler is owned: 1 / 0, -1 = not known yet (no save, off).
+    int DroneProgramsOwned() const;
 
 private:
     bool ready_ = false;
