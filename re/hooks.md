@@ -38,7 +38,7 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | AutoSaveDirector.BeginLoad(2) | 0x5CDB50 | sandbox_saves.AutoSaveDirector.BeginLoad | sandbox/cheated_save.cpp | track cheated save on load (always on) |
 | AutoSaveDirector.CleanupAutosaves(1) | 0x5CE040 | sandbox_saves.AutoSaveDirector.CleanupAutosaves | sandbox/cheated_save.cpp | keep cheated marks in step (always on) |
 | AutoSaveDirector.Load(3) | 0x5CFDC0 | custom_upgrades.AutoSaveDirector.Load | custom_upgrades/module.cpp | load sidecar |
-| AutoSaveDirector.SaveGameImpl(2) | 0x5D10A0 | custom_upgrades.AutoSaveDirector.SaveGameImpl | custom_upgrades/module.cpp | write sidecar |
+| AutoSaveDirector.SaveGameImpl(2) | 0x5D10A0 | custom_upgrades.AutoSaveDirector.SaveGameImpl | custom_upgrades/module.cpp | write sidecar; asks autotest's save veto first (see Notes) |
 | AutoSaveDirector.StartNewGame(2) | 0x5D1A70 | custom_upgrades.AutoSaveDirector.StartNewGame | custom_upgrades/module.cpp | reset sidecar state |
 | Button.Press(0) (UnityEngine.UI) | 0x35A0730 | sell_upgrades.UnityEngine.UI.Button.Press | sell_upgrades/module.cpp | Sell button click; every uGUI button, pointer compare |
 | Canvas.SendWillRenderCanvases(0) (UIModule, static) | 0x37BF0A0 | core.main_thread.Canvas.SendWillRenderCanvases | core/main_thread.cpp | main-thread tick (secondary; only with frameCount or if primary failed) |
@@ -225,14 +225,14 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | VacuumItem.NextSlot(1) | 0xA67D00 | hl2_movement.VacuumItem.NextSlot | hl2_movement/module.cpp | scroll-wheel jump (opt) |
 | VacuumItem.PreviousSlot(1) | 0xA68F80 | hl2_movement.VacuumItem.PreviousSlot | hl2_movement/module.cpp | scroll-wheel jump (opt) |
 | VacuumItem.SelectSlot(InputEventData) | 0xA69640 | custom_upgrades.VacuumItem.SelectSlot | custom_upgrades/vacpack_upgrades.cpp | remap water slot key (opt); MethodByParams (int overload only called) |
-| Win32 WndProc of the game window | user32 | (no HookManager entry) | ui/overlay.cpp | `SetWindowLongPtrW(GWLP_WNDPROC)` subclass: overlay input |
+| Win32 WndProc of the game window | user32 | (no HookManager entry) | ui/overlay.cpp | `SetWindowLongPtrW(GWLP_WNDPROC)` subclass: overlay input; while a test question is open (ui/autotest_view.h) also queues input for ImGui with the overlay closed, swallowing only clicks on the panel and keys while its note field types |
 | Win32 WH_GETMESSAGE hook (window thread) | user32 | (no HookManager entry) | ui/overlay.cpp | `SetWindowsHookExW` while overlay has input: block Steam Shift+Tab, feed Tab to ImGui; refreshed every 2 s |
 
 Count: 186 MinHook hooks (core 2, ui 16, custom_upgrades 63, hl2_movement 17, sell_upgrades 13,
 quick_travel 11, sandbox 10 in four groups, drone_price_limit 9, free_placement 7, spawn_scaling 7,
 plot_upgrades 6, map_tools 5, minimap 5, quick_start 5, gadget_stacking 4, misc_tweaks 4, instant_build 1, slime_dj 1)
-plus the two Win32 hooks. No two hooks share a target. Modules without hooks: collectibles,
-debug_tools, discord_rpc, wall_markers (reads the overlay's Present), proxy/.
+plus the two Win32 hooks. No two hooks share a target. Modules without hooks: autotest (uses custom_upgrades'
+SaveGameImpl hook, see Notes), collectibles, debug_tools, discord_rpc, wall_markers (reads the overlay's Present), proxy/.
 
 ## Notes
 
@@ -255,6 +255,11 @@ debug_tools, discord_rpc, wall_markers (reads the overlay's Present), proxy/.
   custom_upgrades' drone-programs UI (drone_programs.h). drone_source.cpp's DroneStationGadgetModel.Pull
   detour asks drone_programs through `drones::SetProgramHooks` (callbacks, not a second hook).
 - radio_shop: "none of these is hooked anywhere else"; dj_buildables: GadgetMusicPlayer hooked nowhere else.
+- `AutoSaveDirector.SaveGameImpl` (custom_upgrades): autotest's save guard plugs in through
+  `custom_upgrades::SetSaveVeto` (api.h); the detour asks the veto before anything else, also while custom_upgrades
+  is off or faulted. While a test client is connected autotest keeps that hook enabled
+  (`HookManager::Enable(custom_upgrades::kSaveHookName)`, re-checked every second) and disables it again on
+  disconnect if custom_upgrades is off. autotest itself installs no hooks.
 - UpgradeModel.SetUpgradeLevel is custom_upgrades'; sandbox/upgrades.cpp relies on it and has no hooks.
   sandbox/upgrades.cpp uses the sandbox_fabricator FabricatorUI hooks for the open Fabricator.
 

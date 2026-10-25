@@ -186,6 +186,22 @@ Details of what the module does: `modules/sandbox/NOTES.md`. Five tabs, each its
 
 Off: an explanation card. On: Songs left (count, **Rescan**, **Open folder**, search, list of `sr2mods_music`: name, duration, unplayable files dimmed with reason; click plays, + queues); right Now playing (seek bar: click/drag, jumps on release and shows the target until the module catches up; **Play/Pause**, **Skip**, **Stop**; a warning line while inaudible, else how many music boxes / speakers play it; the module's rows via `DrawRow`) and the Queue (move up / down / remove, **Clear**). Below, full width, **Corral radios**: one section per loaded corral with the Corral Radio (name, distance, on/off, song or warning, **Skip**, **Shuffle**, **Add songs** / **Done**, **Clear**, playlist of up to 5 visible rows). While **Add songs** is active the Songs + buttons add to that radio. The tab's refresh icon rescans. List rows end with an empty `Dummy` after moving the cursor (a bare `SetCursorPos` past the content trips ImGui's `EndChild` check). Details: `modules/slime_dj/NOTES.md`.
 
+## Test harness view (`autotest_view.cpp`, module `autotest`)
+
+The overlay side of `modules/autotest` (design: `modules/autotest/NOTES.md`). All state behind one mutex; the pipe
+threads open / cancel questions and wait for answers and screenshots, the render thread draws and answers.
+- `HasContent()` (armed or a question open) makes `RenderFrame` draw a frame even with nothing else to show:
+  "Test harness connected" pill bottom right while a client is connected.
+- A question: pulsing accent border on the foreground draw list, a panel at the top centre drawn last (after the
+  menu, `BringWindowToDisplayFront`), keys 1-4 polled with `GetAsyncKeyState` (game in front, no text field typing).
+- Input with the overlay closed: `WndFilterCpp` queues the window's input for ImGui while a question is open (not
+  `WM_INPUT`), `DrainMessages` replays it, `PollMouseButtons` runs; only clicks over the panel and keys while its
+  note field types are swallowed. `OnMainThreadTick` passes `WantsGameInputLock()` to `game_input::Tick` (pointer on
+  the panel / typing), so the game's input is locked exactly then, the per-action way.
+- Screenshots: `OnPresentImpl` copies the back buffer through a staging texture (resolved when multisampled) before
+  `RenderFrame` (or after it for `overlay: true`) and converts R8G8B8A8 / B8G8R8A8 / R10G10B10A2 / R16G16B16A16F to
+  RGBA8; the PNG is encoded on the pipe thread.
+
 ## HUD edit mode (`hud_edit.cpp`)
 
 One edit mode for `Element::Minimap` (`minimap.pos_x`, `pos_y`, `size`: edge length 10-50 % of screen height) and `Element::SpeedPanel` (`hl2_movement.momentum_hud_x`, `_y`, `_size`: font size 0.8-8 % of screen height); each is a table row in `hud_edit.cpp`.

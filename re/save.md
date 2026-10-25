@@ -15,6 +15,34 @@ Custom ids (`0x5352xxxx`, "SR" << 16; `custom_upgrades::IsCustomUpgrade`) never 
 - `AutoSaveDirector.StartNewGame(int, GameSettingsModel)` 0x5D1A70; `CurrentSaveGameName()` 0x5CE220 (`_currentGameMetadata.GameName` or ""); `DeleteGame(string)`; `SaveProfile()` (options). AutoSaveDirector = `GameContext.Instance.<AutoSaveDirector>k__BackingField`.
 - On the title screen the metadata keeps the last game: "in game" = `SceneContext.GameModel` set.
 
+## Save slots: what the user sees vs `SlotIndex` (code, checked against the user's saves)
+
+- **The slot the user sees = `SlotIndex + 1`.** `SaveGamesRootUI.CreateBehaviorModels` 0x7348C0 (IDA) makes an array of
+  `AutoSaveDirectorConfiguration._saveSlotCount` (+0x64) buttons, takes each game's newest summary
+  (`AvailableGamesByGameName()` values, `<CreateBehaviorModels>b__20_0` = `list[0]`), orders them by `SaveSlotIndex`
+  and puts the game into button `SaveSlotIndex` (out of range: logged "Game Summary {0} has save slot index {1}. This
+  is out of range", not shown); the empty buttons become New Game buttons (`NewGameUISetup.SelectedIndex` = that index
+  -> `NewGameOptionsUIRoot.SaveSlotIndex` -> `AutoSaveDirector.StartNewGame(SaveSlotIndex, settings)`).
+- **The slot is also in the game's name.** `StartNewGame` 0x5D1A70 (IDA): `saveSlotIndex` must be in
+  `[0, _saveSlotCount)`; `GameName = string.Format("{0:yyyyMMddHHmmss}_{1}", DateTime.Now, saveSlotIndex + 1)` (plus
+  `"_<i>"` while that name has data); `DisplayName` = `(saveSlotIndex + 1).ToString()`; `GameMetadata(name, display,
+  0, saveSlotIndex)`. So save files are `<yyyyMMddHHmmss>_<slot>_<rotation>.sav`.
+- Checked read-only against the user's save folder (2026-10-25): four games `20261020220332_1`, `20261022183338_2`,
+  `20261023190137_3`, `20261024162000_4` = slots 1-4 (SlotIndex 0-3). Slots 5 and 6 (SlotIndex 4 and 5, names ending in
+  `_5` / `_6`) are the test slots of `modules/autotest` (it refuses anything else).
+- `Summary` (MP.SR.Persist): `Name` +0x10 (GameName), `DisplayName` +0x18, `SaveSlotIndex` +0x20, `SaveTimestamp`
+  DateTimeOffset +0x48 (`_dateTime` UTC ticks in the low 62 bits, `_offsetMinutes` short at +8), `SaveName` +0x58,
+  `SaveNumber` +0x60, `IsInvalid` +0x44, `GameOver` +0x45; `get_SaveIdentifier()` -> `GameSaveIdentifier`.
+  `AvailableGamesByGameName()` returns a fresh `Dictionary<string, List<Summary>>` (corefx layout: `_entries` of
+  `{uint hashCode; int next; string key; List value}` = 24 bytes, `_count`). autotest reads it (game.cpp).
+- Quit without saving (autotest `quit_to_title`): `PauseMenuDirector.Quit` = `SaveAllNow()` then
+  `SceneContext.OnSessionEnded()` and `SystemContext.SceneLoader.LoadMainMenuSceneGroup(null)`; the harness makes the
+  last two calls only. `AutoSaveDirector.OnSessionEnded` 0x5D08E0 clears `_currentGameMetadata` (hasValue false on the
+  title screen after a quit).
+- Every game save goes through `SaveGameImpl` (IDA callers: `OnApplicationQuit`, `SaveAllNow`, `SaveGameAndFlush`,
+  `SaveGame_GetSummary`, `SaveGame`); returning null there skips the save and every caller handles null (no summary, the
+  profile is still saved). autotest's save guard vetoes through custom_upgrades' detour (re/hooks.md).
+
 ## Actors and persistence ids (code/data)
 
 - `GameModelPullHelpers.PullActors` 0x5E5C00: writes `BuildActorData(actor)` for every actor in `GameModel.AllActors()` whose type is not in `GameModel.ignoreOnLoad` (group "SceneObjectGroup" = Player only). No other filter, no despawn on save. `PushActors` / `PushActorData` 0x5EC010 / 0x5EB980 load them: skip non-finite positions, **throw for an unknown type id**, skip unknown scene groups.
