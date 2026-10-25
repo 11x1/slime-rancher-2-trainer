@@ -69,6 +69,7 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | Gadget.ChangeVariant(2) | 0x651CD0 | custom_upgrades.Gadget.ChangeVariant | custom_upgrades/quantum_link.cpp | variant toggle of placed clones (variant_ext) |
 | Gadget.IsCompletelyGrounded(2) | 0x6530D0 | free_placement.Gadget.IsCompletelyGrounded | free_placement/module.cpp | place anywhere |
 | Gadget.IsOverlapping(float, LayerMask, bool) | 0x653270 | free_placement.Gadget.IsOverlapping | free_placement/module.cpp | ignore overlap; MethodByParams (ref overload 0x653330 not hooked) |
+| Gadget.SetModel(1) | 0x654370 | gadget_stacking.Gadget.SetModel | gadget_stacking/module.cpp | every placed / loaded gadget takes gadgets on top (AllowGadgetStackingOnTop) |
 | Gadget.Update(0) | 0x654E60 | instant_build.Gadget.Update | instant_build/module.cpp | skip gadget cooldowns/charge-up |
 | GadgetDefinition.get_LocalizedDescription(0) | 0x51B440 | custom_upgrades.GadgetDefinition.get_LocalizedDescription | custom_upgrades/gadget_look.cpp | own description for clones (any thread) |
 | GadgetDirector.GetItemCount(1) | 0x8688C0 | custom_upgrades.GadgetDirector.GetItemCount | custom_upgrades/quantum_link.cpp | clone item counts (variant_ext) |
@@ -81,12 +82,15 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | GadgetFavoritesBar.NextSlot(1) | 0x75E180 | hl2_movement.GadgetFavoritesBar.NextSlot | hl2_movement/module.cpp | scroll-wheel jump (opt) |
 | GadgetFavoritesBar.PreviousSlot(1) | 0x75E500 | hl2_movement.GadgetFavoritesBar.PreviousSlot | hl2_movement/module.cpp | scroll-wheel jump (opt) |
 | GadgetItem.IsInLinkedGadgetRange(1) | 0xA43770 | free_placement.GadgetItem.IsInLinkedGadgetRange | free_placement/module.cpp | unlimited link range |
+| GadgetItem.IsPlacementValid(2) | 0xA439F0 | gadget_stacking.GadgetItem.IsPlacementValid | gadget_stacking/module.cpp | stack target = chosen hit's gadget, placeholder may stack, no grounded test on a gadget |
 | GadgetItem.PickupGadget(1) | 0xA44AD0 | custom_upgrades.GadgetItem.PickupGadget | custom_upgrades/quantum_link.cpp | pick up clones (variant_ext) |
+| GadgetItem.PickupOrStoreStackedGadgets(2) | 0xA45010 | gadget_stacking.GadgetItem.PickupOrStoreStackedGadgets | gadget_stacking/module.cpp | log only (stack goes back with its base) |
 | GadgetItem.PlaceGadgetEvent(1) | 0xA45410 | custom_upgrades.GadgetItem.PlaceGadgetEvent | custom_upgrades/quantum_link.cpp | place clones (variant_ext) |
 | GadgetItem.SetHeldGadget(1) | 0xA46810 | custom_upgrades.GadgetItem.SetHeldGadget | custom_upgrades/gadget_look.cpp | placement preview look |
 | GadgetItem.UpdateFootprint(0) | 0xA48050 | free_placement.GadgetItem.UpdateFootprint | free_placement/module.cpp | placement validity (scope for the other free_placement detours) |
 | GadgetMusicPlayer.OnInteract(0) | 0x747930 | custom_upgrades.dj.GadgetMusicPlayer.OnInteract | custom_upgrades/dj_buildables.cpp | E on DJ booths / speakers |
 | GadgetMusicPlayer.ShowDeactivatePrompt(0) | 0x748180 | custom_upgrades.dj.GadgetMusicPlayer.ShowDeactivatePrompt | custom_upgrades/dj_buildables.cpp | DJ prompt |
+| GadgetOverlapHelpers.IsGadgetOverlapping(7, ref GadgetOverlapInfo) (static) | 0x64FA50 | gadget_stacking.GadgetOverlapHelpers.IsGadgetOverlapping | gadget_stacking/module.cpp | placed gadgets don't block the held placeholder (armed by IsPlacementValid in the same tick); below free_placement's Gadget.IsOverlapping |
 | HudUI.Awake(0) | 0x698620 | minimap.HudUI.Awake | minimap/module.cpp | record HUD instance (opt) |
 | IDXGISwapChain::Present (vtable slot 8) | dxgi.dll | ui.dxgi_present | ui/overlay.cpp | ImGui overlay render (vtable read from a dummy swap chain) |
 | IDXGISwapChain::ResizeBuffers (slot 13) | dxgi.dll | ui.dxgi_resize_buffers | ui/overlay.cpp | release RTV before resize (required) |
@@ -221,9 +225,9 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | Win32 WndProc of the game window | user32 | (no HookManager entry) | ui/overlay.cpp | `SetWindowLongPtrW(GWLP_WNDPROC)` subclass: overlay input |
 | Win32 WH_GETMESSAGE hook (window thread) | user32 | (no HookManager entry) | ui/overlay.cpp | `SetWindowsHookExW` while overlay has input: block Steam Shift+Tab, feed Tab to ImGui; refreshed every 2 s |
 
-Count: 182 MinHook hooks (core 2, ui 16, custom_upgrades 63, hl2_movement 17, sell_upgrades 13,
+Count: 186 MinHook hooks (core 2, ui 16, custom_upgrades 63, hl2_movement 17, sell_upgrades 13,
 quick_travel 11, sandbox 10 in four groups, drone_price_limit 9, free_placement 7, spawn_scaling 7,
-plot_upgrades 6, map_tools 5, minimap 5, quick_start 5, misc_tweaks 4, instant_build 1, slime_dj 1)
+plot_upgrades 6, map_tools 5, minimap 5, quick_start 5, gadget_stacking 4, misc_tweaks 4, instant_build 1, slime_dj 1)
 plus the two Win32 hooks. No two hooks share a target. Modules without hooks: collectibles,
 debug_tools, discord_rpc, wall_markers (reads the overlay's Present), proxy/.
 
