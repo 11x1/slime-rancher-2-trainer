@@ -155,7 +155,7 @@ constexpr float kGlowHeight = 1.0f;
 constexpr double kUseCooldown = 1.5;    // Use on a link: the cloud menu / notices at most this often
 constexpr double kCloudOpenSeconds = 10.0;  // the Quantum Cloud menu must load within this time
 constexpr double kCloudSettleSeconds = 0.15;  // ... then be active this long before it is filled (and between tries)
-constexpr int kCloudTries = 3;               // UpdateShowData(null) tries before the tab and legend are set anyway
+constexpr int kCloudTries = 3;               // UpdateShowData(null) tries before the legends are set anyway
 constexpr int kUseLines = 5;            // cloud types listed by Use
 
 struct Vec3 {
@@ -340,8 +340,9 @@ struct Impl {
     std::unordered_set<Il2CppObject*> interactables;  // the links' Use components (OnInteract detours)
     double lastUse = 0.0;
     // Use opens the game's Quantum Cloud menu: the drone station menu without a station (OpenCloudMenu / CloudFrame).
-    const MethodInfo* udmInstance = nullptr, *udmOpen = nullptr, *droneShowData = nullptr, *tabGoTo = nullptr;
-    size_t offUdiDisplay = 0, offMenuRoot = 0, offMenuTabs = 0, offMenuTabbed = 0, offMenuCloud = 0, offTabTarget = 0;
+    const MethodInfo* udmInstance = nullptr, *udmOpen = nullptr, *droneShowData = nullptr;
+    size_t offUdiDisplay = 0, offMenuRoot = 0, offMenuCloud = 0, offMenuList = 0;
+    Il2CppClass* legendClass = nullptr, *registrarClass = nullptr;  // InputLegend / InputLegendFocusRegistrar (optional)
     std::string cloudDisplay;          // the drone station menu's display name (from the station prefab)
     bool cloudDisplayLooked = false;
     Il2CppGCHandle cloudReq = nullptr; // UIDisplayRequestHandle of the menu being opened
@@ -596,6 +597,8 @@ struct Impl {
     bool OpenCloudMenu();
     void CloudFrame();
     std::string HideCloudHints(Il2CppObject* cloudMenu);
+    std::string HideListHints(Il2CppObject* menu);
+    std::string HideHints(Il2CppObject* legend, const std::vector<Il2CppObject*>& configs);
     void EndCloudRequest();
     bool OnUse(Il2CppObject* interactable);
     std::string NameOf(Il2CppObject* type);
@@ -1505,7 +1508,7 @@ int Impl::ScaleParticles(Il2CppObject* glow) {
 // UIDisplayInteractable._display) opened with UIDisplayManager.OpenDisplay and, once loaded (CloudFrame), shown
 // without a station: DroneUIDisplay's IDisplayShowDataHandler<IDroneTaskAssignable>.UpdateShowData(null) builds the
 // view model the map's drone panel uses (cloud view only, no withdraw; DroneMenuUI.SetViewModel drops the programming
-// tab), then the Quantum Cloud tab is selected.
+// tab). It opens on its own first tab, the drone list (round 14).
 bool Impl::OpenCloudMenu() {
     if (!udmInstance || !udmOpen || !droneShowData) return false;
     if (cloudReq) return true;  // already opening
@@ -1546,13 +1549,11 @@ void Impl::EndCloudRequest() {
 }
 
 // While the menu loads (every frame, at most kCloudOpenSeconds): the request's display -> its GameObject ->
-// DroneUIDisplay -> UpdateShowData(null), the Quantum Cloud tab.
-// Round 13 ("nope, in the link still shows '[SPACE] Go To'"; log: `UpdateShowData(null) failed:
-// System.NullReferenceException`, no managed trace): it was called the first frame the display's GameObject
-// existed, before the menu was active (its components' Awake / Start not run yet), and the throw returned before
-// the tab switch and the legend, so the menu stayed on its first tab (the drone list: "[SPACE] Go To"). Now it
-// waits until the menu is active plus kCloudSettleSeconds, tries again (kCloudTries) when it still throws, and
-// selects the Quantum Cloud tab and hides its hints either way.
+// DroneUIDisplay -> UpdateShowData(null), then the cloud page's and the drone list's legends.
+// Round 13 (log: `UpdateShowData(null) failed: System.NullReferenceException`, no managed trace): it was called the
+// first frame the display's GameObject existed, before the menu was active (its components' Awake / Start not run
+// yet). Now it waits until the menu is active plus kCloudSettleSeconds, tries again (kCloudTries) when it still
+// throws, and sets the legends either way. Round 14: no tab switch, the menu opens on the drone list.
 void Impl::CloudFrame() {
     Il2CppObject* req = unity::GCHandleTarget(cloudReq);
     if (!req || Now() - cloudReqAt > kCloudOpenSeconds) {
@@ -1595,28 +1596,21 @@ void Impl::CloudFrame() {
             return;
         }
         if (!cloudFailLogged)
-            SR2_INFO("[{}] quantum link: DroneUIDisplay.UpdateShowData(null) threw {} time(s) ({}) - the cloud tab and legend "
-                     "are set anyway",
+            SR2_INFO("[{}] quantum link: DroneUIDisplay.UpdateShowData(null) threw {} time(s) ({}) - the legends are "
+                     "set anyway",
                      module, cloudTries, err);
         cloudFailLogged = true;
     }
     EndCloudRequest();
-    // The Quantum Cloud tab: the DroneTabSetup whose Target is the cloud inventory's transform.
+    // Round 14: the menu stays on its own first tab, the drone list ("quantum cloud tab shouldnt be the default, leave
+    // it be as Drones tab"). The forced TabbedControl.GoToTab of rounds 11-13 threw a NullReferenceException each time.
     Il2CppObject* menu = unity::Field<Il2CppObject*>(dui, offMenuRoot);
     Il2CppObject* cloud = unity::IsAlive(menu) ? unity::Field<Il2CppObject*>(menu, offMenuCloud) : nullptr;
-    void* tabs = unity::IsAlive(menu) ? unity::Field<void*>(menu, offMenuTabs) : nullptr;
-    Il2CppObject* cloudTr = unity::IsAlive(cloud) ? unity::TransformOf(cloud) : nullptr;
-    int32_t index = -1;
-    for (size_t i = 0, n = unity::ListCount(tabs); cloudTr && i < n && i < 8; ++i)
-        if (auto* t = static_cast<Il2CppObject*>(unity::ListAt(tabs, i)); t && unity::Field<Il2CppObject*>(t, offTabTarget) == cloudTr)
-            index = static_cast<int32_t>(i);
-    Il2CppObject* tabbed = unity::IsAlive(menu) ? unity::Field<Il2CppObject*>(menu, offMenuTabbed) : nullptr;
-    bool switched = false;
-    if (index >= 0 && unity::IsAlive(tabbed)) switched = Value<bool>(Call(tabGoTo, tabbed, {&index}, "TabbedControl.GoToTab", &ok)) && ok;
     const std::string hints = unity::IsAlive(cloud) ? HideCloudHints(cloud) : std::string("no cloud page");
-    SR2_INFO("[{}] quantum link: Quantum Cloud menu open ({}; {}; legend: {})", module,
-             switched ? std::format("cloud tab {}", index + 1) : index < 0 ? std::string("cloud tab not found") : std::string("already on the cloud tab"),
-             err.empty() ? std::format("view only, no station, filled on try {}", cloudTries + 1) : std::string("not filled"), hints);
+    const std::string listHints = unity::IsAlive(menu) ? HideListHints(menu) : std::string("no menu");
+    SR2_INFO("[{}] quantum link: Quantum Cloud menu open ({}; cloud legend: {}; drone list legend: {})", module,
+             err.empty() ? std::format("view only, no station, filled on try {}", cloudTries + 1) : std::string("not filled"), hints,
+             listHints);
 }
 
 // Round 12: "the row shows to press [SPACE] and a magnifying glass, #watdatmean". Without a station
@@ -1640,19 +1634,75 @@ std::string Impl::HideCloudHints(Il2CppObject* cloudMenu) {
         objOff = R.FieldOffset(k, "_object");
     Il2CppObject* legend = objOff ? unity::Field<Il2CppObject*>(ci, *objOff) : nullptr;
     if (!unity::IsAlive(legend)) return "legend component not found";
-    const MethodInfo* setEnabled = R.Method(api().il2cpp_object_get_class(legend), "SetItemEnabled", 2, nullptr);
     auto hintsOff = R.FieldOffset(api().il2cpp_object_get_class(cfg), "_hints");
-    if (!setEnabled || !hintsOff) return std::format("{}.SetItemEnabled / _hints not found", unity::ClassName(legend));
+    if (!hintsOff) return "InputLegendConfiguration._hints not found";
+    std::vector<Il2CppObject*> configs;
     void* hints = unity::Field<void*>(cfg, *hintsOff);
+    for (size_t i = 0, n = std::min<size_t>(unity::ArrayLength(hints), 16); i < n; ++i)
+        if (auto* h = static_cast<Il2CppObject*>(unity::ArrayAt(hints, i))) configs.push_back(h);
+    return HideHints(legend, configs);
+}
+
+// Round 14 ("In the DRONES menu, there is the 'Go To' bug (still exists)"): the drone list's "[SPACE] Go To" pans
+// the map to a drone. DroneListButton.OnSubmit (0x815AC0) raises DroneListEntryViewModel.GoToInMapRequested, which
+// DroneListViewModel forwards to its GoToEntryInMapRequested; only the map's drone panel (MapDroneMenuContainer)
+// subscribes, so in this menu Space already does nothing and only the hint is wrong. DroneListMenu has no legend
+// field: every InputLegendFocusRegistrar / InputLegend under the drone list page gets its hints switched off
+// (SetItemEnabled(event, false); both keep a _disabledHints set, so a Configure on focus keeps them off) except
+// back / close ones. The hints are read from the components' configurations (default and current) and, on an
+// InputLegend, from its InputHint entries. Returns a summary for the log.
+std::string Impl::HideListHints(Il2CppObject* menu) {
+    if (!offMenuList || (!legendClass && !registrarClass)) return "InputLegend classes not found";
+    Il2CppObject* list = unity::Field<Il2CppObject*>(menu, offMenuList);
+    if (!unity::IsAlive(list)) return "no drone list page";
+    Resolver& R = Resolver::Get();
+    std::vector<Il2CppObject*> legends;
+    for (Il2CppClass* k : {registrarClass, legendClass})
+        for (Il2CppObject* c : AllInChildren(list, k)) legends.push_back(c);
+    if (legends.empty()) return "no legend under the drone list page";
+    auto field = [&](Il2CppObject* o, const char* name) -> Il2CppObject* {
+        auto off = o ? R.FieldOffset(api().il2cpp_object_get_class(o), name) : std::nullopt;
+        return off ? unity::Field<Il2CppObject*>(o, *off) : nullptr;
+    };
+    std::string out;
+    for (Il2CppObject* legend : legends) {
+        std::vector<Il2CppObject*> configs;
+        auto addArray = [&](void* arr) {
+            for (size_t i = 0, n = arr ? std::min<size_t>(unity::ArrayLength(arr), 16) : 0; i < n; ++i)
+                if (auto* h = static_cast<Il2CppObject*>(unity::ArrayAt(arr, i))) configs.push_back(h);
+        };
+        for (const char* cfgName : {"_configuration", "_defaultConfiguration", "_currentConfiguration"})
+            if (Il2CppObject* cfg = field(legend, cfgName); unity::IsAlive(cfg)) addArray(field(cfg, "_hints"));
+        addArray(field(legend, "_defaultHints"));
+        if (void* cur = field(legend, "_currentHints"))  // List<InputHintConfiguration>
+            for (size_t i = 0, n = std::min<size_t>(unity::ListCount(cur), 16); i < n; ++i)
+                if (auto* h = static_cast<Il2CppObject*>(unity::ListAt(cur, i))) configs.push_back(h);
+        if (api().il2cpp_object_get_class(legend) == legendClass)  // InputLegend._hints: InputHint[]
+            if (void* entries = field(legend, "_hints"))
+                for (size_t i = 0, n = std::min<size_t>(unity::ArrayLength(entries), 16); i < n; ++i)
+                    if (auto* h = static_cast<Il2CppObject*>(unity::ArrayAt(entries, i)); unity::IsAlive(h))
+                        if (Il2CppObject* c = field(h, "_configuration")) configs.push_back(c);
+        out += std::format("{}{} '{}': {}", out.empty() ? "" : " | ", unity::ClassName(legend),
+                           unity::GetName(unity::GameObjectOf(legend)), HideHints(legend, configs));
+    }
+    return out;
+}
+
+// Switches the hints of `configs` (InputHintConfigurations; repeated events skipped) off on `legend` (an
+// IInputLegend: InputLegend / InputLegendFocusRegistrar) with SetItemEnabled(event, false), except events named
+// cancel / back / close / exit. Returns "hid 'Label' [Event], ...; kept ...".
+std::string Impl::HideHints(Il2CppObject* legend, const std::vector<Il2CppObject*>& configs) {
+    Resolver& R = Resolver::Get();
+    const MethodInfo* setEnabled = R.Method(api().il2cpp_object_get_class(legend), "SetItemEnabled", 2, nullptr);
+    if (!setEnabled) return std::format("{}.SetItemEnabled not found", unity::ClassName(legend));
+    std::unordered_set<Il2CppObject*> seen;
     std::string hid, kept;
-    for (size_t i = 0, n = std::min<size_t>(unity::ArrayLength(hints), 16); i < n; ++i) {
-        auto* h = static_cast<Il2CppObject*>(unity::ArrayAt(hints, i));
-        if (!h) continue;
+    for (Il2CppObject* h : configs) {
         Il2CppClass* hk = api().il2cpp_object_get_class(h);
         auto evOff = R.FieldOffset(hk, "InputEvent");
         auto lblOff = R.FieldOffset(hk, "Label");
         Il2CppObject* ev = evOff ? unity::Field<Il2CppObject*>(h, *evOff) : nullptr;
-        if (!unity::IsAlive(ev)) continue;
+        if (!unity::IsAlive(ev) || !seen.insert(ev).second) continue;
         std::string label;
         if (Il2CppObject* ls = lblOff ? unity::Field<Il2CppObject*>(h, *lblOff) : nullptr; ls && lsGetString) {
             bool ok = false;
@@ -2241,8 +2291,9 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
         Il2CppClass* udm = R.Class(kImage, kDisp, "UIDisplayManager", nullptr);
         p->droneUiClass = R.Class(kImage, kDroneUi, "DroneUIDisplay", nullptr);
         Il2CppClass* menu = R.Class(kImage, kDroneUi, "DroneMenuUI", nullptr);
-        Il2CppClass* tabSetup = R.Class(kImage, kDroneUi, "DroneTabSetup", nullptr);
-        Il2CppClass* tabbed = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Framework.CommonControls", "TabbedControl", nullptr);
+        constexpr const char* kControls = "MonomiPark.SlimeRancher.UI.Framework.CommonControls";
+        p->legendClass = R.Class(kImage, kControls, "InputLegend", nullptr);
+        p->registrarClass = R.Class(kImage, kControls, "InputLegendFocusRegistrar", nullptr);
         std::string sufErr;
         const MethodInfo* show = nullptr;
         if (p->droneUiClass && api().il2cpp_class_get_methods && api().il2cpp_method_get_name && api().il2cpp_method_get_param_count) {  // IDisplayShowDataHandler<IDroneTaskAssignable>.UpdateShowData (explicit)
@@ -2260,11 +2311,9 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
             return out != 0;
         };
         const bool fields = fo(uiDisplay, "_display", p->offUdiDisplay) && fo(p->droneUiClass, "_menuRoot", p->offMenuRoot) &&
-                            fo(menu, "_tabs", p->offMenuTabs) && fo(menu, "_tabbedControl", p->offMenuTabbed) &&
-                            fo(menu, "_cloudInventory", p->offMenuCloud) && fo(tabSetup, "Target", p->offTabTarget);
+                            fo(menu, "_cloudInventory", p->offMenuCloud) && fo(menu, "_droneList", p->offMenuList);
         p->udmInstance = udm ? R.Method(udm, "get_Instance", 0, nullptr) : nullptr;
         p->udmOpen = udm ? R.MethodByParams(udm, "OpenDisplay", {"MonomiPark.SlimeRancher.UI.Framework.Displays.UIDisplayHandle"}) : nullptr;
-        p->tabGoTo = tabbed ? R.Method(tabbed, "GoToTab", 1, nullptr) : nullptr;
         p->droneShowData = fields && p->udmInstance && p->udmOpen ? show : nullptr;
         if (!p->droneShowData)
             SR2_WARN("[{}] quantum link: the Quantum Cloud menu can't be opened (DroneUIDisplay / UIDisplayManager members missing) - "
