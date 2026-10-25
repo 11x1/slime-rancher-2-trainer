@@ -308,7 +308,7 @@ void UpgradesTab(const Helpers& h, const ub::State& st) {
         Text(dl, theme::kSmallSize, ImVec2(tx, a.y + U(25)), level < 0 ? P.dim : P.soft, tier.c_str());
         dl->PopClipRect();
         Circles(dl, ImVec2(tx, b.y - U(15)), std::max(U(40), textW), u, level);
-        // - / +, the glyphs drawn as lines in the button's centre (the font's '-' / '+' sit above the
+        // - / +, no tooltip (round 15 feedback), the glyphs drawn as lines in the button's centre (the font's '-' / '+' sit above the
         // middle of a square button).
         const float by = a.y + (eh - btn) * 0.5f;
         auto glyph = [&](bool plus) {
@@ -325,13 +325,11 @@ void UpgradesTab(const Helpers& h, const ub::State& st) {
         if (ImGui::Button("##dn", ImVec2(btn, btn))) RequestLevel(u, level - 1);
         glyph(false);
         ImGui::EndDisabled();
-        HoverTip(h, level == 0 ? "Back to not bought." : "One level down.");
         ImGui::SameLine(0, U(4));
         ImGui::BeginDisabled(level >= u.levels - 1);
         if (ImGui::Button("##up", ImVec2(btn, btn))) RequestLevel(u, level + 1);
         glyph(true);
         ImGui::EndDisabled();
-        HoverTip(h, "One level up, free.");
         ImGui::PopItemFlag();
         ImGui::PopID();
     }
