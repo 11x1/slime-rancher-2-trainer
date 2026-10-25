@@ -28,7 +28,7 @@ The script-drawn PNGs were removed from `assets/icons/`. Each name below has not
 | `coop_air_net` | Coop Air Net | the corral's Air Net upgrade icon, for good (the user's choice, no drawing planned) |
 | `gordo` | collectible tracker | sprite `iconGordoPedia_small` / `iconGordoPedia` (Slimepedia), else the map marker |
 | `plort_door`, `shadow_door` | collectible tracker | the map marker sprites |
-| `ghost_drone` | collectible tracker (under the minimap) | sprite `iconExplorerDronePedia` (user's pick), else placeholder |
+| `ghost_drone` | collectible tracker (under the minimap) | sprite `iconExplorerDronePedia` (user's pick, confirmed round 16; loaded through a drone station UI preload, see re/drones.md), else placeholder |
 | `research_drone` | collectible tracker | sprite `iconPediaDrone_small` / `iconPediaDrone`, else placeholder |
 | `map_node` | collectible tracker | sprite `pediaHomeWorld` (the user's pick), then `iconPediaHomeWorld` (Slimepedia World tile, may not be loaded in game), else placeholder |
 

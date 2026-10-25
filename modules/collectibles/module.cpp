@@ -60,7 +60,11 @@
 // the Slimepedia's gordo and research drone icons, the explorer drone icon for
 // ghostly drones, the Slimepedia World tile for map data nodes). Only when the
 // game has no sprite, the script-drawn placeholder (<name>_placeholder.png),
-// else the text label.
+// else the text label. Ghostly drones: iconExplorerDronePedia (user's pick),
+// which lives in the drone station menu's UI scene: that scene is preloaded for
+// a moment with the game's own preload API to find it (GhostIconTick).
+// Zones: the ranch islands (Conservatory + expansions) count as one zone
+// (IsRanchIsland), the Sanctuary stays separate.
 // Size: icon / count row 6.8 % of the minimap's size (list font 4.6 %) times
 // the "size" setting (60-160 %); the label line adds half of that.
 //
@@ -72,6 +76,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cctype>
 #include <atomic>
 #include <cmath>
 #include <format>
@@ -242,6 +247,11 @@ struct Sym {
     size_t mdCounters = kNoOff, counterIcon = kNoOff;
     size_t areaZoneData = kNoOff, areaPoints = kNoOff, zmdPrimary = kNoOff, zoneMarkerData = kNoOff,
            labZoneMarkerData = kNoOff;
+    size_t zoneRanch = kNoOff;  // ZoneDefinition._isRanchZone (optional; the name test covers its absence)
+    // UI display preload (GhostIconTick): UIDisplayManager, its layer set, UIDisplaySceneLoadEntry
+    Il2CppClass *udm = nullptr, *sceneEntry = nullptr;
+    ugui::Fn udmInstance, udmPreload, udmRelease, entryIsDone;
+    size_t udmLayerSet = kNoOff, layerSetList = kNoOff, layerDisplays = kNoOff;
     size_t gordoZone = kNoOff, gordoId = kNoOff, gordoIcon = kNoOff, puzzleIcon = kNoOff, depIcon = kNoOff;
     size_t droneEntryF = kNoOff, droneModelF = kNoOff, entryRefId = kNoOff, droneRead = kNoOff;
     size_t fogEvent = kNoOff, sgeDirector = kNoOff, sgeKey = kNoOff, edModel = kNoOff, gmEventRecord = kNoOff,
@@ -304,6 +314,7 @@ public:
         s_.zoneDef = c.Class("MonomiPark.SlimeRancher.World", "ZoneDefinition");
         s_.zoneMapData = c.Class("MonomiPark.SlimeRancher.World", "ZoneMapData");
         s_.zmdPrimary = c.Field(s_.zoneMapData, "_primaryZone");
+        s_.zoneRanch = c.Field(s_.zoneDef, "_isRanchZone");
         s_.detectArea = c.Class(nsUiMap, "ZoneDetectionArea");
         s_.areaZoneData = c.Field(s_.detectArea, "_zoneMapData");
         s_.areaPoints = c.Field(s_.detectArea, "_points");
@@ -368,6 +379,18 @@ public:
         s_.eventRecordModel = c.Class(nsEvent, "EventRecordModel");
         s_.gmEventRecord = c.Field(s_.gameModel, "eventRecordModel");
         s_.mdEventDirector = c.Field(s_.mapDirector, "_eventDirector");
+
+        // ghostly drone icon: the drone station menu's UI scene preload (GhostIconTick)
+        const char* nsDisplays = "MonomiPark.SlimeRancher.UI.Framework.Displays";
+        s_.udm = c.Class(nsDisplays, "UIDisplayManager");
+        s_.sceneEntry = c.Class(nsDisplays, "UIDisplaySceneLoadEntry");
+        s_.udmInstance = c.Bind(s_.udm, "get_Instance", 0);
+        s_.udmPreload = c.Bind(s_.udm, "RequestPreloadDisplay", 2);
+        s_.udmRelease = c.Bind(s_.udm, "ReleasePreloadDisplay", 2);
+        s_.entryIsDone = c.Bind(s_.sceneEntry, "get_IsDone", 0);
+        s_.udmLayerSet = c.Field(s_.udm, "_layerSet");
+        s_.layerSetList = c.Field(c.Class(nsDisplays, "UILayerSetDefinition"), "_layerList");
+        s_.layerDisplays = c.Field(c.Class(nsDisplays, "UILayerDefinition"), "_displayList");
 
         // Nothing works without the page / zone basics; everything else degrades per category.
         if (!s_.zoneDef || !ugui::HasTmp())
@@ -499,6 +522,15 @@ private:
     Ref catIcon_[kCatCount];
     Ref namedIcon_[kCatCount];  // game sprites found by name (FindNamedSprites; assets, kept across pages)
     int namedScans_ = 0;
+    // Ghostly drone icon (GhostIconTick): drone UI displays to preload in turn, the running preload,
+    // and the display held loaded when the sprite does not outlive its scene.
+    std::vector<std::string> ghostDisplays_;
+    size_t ghostDisplayIdx_ = 0;
+    bool ghostDisplaysRead_ = false, ghostHold_ = false, ghostWasFound_ = false, ghostGaveUp_ = false;
+    std::string ghostHeldDisplay_;  // display whose preload is held ("" = none)
+    Ref ghostPreload_;              // UIDisplaySceneLoadEntry of the running preload
+    std::string ghostPreloadName_;
+    unsigned long long ghostPreloadT0_ = 0, ghostNextTry_ = 0, ghostNextScan_ = 0;
     float scaleX_ = 0, scaleY_ = 0, offX_ = 0, offY_ = 0;
 
     // live state
@@ -509,6 +541,9 @@ private:
     Ref ghostIcon_;  // IdentifiableType.icon of the spawners' drone (kept across page rebuilds)
     // zone -> number of scene groups (ZoneSceneGroupMapping; -1 = also a SceneGroupList asset)
     std::unordered_map<Il2CppObject*, int> zoneGroups_;
+    // ZoneDefinition (identity) -> is a ranch island (IsRanchIsland; cleared with the page index)
+    std::unordered_map<Il2CppObject*, bool> ranchIsland_;
+    std::unordered_set<std::string> ranchLogged_;  // ranch islands named in the log this session
     // zones scanned while current and settled (identity only): their scene-scanned totals are complete
     std::unordered_set<Il2CppObject*> dronesComplete_, ghostsComplete_;
     float zoneAge_ = 0;
@@ -641,6 +676,11 @@ private:
             zoneAge_ = 0;
             settleScanDue_ = true;  // one scan once the zone's scenes are in (counts + completeness)
             SR2_DEBUG("collectibles: zone -> '{}'", unity::GetName(snap.zone));
+            if (IsRanchIsland(snap.zone) && ranchLogged_.insert(unity::GetName(snap.zone)).second)
+                SR2_INFO("collectibles: zone '{}' is a ranch island: the tracker shows the whole ranch's counts "
+                         "(ZoneDefinition._isRanchZone {}, name test 'Conservatory*' without 'Sanctuary')",
+                         unity::GetName(snap.zone),
+                         Has(s_.zoneRanch) ? (F<bool>(snap.zone, s_.zoneRanch) ? "set" : "not set") : "unavailable");
         }
 
         // Scene scans (each one FindObjectsByType over every scene object): once per zone after it
@@ -670,6 +710,8 @@ private:
                 recomputeAcc_ = 1e9f;
             }
         }
+        Step("ghost icon");
+        GhostIconTick();
         recomputeAcc_ += dt;
         if (recomputeAcc_ >= kRecomputeInterval) {
             recomputeAcc_ = 0;
@@ -707,6 +749,31 @@ private:
     Il2CppObject* ZoneOfMapData(Il2CppObject* zmd) {
         if (!ugui::IsA(zmd, s_.zoneMapData) || !Has(s_.zmdPrimary)) return nullptr;
         return PinZone(F<Il2CppObject*>(zmd, s_.zmdPrimary));
+    }
+
+    // The ranch is one zone for the tracker: the Conservatory and its expansion islands (the Gully,
+    // the Den, the Tidepools, the Archway, the Digsite, ...) are separate ZoneDefinitions
+    // ('Conservatory Gully', ...), but the game files the ranch's map counters and markers under
+    // 'Conservatory' only, so on an expansion the tracker was empty. A ranch island:
+    // ZoneDefinition._isRanchZone or an asset name starting with "Conservatory"; the Sanctuary
+    // ('Conservatory Sanctuary') has its own counters, nodes and teleporter and stays separate.
+    bool IsRanchIsland(Il2CppObject* z) {
+        if (!z) return false;
+        auto it = ranchIsland_.find(z);
+        if (it != ranchIsland_.end()) return it->second;
+        bool r = false;
+        if (ugui::IsA(z, s_.zoneDef)) {
+            std::string n = unity::GetName(z);
+            std::transform(n.begin(), n.end(), n.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+            const bool flag = Has(s_.zoneRanch) && F<bool>(z, s_.zoneRanch);
+            r = n.find("sanctuary") == std::string::npos && (flag || n.rfind("conservatory", 0) == 0);
+        }
+        ranchIsland_.emplace(z, r);
+        return r;
+    }
+    // Same tracker zone: identical, or both ranch islands.
+    bool SameZone(Il2CppObject* a, Il2CppObject* b) {
+        return a == b || (a && b && IsRanchIsland(a) && IsRanchIsland(b));
     }
 
     static bool PointInPoly(const std::vector<Vec2>& p, float x, float y) {
@@ -787,6 +854,7 @@ private:
         zoneGroups_.clear();
         zonePins_.clear();
         zoneSet_.clear();
+        ranchIsland_.clear();
         for (Ref& r : catIcon_) r.Reset(nullptr);
         pagePrefab_.Reset(nullptr);
         mapT_.Reset(nullptr);
@@ -916,7 +984,7 @@ private:
 
         ReadZoneGroups();
         LogTotals(byOwn, byPoly, byLabel, unassigned, fogAreas, fogNoEvent);
-        FindNamedSprites();
+        FindNamedSprites(false);
         recomputeAcc_ = 1e9f;
         shownSig_.clear();
     }
@@ -1016,7 +1084,10 @@ private:
         std::vector<Il2CppObject*> zones;
         for (const Ref& r : zonePins_) zones.push_back(r.get());
         std::string out;
+        bool ranchDone = false;  // the ranch islands share one line (their merged counts)
         for (Il2CppObject* z : zones) {
+            const bool ranch = IsRanchIsland(z);
+            if (ranch && ranchDone) continue;
             Count c[kCatCount];
             Tally(z, gm, c, true);
             std::string line;
@@ -1031,7 +1102,10 @@ private:
             if (g != zoneGroups_.end())
                 line += std::format("{}scene groups {}", line.empty() ? "" : ", ",
                                     g->second < 0 ? std::string("list") : std::to_string(g->second));
-            if (!line.empty()) out += std::format(" | '{}': {}", unity::GetName(z), line);
+            if (!line.empty()) {
+                out += std::format(" | '{}'{}: {}", unity::GetName(z), ranch ? " (+ the other ranch islands)" : "", line);
+                ranchDone = ranchDone || ranch;
+            }
         }
         std::string icons;
         for (int i = 0; i < kCatCount; ++i)
@@ -1096,9 +1170,9 @@ private:
     void Tally(Il2CppObject* zone, Il2CppObject* gm, Count* c, bool forLog) {
         bool hasCounter[kCatCount] = {};
         for (const CounterRef& cr : counters_)
-            if (cr.zone == zone) hasCounter[cr.cat] = true;
+            if (SameZone(cr.zone, zone)) hasCounter[cr.cat] = true;
         for (CounterRef& cr : counters_) {
-            if (cr.zone != zone || (!forLog && !cfg_.cats[cr.cat]) || !cr.counter.Alive()) continue;
+            if (!SameZone(cr.zone, zone) || (!forLog && !cfg_.cats[cr.cat]) || !cr.counter.Alive()) continue;
             MapCounterState st{0, 0, nullptr};
             // MapCounterState GetState(): 16-byte struct returned through a hidden pointer (rcx), this in rdx.
             if (!Managed([&] { ugui::Call<void*>(cr.getState, static_cast<void*>(&st), cr.counter.get()); })) continue;
@@ -1110,7 +1184,7 @@ private:
         bool attributeUnassigned = !pageHasZoneInfo_ && zone == zone_.get();
         for (Entry& e : entries_) {
             Il2CppObject* ez = e.zone ? e.zone : (attributeUnassigned ? zone : nullptr);
-            if (ez != zone || hasCounter[e.cat] || (!forLog && !cfg_.cats[e.cat])) continue;
+            if (!SameZone(ez, zone) || hasCounter[e.cat] || (!forLog && !cfg_.cats[e.cat])) continue;
             if (e.queryFailures >= 3) continue;  // broken marker: left out (logged once)
             bool done = false;
             if (!QueryDone(e, gm, done)) {
@@ -1143,7 +1217,7 @@ private:
             }
             for (FogNode& n : fogNodes_) {
                 Il2CppObject* nz = n.zone ? n.zone : (attributeUnassigned ? zone : nullptr);
-                if (nz != zone || n.failures >= 3) continue;
+                if (!SameZone(nz, zone) || n.failures >= 3) continue;
                 Count& k = c[kMapNodes];
                 k.known = false;  // no discovery information: spoiler-free shows "done/?"
                 if (!dir) {       // save data not there yet: totals only in the log, nothing shown
@@ -1164,7 +1238,7 @@ private:
         }
         if (!hasCounter[kDrones] && (forLog || cfg_.cats[kDrones])) {
             for (auto& [id, d] : drones_) {
-                if (d.zone != zone) continue;
+                if (!SameZone(d.zone, zone)) continue;
                 if (!forLog && !d.read && d.ctrl.Alive()) d.read = DroneRead(d.ctrl.get());
                 Count& k = c[kDrones];
                 ++k.total;
@@ -1175,7 +1249,7 @@ private:
         }
         if (!hasCounter[kGhostDrones] && (forLog || cfg_.cats[kGhostDrones])) {
             for (auto& [id, g] : ghosts_) {
-                if (g.zone != zone) continue;
+                if (!SameZone(g.zone, zone)) continue;
                 if (!forLog && !g.done && g.pod.Alive()) {
                     bool done = false;
                     if (PodOpen(g.pod.get(), done)) g.done = done;
@@ -1455,13 +1529,15 @@ private:
 
     // One Resources.FindObjectsOfTypeAll(Sprite) after a page index build while a wanted sprite is
     // still missing, at most 3 per session (only sprites loaded at that moment are found; the
-    // Slimepedia's may come later than the first page).
-    void FindNamedSprites() {
+    // Slimepedia's may come later than the first page). `extra`: a scan outside that budget
+    // (GhostIconTick: after a UI scene preload, and every kGhostRescan ms while the ghost icon is
+    // missing), logged only when it finds something. True when a sprite was found.
+    bool FindNamedSprites(bool extra) {
         bool missing = false;
         for (int c = 0; c < kCatCount; ++c)
             if (!SpriteNames(c).empty() && !namedIcon_[c].Alive()) missing = true;
-        if (!missing || namedScans_ >= 3) return;
-        ++namedScans_;
+        if (!missing || (!extra && namedScans_ >= 3)) return false;
+        if (!extra) ++namedScans_;
         Step("named sprites");
         std::unordered_map<std::string, Il2CppObject*> byName;
         for (int c = 0; c < kCatCount; ++c)
@@ -1484,9 +1560,164 @@ private:
                     break;
                 }
         }
-        SR2_INFO("collectibles: game sprites by name (scan {}, {} sprites, {} ms): {}", namedScans_, seen,
-                 GetTickCount64() - t0, found.empty() ? "none new" : found);
+        if (!extra || !found.empty())
+            SR2_INFO("collectibles: game sprites by name ({}, {} sprites, {} ms): {}",
+                     extra ? std::string("extra scan") : std::format("scan {}", namedScans_), seen,
+                     GetTickCount64() - t0, found.empty() ? "none new" : found);
         if (!found.empty()) shownSig_.clear();
+        return !found.empty();
+    }
+
+    // ------------------------------------------------------ ghost drone icon --
+    // The ghostly drones' icon is the game's iconExplorerDronePedia (user's pick). The sprite is only
+    // in the drone station menu's UI scene, which the game loads when a drone station is opened, so
+    // the page-build scans never saw it (round 15 log: cat_ghostly_drones never found, 3 scans). Like
+    // the sandbox's Fabricator Pinned icon: a UI display named like "drone" (UILayerDefinition entries
+    // in UIDisplayManager._layerSet, "station" first, in turn) is preloaded with the game's own
+    // UIDisplayManager.RequestPreloadDisplay; once its UIDisplaySceneLoadEntry.IsDone, one sprite scan,
+    // then the request is released. If the sprite dies after the release (unloaded with its scene),
+    // the preload is requested again and held. Besides: an extra sprite scan every kGhostRescan ms
+    // while the icon is missing (it also arrives when the player opens a drone station). Only while
+    // the ghost row is on and the user has no "ghost_drone" drawing. Main thread.
+    static constexpr const char* kGhostRequester = "SR2Mods.Collectibles.GhostIcon";
+    static constexpr unsigned long long kGhostRescan = 30000, kGhostRetry = 10000, kGhostWait = 30000;
+
+    bool GhostIconWanted() const {
+        return cfg_.cats[kGhostDrones] && !sr2::ui::mod_icons::Has("ghost_drone");
+    }
+
+    Il2CppObject* Udm() {
+        Il2CppObject* udm = nullptr;
+        if (s_.udmInstance) Managed([&] { udm = ugui::Call<Il2CppObject*>(s_.udmInstance); });
+        return ugui::IsA(udm, s_.udm) ? udm : nullptr;
+    }
+
+    static std::string LowerStr(std::string v) {
+        std::transform(v.begin(), v.end(), v.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        return v;
+    }
+
+    // UILayerDefinition entries whose _name contains "drone" and that have a scene (_sceneAsset).
+    void ReadGhostDisplays(Il2CppObject* udm) {
+        if (!Has(s_.udmLayerSet) || !Has(s_.layerSetList) || !Has(s_.layerDisplays)) return;
+        void* set = F<void*>(udm, s_.udmLayerSet);
+        void* layers = ugui::PlausiblePointer(set) ? F<void*>(set, s_.layerSetList) : nullptr;
+        if (!ugui::PlausiblePointer(layers)) return;
+        std::string all;
+        for (size_t i = 0, n = unity::ArrayLength(layers); i < n; ++i) {
+            auto* layer = static_cast<Il2CppObject*>(unity::ArrayAt(layers, i));
+            void* list = ugui::PlausiblePointer(layer) ? F<void*>(layer, s_.layerDisplays) : nullptr;
+            if (!ugui::PlausiblePointer(list)) continue;
+            for (size_t j = 0, m = unity::ArrayLength(list); j < m; ++j) {
+                auto* e = static_cast<Il2CppObject*>(unity::ArrayAt(list, j));
+                if (!ugui::PlausiblePointer(e)) continue;
+                Il2CppClass* k = unity::ClassOf(e);  // UILayerDefinition.LayerEntry
+                auto oName = Resolver::Get().FieldOffset(k, "_name");
+                auto oScene = Resolver::Get().FieldOffset(k, "_sceneAsset");
+                if (!oName || !oScene) return;
+                const std::string name = unity::ToUtf8(F<Il2CppString*>(e, *oName));
+                if (LowerStr(name).find("drone") == std::string::npos) continue;
+                all += (all.empty() ? "" : ", ") + name;
+                if (F<Il2CppObject*>(e, *oScene)) ghostDisplays_.push_back(name);
+            }
+        }
+        std::stable_sort(ghostDisplays_.begin(), ghostDisplays_.end(), [](const std::string& a, const std::string& b) {
+            return (LowerStr(a).find("station") != std::string::npos) > (LowerStr(b).find("station") != std::string::npos);
+        });
+        SR2_INFO("collectibles: ghost icon: UI displays named like 'drone': {}; {} with a UI scene to preload",
+                 all.empty() ? "none" : all, ghostDisplays_.size());
+    }
+
+    void GhostPreloadRelease(const std::string& name, const char* why) {
+        ghostPreload_.Reset(nullptr);
+        Il2CppObject* udm = Udm();
+        bool ok = false;
+        if (udm && s_.udmRelease && !name.empty())
+            ok = Managed([&] {
+                ugui::Call<void>(s_.udmRelease, udm, unity::NewString(name), unity::NewString(kGhostRequester));
+            });
+        SR2_INFO("collectibles: ghost icon: UI display '{}' preload released ({}){}", name, why,
+                 ok ? "" : " - the release call failed");
+    }
+
+    void GhostIconTick() {
+        if (!GhostIconWanted()) {
+            if (ghostPreload_) GhostPreloadRelease(ghostPreloadName_, "ghost row off");
+            return;
+        }
+        const unsigned long long now = GetTickCount64();
+        if (namedIcon_[kGhostDrones].Alive()) {
+            ghostWasFound_ = true;
+            return;
+        }
+        if (ghostWasFound_ && !ghostHold_) {  // found once, gone since: its scene took it along
+            ghostWasFound_ = false;
+            ghostHold_ = true;
+            ghostGaveUp_ = false;
+            ghostDisplayIdx_ = 0;
+            ghostNextTry_ = 0;
+            SR2_INFO("collectibles: ghost icon: the sprite was unloaded after the preload was released - preloading "
+                     "again and keeping it loaded");
+        }
+        if (ghostPreload_) {  // a preload in flight: wait for its scene, then scan
+            Il2CppObject* e = ghostPreload_.get();
+            bool done = !ugui::IsA(e, s_.sceneEntry);  // another handle type: do not wait for it
+            if (!done && s_.entryIsDone) Managed([&] { done = ugui::Call<bool>(s_.entryIsDone, e); });
+            if (!done && now - ghostPreloadT0_ < kGhostWait) return;
+            const bool found = done && FindNamedSprites(true) && namedIcon_[kGhostDrones].Alive();
+            const std::string name = ghostPreloadName_;
+            SR2_INFO("collectibles: ghost icon: UI display '{}' {} after {:.1f} s - iconExplorerDronePedia {}", name,
+                     done ? "loaded" : "still loading", static_cast<double>(now - ghostPreloadT0_) / 1000.0,
+                     found ? "found" : "not in it");
+            if (found && ghostHold_) {
+                ghostPreload_.Reset(nullptr);  // our requester stays registered: the scene stays loaded
+                ghostHeldDisplay_ = name;
+            } else {
+                GhostPreloadRelease(name, found ? "icon found" : "no icon");
+            }
+            if (!found) ++ghostDisplayIdx_;
+            ghostNextTry_ = now + kGhostRetry;
+            return;
+        }
+        if (!ghostHeldDisplay_.empty()) {  // held, yet the sprite is gone: request the same display again
+            SR2_INFO("collectibles: ghost icon: the sprite is gone although UI display '{}' is held - requesting it again",
+                     ghostHeldDisplay_);
+            ghostHeldDisplay_.clear();  // ghostDisplayIdx_ still points at it
+        }
+        if (now >= ghostNextScan_) {             // cheap: a drone station may have been opened meanwhile
+            ghostNextScan_ = now + kGhostRescan;
+            if (FindNamedSprites(true) && namedIcon_[kGhostDrones].Alive()) return;
+        }
+        if (ghostGaveUp_ || now < ghostNextTry_ || !s_.udmPreload) return;
+        ghostNextTry_ = now + kGhostRetry;
+        Il2CppObject* udm = Udm();
+        if (!udm) return;
+        if (!ghostDisplaysRead_) {
+            ghostDisplaysRead_ = true;
+            ReadGhostDisplays(udm);
+        }
+        if (ghostDisplayIdx_ >= ghostDisplays_.size()) {
+            ghostGaveUp_ = true;
+            SR2_INFO("collectibles: ghost icon: no drone UI display brought iconExplorerDronePedia in ({} tried) - the "
+                     "fallback icon shows until a drone station is opened", ghostDisplays_.size());
+            return;
+        }
+        const std::string name = ghostDisplays_[ghostDisplayIdx_];
+        Il2CppObject* entry = nullptr;
+        Managed([&] {
+            entry = ugui::Call<Il2CppObject*>(s_.udmPreload, udm, unity::NewString(name), unity::NewString(kGhostRequester));
+        });
+        if (!entry) {
+            SR2_INFO("collectibles: ghost icon: UI display '{}' could not be preloaded (no UI scene, or the UI is not "
+                     "set up yet)", name);
+            ++ghostDisplayIdx_;
+            return;
+        }
+        ghostPreload_.Reset(entry);
+        ghostPreloadName_ = name;
+        ghostPreloadT0_ = now;
+        SR2_INFO("collectibles: ghost icon: preloading UI display '{}' for iconExplorerDronePedia ({}{})", name,
+                 unity::ClassName(entry), ghostHold_ ? ", kept loaded" : "");
     }
 
     // The user's drawing, else the game's sprite (gordos: the Slimepedia icon before the page
@@ -1745,6 +1976,11 @@ private:
         TeardownStep("release ghosts", [&] {
             ghosts_.clear();
             ghostIcon_.Reset(nullptr);
+        });
+        TeardownStep("release ghost icon preload", [&] {
+            if (ghostPreload_) GhostPreloadRelease(ghostPreloadName_, "module off");
+            if (!ghostHeldDisplay_.empty()) GhostPreloadRelease(ghostHeldDisplay_, "module off");
+            ghostHeldDisplay_.clear();
         });
         dronesComplete_.clear();
         ghostsComplete_.clear();

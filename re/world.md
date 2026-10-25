@@ -156,7 +156,8 @@ One `ResourceNodeDirector` per area owns many `ResourceNodeSpawner` points; on a
 
 ### ZoneDefinition (MonomiPark.SlimeRancher.World)
 - fields: `_isRanchZone` bool, `_localizedName` (LocalizedString, `GetLocalizedString()`)
-- mod: MT
+- gotchas: the ranch expansions are their own zones (asset names from the minimap's zone log: `Conservatory`, `Conservatory Gully`, `Conservatory Den`, ...; the crate list names them `conservatory_archway`, `conservatory_pools`, `conservatory_den`, `conservatory_gully`, ...), and `Conservatory Sanctuary` is the Sanctuary. The map's counters (`MapDirector._counters`) and markers of the ranch are filed under `Conservatory` only, so per-zone lookups find nothing on an expansion. Whether the expansions set `_isRanchZone` is not verified; the collectibles tracker treats `_isRanchZone` OR a name starting with "Conservatory" (not "Sanctuary") as one ranch zone
+- mod: MT, collectibles (ranch islands)
 
 ### Hazard volumes
 - classes: `KillOnTrigger` (fall-through kill volumes, slime sea), `KillOnTriggerCloudOcean`, `LavaVolume`, `DamagePlayerOnEnterTrigger`
