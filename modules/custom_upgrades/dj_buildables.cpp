@@ -1223,8 +1223,18 @@ void Impl::RegisterLooks() {
     for (int f : {kBooth, kSpeaker, kRadio}) {
         Il2CppObject* icon = fams[f].defs.empty() ? nullptr : MakeIcon(f);
         // Round 12 ("The icons are so low quality on the right pane"): a recoloured 128 px icon stretched
-        // up; the details picture is the base's 512 px full art recoloured the same way instead.
-        const bool drawn = fams[f].iconName && sr2::ui::mod_icons::Has(fams[f].iconName);
+        // up; the details picture is the base's 512 px full art recoloured the same way instead. A user's
+        // drawing shows as drawn: its 512 px copy (<iconName>_large.png) in the details when embedded.
+        const bool drawn = icon && fams[f].iconName && sr2::ui::mod_icons::Has(fams[f].iconName) &&
+                           icon == sr2::ui::mod_icons::Get(fams[f].iconName);  // cached: MakeIcon's sprite
+        Il2CppObject* details = icon;
+        if (drawn) {
+            const std::string large = std::string(fams[f].iconName) + "_large";
+            if (sr2::ui::mod_icons::Has(large))
+                if (Il2CppObject* big = sr2::ui::mod_icons::Get(large, unity::Field<Il2CppObject*>(fams[f].base, offIcon))) details = big;
+            SR2_INFO("[{}] dj buildables: {} details picture = the mod icon '{}'", module, fams[f].label,
+                     details != icon ? large : std::string(fams[f].iconName));
+        }
         for (Il2CppObject* def : fams[f].defs) {
             gadget_look::Look look;
             look.name = Label(def);
@@ -1233,7 +1243,7 @@ void Impl::RegisterLooks() {
             if (f != kRadio) look.dressPreview = [this, def](Il2CppObject* placeholder) { DressPreview(def, placeholder); };
             if (icon) {
                 SetRef(def, offIcon, icon);  // the grid tile (GadgetDefinition.get_Icon)
-                look.icon = icon;            // the details picture (until the full art is recoloured)
+                look.icon = details;         // the details picture (vanilla base: until its full art is recoloured)
                 if (!drawn) {
                     look.artTint = {fams[f].tint.r, fams[f].tint.g, fams[f].tint.b};
                     look.artAmount = kIconTint;

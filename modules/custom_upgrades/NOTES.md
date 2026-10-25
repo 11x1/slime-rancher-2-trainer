@@ -372,6 +372,9 @@ ToggleVariant, stacking), re/audio.md (GadgetMusicPlayer, corral Music Box), re/
   `assets/icons/dj_booth.png` / `dj_speaker.png` / `slime_radio.png` when the user has drawn them, else the
   base's vanilla icon recoloured (booth pink, stack orange, radio cyan; log `<label> card icon = ...`); the
   details picture is the base's full art recoloured the same way once it has loaded (gadget looks `artTint`).
+  A drawing always wins over the recoloured vanilla icon, in the tile and the details; the details use its
+  512 px copy `<iconName>_large.png` when embedded (`pad_icon.py <source> <name>_large 512`; the DJ Speaker
+  Stack has one), else the 256 px icon. Log `<label> details picture = the mod icon '<name>'`.
 - **Dressed at once**: placing (AfterPlace) and the toggle on a placed one (ChangeVariant) build the record
   right away (`DressNow`); the tick keeps it (round 11: "have to wait a second for it to be the correct
   model"). Booth / stack: vanilla decoration +
