@@ -18,6 +18,10 @@
 // cursor row's actions (Songs: SPACE Queue, ENTER Play now; Playlist: DEL Remove, ENTER Play now) and the
 // switches R Radio, F Shuffle, C Clear (moved down from the header). The focused row's name scrolls when it
 // doesn't fit (a RectMask2D clip). "Clear?" disarms on any other input.
+// Round 15: the key bar is two 2 x 2 grids (left: R Radio, F Shuffle / Esc Close; right: SPACE Queue on Songs or
+// Z Remove + SPACE Play now on the Playlist / C Clear), every key the game's own key icon (game_button
+// Spec.control); Space and Enter both queue a song (no Play now from the song list any more); the header is one
+// row (title, corral name, warning pill), the lists right under it and the panel near the top of the screen.
 //
 // Input (polled from the InputSystem devices, nothing hooked; ignored for the first 0.3 s):
 //   Mouse (the main way): hovering a row lights it (the cursor follows the mouse); a click on a song adds
@@ -25,10 +29,10 @@
 //   the wheel scrolls the list under the pointer; a click on the backdrop closes.
 //   Keys: three focus areas - Songs, Playlist, the key bar. Up / Down (W / S, d-pad, left stick) move in a
 //   list (down past the last row: the key bar, up from it: back), Left / Right (A / D) switch list or bar
-//   button, Tab cycles the areas, Page Up / Down (pad LT / RT), Home / End. Songs: Space / pad A queue the
-//   song, Enter / pad X play it now (inserted after the playing entry). Playlist: Space / Enter / pad A play
-//   the entry, Delete / Backspace / pad X remove it, Shift + Up / Down (pad LB / RB) move it. Key bar: Space /
-//   Enter press the button. R / pad Y radio on / off, F shuffle, C clear (twice). Esc / pad B close.
+//   button, Tab cycles the areas, Page Up / Down (pad LT / RT), Home / End. Songs: Space / Enter / pad A queue
+//   the song. Playlist: Space / Enter / pad A play the entry, Z / Delete / Backspace / pad X remove it, Shift +
+//   Up / Down (pad LB / RB) move it. Key grids: arrows move in them (up from the top row: back to the list),
+//   Space / Enter press the button. R / pad Y radio on / off, F shuffle, C clear (twice). Esc / pad B close.
 //   Clicks are polled from UnityEngine.UI.Toggle components (no managed delegates); the cloned game
 //   buttons from their Button (IsPressed last frame, released with the pointer inside).
 //

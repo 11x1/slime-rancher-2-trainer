@@ -222,7 +222,7 @@ that changes channel stops, drops its clip and joins the other channel at its cl
   radio left on in the save starts.
 - Not per radio: `SongPlaying` / `SongName` follow the global song only. Walls dance per channel (round 12).
 
-### Corral Radio menu (rounds 11-13, `radio_menu.cpp`)
+### Corral Radio menu (rounds 11-15, `radio_menu.cpp`)
 
 User: "Add a button in the last empty corner (color it blue; like you did for silo's button) and let the
 button open a menu to build a queue from". custom_upgrades builds the button (a second `SiloButtons` with
@@ -302,6 +302,27 @@ radio channel exists), then opens the menu.
     state right after the toggle, before the next box scan handed out the slot. Now `HandleRadio` ends with
     `AllocateSlots()` (slot freed / taken at once), and the warning (menu and tab) shows only when four
     other radios really hold the slots (`SlotsFull`).
+- *Round 15* (layout):
+  - Header (user: "we have a lot of free space at the top so we can move the columns up by like 120px, when no
+    radio, move it down like 20px or so that the warning pill fits"): title, corral name and warning pill share
+    one row (`LayoutHeader`: estimated widths at build, `TMP_Text.get_preferredWidth` on the first shown frame);
+    the list heads sit right under it (`kBodyY` 86 instead of 128). Everything from the heads down is a "Body"
+    child that `ApplyShift` moves 20 px lower while the warning shows (the panel grows downwards with it). The
+    panel is anchored to the top of the canvas, `kPanelTop` 44 px down (centred only when that is higher, small
+    screens), so at 1080 with 11 rows the list heads are ~117 px higher on screen than in round 14.
+  - Key area as two 2 x 2 grids (user: "from left->right top->bottom: [radio, shuffle, close, <empty>] on bottom
+    left / on the right we have (same logic) [remove/queue, play now, <empty>, clear]"): `kBarCol` / `kBarRow`
+    per button; each grid column as wide as its widest button (a hidden button keeps its last width, so nothing
+    jumps when the list changes); left grid from the left padding, right grid ending at the right padding.
+    Queue (Songs) and Remove (Playlist) are two buttons in one cell, the hidden one inactive; Play now only for
+    the playlist. Keys move through the grids as one 4 x 2 grid (empty cells skipped, `BarMove`).
+  - Keys (user: "use [Z] to remove songs, [SPACE] to play now"; "space and enter do the same thing on left
+    column so those can be merged"): Songs Space / Enter / pad A queue (Play now from the song list and its
+    Enter / pad X are gone); Playlist Space / Enter / pad A play, Z / Delete / Backspace / pad X remove.
+  - Key icons (user: "esc keytip makes the text overflow the key"; shared rule: the game's own icon for SPACE):
+    every grid button has `Spec.control` (`<Keyboard>/r`, `/f`, `/escape`, `/space`, `/z`, `/c`), so the game's
+    KeyboardMouseIcon entry draws the key (localized name, widened icon); the cap text ("Esc", not "ESC") is only
+    the fallback when the game has no entry.
 - *Input*: polled (InputSystem devices, Toggle clicks, the clones' `Selectable.IsPressed` + pointer inside),
   0.3 s grace; hover from `Selectable.get_isPointerInside` (the list box, then its rows, then the hovered
   entry's small buttons: about 16 calls per frame). The keys of round 11 still work, unprinted (see the
