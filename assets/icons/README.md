@@ -11,7 +11,7 @@ game's own (vanilla) icon. 256 x 256 RGBA PNGs, straight alpha. They are embedde
 | `hen_collector_source.png` | Hen Collector: the coop upgrade card and the drone program source (user's drawing, `source/roostercollector_custom.png`) |
 | `elder_collector_source.png` | Elder Collector drone source (user's drawing, `source/eldercollector_custom.png`); without it the source shows the elder hen |
 | `mods_tab.png` | the "Mods" tab of the in-game Options menu (user's drawing, `source/modstabicon_custom.png`, kept at its 128 x 128: the tab scales it to the stock category icon, which is 128 x 128 too) |
-| `map_node_placeholder.png`, `research_drone_placeholder.png`, `ghost_drone_placeholder.png` | collectible tracker, script-drawn (`src/make_icons.py`): shown only when neither a user drawing (`map_node.png` / `research_drone.png` / `ghost_drone.png`) nor the game sprite found by name (`iconPediaHomeWorld`, `iconPediaDrone(_small)`, `iconExplorerDronePedia`) is there |
+| `map_node_placeholder.png`, `research_drone_placeholder.png`, `ghost_drone_placeholder.png` | collectible tracker, script-drawn (`src/make_icons.py`): shown only when neither a user drawing (`map_node.png` / `research_drone.png` / `ghost_drone.png`) nor the game sprite found by name (`pediaHomeWorld`, `iconPediaDrone(_small)`, `iconExplorerDronePedia`) is there |
 
 Names a drawing can take over (nothing embedded under them now, the vanilla icon shows):
 `sell_all`, `music_2`, `corral_radio`, `hens_1`, `hens_2`, `growth_1`, `growth_2`, `ash_boost`,
