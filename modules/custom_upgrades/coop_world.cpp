@@ -410,8 +410,20 @@ struct CoopWorld::Impl {
     // Air net
     Il2CppObject* AirNetSource(Il2CppObject* lookup);
     void CreateAirNet(Il2CppObject* plot, const CoopInfo& c, Il2CppObject* lookup, unsigned generation);
+    void MeasureNet(Il2CppObject* clone);
     void FitAirNet(Il2CppObject* clone, const CoopInfo& c, bool log);
     bool loggedNoSource = false;
+    // The net's collider relative to the clone root, per unit X/Z scale, read once from a fresh clone
+    // (CreateAirNet). FitAirNet works from these and the root transform, not from the collider's live
+    // bounds: those went stale for many ticks (round 15 log: the same move every tick, the net drifted
+    // 190 m up until the bounds caught up).
+    struct NetGeom {
+        bool ok = false;
+        float offX = 0, offZ = 0;  // net centre - root (per unit scale)
+        float offY = 0;            // net bottom - root y (Y is never scaled)
+        float extX = 0, extZ = 0;  // half size (per unit scale)
+    } netGeom;
+    std::set<Il2CppObject*> warnedFit;  // plots whose too-large fit offset was logged
 
     // Hen collector
     Il2CppObject* DeluxeSource(Il2CppObject* lookup);
@@ -712,43 +724,61 @@ Il2CppObject* CoopWorld::Impl::AirNetSource(Il2CppObject* lookup) {
     return pick;
 }
 
-void CoopWorld::Impl::FitAirNet(Il2CppObject* clone, const CoopInfo& c, bool log) {
-    if (!c.hasRegion) return;
+// The net's offsets from the clone root (NetGeom), from the collider of a clone not moved yet: right
+// after CreateAirNet, or (when it was not readable then, e.g. built while the plot was inactive) at the
+// first fit, which never moves a clone before the offsets are known.
+void CoopWorld::Impl::MeasureNet(Il2CppObject* clone) {
     Il2CppObject* tr = unity::TransformOf(clone);
     Il2CppObject* col = unity::IsAlive(tr) ? InChildren(tr, colliderClass, false) : nullptr;
     Bounds net{};
-    if (!col || !ColliderBounds(col, net)) return;  // broken net (collider off) -> refit later
+    if (!col || !ColliderBounds(col, net)) return;  // broken net (collider off) -> later
+    const Vec3 pos = GetVec(trGetPosition, tr, "Transform.get_position");
+    const Vec3 ls = GetVec(trGetLocalScale, tr, "Transform.get_localScale");
+    if (ls.x <= 0.01f || ls.z <= 0.01f) return;
+    netGeom = {true,
+               (net.center.x - pos.x) / ls.x,
+               (net.center.z - pos.z) / ls.z,
+               (net.center.y - net.extents.y) - pos.y,
+               net.extents.x / ls.x,
+               net.extents.z / ls.z};
+    SR2_INFO("[{}] coop air net: net bottom {:.2f} above the plot root, {:.2f} x {:.2f} at scale 1", module, netGeom.offY,
+             2 * netGeom.extX, 2 * netGeom.extZ);
+}
+
+void CoopWorld::Impl::FitAirNet(Il2CppObject* clone, const CoopInfo& c, bool log) {
+    if (!c.hasRegion) return;
+    if (!netGeom.ok) MeasureNet(clone);
+    if (!netGeom.ok) return;
+    Il2CppObject* tr = unity::TransformOf(clone);
+    if (!unity::IsAlive(tr)) return;
     const Bounds& r = c.region;
+    const NetGeom& g = netGeom;
     bool moved = false;
     // Footprint: uniform X/Z scale around the clone root (the plot centre).
-    const float sx = r.extents.x / net.extents.x, sz = r.extents.z / net.extents.z;
-    const float s = 0.5f * (sx + sz);
-    if (std::isfinite(s) && std::fabs(s - 1.0f) > kFitTolerance && s > 0.5f && s < 2.0f) {
-        Vec3 ls = GetVec(trGetLocalScale, tr, "Transform.get_localScale");
-        ls.x *= s;
-        ls.z *= s;
+    Vec3 ls = GetVec(trGetLocalScale, tr, "Transform.get_localScale");
+    float s = 0.5f * (r.extents.x / g.extX + r.extents.z / g.extZ);
+    if (!std::isfinite(s) || s <= 0.5f || s >= 2.0f) s = ls.x;  // odd region: keep the scale
+    if (std::fabs(s - ls.x) > kFitTolerance * ls.x || std::fabs(s - ls.z) > kFitTolerance * ls.z) {
+        ls.x = ls.z = s;
         SetVec(trSetLocalScale, tr, ls, "Transform.set_localScale");
-        Sync();
-        if (!ColliderBounds(col, net)) return;
         moved = true;
     }
-    // Height: net bottom on the coop region's top; centre on the region's centre.
-    const float dx = r.center.x - net.center.x;
-    const float dy = (r.center.y + r.extents.y) - (net.center.y - net.extents.y);
-    const float dz = r.center.z - net.center.z;
+    // Height: net bottom on the coop region's top; centre on the region's centre. From the root
+    // transform (never stale) and the net's offsets measured at creation.
+    const Vec3 pos = GetVec(trGetPosition, tr, "Transform.get_position");
+    const Vec3 want{r.center.x - g.offX * s, (r.center.y + r.extents.y) - g.offY, r.center.z - g.offZ * s};
+    const float dx = want.x - pos.x, dy = want.y - pos.y, dz = want.z - pos.z;
     if (std::fabs(dx) > kFitTolerance || std::fabs(dy) > kFitTolerance || std::fabs(dz) > kFitTolerance) {
         if (std::fabs(dx) > 3.0f || std::fabs(dz) > 3.0f || std::fabs(dy) > 6.0f) {
-            SR2_WARN("[{}] coop air net: fit offset ({:.2f}, {:.2f}, {:.2f}) too large - left unfitted", module, dx, dy, dz);
+            if (warnedFit.insert(c.plot).second)
+                SR2_WARN("[{}] coop air net: fit offset ({:.2f}, {:.2f}, {:.2f}) too large - left unfitted (logged once "
+                         "per coop)", module, dx, dy, dz);
             return;
         }
-        Vec3 pos = GetVec(trGetPosition, tr, "Transform.get_position");
-        pos.x += dx;
-        pos.y += dy;
-        pos.z += dz;
-        SetVec(trSetPosition, tr, pos, "Transform.set_position");
-        Sync();
+        SetVec(trSetPosition, tr, want, "Transform.set_position");
         moved = true;
     }
+    if (moved) Sync();
     if (moved || log)
         SR2_INFO("[{}] coop air net fitted: region top {:.2f}, footprint {:.2f} x {:.2f} (net scale x{:.3f}, moved "
                  "{:.2f}, {:.2f}, {:.2f})",
@@ -771,6 +801,7 @@ void CoopWorld::Impl::CreateAirNet(Il2CppObject* plot, const CoopInfo& c, Il2Cpp
     unity::SetActive(clone, true);  // AirNet.Awake: collider, material, TimeDirector
     Sync();
     SR2_INFO("[{}] coop air net created from corral '{}'", module, unity::GetName(src));
+    MeasureNet(clone);
     FitAirNet(clone, c, true);
 }
 
