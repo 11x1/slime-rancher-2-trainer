@@ -417,6 +417,22 @@ Now, before the original SetItem of a card whose art is pending, the image gets 
 `UIImageDynamicLoader._iconSource` is cleared (SetFullArtSource skips an unchanged source with a valid
 handle, re/fabricator.md), and `ArtFrame` never accepts a sprite of ours (`IsOurs`: made here, registered,
 or named `sr2mods_icon_*`).
+**Round 15, the real cause** ("both look blurry still", "blurry and pixelated", "quantum link shows refinery
+default one"): the details image draws `Image.overrideSprite`. The loader's `_onSetSprite` event is wired to
+`Image.set_overrideSprite` (scene data) and sets it on every SetItem to the item's small icon (`GadgetDefinition.icon`:
+the 256 px DJ tile drawings, the 128 px tinted Refinery Link icon), to the loaded full art when done, and again on
+OnEnable / OnDisable (re/fabricator.md). Rounds 12-14 set and read `Image.sprite`, hidden under that override:
+the mip bias and the Lanczos copies never reached the screen, the logs named a sprite that was not drawn,
+`ArtFrame` never saw the Refinery Link's full art arrive (the 10 s timeout, then the 128 px icon), and the
+vanilla probe logged our own leftover sprite. Now `ShowPicture` sets both `sprite` and `overrideSprite` and
+detaches the loader (`ReleaseCurrentHandle`, `_iconSource` = null: OnEnable sets nothing, OnDisable clears the
+override so `sprite`, also ours, shows; the next SetItem sets the source again). `ArtFrame` and the vanilla probe
+read `get_overrideSprite` (= what is drawn). `DropArt` no longer falls back to the 128 px icon: a timeout waits
+again the next time the card is shown, a failed recolour leaves the base's own full art to the game's loader
+for the session (`plainArt`). The picture log adds the display mode (`display WxH @ Hz, borderless fullscreen`).
+Display check (registry and `slimerancher.cfg`, round 14 setup): borderless fullscreen 1920 x 1080 on monitor 0
+(the 1920 x 1080 primary, native 1920 x 1080 @ 144), no render scale or upscaler setting, SMAA; the card canvas
+is Screen Space Overlay (drawn at backbuffer size after post-processing), so the display path does not blur it.
 
 ## Slime DJ buildables
 
