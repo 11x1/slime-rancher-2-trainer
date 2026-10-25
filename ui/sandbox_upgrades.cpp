@@ -199,10 +199,17 @@ void MenuTitle(const std::string& name, const std::string& tier) {
     ImGui::Separator();
 }
 
+// The right-click menus' rows are one text line high, shorter than the Sandbox item menu's icon rows (22 px plus
+// 4 px spacing) that share the 8 px row rounding, so they looked pill-shaped (round 16: "too rounded"). Their
+// rounding is scaled by row height to look like the item menu's.
 template <class F>
 void Popup(const Helpers& h, const char* id, F&& body) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(10), U(8)));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(8), U(5)));
+    const float rowH = ImGui::GetTextLineHeight() + U(5);
+    const float rounding = std::floor(ImGui::GetStyle().SelectableRounding * rowH / U(22 + 4));
+    ImGui::PushStyleVar(ImGuiStyleVar_SelectableRounding, rounding);  // KeyMenuItem rows
+    ImGui::PushStyleVar(ImGuiStyleVar_MenuItemRounding, rounding);    // MenuItem rows
     h.pushFloating();
     if (ImGui::BeginPopup(id)) {
         h.surface(true);
@@ -211,7 +218,7 @@ void Popup(const Helpers& h, const char* id, F&& body) {
         ImGui::EndPopup();
     }
     h.popFloating();
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleVar(4);
 }
 
 // ------------------------------------------------------------- upgrades ----
