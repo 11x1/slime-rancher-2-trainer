@@ -307,14 +307,36 @@ GadgetItem, Fabricator categories), re/save.md (GetPersistenceId, `_reverseIndex
   place: id listed, kit used (`Quantum Storage Link placed`); no kit -> plain (logged). Pick-up gives the
   kit back and holds the variant; removed otherwise, the tick gives it back. Toggle on a placed one flips
   quantum <-> plain in place.
-- **Look** (tick): materials instanced, colours 60 % purple, emission cyan, tagged ` [sr2q]` (originals
-  back when plain). Holder `sr2qlink#<gen>`: a teleporter `_activeFX` clone (0.22 size, 1 m up; its child
-  particle systems in Local scaling mode get the factor on their own transforms, `ScaleParticles`) that
-  jitters in place and size every 3.5-8 s for ~0.5 s and never switches off (`QuantumLink::Frame`; round 11:
-  the old drop-out restarted the particles, "disappears in like 6-7s intervals"); the cloud-withdraw FX pulses
-  every ~7 s and at every take. Icon: a purple copy of the Refinery Link sprite (`TintedSprite`) in `icon`;
-  `quantum::SourceIcon()` = the same on a square canvas (round 11: the drone source icon "is wider than
-  normally").
+- **Look** (tick): materials instanced, colours 30 % purple (round 14, was 60 %: "the purple is too strong";
+  the placement preview too), emission cyan, tagged ` [sr2q]` (originals back when plain). Holder
+  `sr2qlink#<gen>`: a teleporter `_activeFX` clone (0.22 size, 1 m up; its child particle systems in Local scaling
+  mode get the factor on their own transforms, `ScaleParticles`) that never switches off (round 11: the old
+  drop-out restarted the particles, "disappears in like 6-7s intervals"). Icon: a purple copy of the Refinery Link
+  sprite (`TintedSprite`) in `icon`; `quantum::SourceIcon()` = the same on a square canvas (round 11: the drone
+  source icon "is wider than normally").
+  Round 14 (re/drones.md "Drone phase-through pass", re/fabricator.md "Refinery Link prefab"):
+  - **Quantum moments** every 14-32 s (`Glitch`, `QuantumLink::Frame`; was every 3.5-8 s, "too quick for my
+    liking"): the glow jitters ~0.5 s and the **phase ghost** shows 0.9-1.6 s ("the drone has a cool effect when
+    passing through it, can we make the quantum link have the same effect in random intervals"). The ghost
+    (`sr2qghost`, `BuildGhost`) = a copy of `model_refineryLink` under the holder, renderers only (colliders,
+    scripts, particles gone), 0.97 of its size so it sits just inside the link, its renderers' `renderingLayerMask`
+    | `1 << 16`: the ranch drones' `DronePhaseThroughCustomPass` draws it like a drone inside the link (scanlines,
+    cyan edge where the ghost crosses the surface); nudged a few cm at every flip. The pass volume is active only
+    while the scene group has a drone station: `PhaseOn` switches it on when off and `PhaseOff` back
+    (`DroneCustomPassController._phaseThroughCustomPassVolume`, looked up with FindObjectsOfTypeAll at most every
+    30 s while missing). Logs `phase ghost = a copy of ...`, `drone phase-through pass volume '...' (on|off now ...)`.
+    Not seen in game: how strong the overlay looks on a ghost fully inside its occluder.
+  - **No idle ping**: the cloud-withdraw FX no longer pulses every ~7 s, only at a take (1.5 s cooldown).
+  - **No suction**: the Refinery Link's vac particles at the port (`model_refineryLink/Dust ` with `Rings`) are
+    switched off ("has a suction effect on the output").
+  - **Outward arrows**: the port's `techDepositorPort01_input` mesh is replaced by `techDepositorPort01_output`,
+    taken from the Drone Station prefab's chute ("shows like items can go in the link which they cant"; also on the
+    placement preview). The link's own mesh is kept and put back when plain.
+  - **Label**: the placed-label provider (`gadget_look::AddPlacedLabel`) existed since round 9, yet the user saw
+    "Refinery Link" in round 14; it now logs `gadget-mode label of a placed link (actor N) = Quantum Storage Link`
+    once, so the next log tells whether it runs. GadgetLabelDisplay shows the HELD gadget's name while the
+    placement footprint is visible (`GadgetItem.UpdateFootprint` -> `SetTargetGadget(..., preferPlaceholder)`,
+    `_isTargetingPlaceholder`), so aiming near a link while holding a plain Refinery Link reads "Refinery Link".
 - **Use** (the link's `ScienceUIDisplayActivator`, a UIDisplayInteractable): opens the game's Quantum Cloud
   menu, the drone station menu without a station (`OpenCloudMenu` / `CloudFrame`, RE: re/drones.md "Drone
   station menu"): view only (no withdraw / send: those need a station), programming tab removed by the game,
