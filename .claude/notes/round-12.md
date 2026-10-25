@@ -2,6 +2,9 @@
 
 Build tested: b39d2e5 (develop). Results are in the round 11 checklist https://claude.ai/artifact/12HrkuKyWbJs1PtsufwVvE (user's work account; collection `results`, ids `r11*`; free text in `misc/notes`). User quotes are verbatim.
 
+## Status (2026-10-25)
+All tasks A-H are merged and deployed (78aeb0d; one build for the round, plus the user's DJ Booth and Speaker Stack drawings). Extra items from the user while running: Tarrs as booth DJs (in B), Electric Pillar Lamps pulse to the music (H). Checklist: round 12 is published to the same work-account artifact https://claude.ai/artifact/12HrkuKyWbJs1PtsufwVvE (41 new cases in `.claude/checklist/r12-cases.json`, 33 carried over). Follow-up for round 13: the corral radio menu still has its own copy of the game-button code; switch it to `modules/common/game_button`.
+
 ## How to run this round (for the session that picks it up)
 The user's working rules are in the auto-memory (orchestrator mode, Opus subagents at medium effort, git workflow, no session link, plain commands, checklist conventions, read logs yourself). In short:
 1. Back up the saves first. `deploy.ps1` does it on every deploy; for a manual backup, copy `%USERPROFILE%\AppData\LocalLow\MonomiPark\SlimeRancher2\Steam\` to `save-backups\<timestamp>`.

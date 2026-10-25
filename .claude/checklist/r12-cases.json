@@ -1,0 +1,425 @@
+[
+[
+"Menu only (Sandbox on, save loaded)",
+"r12ml1",
+"Grid tooltips don't flicker",
+[
+"Sandbox > Spawn & Craft: point at a spawner tile: tooltip appears.",
+"Move slowly across a row and down a column through the gaps: the tooltip moves tile to tile, never vanishes.",
+"Same in the Crafter grid, Vacpack slot row and picker, Upgrades blueprint tabs.",
+"Tile size and spacing look as before; section headings in place."
+]
+],
+[
+"Menu only (Sandbox on, save loaded)",
+"r12ml2",
+"Upgrades entries hover",
+[
+"Sandbox > Upgrades > Upgrades: move across the gap between two entries: the highlight never drops out.",
+"- / + still work.",
+"Right-click an entry: its menu opens."
+]
+],
+[
+"Menu only (Sandbox on, save loaded)",
+"r12ml3",
+"Keyboard still works on grids",
+[
+"Tab into a grid, arrows: focus moves tile by tile, ring around the tile (not the bigger cell).",
+"Tab again: focus leaves the grid.",
+"Menu key / Shift+F10 on a tile: context menu opens.",
+"Same on the vacpack slot row."
+]
+],
+[
+"Menu only",
+"r12ml4",
+"Ranch > Upgrades layout",
+[
+"Open Ranch: tabs read \"Upgrades\" and \"Slime DJ\".",
+"Upgrades: one Custom Upgrades card on the left with sections Plot upgrades (Tier effects), Sell upgrades (Sell back for half price), Refinery upgrades (note, Extra Tank III / IV keys, Drone station price limit).",
+"Toggle each switch: each works and dims while off.",
+"Misc > General: no Drone Price Limit card any more."
+]
+],
+[
+"Main menu (no save loaded)",
+"r12ml5",
+"Master switch off",
+[
+"Turn Custom Upgrades off: title dims; Tier effects and slot keys grey out.",
+"Sell back for half price and Drone station price limit still toggle.",
+"Load a save that uses custom upgrades: the header switch is locked on; hover says why."
+]
+],
+[
+"Menu only",
+"r12ml6",
+"Search finds the sections",
+[
+"Ctrl+Space, type \"sell upgrades\": path reads Ranch > Upgrades > Custom Upgrades > Sell upgrades.",
+"Enter: the page opens and the row pulses.",
+"Same with \"drone price\"."
+]
+],
+[
+"Ranch: open ground",
+"r12dj1",
+"Booth silent while off",
+[
+"Fabricate and place a DJ Booth (starts off): no sound at all.",
+"Leave the zone and come back, or reload: still silent.",
+"E to switch it on with no slime and no song: the music box tune plays.",
+"E to switch it off: silent."
+]
+],
+[
+"Ranch: open ground",
+"r12dj2",
+"Every booth speaker plays, louder",
+[
+"Queue a song in the Slime DJ tab.",
+"Put a slime on the pillow behind the booth, switch it on.",
+"Walk from the left floor speaker past the desk to the right one: music from both floor speakers and the desk speakers; louder than one corral music box."
+]
+],
+[
+"Ranch: open ground",
+"r12dj3",
+"A Tarr as the DJ",
+[
+"Throw or carry a Tarr onto the pillow behind a switched-on booth: it sits.",
+"Queue a song: the booth plays the Slime DJ song."
+]
+],
+[
+"Ranch: corral with a Music Box",
+"r12dj4",
+"No crackle with Amplify",
+[
+"Amplify on, Slime DJ volume 100 %, game music volume max.",
+"Place 4-5 DJ Speaker Stacks and a booth near the corral, all on.",
+"Play a loud hardstyle / hardtekk song among the speakers: clean, no crackle; still surround."
+]
+],
+[
+"Ranch: open ground",
+"r12dj5",
+"Switched-off booth doesn't play or boost",
+[
+"Amplify on, a song playing from a nearby music box or stacks; place a booth and leave it off.",
+"Walk up to the booth: no music from it; other speakers sound the same as before.",
+"Switch it on with a slime seated: it joins in sync within a moment."
+]
+],
+[
+"Ranch: corral with Corral Radio and Music Box",
+"r12dj6",
+"Walls follow the corral's radio",
+[
+"Walls dance on; put songs in the radio playlist, radio on, stop the global queue.",
+"Stand next to the corral: walls ripple and glow to the radio's song.",
+"Play a different global song with a second corral nearby (no radio): each corral follows its own song."
+]
+],
+[
+"Ranch: corral with a Music Box",
+"r12dj7",
+"Speakers inside boost the walls",
+[
+"Walls dance on, a song playing: watch the walls.",
+"Place two DJ Speaker Stacks or Slime Radios inside the corral, stacks on: walls move noticeably harder.",
+"Switch the stacks off: back to normal."
+]
+],
+[
+"Ranch: drone station",
+"r12pg1",
+"Old save without the upgrade",
+[
+"Load a save where a station already had 2+ programs: it runs program 1 only.",
+"Open its menu, Programming page: no [P] Programs pill; P does nothing.",
+"Wait a few minutes: the drone never switches programs."
+]
+],
+[
+"Ranch: Fabricator",
+"r12pg2",
+"Drone Program Scheduler card",
+[
+"Custom upgrades on, Drone Station blueprint owned: Fabricator > Upgrades shows \"Drone Program Scheduler\" with the Drone Station icon, 20,000 Newbucks plus refinery items.",
+"(New save without the Drone Station blueprint: the card isn't shown.)"
+]
+],
+[
+"Ranch: Fabricator",
+"r12pg3",
+"Buy it, programs come back",
+[
+"Buy Drone Program Scheduler: the card shows fully upgraded.",
+"Open a drone station: the [P] Programs pill is there.",
+"P > Add program works; the station from the old save shows its old programs again and they take turns."
+]
+],
+[
+"Main menu -> load a save",
+"r12pg4",
+"Per save",
+[
+"Load a save that doesn't own the upgrade: no [P] pill on any station.",
+"Load the save that owns it: the pill is back."
+]
+],
+[
+"Ranch: drone station (Sandbox on)",
+"r12pg5",
+"Sandbox raise / lower",
+[
+"Sandbox > Upgrades & Blueprints: raise Drone Program Scheduler: the [P] pill appears.",
+"Lower it while a station is on program 2: back to program 1, pill gone (an open Programs dialog closes).",
+"Raise it again: the other programs are still there."
+]
+],
+[
+"Ranch: anywhere",
+"r12bd1",
+"Entity hitboxes show",
+[
+"Overlay > Misc > General > Developer tools: turn on \"Show entity hitboxes\", close the overlay: green / yellow / blue wireframes around nearby slimes, toys and gadgets.",
+"Walk up to a Slime Radio: a wireframe sphere plus a flat box at its bottom."
+]
+],
+[
+"Ranch: silo",
+"r12bd2",
+"Sell-All Button icon",
+[
+"Open a silo's plot upgrade menu.",
+"The Sell-All Button card shows the Market Link icon, not Silo Capacity's."
+]
+],
+[
+"Ranch: Fabricator",
+"r12bd3",
+"Sharp card pictures",
+[
+"Decorations > DJ Booth: the details picture is the big Scientist Desk art tinted pink, sharp (may show the small icon for a moment the very first time).",
+"Slime Radio: sharp cyan Boombox art.",
+"DJ Speaker Stack: your stacked-radio drawing, sharp in the details and the tile.",
+"Select another card and come back to DJ Booth: the sharp picture shows at once.",
+"Warp Tech > Quantum Storage Link: sharp purple Refinery Link art."
+]
+],
+[
+"Ranch: open ground with Slime Radios",
+"r12bd4",
+"Bigger radio that rolls and rights itself",
+[
+"Fabricate a Slime Radio: about twice as big as before, upright on its base.",
+"Push or shoot it from the side: it rolls or tips, then rocks back upright; no long slide.",
+"Vac it, hold 3 s, shoot it out: stays in the nozzle while held, lands and rights itself.",
+"Drop it on a slope: may roll a little, then settles."
+]
+],
+[
+"Ranch: placed Quantum Storage Link",
+"r12bd5",
+"No stray [SPACE] hint",
+[
+"E on the link: the Quantum Cloud menu opens with no \"[SPACE] + magnifying glass\" row (a back / close hint may stay).",
+"Close it, open a real Drone Station's Quantum Cloud tab: withdraw / send hints and keys still work."
+]
+],
+[
+"Ranch: corral",
+"r12cr1",
+"Button in the opposite corner, game notifications",
+[
+"Buy the Music Box and the Corral Radio: the blue button stands at the corner below the Music Box speaker, diagonally opposite the auto-feeder corner.",
+"Switch Slime DJ off, press the button: a game notification \"Corral Radio: Slime DJ is off ...\"; no floating text.",
+"On a coop with the Hen Collector, press its button: result as a game notification."
+]
+],
+[
+"Ranch: corral",
+"r12cr2",
+"Music Box buy / sell with the radio",
+[
+"Corral with Music Box and Corral Radio, no Music Box II: the Music Box card shows Purchase (Music Box II) and an active \"Sell +N\".",
+"Purchase: Music Box II is bought.",
+"Sell Music Box II: the card shows Purchase plus \"Sell +N\" again.",
+"Change zone or teleport, come back, open the menu: Sell is still there.",
+"Sell the Music Box with the radio owned: it sells; the Corral Radio card stays listed and sellable.",
+"Buy the Music Box back: the radio plays its playlist again."
+]
+],
+[
+"Ranch: corral",
+"r12cr3",
+"Game-styled radio menu",
+[
+"Press the blue button: Radio / Shuffle / Clear top right as game-style buttons; no key hints, no Done / Play / Up / Down / Remove row.",
+"Hover song rows: the row lights up and shows \"+ Add\"; click adds it (green note).",
+"Click a playlist entry: it plays (pink, \">\").",
+"Entry's up / down / remove buttons work; up greyed on the first row, down on the last.",
+"Radio, Shuffle, Clear twice: labels change, second Clear empties the list.",
+"Esc closes; reopen and click the dark backdrop: closes, game unpauses.",
+"Keyboard only (arrows, Tab, Enter, Del, Shift+Up/Down, R, F) still works."
+]
+],
+[
+"Ranch: anywhere (Sandbox on)",
+"r12sb1",
+"Spawn a radiant slime",
+[
+"Sandbox > Spawn & Craft: right-click Pink Slime: a \"Spawn: Radiant Pink Slime\" entry.",
+"Click it: a glowing radiant Pink Slime appears in front of you.",
+"Vac it and shoot it out: still radiant.",
+"Save, quit to title, load: a radiant slime left on the ground is still radiant."
+]
+],
+[
+"Ranch: anywhere (Sandbox on)",
+"r12sb2",
+"Radiant largos",
+[
+"Spawner > Largos: right-click a largo (e.g. Pink Tabby): up to two entries \"(radiant Pink)\" / \"(radiant Tabby)\".",
+"Click one: a radiant largo with that base's look spawns."
+]
+],
+[
+"Ranch: anywhere (Sandbox on)",
+"r12sb3",
+"No radiant form / picker",
+[
+"Right-click a slime that may have no radiant form (Gold, Lucky, a Tarr): the entry is greyed with \"The game has no radiant form of this slime.\" (or available if it has one).",
+"Vacpack page: right-click a slime in the picker: \"Spawn: Radiant <slime>\" is listed too."
+]
+],
+[
+"Ranch: anywhere (Sandbox on)",
+"r12nc1",
+"Noclip",
+[
+"Sandbox > General: a Noclip card under Newbucks (switch, key N, Fly up Space, Fly down Ctrl, speed 15 m/s, Shift 3x).",
+"Close the overlay, press N: \"Noclip on\", no falling.",
+"Look up, hold W: you fly where you look, through walls and ground.",
+"Hold Space, then Ctrl: straight up, then down.",
+"Shift + W: about 3x faster.",
+"Press N above ground: \"Noclip off\", you fall and land with collision."
+]
+],
+[
+"Ranch: anywhere (Sandbox on)",
+"r12nc2",
+"Noclip with HL2 movement",
+[
+"HL2 movement on: noclip, fly 150 m+ straight down, wait, noclip off: you're not teleported back up.",
+"Bunny-hop afterwards: HL2 movement as usual."
+]
+],
+[
+"Ranch: anywhere (Sandbox on)",
+"r12nc3",
+"Noclip restores",
+[
+"Noclip on, fly up, open the overlay and turn Sandbox off: you fall, collision works.",
+"Sandbox on, noclip on, open the map and press N or Space: nothing toggles or moves.",
+"Noclip on, pause (Esc): no movement while paused.",
+"Noclip on, take a teleporter to another zone: noclip ends, collision and gravity back.",
+"Rebind the noclip key: the new key toggles, N no longer does; speed 50 is noticeably faster."
+]
+],
+[
+"Ranch: silo",
+"r12gb1",
+"Receipt buttons react like the game's",
+[
+"Empty the silo, press Sell-All: Sell is grey (no hover); Cancel turns blue and bounces on hover and shows C.",
+"Put plorts in, press Sell-All: Sell is pink, turns blue and bounces on hover, shows the confirm key.",
+"Click Sell: plorts sold, receipt closes.",
+"Open again, press C: closes without selling. Open again, press Enter: sells."
+]
+],
+[
+"Ranch: drone station",
+"r12gb2",
+"Station pills as game buttons",
+[
+"(Drone Program Scheduler owned) Programming page: [P] Programs is a pink pill with a P key cap right of the target's Change; blue + bounce on hover.",
+"Destination Plort Market: [C] Limit appears in the same style.",
+"Click [C] Limit: the two \"Limit by\" buttons and Close are pink game buttons, selected mode teal, Close shows C.",
+"Click the other mode: it turns teal, the first pink. Close closes."
+]
+],
+[
+"Ranch: drone station",
+"r12gb3",
+"Programs dialog buttons",
+[
+"Press P: Edit / Running, Remove, Add program, mode buttons, Close [P] are pink game buttons; Running and the chosen mode teal; all react to hover.",
+"Arrow keys: the teal focus frame fits each button.",
+"Enter on Add program: program added, pill reads \"Program 2/2\".",
+"Edit on program 1: the page shows program 1. \"After each delivery\" turns teal. Remove: one row fewer.",
+"P or Esc: the dialog closes without closing the station menu."
+]
+],
+[
+"Ranch: Fabricator",
+"r12ic2",
+"Your DJ Booth drawing",
+[
+"Fabricator > Decorations > DJ Booth: the tile shows your booth drawing.",
+"The details picture shows it sharp (512 px copy)."
+]
+],
+[
+"Ranch: corral with a Music Box",
+"r12lp1",
+"Electric Pillar Lamp pulses",
+[
+"Place an Electric Pillar Lamp ~5 m from a corral with a Music Box.",
+"Ranch > Slime DJ: \"Lamps pulse to the music\" on; play a song with a strong beat: within ~4 s the lamp's glow and lightning flash on beats and shift colour.",
+"Quiet part: the lamp is nearly its normal look.",
+"Pause: back to exactly its normal look. Play, then Stop: normal again."
+]
+],
+[
+"Ranch: corral with a Music Box",
+"r12lp2",
+"Lamp range and setting",
+[
+"While a song plays, place a second lamp ~30 m from every speaker: it doesn't pulse.",
+"\"Lamp range\" 40 m: within ~4 s it pulses, weakly. Back to 20 m: normal within ~2 s.",
+"Switch \"Lamps pulse to the music\" off: lamps normal at once; on: pulse again within ~2 s."
+]
+],
+[
+"Ranch: open ground",
+"r12lp3",
+"Lamps by booth, stack, radio",
+[
+"Lamp next to a switched-off DJ Booth while a song plays from a corral 20 m+ away: no pulse.",
+"Switch the booth on with a slime seated: the lamp pulses.",
+"Repeat with a speaker stack on, and a Slime Radio next to a lamp: pulses each time."
+]
+],
+[
+"Ranch: corral with Corral Radio and Music Box",
+"r12lp4",
+"Lamp follows the corral radio",
+[
+"Lamp next to a corral whose radio plays its own playlist, global queue playing a different song elsewhere: the lamp follows the radio's beat.",
+"Switch the radio off: the lamp returns to normal."
+]
+],
+[
+"Menu only",
+"r12lp5",
+"Lamp settings layout",
+[
+"Ranch > Slime DJ: \"Lamps pulse to the music\" and \"Lamp range\" right after \"Walls dance to the music\" / \"Dance intensity\".",
+"\"Lamp range\" hides while the switch is off."
+]
+]
+]
