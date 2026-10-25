@@ -41,4 +41,10 @@ bool SongPlaying();
 // Any thread. Name of the loaded song ("" = none).
 std::string SongName();
 
+// Main thread (a detour is fine: it only records the request). Opens the Corral Radio playlist menu
+// (radio_menu.h) for this corral LandPlot in Slime DJ's next tick. False with `why` (a short sentence
+// for the player) when it can't: Slime DJ off, the menu unavailable, already open, plot unknown.
+// Used by custom_upgrades' blue Corral Radio button.
+bool OpenRadioMenu(Il2CppObject* landPlot, std::string* why = nullptr);
+
 }  // namespace sr2::modules::slime_dj
