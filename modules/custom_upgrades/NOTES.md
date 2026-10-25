@@ -11,7 +11,7 @@ per-system `re/*.md` files linked below. Each `.cpp` header comment has the file
 | `module.cpp` | upgrade table `kDefs`, menu injection, HasUpgrade / AddUpgrade, sidecar, gate, tiers, Sell-All sale, silo capacity, demolish, Activate detour |
 | `api.h` | for other modules: `Owns`, `Multiplier`, `CanSell` / `Remove`, `ChainSellTarget`, per-plot / per-save values, `PlotKey`, `HiddenMenuItem`, `IsModGadget` |
 | `coop_world.cpp` | Coop Air Net, Hen Collector (clone, vacuum, Activate, ranch drone linking) |
-| `feeder_lock.cpp` | Auto-Feeder food lock (five SiloStorage hooks, locked storage table) |
+| `feeder_lock.cpp` | Auto-Feeder "Leave last food item in" (two SlimeFeeder + five SiloStorage hooks, kept feeder table) |
 | `plot_menu_slider.cpp` | reusable uGUI slider for the plot menu details panel (also used by drone_price_limit) |
 | `silo_world.cpp`, `silo_receipt.cpp`, `sale_notify.cpp` | Sell-All world button (and the Corral Radio button: same class, `ButtonLook`), receipt dialog, HUD notices |
 | `plot_props.cpp` | decorative props for owned tiers |
@@ -95,8 +95,10 @@ MinHook allows one hook per address; other modules must not hook these:
   `UpgradeChain.Show`, `FabricatorItemButton.ConfigurePips`.
 - shadow_catcher.cpp: `AmmoSlotDefinition.IsAllowed`, `ShadowSlimeScatter` (ScatterIfPlayerNear,
   Relevancy, DoAlert, Action), `ProducePlortsOnHit.ProducePlort`.
-- feeder_lock.cpp: `SiloStorage.CanSpecificSlotAccept` / `CanAnySlotAccept` / `MaybeAddToSpecificSlot` /
-  `MaybeAddToAnySlot` / `MaybeAddAsResource` (pass-through except for a locked feeder's storage).
+- feeder_lock.cpp: `SlimeFeeder.ProcessFeedOperation` / `RemainingFeedOperationsFastForward`,
+  `SiloStorage.CanSpecificSlotAccept` / `CanAnySlotAccept` / `MaybeAddToSpecificSlot` /
+  `MaybeAddToAnySlot` / `MaybeAddAsResource` (pass-through except for a kept feeder).
+- module.cpp: `ListUI.Submit` (flips the Auto-Feeder switch while it is shown; every other Submit passes).
 - slime_launcher.cpp: `VacuumItem.Expel(AmmoMetadata, bool, float, bool)`, `VacuumItem.ExpelHeld`.
 - radio_shop.cpp: `ShopCategoryRuntime.GetRuntimeItems`, `ShopRuntimeItem.get_Asset` / `get_Description` /
   `TryPurchase`, `ShopDirector.SpawnNextItem`.
@@ -219,29 +221,43 @@ re/custom-upgrades.md 2.1 / 2.4.
   while a drone flies to a port that still holds chickens leaves it a destroyed port (as vanilla on a
   deluxe coop demolish). RE: re/drones.md (RanchMetadata).
 
-## Auto-Feeder food lock (round 15)
+## Auto-Feeder: Leave last food item in (round 16)
 
-User: "Give the autofeeder an option to lock 1 item in it as always in the buy menu so drones can be filtered
-to put specific food items in them not just everything". RE: re/plots.md "SlimeFeeder", re/drones.md
-"Feeder sink".
-- **Menu**: in a corral's plot menu, while the OWNED vanilla Auto-Feeder card is selected, a `PlotMenuSlider`
-  ("FeederLock", mouse only like the Hen Collector sliders) sits in the cost row's slot: "Feeder takes: any
-  food" at 0, then "Feeder takes only: <food>" for each food of the feeder (its storage's slot definition
-  group with sub-groups, minus the block list, group order; logged once per session: `auto-feeder food lock:
-  N food(s) in group ...`). The card is found by its `_description` instance among the corral menu's items
-  (`_upgrade` FEEDER 9). Not offered for an unbought feeder (no active SlimeFeeder, no storage).
-- **Save**: per plot `PlotValue` `custom_upgrades.feeder_lock` = the food's asset name ("" = unlocked,
-  nothing stored). Never in the vanilla save; a mod-free load simply has a normal feeder.
-- **Effect** (`feeder_lock.cpp`): world tick part 12 hands the locked corrals to `FeederLock::Tick`, which maps
-  each live feeder's SiloStorage (`SlimeFeeder._storage`) to the locked IdentifiableType; the slider applies a
-  change at once (`SetNow`). Five SiloStorage hooks answer false for any other item on a locked storage:
-  `CanSpecificSlotAccept` makes the feeder no drone destination for it (GetSinks), so drones whose program
-  ends in Feeder fetch and deliver only the locked food to it (other feeders unchanged); `MaybeAddToSpecificSlot`
-  keeps the player's shots of other foods out (the item stays outside, as for a non-food); the other three
-  are backstops. Unlocked feeders and every other storage go straight to the original (one atomic load while
-  nothing is locked). Food already inside when locking stays and is fed out; the slot holds one type, so the
-  locked food comes in once it is empty. Logs: `auto-feeder on plot '<id>' locked to '<food>'` / `unlocked`,
-  `locked auto-feeder refused '<food>' (...)` once per food.
+Round 15 was a food picker (user: "Give the autofeeder an option to lock 1 item in it as always in the buy
+menu so drones can be filtered to put specific food items in them not just everything"); on its test the
+user said "No no no no no, it should be just a toggle, 'Leave last food item in'". RE: re/plots.md
+"SlimeFeeder", re/drones.md "Feeder sink".
+- **Menu**: in a corral's plot menu, while the OWNED vanilla Auto-Feeder card is selected, an on/off switch
+  sits in the cost row's slot: a two-position `PlotMenuSlider` ("FeederKeepLast", 0 = off, 1 = on), half
+  the panel wide (`columns = 2`), label "Leave last food item in: On / Off". The plot menu has no toggle
+  widget of its own (only the game's buttons, and our sliders), so the switch is our slider at two
+  positions: handle left = off, handle right with the pink fill = on. Mouse: click the other half or drag.
+  Pad A / Enter: `ListUI.Submit` (the list menus' submit listener; on an owned card its OnAction does
+  nothing) flips it while it is shown (`PlotMenuSlider::Flip`, one flip per frame, not under a PopupPrompt);
+  left / right stay with the menu's grid (`keys = false`). The card is found by its `_description`
+  instance among the corral menu's items (`_upgrade` FEEDER 9). Not offered for an unbought feeder (no
+  active SlimeFeeder, no storage).
+- **Save**: per plot `PlotValue` `custom_upgrades.feeder_lock` = "1" (on; "" = off, nothing stored). Round
+  15 stored a food's asset name under the same key: it reads as on. Never in the vanilla save.
+- **Feeding out** (`feeder_lock.cpp`): every feed is `SlimeFeeder.ProcessFeedOperation(ejectFood)`
+  (FixedUpdate with true, fast-forward with false). With the switch on and at most one item in the feeder,
+  the detour runs vanilla's empty path only (`remainingFeedOperations` - 1, nothing fed), so the last item
+  stays. The fast-forward source (`RanchCellFastForwarder.FeedingSource.AutoFeeder`) takes its budget from
+  `RemainingFeedOperationsFastForward` = min(pending, count): the detour makes it min(that, count - 1), so a
+  fast-forward never counts the kept item as eaten. Log once per feeder: `auto-feeder kept its last food item
+  in (feeding / fast-forward)`.
+- **Putting food in**: the feeder slot holds one food type, and with one item always in it keeps that type.
+  The round 15 SiloStorage hooks (CanSpecificSlotAccept, CanAnySlotAccept, MaybeAddToSpecificSlot,
+  MaybeAddToAnySlot, MaybeAddAsResource) refuse any other food on a kept feeder's storage, with the kept
+  food = the feeder's current food (`GetFoodId` while `GetFoodCount` > 0, read by the ~1 Hz tick and at a
+  switch change). So drones (GetSinks) and shots add only more of the same food. An empty feeder with the
+  switch on takes any food; the first one becomes the kept food. Logs: `auto-feeder on plot '<id>': leave
+  last food item in ON, keeps '<food>'` (or `empty`) / `OFF`, `auto-feeder keeping its last food refused
+  '<food>' (...)` once per food.
+- **Switch off**: the next feeds take the last item as vanilla; an empty feeder takes any food.
+- World tick part 12 hands the corrals with the switch on to `FeederLock::Tick` (table of feeder, storage,
+  kept food); `SetNow` applies a change from the menu at once. Feeders without the switch, and every other
+  storage, go straight to the originals (one atomic load while no feeder keeps one).
 - Module off / load / fault: `Cleanup` empties the table (vanilla feeders); the next tick rebuilds it from the
   loaded save's sidecar.
 

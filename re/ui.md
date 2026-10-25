@@ -108,7 +108,7 @@ Unity's new Input System only, through a ScriptableObject event bus; gameplay su
 ### Plot menu navigation (slider keys; hooks since removed)
 - `FocusManager.NavigateInDirection` hands a move to every IMoveHandler between the focused card and the spatial target via `INavigationHandler.TryHandleAsNavigation` 0x79C940; the focused card's own Selectable comes first (so `UniformGridView.OnNavigate` is never reached); after each call it checks the event's `used` flag (used -> no SetFocus)
 - `ListUI.Submit` 0x83F450, `BaseUI.OnCancelPressed` 0x683490 (were hooked for select-to-step, removed)
-- mod: none now (custom_upgrades sliders are mouse only); `NavigateInDirection` hooked by drone_price_limit
+- mod: custom_upgrades sliders are mouse only; `ListUI.Submit` hooked again (round 16) only to flip the Auto-Feeder switch while it is shown; `NavigateInDirection` hooked by drone_price_limit
 
 ### SliderStyler / uGUI slider
 - fields: SliderStyler `_style` +0x28 (SliderStyle), `_slider` +0x30

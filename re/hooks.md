@@ -117,6 +117,7 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | LandPlotUIRoot.PromptForPlot(1) | 0x6E77D0 | sell_upgrades.LandPlotUIRoot.PromptForPlot | sell_upgrades/module.cpp | plot purchase popup order (opt) |
 | LandPlotUIRoot.SetActivator(1) | 0x6E8110 | sell_upgrades.LandPlotUIRoot.SetActivator | sell_upgrades/module.cpp | Sell button (the override itself) |
 | LandPlotUIRoot.UpdateMenuItemAvailabilityAndHidden(0) | 0x6E8150 | custom_upgrades.LandPlotUIRoot.UpdateMenuItemAvailabilityAndHidden | custom_upgrades/module.cpp | custom tiers in plot menu (the override itself) |
+| ListUI.Submit(1) | 0x83F450 | custom_upgrades.ListUI.Submit | custom_upgrades/module.cpp | flips the Auto-Feeder switch while shown (opt; every list menu, one flag check) |
 | ListUIRoot`4.OnAltAction(1) | 0x11AF260 **shared generic** | sell_upgrades.ListUIRoot.OnAltAction | sell_upgrades/module.cpp | alt-action sell; LandPlotUIRoot only, by class |
 | ListUIRoot`4.OpenPopupPrompt(7) | 0x11AF570 **shared generic** | sell_upgrades.ListUIRoot.OpenPopupPrompt | sell_upgrades/module.cpp | popup button order (opt); LandPlotUIRoot only |
 | ListUIRoot`4.RebuildUI(0) | 0x11AFB30 **shared generic** | custom_upgrades.ListUIRoot.RebuildUI | custom_upgrades/module.cpp | refresh plot menu after buy/sell (opt); every list menu |
@@ -154,7 +155,7 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | PlayerUpgradeFabricateCategoryRuntime..ctor(2) | 0x82BE90 | custom_upgrades.PlayerUpgradeFabricateCategoryRuntime..ctor | custom_upgrades/vacpack_upgrades.cpp | add upgrade cards (own ctor, no parent walk) |
 | PlortCollectorActivator.Activate(0) | 0x52DD60 | custom_upgrades.PlortCollectorActivator.Activate | custom_upgrades/module.cpp | silo Sell-All, Corral Radio + Hen Collector buttons (silo_world, coop_world) (opt) |
 | ProducePlortsOnHit.ProducePlort(0) | 0x885CA0 | custom_upgrades.ProducePlortsOnHit.ProducePlort | custom_upgrades/shadow_catcher.cpp | lift hit-plort despawn limit (opt) |
-| PurchaseItemDetailsContentView.BindData(1) | 0x6D9EA0 | custom_upgrades.PurchaseItemDetailsContentView.BindData | custom_upgrades/module.cpp | Hen Collector limit sliders, Auto-Feeder food lock slider (opt; the class's own override) |
+| PurchaseItemDetailsContentView.BindData(1) | 0x6D9EA0 | custom_upgrades.PurchaseItemDetailsContentView.BindData | custom_upgrades/module.cpp | Hen Collector limit sliders, Auto-Feeder switch (opt; the class's own override) |
 | RanchDrone.GatherSourceTask(1) | 0xA19B40 | custom_upgrades.RanchDrone.GatherSourceTask | custom_upgrades/drone_source.cpp | custom drone sources |
 | RanchDrone.GatherSourceTasks(1) | 0xA1AA90 | custom_upgrades.RanchDrone.GatherSourceTasks | custom_upgrades/drone_source.cpp | custom drone sources |
 | RanchDroneBehaviourDumpAmmo.Relevancy(1) | 0xA22CD0 | drone_price_limit.RanchDroneBehaviourDumpAmmo.Relevancy | drone_price_limit/module.cpp | hold plorts below limit |
@@ -184,12 +185,14 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | ShopRuntimeItem.get_Asset(0) | 0x8C1E20 | custom_upgrades.radio_shop.ShopRuntimeItem.get_Asset | custom_upgrades/radio_shop.cpp | Slime Radio shop entry |
 | ShopRuntimeItem.get_Description(0) | 0x8C1EC0 | custom_upgrades.radio_shop.ShopRuntimeItem.get_Description | custom_upgrades/radio_shop.cpp | Slime Radio shop entry |
 | ShopRuntimeItem.TryPurchase(3) | 0x8C1040 | custom_upgrades.radio_shop.ShopRuntimeItem.TryPurchase | custom_upgrades/radio_shop.cpp | Slime Radio shop entry |
-| SiloStorage.CanAnySlotAccept(1) | 0x995530 | custom_upgrades.SiloStorage.CanAnySlotAccept | custom_upgrades/feeder_lock.cpp | auto-feeder food lock (locked feeder storages only) |
-| SiloStorage.CanSpecificSlotAccept(3) | 0x995580 | custom_upgrades.SiloStorage.CanSpecificSlotAccept | custom_upgrades/feeder_lock.cpp | auto-feeder food lock: drone Feeder sinks (GetSinks lambda) |
-| SiloStorage.MaybeAddAsResource(4) | 0x995740 | custom_upgrades.SiloStorage.MaybeAddAsResource | custom_upgrades/feeder_lock.cpp | auto-feeder food lock (backstop) |
-| SiloStorage.MaybeAddToAnySlot(1) | 0x9957B0 | custom_upgrades.SiloStorage.MaybeAddToAnySlot | custom_upgrades/feeder_lock.cpp | auto-feeder food lock (backstop) |
-| SiloStorage.MaybeAddToSpecificSlot(3) | 0x995810 | custom_upgrades.SiloStorage.MaybeAddToSpecificSlot | custom_upgrades/feeder_lock.cpp | auto-feeder food lock: food shot into the feeder (SiloCatcher.Insert) |
+| SiloStorage.CanAnySlotAccept(1) | 0x995530 | custom_upgrades.SiloStorage.CanAnySlotAccept | custom_upgrades/feeder_lock.cpp | auto-feeder leave last food item in (kept feeder storages only) |
+| SiloStorage.CanSpecificSlotAccept(3) | 0x995580 | custom_upgrades.SiloStorage.CanSpecificSlotAccept | custom_upgrades/feeder_lock.cpp | auto-feeder leave last food item in: drone Feeder sinks (GetSinks lambda) |
+| SiloStorage.MaybeAddAsResource(4) | 0x995740 | custom_upgrades.SiloStorage.MaybeAddAsResource | custom_upgrades/feeder_lock.cpp | auto-feeder leave last food item in (backstop) |
+| SiloStorage.MaybeAddToAnySlot(1) | 0x9957B0 | custom_upgrades.SiloStorage.MaybeAddToAnySlot | custom_upgrades/feeder_lock.cpp | auto-feeder leave last food item in (backstop) |
+| SiloStorage.MaybeAddToSpecificSlot(3) | 0x995810 | custom_upgrades.SiloStorage.MaybeAddToSpecificSlot | custom_upgrades/feeder_lock.cpp | auto-feeder leave last food item in: food shot into the feeder (SiloCatcher.Insert) |
 | SlimeEmotions.ComputeAgitationChangePerHour(0) | 0x88ABA0 | plot_upgrades.SlimeEmotions.ComputeAgitationChangePerHour | plot_upgrades/module.cpp | music box booster |
+| SlimeFeeder.ProcessFeedOperation(1) | 0x996280 | custom_upgrades.SlimeFeeder.ProcessFeedOperation | custom_upgrades/feeder_lock.cpp | auto-feeder leave last food item in: no feed at 1 item left (kept feeders only) |
+| SlimeFeeder.RemainingFeedOperationsFastForward(0) | 0x996370 | custom_upgrades.SlimeFeeder.RemainingFeedOperationsFastForward | custom_upgrades/feeder_lock.cpp | auto-feeder leave last food item in: fast-forward budget count - 1 (kept feeders only) |
 | SpawnResource.UpdateToTime(3) | 0xBC2C00 | plot_upgrades.SpawnResource.UpdateToTime | plot_upgrades/module.cpp | garden booster |
 | SpawnTemporaryObjectActivity.Spawn(2) | 0x66DB30 | spawn_scaling.SpawnTemporaryObjectActivity.Spawn | spawn_scaling/module.cpp | weather patch-on-touch (opt) |
 | SpawnTornadoActivity.Spawn(2) | 0x66DBF0 | spawn_scaling.SpawnTornadoActivity.Spawn | spawn_scaling/module.cpp | weather patch-on-touch (opt) |
