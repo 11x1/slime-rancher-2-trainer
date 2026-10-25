@@ -145,8 +145,8 @@ constexpr size_t kMaxRadioStreams = 4;
 constexpr size_t kMaxRadios = 32;
 constexpr const char* kRadioValue = "slime_dj.radio";  // custom_upgrades per-plot value (the playlist)
 // The reason the Corral Radio button gets while Slime DJ is off (custom_upgrades shows it as a game
-// notification "Corral Radio: ..."; round 13: no parentheses).
-constexpr const char* kOffWhy = "Slime DJ is off, turn it on in the overlay under Ranch > Slime DJ";
+// notification; round 14: "Just show 'Slime DJ is off'").
+constexpr const char* kOffWhy = "Slime DJ is off";
 constexpr int32_t kUpgradeMusicBox = 2;  // LandPlot.Upgrade.MUSIC_BOX
 // Real radio: air records kept for radios whose channel is gone (no Music Box, zone unloaded).
 constexpr size_t kMaxAirs = 64;
@@ -2378,10 +2378,10 @@ public:
             return false;
         };
         if (dead_.load() || !frameCb_) return no(kOffWhy);
-        if (!menu_.Ready()) return no("the playlist menu is unavailable; use the overlay's Slime DJ tab");
-        if (menu_.IsOpen() || !menuKey_.empty()) return no("the playlist menu is already open");
+        if (!menu_.Ready()) return no("The playlist menu is unavailable; use the overlay's Slime DJ tab");
+        if (menu_.IsOpen() || !menuKey_.empty()) return no("The playlist menu is already open");
         std::string key = cu::PlotKey(plot);
-        if (key.empty()) return no("this corral is not known yet; try again in a moment");
+        if (key.empty()) return no("This corral is not known yet; try again in a moment");
         menuKey_ = std::move(key);
         Free(menuPlot_);
         menuPlot_ = unity::NewGCHandle(plot);
@@ -2882,7 +2882,7 @@ namespace slime_dj {
 
 bool OpenRadioMenu(Il2CppObject* landPlot, std::string* why) {
     if (!sr2::core::main_thread::IsMainThread() || !landPlot) {
-        if (why) *why = "not on the main thread";
+        if (why) *why = "Not on the main thread";
         return false;
     }
     SlimeDj* self = g_self;
