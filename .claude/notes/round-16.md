@@ -2,6 +2,11 @@
 
 Build tested: d1f076b (develop). Results are in the work-account checklist https://claude.ai/artifact/12HrkuKyWbJs1PtsufwVvE (collection `results`, ids `r15*`; free text in `misc/notes`). User quotes are verbatim.
 
+## Status (2026-10-25)
+All tasks A-I plus the user's icons (Sprinkler, Music Box, plort door, Corral Radio sprite) are merged and deployed (bc3486d, DLL cea64546; one build for the round). Checklist: round 16 is published to https://claude.ai/artifact/12HrkuKyWbJs1PtsufwVvE (32 new cases in `.claude/checklist/r16-cases.json`, carried-over cases under Skipped). Open questions for the user:
+- G read "ranch mini icons" as the tracker row under the minimap. If the user meant gadget icons on the minimap, that is the "Placed gadgets" minimap setting (off in their config).
+- The Auto-Feeder switch flips with click or Enter / pad A only; left / right still move the card selection.
+
 ## How to run this round
 Same as round 15 (auto-memory: orchestrator mode, Opus subagents at medium effort in worktrees, git workflow, no session link, plain commands, checklist conventions, read logs yourself, deploy once per round; agent builds take turns via build.ps1 and must `Set-Location` into their own worktree):
 1. One agent per task below, up to 9 at a time. Prompt: "Read `.claude/agent-brief.md` and follow it", the task's section, the branch name.
