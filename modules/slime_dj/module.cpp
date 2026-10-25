@@ -1336,7 +1336,7 @@ private:
         ch.lastSong = s->id;
         if (ch.Radio()) {
             SR2_INFO("slime_dj: radio '{}' playing '{}' ({}){}", RadioName(ch), s->name, s->file,
-                     frame ? std::format(" from {:.0f} s (it played on without a speaker)", static_cast<double>(frame) / s->rate)
+                     frame ? std::format(" from {:.0f} s (where it is on air now)", static_cast<double>(frame) / s->rate)
                            : std::string());
         } else {
             SR2_INFO("slime_dj: playing '{}' ({})", s->name, s->file);
@@ -1461,10 +1461,35 @@ private:
         return h;
     }
 
+    // The Air record still points at an entry of the playlist (edits while the radio was off or away
+    // may have moved or removed it): fixes its index, false when its song is no longer in the list.
+    static bool AirInList(Channel& r) {
+        const int n = static_cast<int>(r.playlist.size());
+        if (r.air.index >= 0 && r.air.index < n && r.playlist[static_cast<size_t>(r.air.index)] == r.air.file) return true;
+        const auto it = std::find(r.playlist.begin(), r.playlist.end(), r.air.file);
+        if (it == r.playlist.end()) return false;
+        r.air.index = static_cast<int>(it - r.playlist.begin());
+        return true;
+    }
+
+    // Where the radio's song is now (the playing entry, seconds into it, the radio clock): false when no
+    // song of its playlist is loaded.
+    bool AirOf(const Channel& r, Air& a) const {
+        if (!r.cur || r.index < 0 || r.index >= static_cast<int>(r.playlist.size())) return false;
+        const Current& c = *r.cur;
+        a = Air{};
+        a.file = r.playlist[static_cast<size_t>(r.index)];
+        a.index = r.index;
+        a.list = PlaylistHash(r);
+        a.pos = c.rate ? static_cast<double>(c.base + (c.started ? c.playPos : 0)) / c.rate : 0.0;
+        a.at = radioTime_;
+        return true;
+    }
+
     void NextRadioSong(Channel& r, bool resume) {
         const int n = static_cast<int>(r.playlist.size());
         double startAt = 0;
-        if (resume && r.hasAir && r.on) startAt = CatchUp(r);
+        if (resume && r.hasAir && r.on && AirInList(r)) startAt = CatchUp(r);
         r.hasAir = false;
         for (int tries = 0; tries < n; ++tries) {
             int next;
@@ -1901,19 +1926,15 @@ private:
 
     void DropRadio(size_t i) {
         Channel& r = *radios_[i];
-        // Real radio: remember where it was on air; it plays on in silence until its channel is back.
-        if (r.on && r.cur && r.index >= 0 && r.index < static_cast<int>(r.playlist.size())) {
-            const Current& c = *r.cur;
-            Air a;
-            a.file = r.playlist[static_cast<size_t>(r.index)];
-            a.index = r.index;
-            a.list = PlaylistHash(r);
-            a.pos = c.rate ? static_cast<double>(c.base + (c.started ? c.playPos : 0)) / c.rate : 0.0;
-            a.at = radioTime_;
+        // Real radio: remember where it was on air; it plays on in silence until its channel is back. A radio
+        // switched off keeps the record of when it was switched off (round 14), so it picks up there too.
+        Air a;
+        if (r.on && AirOf(r, a)) {
             if (airs_.size() >= kMaxAirs && !airs_.count(r.key)) airs_.clear();
             airs_[r.key] = std::move(a);
-        } else if (r.on && r.hasAir) {
-            airs_[r.key] = r.air;  // came back and went again before its song started
+        } else if (r.hasAir) {
+            if (airs_.size() >= kMaxAirs && !airs_.count(r.key)) airs_.clear();
+            airs_[r.key] = r.air;  // came back and went again before its song started, or switched off
         } else {
             airs_.erase(r.key);
         }
@@ -1948,7 +1969,7 @@ private:
                 LoadRadio(*ch, c.plot);
                 if (auto it = airs_.find(c.radio); it != airs_.end()) {
                     const Air& a = it->second;
-                    if (ch->on && a.index >= 0 && a.index < static_cast<int>(ch->playlist.size()) &&
+                    if (a.index >= 0 && a.index < static_cast<int>(ch->playlist.size()) &&
                         ch->playlist[static_cast<size_t>(a.index)] == a.file && a.list == PlaylistHash(*ch)) {
                         ch->air = a;
                         ch->hasAir = true;
@@ -1972,6 +1993,11 @@ private:
         }
         for (size_t i = radios_.size(); i > 0; --i)
             if (!radios_[i - 1]->seen) DropRadio(i - 1);
+    }
+
+    bool SlotsFull() const {
+        return std::count_if(radios_.begin(), radios_.end(), [](const auto& r) { return r->slot; }) >=
+               static_cast<std::ptrdiff_t>(kMaxRadioStreams);
     }
 
     // Box scan: decoder slots for the radios that are on (kMaxRadioStreams at once). A radio keeps its
@@ -2436,7 +2462,7 @@ private:
             }
             if (m.warning.empty() && menuAge_ >= 3.0f) m.warning = "This corral's radio can't play right now.";
             r = &stored;
-        } else if (r->on && !r->cur && !r->slot) {
+        } else if (r->on && !r->cur && !r->slot && SlotsFull()) {
             m.warning = std::format("{} radios play already: this one starts when one of them stops.", kMaxRadioStreams);
         }
         m.on = r->on;
@@ -2607,8 +2633,23 @@ private:
                     return;
                 }
                 r->on = !r->on;
+                // Round 14 ("song still restarts if slime radio is disabled and enabled"): switched off, the
+                // radio remembers where its song was (an Air record, as when its channel goes away); switched
+                // on again it catches up (CatchUp: the time it was off played through the playlist; none while
+                // the game is paused, so off and on inside the menu goes on where it was). The decoder slot is
+                // released / taken right away (AllocateSlots below), so fast toggling never shows "4 radios
+                // play already".
+                if (!r->on) {
+                    Air air;
+                    if (AirOf(*r, air)) {
+                        r->air = std::move(air);
+                        r->hasAir = true;
+                    }
+                }
                 bridge::SetStatus(std::format("{} {}.", RadioName(*r), r->on ? "switched on" : "switched off"), false);
-                SR2_INFO("slime_dj: radio '{}' switched {}", RadioName(*r), r->on ? "on" : "off");
+                SR2_INFO("slime_dj: radio '{}' switched {}{}", RadioName(*r), r->on ? "on" : "off",
+                         r->hasAir ? std::format(" (song position kept: entry {} at {:.0f} s)", r->air.index + 1, r->air.pos)
+                                   : std::string());
                 break;
             case bridge::Op::RadioSkip:
                 if (r->cur) {
@@ -2647,11 +2688,13 @@ private:
                 r->playlist.clear();
                 r->index = -1;
                 r->on = false;
+                r->hasAir = false;
                 break;
             case bridge::Op::RadioPlayAt:
                 if (!valid) return;
                 r->on = true;
                 r->index = a.index;
+                r->hasAir = false;  // this entry from its start, not where the radio was
                 if (r->slot) {
                     r->failures = 0;
                     NextSong(*r, true);
@@ -2660,7 +2703,8 @@ private:
             default: return;
         }
         SaveRadio(*r);
-        boxScan_ = 0;  // start / stop / hand slots out now
+        AllocateSlots();  // round 14: a radio switched off frees its slot now, one switched on takes a free one
+        boxScan_ = 0;     // speakers join in the next box scan
     }
 
     // ------------------------------------------------------------- snapshot ----
@@ -2738,7 +2782,7 @@ private:
                 else if (!HasSpeaker(r)) br.waiting = "No speaker in this corral right now.";
                 else if (c.buffering) br.waiting = "Buffering...";
                 else if (GamePaused()) br.waiting = "Game paused";
-            } else if (r.on && !r.slot) {
+            } else if (r.on && !r.slot && SlotsFull()) {
                 br.waiting = std::format("Waiting: {} radios play already (the nearest ones get the next free slot).", kMaxRadioStreams);
             } else if (r.on && !songs_) {
                 br.waiting = "Reading the music folder...";
