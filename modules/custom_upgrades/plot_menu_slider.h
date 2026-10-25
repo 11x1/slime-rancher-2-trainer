@@ -30,6 +30,11 @@
 // SetPolling(false) stops the pad / keyboard polling (several sliders in one panel: only the focused
 // one polls; the host can still call Step()).
 //
+// Selector style (spec.selector): the same root and slot, but the body is the label on the left and a clone of
+// the game's options selector on the right (its OptionsPresetSelector behaviour and the value's
+// LocalizeStringEvent off, a polled Toggle on each arrow, navigation None). Prefab: the control prefab of a
+// PresetOptionsItemDefinition (one asset scan per session).
+//
 // Lifetime: Create() replaces the previous slider (one instance per PlotMenuSlider); Destroy() removes
 // it; Tick() destroys it when its GameObject died with the menu. GC handles (root, slider, label,
 // remembered selection) are freed only from posted main-thread jobs, never inside a hook.
@@ -80,6 +85,14 @@ struct SliderSpec {
     // keeps plain steps (Shift there belongs to its second slider).
     bool fastKeys = false;
     int shiftStep = 10;
+    // Round 18 (user on the Auto-Feeder switch: "use the same component as for drone modes, not a slider"):
+    // instead of the bar, a clone of the game's options-menu selector ("< value >", the Settings rows'
+    // OptionsPresetSelector, as the drone station's Programs dialog "Next program" mode) at the right end of
+    // the row, the label left of it. The arrows step and wrap (two values: each click toggles). Plot menu only
+    // (Create; CreateIn ignores it). Without the game's prefab it falls back to the bar, whose label then
+    // reads "<label>: <valueText>".
+    bool selector = false;
+    std::function<std::string(int)> valueText;  // the selector's value ("On"); unset -> the number
 };
 
 // Where CreateIn() puts the slider.
@@ -122,6 +135,8 @@ public:
     // Main thread. Remove the slider (idempotent); the row's builder removes the whole row.
     void Destroy();
     bool Active() const;
+    // spec.selector and the game's selector was built (false: the bar fallback).
+    bool IsSelector() const;
     int Value() const;
     // Main thread, every frame (one pointer check while no slider exists).
     void Tick(float unscaledDt);
