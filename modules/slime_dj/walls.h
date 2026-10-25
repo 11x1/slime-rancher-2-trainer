@@ -7,7 +7,7 @@
 // Main thread only, inside the module's guarded tick (no hooks). Objects are found once per plot
 // (and again when its walls or net change), held by GC handles; nothing is searched per frame.
 // Everything changed is put back exactly (property blocks) when the song stops or pauses,
-// the plot leaves the hearing range, the setting is turned off or the module is disabled. See
+// the plot unloads (or its box stops), the setting is turned off or the module is disabled. See
 // NOTES.md "Walls dance to the music".
 
 #include <cstdint>
@@ -37,8 +37,8 @@ public:
         uintptr_t group = 0;
         float boost = 1.0f;
     };
-    // Every music box scan: the corrals to animate now (their box plays a song and the camera is
-    // within hearing range). Others are restored and dropped.
+    // Every music box scan: the corrals to animate now (their box plays a song; any distance),
+    // nearest first: only the first 12 are animated. Others are restored and dropped.
     void Sync(const std::vector<Target>& targets);
     // Every frame. `beatOf(group)`: the analysis of that song at its play position, nullptr while it
     // does not play (those walls then settle and are restored). `intensity`: the setting, 0..2.

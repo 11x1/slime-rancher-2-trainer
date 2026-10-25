@@ -36,7 +36,7 @@
 //     volume drop while the listener is outside a corral with High Walls (more with the Air Net).
 //   * Walls dance to the music (setting dance_walls, off by default): the decoder thread analyses
 //     the song (beat.cpp: bass level + onsets per 10 ms); every frame the energy walls and the Air
-//     Net of the corrals whose box plays and that are within hearing range pulse with it
+//     Net of the corrals whose box plays (any distance while the plot is loaded) pulse with it
 //     (walls.cpp), restored when the song stops or pauses.
 //
 // Fault policy (like wall_markers): every game call runs inside one guarded tick or guarded
@@ -652,7 +652,7 @@ private:
             "them, so you hear the song coming from every speaker around you.");
         def("dance_walls", "Walls dance to the music", Kind::Bool, 0, 0, 1, 1,
             "The energy walls of a corral whose music box plays ripple round the corral on every beat (like a "
-            "shot through the wall), and they and the Air Net, if bought, glow and change colour with the song. Only corrals within hearing range. Everything goes back to "
+            "shot through the wall), and they and the Air Net, if bought, glow and change colour with the song, also when you are far away. Everything goes back to "
             "normal when the song stops or pauses.");
         def("muffle_walls", "Muffle behind High Walls", Kind::Bool, 1, 0, 1, 1,
             "From outside a corral with High Walls its music sounds muffled and a bit quieter, more so with "
@@ -2130,16 +2130,19 @@ private:
     }
 
     // -------------------------------------------------------- walls dance ----
-    // Box scan: the corrals whose music box plays a song and that the camera is within hearing range
-    // of (the speaker's range, Amplify included). Each follows its box's channel: the global queue, or
-    // (round 12: "the walls dont dance to the corral's specific radio") the corral's own radio.
-    // Audible emitters inside a corral (speaker stacks, Boomboxes, Slime Radios, a DJ Booth's
+    // Box scan: the corrals whose music box plays a song, at any distance (round 14: "the walls dont
+    // react to music from far away"; until then only within hearing range). A box counts while its
+    // plot is loaded (FindBoxes: MusicBox activeInHierarchy), which is when its walls can be seen;
+    // the speaker plays on silently out of range, so the play head and the analysis keep running.
+    // Nearest first (WallDancer animates at most 12). Each follows its box's channel: the global
+    // queue, or (round 12: "the walls dont dance to the corral's specific radio") the corral's own
+    // radio. Audible emitters inside a corral (speaker stacks, Boomboxes, Slime Radios, a DJ Booth's
     // speakers) boost its walls (round 12 idea: "speaker buildables/toy in a plot amplify the walls").
     void SyncDancer() {
         if (!cfg_.danceWalls || !dancer_.Ready() || !AnySong()) return;
         Vec3 cam{};
         const bool haveCam = CameraPos(cam);
-        std::vector<dj::WallDancer::Target> targets;
+        std::vector<std::pair<float, dj::WallDancer::Target>> byDist;  // squared distance (0 without one)
         int boosted = 0;
         for (const Speaker& sp : speakers_) {
             if (sp.emitter || !sp.live || !sp.ch || !sp.ch->cur || sp.clipGen != sp.ch->cur->clipGen) continue;
@@ -2147,18 +2150,23 @@ private:
             if (!box) continue;
             auto it = std::find_if(boxUps_.begin(), boxUps_.end(), [&](const auto& b) { return b.first == box; });
             if (it == boxUps_.end() || !unity::IsAlive(it->second)) continue;
+            float d2 = 0.0f;
             if (haveCam && sp.posOk) {
                 const float dx = sp.pos.x - cam.x, dy = sp.pos.y - cam.y, dz = sp.pos.z - cam.z;
-                if (dx * dx + dy * dy + dz * dz > sp.maxD * sp.maxD) continue;
+                d2 = dx * dx + dy * dy + dz * dz;
             }
             int extra = 0;
             if (sp.corral >= 0)
                 for (const Speaker& e : speakers_)
                     if (e.emitter && e.corral == sp.corral && e.ch == sp.ch && Audible(e)) ++extra;
             boosted += extra ? 1 : 0;
-            targets.push_back({it->second, reinterpret_cast<uintptr_t>(sp.ch),
-                               std::min(1.0f + kDanceSpeakerStep * static_cast<float>(extra), kDanceSpeakerMax)});
+            byDist.push_back({d2, {it->second, reinterpret_cast<uintptr_t>(sp.ch),
+                                   std::min(1.0f + kDanceSpeakerStep * static_cast<float>(extra), kDanceSpeakerMax)}});
         }
+        std::stable_sort(byDist.begin(), byDist.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        std::vector<dj::WallDancer::Target> targets;
+        targets.reserve(byDist.size());
+        for (const auto& n : byDist) targets.push_back(n.second);
         dancer_.Sync(targets);
         const std::array<int, 3> state{static_cast<int>(dancer_.Plots()),
                                        static_cast<int>(std::count_if(targets.begin(), targets.end(),
