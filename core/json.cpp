@@ -316,8 +316,10 @@ void WriteNumber(std::string& o, double d) {
     o.append(buf, r.ptr);
 }
 
+// indent < 0: compact (one line, no spaces).
 void WriteValue(std::string& o, const Value& v, int indent) {
     auto nl = [&](int n) {
+        if (indent < 0) return;
         o += '\n';
         o.append(static_cast<size_t>(n) * 2, ' ');
     };
@@ -335,7 +337,7 @@ void WriteValue(std::string& o, const Value& v, int indent) {
             for (size_t i = 0; i < v.items().size(); ++i) {
                 if (i) o += ',';
                 nl(indent + 1);
-                WriteValue(o, v.items()[i], indent + 1);
+                WriteValue(o, v.items()[i], indent < 0 ? indent : indent + 1);
             }
             nl(indent);
             o += ']';
@@ -351,8 +353,8 @@ void WriteValue(std::string& o, const Value& v, int indent) {
                 if (i) o += ',';
                 nl(indent + 1);
                 WriteString(o, v.keys()[i]);
-                o += ": ";
-                WriteValue(o, v.items()[i], indent + 1);
+                o += indent < 0 ? ":" : ": ";
+                WriteValue(o, v.items()[i], indent < 0 ? indent : indent + 1);
             }
             nl(indent);
             o += '}';
@@ -367,6 +369,12 @@ std::string Serialize(const Value& v) {
     std::string o;
     WriteValue(o, v, 0);
     o += '\n';
+    return o;
+}
+
+std::string SerializeCompact(const Value& v) {
+    std::string o;
+    WriteValue(o, v, -1);
     return o;
 }
 
