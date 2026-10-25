@@ -310,10 +310,11 @@ GadgetItem, Fabricator categories), re/save.md (GetPersistenceId, `_reverseIndex
 - **Use** (the link's `ScienceUIDisplayActivator`, a UIDisplayInteractable): opens the game's Quantum Cloud
   menu, the drone station menu without a station (`OpenCloudMenu` / `CloudFrame`, RE: re/drones.md "Drone
   station menu"): view only (no withdraw / send: those need a station), programming tab removed by the game,
-  the Quantum Cloud tab selected. Fallback (menu members missing, display not found): HUD notices (what it
+  opens on the drone list tab (round 14). Fallback (menu members missing, display not found): HUD notices (what it
   is, the five largest cloud amounts; `QueueText`, 1.5 s cooldown). Still a refinery input. Logs `Quantum
-  Cloud menu = the drone station menu '<name>'`, `Quantum Cloud menu open (cloud tab N; view only, no
-  station; legend: hid ... kept ...)`, `did not open within 10 s`.
+  Cloud menu = the drone station menu '<name>'`, `Quantum Cloud menu open (view only, no station, filled on
+  try N | not filled; cloud legend: hid ... kept ...; drone list legend: <Class> '<object>': hid ... kept ...)`,
+  `did not open within 10 s`.
   Round 12 ("the row shows to press [SPACE] and a magnifying glass, #watdatmean"): without a station the cloud
   page's legend is `DroneCloudInventoryMenu._defaultLegendConfig`, the map drone panel's (map controls that
   nothing in this menu handles). `HideCloudHints` switches its hints off (`IInputLegend.SetItemEnabled(event,
@@ -326,7 +327,15 @@ GadgetItem, Fabricator categories), re/save.md (GetPersistenceId, `_reverseIndex
   ("[SPACE] Go To"). `CloudFrame` now waits until the menu is active plus 0.15 s, retries a throw up to 3
   times, and selects the cloud tab and hides its hints either way. Logs `Quantum Cloud menu open (cloud tab N;
   view only, no station, filled on try N | not filled; legend: ...)` and, once per session,
-  `UpdateShowData(null) threw N time(s) (...) - the cloud tab and legend are set anyway`. RE: re/drones.md.
+  `UpdateShowData(null) threw N time(s) (...) - the legends are set anyway`. RE: re/drones.md.
+  Round 14 ("quantum cloud tab shouldnt be the default, leave it be as Drones tab"; log `TabbedControl.GoToTab
+  failed: System.NullReferenceException` on every open): the forced cloud tab is gone, so is that warning.
+  The drone list's "[SPACE] Go To" (the user's "Go To bug"): `DroneListButton.OnSubmit` raises
+  `GoToInMapRequested`, which only the map's drone panel subscribes to, so Space already does nothing here.
+  `HideListHints` switches the hints off (except cancel / back / close / exit) on every
+  `InputLegendFocusRegistrar` / `InputLegend` under `DroneMenuUI._droneList`, events read from their
+  configurations and hint entries (`HideHints`, shared with `HideCloudHints`). Not seen in game: which
+  component holds that page's legend (the log names it, or says `no legend under the drone list page`).
 - **Drone source** (`0x53520110`, after Silo, every target, while a link with a drone port is built):
   `GetSources` returns hidden storages (`sr2qstore`: `SiloStorage`, 8 slots, no type group, 999 each,
   own `AmmoModel`, active in hierarchy); catcher = the link's own `SiloCatcher`. Accepted cloud types
@@ -425,6 +434,16 @@ ToggleVariant, stacking), re/audio.md (GadgetMusicPlayer, corral Music Box), re/
   ~30 degrees and rolls on the egg), angular damping >= 0.8 (was 1.5), mass unchanged (0.5 kg, as the fox).
   Without CapsuleCollider members the round 12 ball + thin base stay. Dressed line: `ball r 0.47 off, egg r
   0.38 x 0.99 high, box base yes, automatic centre of mass yes, grip yes, rolls yes`.
+  Round 14 ("the egg shape hitbox is still too big, stays stuck on the bottom hitbox's edge somehow, like it
+  gets stuck on an EDGE"): the round 13 box stuck out 0.24 r below and around the egg's bottom; tipped, the
+  radio lay on the box's bottom edge plus the egg (a flat facet) with the automatic centre of mass only 0.07 r
+  above the egg's bottom centre, so it was nearly balanced there and the grippy material kept it. Now: egg 0.62 r
+  x 1.8 r with its bottom on the floor (was 0.8 x 2.1, 0.05 r up); the box a low footprint inside the egg's
+  bottom (1.1 x 0.4 egg radii = 0.68 r wide, 0.25 r high, bottom on the floor; its top corners inside the egg,
+  only the bottom face stands out). It stands upright on the base, tips at about 22 degrees, then the centre of
+  mass (about 0.37 egg radii above the egg's bottom centre) is beyond the egg's contact, so it falls onto the egg
+  and lies on its side, where the base is inside the capsule and nothing catches. Dressed line: `egg r 0.29 x
+  0.85 high`. Not tried in game; the numbers are from the geometry.
 - **Fabricator** (Decorations): booth after the Scientist Desk (Newbucks x2.5, items x2), stack after the
   Boombox (x1.5), radio after the stack (x0.5), Newbucks rounded to 5. Card icons (tile + details):
   `assets/icons/dj_booth.png` / `dj_speaker.png` / `slime_radio.png` when the user has drawn them, else the

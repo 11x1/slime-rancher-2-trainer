@@ -132,12 +132,11 @@ struct StackBox {
 constexpr StackBox kStackBox{1.2f, 1.7f, 0.9f};
 // The radio (BuildRadio, toy units, x the toy ball's radius r): the stack's height as a fraction of the ball's
 // diameter and the plinth it stands on; the egg (a capsule: radius, full height, bottom above the floor) and the
-// box base under it in the Fox Toy's proportions (toySteamFox: ball r 0.58 at y 0.14 over a 0.85 x 0.75 x 0.85
-// box at y -0.10, so the box is 1.47 x 1.29 egg radii, its bottom 0.06 below the ball's); the round 12 flat base
-// (used when there is no egg); linear and angular damping (at least).
+// box base inside its bottom (width and height in egg radii, bottom on the floor: round 14, see BuildRadio); the
+// round 12 flat base (used when there is no egg); linear and angular damping (at least).
 constexpr float kRadioFill = 0.82f, kRadioStand = 0.14f;
-constexpr float kRadioEggR = 0.8f, kRadioEggH = 2.1f, kRadioEggLift = 0.05f;
-constexpr float kRadioBaseW = kRadioEggR * 1.47f, kRadioBaseH = kRadioEggR * 1.29f;
+constexpr float kRadioEggR = 0.62f, kRadioEggH = 1.8f, kRadioEggLift = 0.0f;
+constexpr float kRadioBaseW = kRadioEggR * 1.1f, kRadioBaseH = kRadioEggR * 0.4f;
 constexpr float kRadioFlatW = 1.15f, kRadioFlatH = 0.14f;
 constexpr float kRadioDamping = 0.6f, kRadioAngDamping = 0.8f;
 constexpr float kIconTint = 0.7f;      // card icon / details picture: how far the base's colours go to the family's
@@ -1588,7 +1587,17 @@ void Impl::BuildSpeaker(Rec& rec, std::string& what) {
 // too much weight though, doesnt seem to roll over at ALL now)". Now the Fox Toy's setup: a box base under a
 // round top, the top a taller egg (a CapsuleCollider we add; the ball is switched off), and the centre of mass
 // automatic (Unity's, from the colliders: about 0.9 r above the floor), so a push tips it over and it rolls on
-// the egg. The stack is sized to fill the ball as before and centred on it, where the night light was: held in
+// the egg. Round 14 ("the egg shape hitbox is still too big, stays stuck on the bottom hitbox's edge somehow"):
+// the round 13 box (1.18 r wide, 1.03 r high, under an egg 0.05 r up) stuck out 0.24 r below and around the
+// egg's bottom, so a tipped radio lay on the box's bottom edge and the egg - a flat facet with the automatic
+// centre of mass only 0.07 r above the egg's bottom centre, nearly balanced, and the grippy material held it
+// there. Now the egg is smaller (0.62 r x 1.8 r, was 0.8 x 2.1) and reaches the floor, and the box is a low
+// footprint inside the egg's bottom: 1.1 x 0.4 egg radii, bottom on the floor, so its top corners lie inside the
+// egg (diagonal 0.78 R where the egg is 0.8 R wide) and only its bottom face stands out, as a flat disc would.
+// Standing it tips at about 22 degrees; past the base's edge the centre of mass (about 0.37 R above the egg's
+// bottom centre: the base is small) lies beyond the egg's contact, so it falls onto the egg and lies on its
+// side, where the base is inside the capsule and it rolls freely. The stack is sized to fill the ball as before
+// and centred on it, where the night light was: held in
 // the vacuum the root sits at the nozzle (round 9: "slime radio just disappears when vacced" - the old single
 // boombox hung below the root).
 void Impl::BuildRadio(Rec& rec, std::string& what) {
