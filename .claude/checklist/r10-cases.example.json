@@ -1,0 +1,446 @@
+[
+[
+"Menu only",
+"r10mp1",
+"Fabricator purchases options",
+[
+"Misc > General, Misc Tweaks card: no \"Fabricator\" / \"Vacpack\" headings, just rows.",
+"Open \"Fabricator purchases\": Normal, Skip animation, Instant each have a dim description line (like Surf slope limit).",
+"Pick Instant: the box reads \"Instant\"."
+]
+],
+[
+"Menu only",
+"r10mp2",
+"No group headings",
+[
+"Ranch > General: the Custom Upgrades card shows no \"Vacpack\" heading; the Extra Tank III/IV key rows sit among the other rows.",
+"Plot Upgrades and Sell Upgrades cards: no headings inside."
+]
+],
+[
+"Menu only",
+"r10mp3",
+"\"Context menu\" wording",
+[
+"Sandbox: hover a vacpack slot: the hints end with \"RMB context menu\".",
+"Hover a picker and a spawner item: \"RMB context menu / clear\"; the tooltip's key row says \"RMB context menu\".",
+"Upgrades and Blueprints tabs: hints end with \"RMB context menu\"."
+]
+],
+[
+"Menu only",
+"r10mp4",
+"Tooltip widths",
+[
+"Blueprints tab: hover a tile with a short name: the tooltip isn't squeezed (~160 px+).",
+"Hover a crate in the spawner: tooltip ~230 px wide.",
+"Hover a setting with a short help text: not squeezed."
+]
+],
+[
+"Menu only",
+"r10mp5",
+"Search clear (×)",
+[
+"Spawner search: type \"pink\": an × appears at the right end.",
+"Click ×: box empties, grid shows everything, you can type at once.",
+"Same in the vacpack picker, crafter, Slime DJ song search and Ctrl+Space search. Empty box: no ×."
+]
+],
+[
+"Menu only",
+"r10mc6",
+"Middle-click reset (from round 9)",
+[
+"Change a slider, a dropdown, a switch and a key bind.",
+"Middle-click each row: each goes back to its default.",
+"Middle-click a row in a locked (module-off) card: nothing changes.",
+"Key bind waiting for a key + middle button: binds the middle button."
+]
+],
+[
+"Menu only",
+"r10st1",
+"Sandbox in the sidebar",
+[
+"Open F8: a Sandbox entry (sparkle icon) below Misc; Misc shows only General.",
+"Click Sandbox: tabs General, Vacpack, Spawn & Craft, Upgrades, Weather.",
+"No save / Sandbox off: every tab shows the Enable sandbox card; Enable -> Cancel keeps it off.",
+"Ctrl+Space \"weather\": a Weather result under Page > Sandbox opens that tab; \"newbucks\" opens General."
+]
+],
+[
+"Ranch: anywhere (Sandbox on)",
+"r10st2",
+"Sandbox tabs and hint bar",
+[
+"General: banner, Newbucks and Player; no hint bar.",
+"Vacpack: a floating bar at the bottom, slightly wider than the cards (\"Point at a grid...\").",
+"Hover a slot, then the item grid: the bar shows their hints; moving onto the bar keeps them.",
+"Spawn & Craft: Spawner and Crafter side by side, taller grids, each with its own hints.",
+"Upgrades: hints for upgrades and blueprints. Weather: no hint bar.",
+"Scroll Upgrades, switch tabs and back, close/reopen F8: each tab keeps its scroll."
+]
+],
+[
+"Ranch: anywhere (Sandbox on)",
+"r10st3",
+"Slot context menu",
+[
+"Right-click a slot with an item: name, then one row with \"Fill (n/max)\" and \"Empty\", then Give/Spawn; no Upgrade/Downgrade/Max/Reset.",
+"Fill on a non-full slot: fills, menu closes. On a full slot: Fill disabled.",
+"Empty: empties. Right-click an empty or locked slot: nothing opens.",
+"Upgrades tab: changing Extra Tank still changes the slot count."
+]
+],
+[
+"Ranch: corral with a Music Box",
+"r10bw1",
+"Walls ripple to the beat",
+[
+"Slime DJ on, \"Walls dance to the music\" at 100 %, play a hardtekk song, stand near the corral.",
+"Every kick: one wall side bulges outwards like a vacpack shot, moving round the corral each beat; walls no longer stretch taller.",
+"200 %: much bigger pumping bulges, stronger glow. 10 %: small ripples.",
+"A ~120 BPM song: one slower, longer ripple per beat."
+]
+],
+[
+"Ranch: corral with a Music Box",
+"r10bw2",
+"Walls back to normal",
+[
+"Pause the song: ripples stop within ~1 s, walls vanilla.",
+"Play, then turn the setting off: vanilla within ~1 s.",
+"While dancing, shoot a chicken through the wall: vanilla ripple (stronger); after stopping, exactly vanilla.",
+"Buy High Walls while dancing: ripples continue, centred higher. Teleport away and back: resumes within ~2 s."
+]
+],
+[
+"Ranch: drone station",
+"r10dp1",
+"Programs switch",
+[
+"Station with 2 programs (e.g. plorts -> refinery, chickens -> incinerator); close the menu and watch.",
+"When the plort program has nothing left, the drone switches and starts the chicken program.",
+"If it keeps scanning without picking up a chicken: ~90 s later it switches back.",
+"Chickens in a coop: set that program's source to Coop, Start Program: it carries chickens to the incinerator."
+]
+],
+[
+"Ranch: drone station",
+"r10dp2",
+"Programs dialog look",
+[
+"Open a station, press P: buttons look like the game's cyan pills, Close shows a P key, the running row has the active icon and a teal \"Running\" pill.",
+"Edit on the other program: dialog closes, the page shows it, button reads Program 2/2.",
+"Close the station menu without changes: no \"discard\" prompt."
+]
+],
+[
+"Ranch: drone station",
+"r10dp3",
+"No switching while the menu is open",
+[
+"Open the station menu, switch to the Drone List tab, wait 30 s: no program switch.",
+"Close the menu from there: no discard prompt.",
+"Change the target without Start Program and close: the game's discard prompt appears (vanilla)."
+]
+],
+[
+"Full map (Reveal everything off)",
+"r10tp1",
+"Teleport refusal message",
+[
+"Open the full map.",
+"Right-click a fogged spot: fail sound, the key bar reads \"Teleport refused: that spot is not on your map yet\" for ~3 s, then \"Teleport\".",
+"Right-click a clear spot: you teleport, HUD shows \"Teleported to ...\".",
+"Close the map after a refusal: no late pile of pop-ups."
+]
+],
+[
+"Ranch: expansion door",
+"r10pl1",
+"Expansion purchase popup",
+[
+"Interact with a locked expansion's purchase terminal: Cancel left, Purchase right.",
+"Cancel: nothing bought.",
+"Open again and buy: unlocks normally."
+]
+],
+[
+"Ranch: silo",
+"r10pl2",
+"Sell-All button",
+[
+"Empty the silo, press the gold button: receipt opens with no rows, \"There are no plorts in this silo.\", Sell greyed; no text floats over the button.",
+"Cancel. Put plorts in, press, Sell: they sell, still no text over the button."
+]
+],
+[
+"Ranch: coop",
+"r10pl3",
+"Plush hen in the corner",
+[
+"Coop with Faster Hens II: the plush hen sits upright in the corner diagonal from the elder collector, slightly turned (if it faces the wall, say so)."
+]
+],
+[
+"Ranch: garden",
+"r10pl4",
+"Sprinkler tier icons",
+[
+"Garden menu with the Sprinkler owned: Sprinkler II shows the vanilla Sprinkler icon.",
+"Buy it: Sprinkler III also shows it."
+]
+],
+[
+"Ranch: corral",
+"r10pl5",
+"Music Box sell button",
+[
+"On a newly bought corral: buy Music Box, then Music Box II.",
+"Sell Music Box II: the card shows Purchase (Music Box II) with \"Sell +175\" on its left.",
+"Close and reopen: Sell still there. Press it: Music Box sold.",
+"Repeat on an older corral."
+]
+],
+[
+"Ranch: Fabricator",
+"r10ql1",
+"Quantum link card",
+[
+"Fabricator > Warp Tech, the card after the Refinery Link: purple-tinted icon.",
+"Select it: purple details picture, description starts \"A Refinery Link wired to your Quantum Cloud...\".",
+"Select the Refinery Link card: vanilla picture and text."
+]
+],
+[
+"Ranch: gadget mode",
+"r10ql2",
+"Quantum link placement",
+[
+"Hold a Refinery Link: label \"Refinery Link\", normal preview.",
+"Press the Variant key to Quantum Storage Link: label \"Quantum Storage Link\", purple preview.",
+"Place it: purple hotbar icon; aiming at it shows \"Quantum Storage Link\"; a plain link shows \"Refinery Link\"."
+]
+],
+[
+"Ranch: placed Quantum Storage Link",
+"r10ql3",
+"Quantum link glow and Use",
+[
+"Look at it: a small purple/cyan glow ~1 m up.",
+"Watch 10 s: every few seconds it flickers and jumps for ~0.5 s, then returns.",
+"Press E: no refinery screen; HUD notices with up to 5 cloud types and counts (or \"The Quantum Cloud is empty\"). E again at once: no second burst.",
+"E on a plain Refinery Link: normal refinery screen."
+]
+],
+[
+"Ranch: drone station",
+"r10ql4",
+"Quantum source icon",
+[
+"Program menu, choose a source: \"Quantum Storage Link\" shows the purple icon."
+]
+],
+[
+"Menu only",
+"r10so1",
+"Shift+Tab vs Steam (third try)",
+[
+"In a save, press F8.",
+"Shift+Tab several times, both orders: the Steam overlay does not open.",
+"Close F8, Shift+Tab: the Steam overlay opens.",
+"Reopen F8, wait ~10 s, Shift+Tab: still no Steam overlay."
+]
+],
+[
+"Menu only",
+"r10so2",
+"Tab focus",
+[
+"Open F8 on a settings page, press Tab a few times: a focus frame moves through sidebar, top bar and cards.",
+"Shift+Tab: moves back, no Steam overlay.",
+"In the Ctrl+Space search box, Tab: nothing breaks."
+]
+],
+[
+"Title screen",
+"r10qs1",
+"Continue automatically",
+[
+"Quick Start \"Continue automatically\" on; restart the game, touch nothing: ~0.5-3 s after the main menu appears the latest save loads.",
+"Restart holding Shift: you stay in the main menu with the \"Staying in the main menu\" note.",
+"Restart, open F8 at the main menu, press Shift, close F8: still loads automatically.",
+"Restart and click Continue yourself first: loads once, no second load."
+]
+],
+[
+"Ranch: anywhere (Sandbox on)",
+"r10ti1",
+"Time of day: skip",
+[
+"Sandbox > Weather: the clock shows today's day and time.",
+"Click 18:00: \"skipping ahead to 18:00 ...\", the sky moves fast, stops at 18:00.",
+"Start a skip ~12 h ahead, click Stop skipping: stops at once."
+]
+],
+[
+"Ranch: anywhere (Sandbox on)",
+"r10ti2",
+"Time of day: rewind and pause",
+[
+"Slider to 30 min ago, Rewind: confirmation; Cancel changes nothing.",
+"Rewind and confirm: clock 30 min earlier.",
+"Pause time on, wait a minute: clock stopped, \"paused\". Off: runs again.",
+"Pause on, Sandbox off and on: clock runs.",
+"Rewind 30 min, save, reload: the rewound time."
+]
+],
+[
+"Ranch: anywhere (Sandbox on)",
+"r10ti3",
+"Weather zone at the ranch",
+[
+"Open the zone dropdown at the ranch: \"Where you are (The Conservatory: no weather)\" is greyed out with a tooltip, can't be picked."
+]
+],
+[
+"Rainbow Fields",
+"r10ti4",
+"Weather zone in a weather zone",
+[
+"Zone dropdown: \"Where you are (Rainbow Fields)\" can be picked; the card follows you.",
+"Walk back to the ranch: the card says the Conservatory has no weather."
+]
+],
+[
+"Ranch: gadget mode",
+"r10ti5",
+"Gadget menu refresh",
+[
+"Open the place-gadget menu on a category (e.g. Decorations).",
+"In the Sandbox crafter craft a gadget from it you have none of; close the overlay: it's in the open menu with its count.",
+"Same with a DJ Booth / Quantum Storage Link: the base gadget's count goes up."
+]
+],
+[
+"Main menu -> load a save",
+"r10ti6",
+"Pinned icon without the Fabricator",
+[
+"Load a save and open the Sandbox crafter at once: within a few seconds Pinned shows the game's pin icon.",
+"Open the Fabricator afterwards: works normally."
+]
+],
+[
+"Ranch: DJ Booth placed",
+"r10dj1",
+"Booth standby and dancing",
+[
+"With a song loaded, switch the booth on (E) with no slime behind it: the corral music box tune plays, boomboxes dance.",
+"Let a slime sit on the pillow: the tune stops, the Slime DJ song plays, the slime turns on the seat.",
+"Switch it off (E): silence; the slime stays but stops turning."
+]
+],
+[
+"Ranch: gadget mode",
+"r10dj2",
+"DJ items in placement mode",
+[
+"Hold a Boombox, Variant until \"DJ Speaker Stack\": that label, ghost shows two stacked boomboxes, no tilted variants.",
+"Hold a Scientist Desk, Variant to Slime DJ Booth: that label, ghost shows the dressed booth.",
+"Place both and aim at each: the mod names show."
+]
+],
+[
+"Ranch: anywhere",
+"r10dj3",
+"Slime Radio",
+[
+"Fabricate a radio: a small upright two-boombox stack appears in front of you.",
+"Vacuum it: stays visible at the nozzle.",
+"Shoot it out: still a radio."
+]
+],
+[
+"Ranch: Fabricator",
+"r10dj4",
+"DJ cards",
+[
+"Decorations: \"DJ Speaker Stack\" and \"Slime DJ Booth\" show their own descriptions."
+]
+],
+[
+"Menu only",
+"r10dj5",
+"Brighter mod icons",
+[
+"Sandbox crafter / Mod buildables tab: mod icons clearly brighter; speaker and radio icons show a stack; booth shows deck, monitors and bench."
+]
+],
+[
+"Shop",
+"r10dj6",
+"Radio in the daily toy rotation",
+[
+"Daily Deals over several restocks: usually a vanilla toy; about one in four the Slime Radio takes its place (Boombox picture, 1000).",
+"Buy it: Newbucks spent once, entry sold out, a radio arrives.",
+"Range Exchange: no Slime Radio."
+]
+],
+[
+"Ranch: Fabricator",
+"r10sh1",
+"Shadow Catcher warning",
+[
+"Open the Shadow Catcher card: the description ends with the sunlight warning."
+]
+],
+[
+"Ranch: corral with a Solar Shield (day)",
+"r10sh2",
+"Shaded shadow slime",
+[
+"Shoot a shadow slime in: it stays, no scared face; wait 2 min: still there.",
+"Throw 10+ fruits at it: no plorts from the hits; at most one plort from eating while hungry, then mischievous face."
+]
+],
+[
+"Ranch: corral without a Solar Shield",
+"r10sh3",
+"Shadow slime in the sun",
+[
+"Daytime (07:00-17:00): shoot one in: scared face; ~15-30 s later it hops about and vanishes.",
+"Again, but vac it within ~10 s and shoot it into the shielded corral: normal face, stays.",
+"At night (after 18:00): stays, no scared face; at daybreak the scared face appears and it fades unless shaded."
+]
+],
+[
+"Ranch: any corral",
+"r10sh4",
+"Shadow hunger rhythm",
+[
+"While hungry, feed one food: one Shadow plort, then mischievous face.",
+"Feed more: eaten, no plorts.",
+"Wait a few game hours (Sandbox time skip helps): the next food makes a plort again."
+]
+],
+[
+"Grey Labyrinth",
+"r10sh5",
+"Wild shadow slimes unchanged",
+[
+"Hit wild shadow slimes with plorts: plorts drop, they scatter as in vanilla."
+]
+],
+[
+"Menu only",
+"r10sh6",
+"Slimepedia sunlight note",
+[
+"English, Shadow Catcher owned: Slimepedia > Shadow Slime > Rancher Risks has the sunlight note after the vanilla text."
+]
+]
+]

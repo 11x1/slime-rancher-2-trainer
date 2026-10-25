@@ -2,6 +2,20 @@
 
 Build tested: cc71186 (develop). Results are in the checklist artifact https://claude.ai/artifact/LVUtmDa1e6KDWD2WpQfY3V (collection `results`, ids `r10*`; free-text notes in `misc/notes`). Start with [agent-context.md](agent-context.md): it cuts what every agent below spends on finding context.
 
+## How to run this round (for the session that picks it up)
+The user's working rules are in the auto-memory (orchestrator mode, Opus subagents at medium effort, git workflow, no session link, plain commands, checklist conventions, read logs yourself). In short:
+1. Back up the saves first. `deploy.ps1` does it on every deploy; for a manual backup, copy `%USERPROFILE%\AppData\LocalLow\MonomiPark\SlimeRancher2\Steam\` to `save-backups\<timestamp>`.
+2. Spawn one agent per task below: `model: "opus"`, `effort: "medium"`, `isolation: "worktree"`, at most 3 at a time unless the user says otherwise. Each prompt is: "Read `.claude/agent-brief.md` and follow it", the task's section from this file, and the branch name. The brief tells the agent to start from `re/INDEX.md`.
+3. When an agent reports, check its branch builds. Merge it into develop with `git merge --no-ff <branch> -m "Merge <branch> into develop"`. The post-merge hook runs `deploy.ps1 -Build`, which backs up the saves and the old DLL. If the game is running, the deploy is refused: run `.\deploy.ps1 -Build -WaitForExit` in the background. Set `SR2MODS_NO_DEPLOY=1` for docs-only merges. Never merge into master; that happens only when the user calls a build stable. `git push` is the user's job: give them `git push origin develop`.
+4. Collect each agent's test cases (WHERE plus numbered steps). When all are merged, build the Round 11 checklist as described in `.claude/checklist/README.md`. Add the carry-over list at the end of this file under the Skipped fold.
+5. After the user's test, read the results and write `round-12.md` the same way. Delete this file once its tasks are merged and tested.
+
+Waves (3 agents each, tasks are independent):
+- Wave 1: `fix/quick-start-crash` + `feature/sandbox-r11` (tasks 1 and 3; one agent, two branches), `feature/buildables-r11` (task 4), `feature/slime-dj-r11` (task 5).
+- Wave 2: `feature/menu-nav-r11` (task 2), `fix/drone-switch-r11` (task 6), `chore/vanilla-card-icons` (task 7, with `custom-icons.md`).
+Tasks 2 and 3 both touch the overlay (Sandbox tab, tooltips); if they run at the same time, the second to finish rebases onto develop.
+
+## Tasks
 Suggested agent split (one branch each, off develop). User quotes are verbatim.
 
 ## 1. Quick start crash (blocker)
