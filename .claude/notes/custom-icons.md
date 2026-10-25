@@ -12,7 +12,7 @@ The extracted game icons for reference are in `assets/icons/game/` (gitignored);
 
 ## Done by the user
 - `mods_tab` (Options menu Mods tab), `hen_collector_source`, `elder_collector_source`, `dj_speaker` (DJ Speaker Stack card, from stackedradio.png), `dj_booth` (DJ Booth card, with a 512 px `dj_booth_large`), `slime_radio` (Slime Radio card, the same stacked-radio drawing as `dj_speaker`, the user's choice).
-- `growth_1` (Sprinkler II card, from the user's sprinkler_2.png), `sprinkler_1` (the vanilla Sprinkler card, garden T1, from sprinkler_1.png), `music_1` (the vanilla Music Box card, corral T1, from music_1.png), `plort_door` (collectible tracker row under the minimap, from plortDoor.png). `ash_boost` (Ash Booster card, from ashtray.pdf: the 512 px JPEG inside a print-to-PDF, white background made transparent). All the user's own drawings (2026-10-25).
+- `growth_1` (Sprinkler II card, from the user's sprinkler_2.png), `sprinkler_1` (the vanilla Sprinkler card, garden T1, from sprinkler_1.png), `music_1` (the vanilla Music Box card, corral T1, from music_1.png), `plort_door` (collectible tracker row under the minimap, from plortDoor.png). `ash_boost` (Ash Booster card, from ashtray.pdf (second version, with embers): the 512 px JPEG inside a print-to-PDF, white background made transparent). All the user's own drawings (2026-10-25).
 - Vanilla cards (Sprinkler, Music Box) get their drawing through `VanillaIconName` in `modules/custom_upgrades/module.cpp`, only while custom upgrades are on; another vanilla card = one more line there plus `assets/icons/<name>.png`.
 - Kept vanilla on purpose (the user's choice, no drawing planned): `growth_2` (Sprinkler III, "use default for T3"), `music_2` (Music Box II, "use default for speakers II").
 
