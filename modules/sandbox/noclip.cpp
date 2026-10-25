@@ -18,6 +18,12 @@
 // motor's transient position + this frame's move goes through SetPosition. What a KCC
 // tick adds in between (one tick of air control from the movement input) is tiny and
 // zeroed again next frame. Rotation and mouse look are untouched (the motor still runs).
+//
+// Kill volumes (the slime sea and fall-through volumes: KillOnTrigger; the Labyrinth cloud ocean:
+// KillOnTriggerCloudOcean) still see the player's capsule, so flying into them knocked the player out.
+// Both end in the static DeathHandler.Kill(GameObject, Damage) -> IDeathHandler (PlayerDeathHandler.OnDeath);
+// while noclip is on, a Kill of the player is dropped there, and KillOnTrigger.OnTriggerEnter for the
+// player's main collider is skipped too (no "Fallthrough destroying" log line, no splash FX).
 
 #include "modules/sandbox/noclip.h"
 
@@ -89,6 +95,16 @@ const MethodInfo* g_setPosition = nullptr;        // KinematicCharacterMotor.Set
 const MethodInfo* g_trForward = nullptr;          // Transform.get_forward
 const MethodInfo* g_trRight = nullptr;            // Transform.get_right
 const MethodInfo* g_lockState = nullptr;          // Cursor.get_lockState (optional)
+const MethodInfo* g_isPlayerCollider = nullptr;   // PhysicsUtil.IsPlayerMainCollider(Collider) (optional)
+
+// ---- kill volume hooks (optional; toggle with the module) ----
+using KillFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+using TriggerFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+KillFn g_origKill = nullptr;
+TriggerFn g_origKillTrigger = nullptr;
+sr2::core::DetourGuard g_killGuard{kModule, "DeathHandler.Kill"};
+sr2::core::DetourGuard g_killTriggerGuard{kModule, "KillOnTrigger.OnTriggerEnter"};
+bool g_loggedKillSkip = false;  // once per noclip session
 
 // ---- state (main thread) ----
 bool g_on = false;
@@ -240,6 +256,7 @@ void Start() {
     g_on = true;
     g_lastCheck = GetTickCount64();
     g_loggedMoveFail = false;
+    g_loggedKillSkip = false;
     Hold(ctrl, motor);
     sr2::modules::common::NoclipFlag().store(true);
     const V3 p = unity::Field<V3>(motor, g_offTransient);
@@ -302,6 +319,48 @@ void Move(Il2CppObject* ctrl, Il2CppObject* motor) {
     Call(g_setPosition, motor, {&pos, &bypassInterpolation}, "KinematicCharacterMotor.SetPosition");
 }
 
+// While noclip is on: `go` is the noclipping player's GameObject (the controller's own, or SceneContext.player).
+bool IsNoclipPlayer(Il2CppObject* go) {
+    if (!g_on || !go || !unity::IsAlive(go)) return false;
+    Il2CppObject* ctrl = g_ctrl ? unity::GCHandleTarget(g_ctrl) : nullptr;
+    if (!ctrl || !unity::IsAlive(ctrl)) return false;
+    if (unity::GameObjectOf(ctrl) == go || unity::GetComponent(go, g_srccClass) == ctrl) return true;
+    Il2CppObject* sc = SceneContext();
+    return sc && unity::Field<Il2CppObject*>(sc, g_offScPlayer) == go;
+}
+
+void LogKillSkip(const char* where) {
+    if (g_loggedKillSkip) return;
+    g_loggedKillSkip = true;
+    SR2_INFO("[{}] noclip: kept the player out of a kill volume ({}); logged once per noclip", kModule, where);
+}
+
+// DeathHandler.Kill(GameObject, Damage), static: the end of every kill volume. Dropped for the noclipping player.
+void KillDetour(Il2CppObject* go, Il2CppObject* damage, const MethodInfo* mi) {
+    bool skip = false;
+    if (g_on && g_killGuard.Run([&] { skip = IsNoclipPlayer(go); }) && skip) {
+        LogKillSkip("DeathHandler.Kill");
+        return;
+    }
+    g_origKill(go, damage, mi);
+}
+
+// KillOnTrigger.OnTriggerEnter(Collider): the slime sea. Skipped for the noclipping player's main collider.
+void KillTriggerDetour(Il2CppObject* self, Il2CppObject* collider, const MethodInfo* mi) {
+    bool skip = false;
+    if (g_on && g_killTriggerGuard.Run([&] {
+            if (!collider || !unity::IsAlive(collider)) return;
+            // The game's own test (also what KillOnTrigger uses to pick the player FX); one player, so it is ours.
+            bool main = false;
+            skip = CallValue(g_isPlayerCollider, nullptr, {collider}, "PhysicsUtil.IsPlayerMainCollider", main) && main;
+        }) &&
+        skip) {
+        LogKillSkip("KillOnTrigger");
+        return;
+    }
+    g_origKillTrigger(self, collider, mi);
+}
+
 }  // namespace
 
 void SetupNoclip(sr2::core::ModuleContext& ctx) {
@@ -322,8 +381,9 @@ void SetupNoclip(sr2::core::ModuleContext& ctx) {
         x.tooltip = tip;
         settings::Register(x);
     };
-    def(kKeyToggle, "Noclip key", Kind::Key, 'N', 0, 255, 1,
-        "Switches noclip on and off while Sandbox is on (not while a menu or the overlay is open).");
+    def(kKeyToggle, "Noclip key", Kind::Key, 0, 0, 255, 1,
+        "Switches noclip on and off while Sandbox is on (not while a menu or the overlay is open). Unbound by "
+        "default.");
     def(kKeyUp, "Fly up", Kind::Key, VK_SPACE, 0, 255, 1, "Hold to rise while noclipping.");
     def(kKeyDown, "Fly down", Kind::Key, VK_CONTROL, 0, 255, 1, "Hold to sink while noclipping.");
     def(kKeySpeed, "Noclip speed", Kind::Float, 15, 1, 200, 1, "How fast noclip moves you.");
@@ -383,6 +443,27 @@ void SetupNoclip(sr2::core::ModuleContext& ctx) {
             g_inChildren = R.MethodByParams(go, "GetComponentInChildren", {"System.Type"}, &err);
         if (Il2CppClass* cursor = R.Class("UnityEngine.CoreModule", "UnityEngine", "Cursor", &err))
             g_lockState = R.Method(cursor, "get_lockState", 0, &err);
+        if (Il2CppClass* pu = R.Class(kImage, "", "PhysicsUtil", &err))
+            g_isPlayerCollider = R.Method(pu, "IsPlayerMainCollider", 1, &err);
+    }
+    // Kill volumes: optional hooks; without them noclip still works, but the slime sea knocks you out.
+    if (w.empty()) {
+        auto hook = [&](const char* ns, const char* klass, const char* name, int argc, const char* hookName,
+                        void* detour, void** orig) {
+            std::string err;
+            Il2CppClass* k = R.Class(kImage, ns, klass, &err);
+            const MethodInfo* m = k ? R.Method(k, name, argc, &err) : nullptr;
+            void* target = m ? R.MethodPointer(m, &err) : nullptr;
+            if (target && ctx.HookAddress(hookName, target, detour, orig))
+                SR2_INFO("[{}] noclip: {} hook ready (+0x{:X})", kModule, hookName, Resolver::Rva(target));
+            else
+                SR2_WARN("[{}] noclip: no {} hook ({})", kModule, hookName, err.empty() ? ctx.failure() : err);
+        };
+        hook("MonomiPark.SlimeRancher.Damage", "DeathHandler", "Kill", 2, "DeathHandler.Kill",
+             reinterpret_cast<void*>(&KillDetour), reinterpret_cast<void**>(&g_origKill));
+        if (g_isPlayerCollider)
+            hook("", "KillOnTrigger", "OnTriggerEnter", 1, "KillOnTrigger.OnTriggerEnter",
+                 reinterpret_cast<void*>(&KillTriggerDetour), reinterpret_cast<void**>(&g_origKillTrigger));
     }
     if (w.empty())
         SR2_INFO("[{}] noclip ready (motor solvers 0x{:X} / 0x{:X}, BaseVelocity 0x{:X}, BypassGravity 0x{:X}; input vector {}, "
@@ -433,12 +514,6 @@ void NoclipTick(bool live) {
     }
     Hold(ctrl, motor);
     Move(ctrl, motor);
-}
-
-void NoclipRequest(bool on) {
-    if (on == g_on) return;
-    if (on) Start();
-    else Stop("the Sandbox page", true);
 }
 
 bool NoclipOn() { return g_on; }

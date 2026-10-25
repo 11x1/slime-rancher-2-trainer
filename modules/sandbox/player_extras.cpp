@@ -395,7 +395,6 @@ void Handle(extras::Op op, long long value) {
         }
         case extras::Op::TeleportToMarker: DoTeleport(); break;
         case extras::Op::UnlockExpansions: DoUnlockExpansions(); break;
-        case extras::Op::Noclip: NoclipRequest(value != 0); break;
     }
     Publish();
 }

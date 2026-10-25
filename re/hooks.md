@@ -46,6 +46,7 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | CompanyLogoScene.Start(0) | 0x688500 | quick_start.CompanyLogoScene.Start | quick_start/module.cpp | skip intro logos |
 | ConfirmPopup.IDisplayShowDataHandler<ConfirmPopupSetup>.UpdateShowData(1) | 0x6D09D0 | sell_upgrades.ConfirmPopup.UpdateShowData | sell_upgrades/module.cpp | expansion popup order; explicit interface impl, found by name suffix |
 | ConfirmPopup.<>c.<...UpdateShowData>b__27_0(2) | 0x6E5960 | sell_upgrades.ConfirmPopup.<UpdateShowData>b__27_0 | sell_upgrades/module.cpp | prompt sort comparison; nested <>c, by suffix (6-byte body) |
+| DeathHandler.Kill(GameObject, Damage) (MP.SR.Damage, static) | 0xAC5BA0 | sandbox.DeathHandler.Kill | sandbox/noclip.cpp | noclip: drop kills of the noclipping player (every kill volume ends here; opt) |
 | DeathObscurer.StartObscuring(3) | 0x8670C0 | quick_travel.DeathObscurer.StartObscuring | quick_travel/module.cpp | shorten death fade |
 | DetailsMoreButtonView.BindData(1) | 0x839F00 | sell_upgrades.DetailsMoreButtonView.BindData | sell_upgrades/module.cpp | Sell button on plot card |
 | DroneProgramMenu.HandleActivateDrone(1) | 0x81AA20 | drone_price_limit.DroneProgramMenu.HandleActivateDrone | drone_price_limit/station_dialog.cpp | station menu dialog / programs |
@@ -99,13 +100,14 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | IntroSequenceUIRoot.StartFrame(1) | 0x725250 | quick_start.IntroSequenceUIRoot.StartFrame | quick_start/module.cpp | skip new-game intro |
 | JumpAbilityBehavior.Start(0) | 0xA78070 | hl2_movement.JumpAbilityBehavior.Start | hl2_movement/module.cpp | jump queue |
 | JumpAbilityBehavior.UpdateVelocity(2) | 0xA782E0 | hl2_movement.JumpAbilityBehavior.UpdateVelocity | hl2_movement/module.cpp | Source-style jump |
+| KillOnTrigger.OnTriggerEnter(1) | 0x871A40 | sandbox.KillOnTrigger.OnTriggerEnter | sandbox/noclip.cpp | noclip: skip the slime sea for the player's main collider (no log line / splash FX; opt) |
 | KFCCharacterController.ClampAirborneHorizontalVelocity(2) | 0x5BBD40 | hl2_movement.ClampAirborneHorizontalVelocity | hl2_movement/module.cpp | air strafing |
 | KFCCharacterController.HandleAirborneDrag(3) | 0x5BC310 | hl2_movement.HandleAirborneDrag | hl2_movement/module.cpp | air movement |
 | KFCCharacterController.HandleGravity(2) | 0x5BC3D0 | hl2_movement.HandleGravity | hl2_movement/module.cpp | gravity |
 | KFCCharacterController.HandleHorizontalAirborneMovement(3) | 0x5BC840 | hl2_movement.HandleHorizontalAirborneMovement | hl2_movement/module.cpp | air acceleration |
 | KFCCharacterController.HandleStablyGroundedDrag(2) | 0x5BCCA0 | hl2_movement.HandleStablyGroundedDrag | hl2_movement/module.cpp | ground friction |
 | KFCCharacterController.HandleStablyGroundedVelocity(2) | 0x5BCCF0 | hl2_movement.HandleStablyGroundedVelocity | hl2_movement/module.cpp | ground acceleration |
-| KFCCharacterController.UpdateVelocity(2) | 0x5BEF50 | hl2_movement.UpdateVelocity | hl2_movement/module.cpp | movement frame entry; vanilla pass-through while the Sandbox noclip is on (no own hook: sandbox/noclip.cpp writes motor fields and calls SetPosition per frame) |
+| KFCCharacterController.UpdateVelocity(2) | 0x5BEF50 | hl2_movement.UpdateVelocity | hl2_movement/module.cpp | movement frame entry; vanilla pass-through while the Sandbox noclip is on (sandbox/noclip.cpp writes motor fields and calls SetPosition per frame; its own hooks are only the kill volumes) |
 | KinematicCharacterMotor.HandleVelocityProjection(3) | 0x599AB0 | hl2_movement.KinematicCharacterMotor.HandleVelocityProjection | hl2_movement/module.cpp | ramp clip (opt); every KCC motor, filters player |
 | LandPlot.AddUpgrade(1) | 0x988750 | custom_upgrades.LandPlot.AddUpgrade | custom_upgrades/module.cpp | custom plot tiers |
 | LandPlot.HasUpgrade(1) | 0x989190 | custom_upgrades.LandPlot.HasUpgrade | custom_upgrades/module.cpp | custom plot tiers |

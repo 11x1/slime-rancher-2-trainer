@@ -5,7 +5,9 @@
 // lets the vanilla tick run untouched while it is set (no Source movement, no
 // fall-through recovery, which would teleport a noclipping player back up).
 //
-// Set and cleared by the noclip on the Unity main thread; read from any thread.
+// Set and cleared by the noclip on the Unity main thread (on and off only by its
+// key, or off when Sandbox goes off / the scene changes); read from any thread.
+// The noclip's own kill-volume hooks use its internal state, not this flag.
 
 #include <atomic>
 
