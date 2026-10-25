@@ -418,6 +418,12 @@ once, retried every 10 s until the groups are loaded, GC handles), then
 `GadgetModel.transform` alive and active = loaded. This refresh runs at most every 4 s, during a box scan
 (2 s) while some speaker plays; between refreshes only the lamps already held are re-weighed. Up to 48
 lamps at once, nearest to a speaker first.
+*Faster start* (round 14: "lamps take a bit to kick in with reacting to the music"): a speaker joins its
+song in `TickSong` (`sp.clipGen`), up to one box scan (2 s) before `SyncLamps` saw it, and a new speaker
+next to ones already playing waited for the 4 s refresh. Now `PollLamps` (every 0.25 s, a loop over the
+speakers, no game calls) compares a signature of the playing speakers (speaker, channel) with the one of
+the last `SyncLamps` and resyncs on a change, and `LampPulser::Sync` refreshes the lamp list within 0.5 s
+(`kNewSourceSeconds`) when a source (channel + position) joined that the previous call did not have.
 
 *More lamps* (round 13: "Add support for 'Pink Striped Lamp', 'Conservatory Lamp', 'Blue Lava Lamp', 'Ice
 Lamp' and the glowing ice things in the snow map if possible"). Lamp kinds by gadget prefab:
@@ -431,11 +437,24 @@ Per lamp the pulse touches:
   black emission on lamp bodies, snow and the conservatory cone is left alone). `_Color` is tinted only on
   glow volumes / lightning (elsewhere it is the albedo).
 - up to 4 `Light` components: `Light.intensity` and `Light.color` (HDRP forwards to these, `re/unity.md`).
-  The Ice Lamp's light is run by a `LightControl` (gradient colour, writes the light on its own update
-  ticks). So each frame the pulse reads the light; a value it did not write itself becomes the new base,
-  and restore only puts the base back while the light still shows the pulse's last value. If the
-  LightControl runs after the mod's frame callback on its tick, that frame shows the plain light (a
-  short dip at most; not seen in game yet).
+  Each frame the pulse reads the light; a value it did not write itself becomes the new base, and restore
+  only puts the base back while the light still shows the pulse's last value.
+- *LightControl lights* (Ice Lamp, Powderfall's glowing ice). Round 14 test: "Debug shows them but they dont
+  seem to pulse (just the ice ones, other lights work as expected)". `LightControl.Update` (IDA, `re/world.md`)
+  calls `LightExtensions.SetIntensity` every frame when not animated (else on each of its ticks while its
+  renderer is visible), in the same Update phase as the mod's tick (EventSystem.Update, order undefined), so
+  it overwrote the pulse. Also the cube's visible glow is `_LightControlColor` on its material instance
+  (`LightControl.Awake`: `materialRenderer.material`), which the pulse never touched: the Ice Lamp logged
+  `0 glowing renderer(s), 1 light(s)`. Round 15: while a lamp pulses, each of its lights' LightControl
+  (matched by `LightControl.thisLight`) is disabled (`Behaviour.set_enabled(false)`) and its `Update` is
+  called from the pulse (`Resolver::Invoke`) right before the light is read, so the gradient colour, the
+  material colour and the base intensity stay the game's and the pulse is written last. `_LightControlColor`
+  is a pulsed HDR colour read back from the material every frame (x the bolt factor in the property
+  block). Restore enables the LightControl again; its `OnEnable` switches the Light on, so the Light's own
+  enabled state (CullablePointLight turns far lights off) is put back after it. A LightControl the game
+  disabled itself is left alone. Log once: `lamps: took over a LightControl light ...`; the build log marks
+  such lights `(LightControl)` and logs the first 4 ice crystals separately from the first 8 lamps.
+  Untested: whether the ice shader brightens with `_LightControlColor` above 1.
 
 *Glowing scene ice* (Powderfall Bluffs): the crystals are scene objects `iceCube0N_light` (material
 `objIce_IceCube01_lightGradient*`, HDR `_InnerEmission`) with a child "Point Light Gradient" (point Light
