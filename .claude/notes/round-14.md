@@ -64,3 +64,12 @@ The user's main complaint: our buttons are not the game's. Clone the game's own 
 - Not tested this round: r12ml6, r12pg4, r12nc2, r12pg1, r12dj6, r12lp4, r11qs2-4, r11cr3.
 - r13lp3 (glowing ice) is retested with F's highlighter.
 - From earlier rounds: r7sb8, r9wx3, r9wx4, r10cr3, r10cr4, r7bd6, r9rs3, r10dj6, r10dp3, r9dp4, r9dp5, r7dr2, r4dr3, r10sh2-5, r9sh4, r9sh5, r9sh7, r8tp3, r4mm4, r6vu4, hc4, p7, ug2, ug3, sv2, ut6.
+
+## I. Quantum Storage Link look (`feature/quantum-link-look-r14`)
+Added by the user while round 14 was running:
+- "the drone has a cool effect when passing through it, can we make the quantum link have the same effect in random intervals (so it shows its quantum?)". Find the effect a drone shows when it passes through the link or the Quantum Cloud (a teleport / dissolve / glitch shader or particle), and play it on the link at random intervals.
+- "the purple is too strong". Tone the purple tint down.
+- "i dont like the pinging effect it has, too quick for my liking". Slow the pulse or ping down, or remove it.
+- "also has a suction effect on the output (comes from the refinery link's model) maybe it's removable?" Remove or switch off the Refinery Link's suction effect on the link.
+- "also the gadget name for it shows 'Refinery Link'". The placed gadget's name (the look-at label / gadget mode name) should read "Quantum Storage Link".
+- "maybe the agent can even switch the small arrows to the other side or somehow take them from elder collector outputs? shows like items can go in the link which they cant". The arrow markers suggest items go into the link. Flip them to point outwards, or use the Elder Collector's output arrows.
