@@ -2,6 +2,9 @@
 
 Build tested: cc71186 (develop). Results are in the checklist artifact https://claude.ai/artifact/LVUtmDa1e6KDWD2WpQfY3V (collection `results`, ids `r10*`; free-text notes in `misc/notes`). The agent context library (`re/INDEX.md`, `.claude/agent-brief.md`) is done: it cuts what every agent below spends on finding context.
 
+## Status (2026-10-25)
+All 7 tasks are merged into develop and deployed (b39d2e5). The Round 11 checklist is a new artifact on the user's work account: https://claude.ai/artifact/12HrkuKyWbJs1PtsufwVvE (the old one is on their personal account; this one starts with an empty db, so no last-round column). 39 new cases (`.claude/checklist/r11-cases.json`) plus 29 carry-overs under Skipped. Checked from the logs instead of asking the user: r7vu2 (Battery Saver line shows 0.42 instead of 0.83) and r8tp4 (fog art read, peak SDF 1.00) pass; r9nr3 and r8dt2 dropped (log-only).
+
 ## How to run this round (for the session that picks it up)
 The user's working rules are in the auto-memory (orchestrator mode, Opus subagents at medium effort, git workflow, no session link, plain commands, checklist conventions, read logs yourself). In short:
 1. Back up the saves first. `deploy.ps1` does it on every deploy; for a manual backup, copy `%USERPROFILE%\AppData\LocalLow\MonomiPark\SlimeRancher2\Steam\` to `save-backups\<timestamp>`.
