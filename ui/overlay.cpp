@@ -31,6 +31,7 @@
 #include "core/profiles.h"
 #include "core/settings.h"
 #include "core/version_guard.h"
+#include "autotest_view.h"
 #include "game_input.h"
 #include "hud.h"
 #include "hud_edit.h"
@@ -254,6 +255,18 @@ WndAction WndFilterCpp(UINT msg, WPARAM wp, LPARAM lp) noexcept {
     LatchMouseDown(msg, wp);  // open or not: the hotkey may be a mouse button
     if (!Captured()) {
         g_gameButtons = 0;
+        // A test question (autotest_view.h) is open: ImGui gets the input too, and the game loses only what
+        // the panel uses (mouse over the panel, keys while its note field types).
+        if (autotest::WantsInput() && (IsInputMsg(msg) || msg == WM_SETFOCUS || msg == WM_KILLFOCUS) && msg != WM_INPUT) {
+            try {
+                std::lock_guard lk(g_msgMutex);
+                if (g_msgQueue.size() < kMaxQueued) g_msgQueue.push_back({msg, wp, lp});
+            } catch (...) {
+            }
+            if (IsMouseMsg(msg) && msg != WM_MOUSEMOVE && autotest::PointerOnPanel()) return WndAction::Swallow;
+            if (msg >= WM_KEYFIRST && msg <= WM_KEYLAST && msg != WM_SYSKEYDOWN && msg != WM_SYSKEYUP && autotest::Typing())
+                return WndAction::Swallow;
+        }
         return WndAction::PassToGame;
     }
     const bool forward = IsInputMsg(msg) || msg == WM_SETFOCUS || msg == WM_KILLFOCUS ||
@@ -315,7 +328,7 @@ void DrainMessages() {
         std::lock_guard lk(g_msgMutex);
         msgs.swap(g_msgQueue);
     }
-    if (!Captured()) return;  // stale input from before closing
+    if (!Captured() && !autotest::WantsInput()) return;  // stale input from before closing
     for (const auto& m : msgs) ImGui_ImplWin32_WndProcHandler(g_hwnd, m.msg, m.wp, m.lp);
 }
 
@@ -746,7 +759,8 @@ void RenderFrame() {
     const bool hint = menuHint || quick.phase != quick_start_hint::Phase::Hidden;
     const bool hudMarkers = hud::HasContent();  // world markers published by modules (wall_markers)
     const bool momentum = momentum_hud::HasContent();  // hl2_movement speed readout
-    if (!open && !editing && !hint && !hudMarkers && !momentum) {
+    const bool harness = autotest::HasContent();        // test harness tag / question (modules/autotest)
+    if (!open && !editing && !hint && !hudMarkers && !momentum && !harness) {
         std::lock_guard lk(g_msgMutex);
         g_msgQueue.clear();
         return;
@@ -768,8 +782,8 @@ void RenderFrame() {
             io.DisplayFramebufferScale = ImVec2(g_bbWidth / io.DisplaySize.x, g_bbHeight / io.DisplaySize.y);
         ApplyScale(io.DisplaySize.y);
 
+        if (open || editing || autotest::WantsInput()) PollMouseButtons(io);
         if (open || editing) {
-            PollMouseButtons(io);
             // The Win32 backend reads Shift / Ctrl with GetKeyState, whose state is per
             // thread and is not kept for this render thread (the window's messages are
             // read on the game's thread), so io.KeyShift / KeyCtrl could be stale until
@@ -819,6 +833,7 @@ void RenderFrame() {
             h.quickSeconds = quick.secondsLeft;
             menu::DrawHint(h);
         }
+        if (harness) autotest::Draw(g_appliedScale, ForegroundIsGame(), g_textInputActive && open);  // on top of the menu
         ImGui::Render();
         g_textInputActive = io.WantTextInput;
         g_typing.store(g_textInputActive, std::memory_order_relaxed);
@@ -840,6 +855,141 @@ void RenderFrame() {
     if (oldDsv) oldDsv->Release();
 }
 
+// ---------------------------------------------------------- screenshots ----
+// The test harness (autotest_view.h) asked for the back buffer: copied through a staging texture
+// (resolved first when multisampled) and converted to RGBA8 here; the PNG is encoded off this thread.
+float HalfToFloat(uint16_t h) {
+    const uint32_t sign = (h >> 15) & 1, exp = (h >> 10) & 0x1F, mant = h & 0x3FF;
+    float v;
+    if (exp == 0) v = std::ldexp(static_cast<float>(mant), -24);
+    else if (exp == 31) v = mant ? 0.0f : 65504.0f;
+    else v = std::ldexp(static_cast<float>(mant | 0x400), static_cast<int>(exp) - 25);
+    return sign ? -v : v;
+}
+
+unsigned char LinearToSrgb8(float v) {
+    v = v < 0 ? 0 : v > 1 ? 1 : v;
+    const float s = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+    return static_cast<unsigned char>(std::lround(s * 255.0f));
+}
+
+autotest::Shot CaptureBackBuffer() {
+    autotest::Shot shot;
+    ID3D11Texture2D* bb = nullptr;
+    if (FAILED(g_swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&bb))) || !bb) {
+        shot.error = "IDXGISwapChain::GetBuffer failed";
+        return shot;
+    }
+    D3D11_TEXTURE2D_DESC d{};
+    bb->GetDesc(&d);
+    DXGI_FORMAT fmt = d.Format;
+    switch (fmt) {  // typeless back buffers: read as the plain format
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS: fmt = DXGI_FORMAT_R8G8B8A8_UNORM; break;
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS: fmt = DXGI_FORMAT_B8G8R8A8_UNORM; break;
+        case DXGI_FORMAT_R10G10B10A2_TYPELESS: fmt = DXGI_FORMAT_R10G10B10A2_UNORM; break;
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS: fmt = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
+        default: break;
+    }
+    ID3D11Texture2D* src = bb;
+    ID3D11Texture2D* resolved = nullptr;
+    if (d.SampleDesc.Count > 1) {
+        D3D11_TEXTURE2D_DESC rd = d;
+        rd.SampleDesc.Count = 1;
+        rd.SampleDesc.Quality = 0;
+        rd.Usage = D3D11_USAGE_DEFAULT;
+        rd.BindFlags = 0;
+        rd.CPUAccessFlags = 0;
+        rd.MiscFlags = 0;
+        rd.MipLevels = 1;
+        rd.ArraySize = 1;
+        if (FAILED(g_device->CreateTexture2D(&rd, nullptr, &resolved)) || !resolved) {
+            bb->Release();
+            shot.error = "cannot resolve the multisampled back buffer";
+            return shot;
+        }
+        g_context->ResolveSubresource(resolved, 0, bb, 0, fmt);
+        src = resolved;
+    }
+    D3D11_TEXTURE2D_DESC sd = d;
+    sd.SampleDesc.Count = 1;
+    sd.SampleDesc.Quality = 0;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.BindFlags = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    sd.MiscFlags = 0;
+    sd.MipLevels = 1;
+    sd.ArraySize = 1;
+    ID3D11Texture2D* staging = nullptr;
+    if (FAILED(g_device->CreateTexture2D(&sd, nullptr, &staging)) || !staging) {
+        if (resolved) resolved->Release();
+        bb->Release();
+        shot.error = "cannot create a staging texture";
+        return shot;
+    }
+    g_context->CopyResource(staging, src);
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (SUCCEEDED(g_context->Map(staging, 0, D3D11_MAP_READ, 0, &m))) {
+        const unsigned w = d.Width, h = d.Height;
+        shot.width = w;
+        shot.height = h;
+        shot.rgba.resize(static_cast<size_t>(w) * h * 4);
+        bool known = true;
+        for (unsigned y = 0; y < h && known; ++y) {
+            const auto* row = static_cast<const unsigned char*>(m.pData) + static_cast<size_t>(y) * m.RowPitch;
+            unsigned char* out = shot.rgba.data() + static_cast<size_t>(y) * w * 4;
+            for (unsigned x = 0; x < w && known; ++x, out += 4) {
+                switch (fmt) {
+                    case DXGI_FORMAT_R8G8B8A8_UNORM:
+                    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+                        out[0] = row[x * 4 + 0];
+                        out[1] = row[x * 4 + 1];
+                        out[2] = row[x * 4 + 2];
+                        break;
+                    case DXGI_FORMAT_B8G8R8A8_UNORM:
+                    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+                    case DXGI_FORMAT_B8G8R8X8_UNORM:
+                    case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+                        out[0] = row[x * 4 + 2];
+                        out[1] = row[x * 4 + 1];
+                        out[2] = row[x * 4 + 0];
+                        break;
+                    case DXGI_FORMAT_R10G10B10A2_UNORM: {
+                        uint32_t p;
+                        std::memcpy(&p, row + x * 4, 4);
+                        out[0] = static_cast<unsigned char>((p & 0x3FF) >> 2);
+                        out[1] = static_cast<unsigned char>(((p >> 10) & 0x3FF) >> 2);
+                        out[2] = static_cast<unsigned char>(((p >> 20) & 0x3FF) >> 2);
+                        break;
+                    }
+                    case DXGI_FORMAT_R16G16B16A16_FLOAT: {  // scRGB (linear): encoded as sRGB, clipped
+                        uint16_t c[3];
+                        std::memcpy(c, row + static_cast<size_t>(x) * 8, 6);
+                        out[0] = LinearToSrgb8(HalfToFloat(c[0]));
+                        out[1] = LinearToSrgb8(HalfToFloat(c[1]));
+                        out[2] = LinearToSrgb8(HalfToFloat(c[2]));
+                        break;
+                    }
+                    default: known = false; break;
+                }
+                out[3] = 255;
+            }
+        }
+        g_context->Unmap(staging, 0);
+        if (known) {
+            shot.ok = true;
+        } else {
+            shot.rgba.clear();
+            shot.error = std::format("unsupported back buffer format {}", static_cast<int>(d.Format));
+        }
+    } else {
+        shot.error = "cannot map the staging texture";
+    }
+    staging->Release();
+    if (resolved) resolved->Release();
+    bb->Release();
+    return shot;
+}
+
 void OnPresentImpl(IDXGISwapChain* sc) {
     if (!g_initDone) {
         g_initDone = true;
@@ -850,7 +1000,9 @@ void OnPresentImpl(IDXGISwapChain* sc) {
         }
     }
     if (sc != g_swapChain) return;  // some other swap chain (not the game window)
+    if (autotest::ShotWanted(false)) autotest::DeliverShot(CaptureBackBuffer());  // the game's frame only
     RenderFrame();
+    if (autotest::ShotWanted(true)) autotest::DeliverShot(CaptureBackBuffer());  // with the overlay
 }
 
 void OnPresentGuarded(IDXGISwapChain* sc) {
@@ -1014,10 +1166,14 @@ bool CreateAndEnable(const char* name, void* target, void* detour, void** orig, 
 
 // The pointer over the overlay (or a text field in use) also keeps the game's menu input
 // (full map, pause menu) and its UI pointer away from the game (game_input.h).
+// A test question's panel under the pointer, or its note field typing, locks the game's input the same
+// way (autotest_view.h), also while the overlay is closed.
 void OnMainThreadTick(float /*dt*/) {
     const bool captured = Captured() && !g_failed.load();
-    game_input::Tick(captured, captured && g_imguiWantsMouse.load(std::memory_order_relaxed),
-                     captured && g_typing.load(std::memory_order_relaxed));
+    const bool panel = !g_failed.load() && autotest::WantsGameInputLock();
+    game_input::Tick(captured || panel,
+                     (captured && g_imguiWantsMouse.load(std::memory_order_relaxed)) || (panel && autotest::PointerOnPanel()),
+                     (captured && g_typing.load(std::memory_order_relaxed)) || (panel && autotest::Typing()));
 }
 
 }  // namespace
