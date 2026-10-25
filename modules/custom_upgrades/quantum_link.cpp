@@ -163,6 +163,14 @@ constexpr float kGhostEmission = 0.35f;  // its emission properties: kCyan times
 // behind other geometry with scanlines and a cyan intersection edge. 1 << 16 = "Ranch Drone Phase Through Custom
 // Pass" (1 << 17 is the explorer drones' pass).
 constexpr uint32_t kRanchDronePhaseBit = 1u << 16;
+// Round 17 ("can we somehow make the white transparent?"): the pass's fullscreen shader (disassembled, re/drones.md)
+// reads only the ghost's depth, never its colours, and blends SrcAlpha / OneMinusSrcAlpha with alpha = scanline alpha
+// (_ScanlineBGAlpha / _ScanlineLineAlpha floats) x intersection fade; colour = the scanlines faded into
+// _IntersectionEdgeColorClose (HDR cyan ~350) by closeness to the occluder. The whole ghost sits a few cm behind the
+// link's surface, so it is all "close" and draws that HDR edge colour: white. While a ghost phases, the shared material
+// gets a plain cyan edge, LDR scanline colours and kPassAlpha of its alphas (ApplyPassLook), restored after.
+constexpr float kPassAlpha = 0.35f;  // the pass's scanline alphas times this while a ghost phases
+constexpr float kPassEdge = 0.7f;    // ... and its close edge colour = kCyan times this (LDR, was HDR ~350)
 constexpr const char* kPortInMesh = "techDepositorPort01_input";    // the link's port: arrows pointing in
 constexpr const char* kPortOutMesh = "techDepositorPort01_output";  // the drone station chute's: arrows out
 constexpr int kStaleTicks = 5;       // ticks with a readable model list before a never-seen listed id is stale
@@ -237,6 +245,10 @@ VariantFn g_origVariant = nullptr;
 DecFn g_origDec = nullptr;
 InteractFn g_origActivator = nullptr;  // UIActivator.OnInteract
 InteractFn g_origDisplay = nullptr;    // UIDisplayInteractable.OnInteract
+using RowBindFn = void (*)(Il2CppObject*, int32_t, Il2CppObject*, const MethodInfo*);
+using RowFocusFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+RowBindFn g_origRowBind = nullptr;    // DroneListButton.BindItem (optional)
+RowFocusFn g_origRowFocus = nullptr;  // DroneListButton.IFocusReceivedHandler.OnFocusReceived (optional)
 
 // Read by the GetPersistenceId detour (any thread; set once on the main thread, never cleared).
 std::atomic<Il2CppObject*> g_ours{nullptr};
@@ -318,6 +330,14 @@ struct Impl {
     double passLookAt = -1e9;
     int phaseUsers = 0;
     bool volumeForced = false, loggedVolume = false, loggedGhost = false, loggedLabel = false;
+    // Round 17: the ranch pass's fullscreen material, toned down while a ghost phases (ApplyPassLook / RestorePassLook)
+    Il2CppClass* passVolumeClass = nullptr, *phasePassClass = nullptr;  // CustomPassVolume / DronePhaseThroughCustomPass
+    size_t offPassList = 0, offPassFilter = 0, offPassMat = 0;
+    const MethodInfo* matGetFloat = nullptr, *matSetFloat = nullptr;
+    Il2CppGCHandle passMat = nullptr;  // the overridden material (pinned until restored)
+    std::vector<std::pair<std::string, Color>> passColors;  // its original values
+    std::vector<std::pair<std::string, float>> passFloats;
+    bool loggedPassLook = false;
     Il2CppObject* icon = nullptr;     // our purple copy of the Refinery Link's icon (nullptr: not made)
     Il2CppObject* squareIcon = nullptr;  // the same on a square canvas: the drone source icon
     bool defFailed = false, slotDefTried = false, fxTried = false;
@@ -397,6 +417,11 @@ struct Impl {
     Il2CppGCHandle rowsList = nullptr;
     double rowsNext = 0.0;
     std::unordered_set<Il2CppObject*> rowsDone;  // rows handled during this open
+    // Round 17 ("Its there for a split second, like 200-500ms"): the rows' BindItem / OnFocusReceived detours hide the
+    // hint the frame a row is bound or focused, while the link's menu opens or is open (LinkMenu); parts hidden so
+    // far this open (for the log)
+    int rowsHookHid = 0;
+    bool LinkMenu() const { return cloudReq || rowsList; }
     double cloudReqAt = 0.0;
     double cloudActiveAt = 0.0;        // when the loaded menu was first seen active (0 = not yet)
     int cloudTries = 0;                // UpdateShowData(null) calls that threw for this request
@@ -653,6 +678,8 @@ struct Impl {
     Il2CppObject* PassVolume();
     void PhaseOn(Rec& rec);
     void PhaseOff(Rec& rec);
+    void ApplyPassLook(Il2CppObject* volumeGo);
+    void RestorePassLook(bool calls);
     bool OpenCloudMenu();
     void CloudFrame();
     std::string HideCloudHints(Il2CppObject* cloudMenu);
@@ -660,6 +687,7 @@ struct Impl {
     std::string HideHints(Il2CppObject* legend, const std::vector<Il2CppObject*>& configs);
     void EndCloudRequest();
     int HideRowHints(Il2CppObject* list, int* rows);
+    int HideRow(Il2CppObject* btn);
     void RowsFrame();
     void EndRows(bool restore);
     bool OnUse(Il2CppObject* interactable);
@@ -908,6 +936,22 @@ void InteractDetour(Il2CppObject* self, const MethodInfo* mi) {
         if (handled) return;
     }
     (*Orig)(self, mi);
+}
+
+// Round 17 ("Its there for a split second, like 200-500ms"): a drone row bound or focused while the link's menu opens or
+// is open loses its "magnifier + [SPACE]" in the same frame (after the original: focus received may switch
+// FocusedContent on; its children are what goes off). The sweep in CloudFrame came 0.15 s after the menu was active
+// plus loading time. Pointer checks only for every other row (the station's own menu, the map's drone panel).
+void RowBindDetour(Il2CppObject* self, int32_t index, Il2CppObject* data, const MethodInfo* mi) {
+    g_origRowBind(self, index, data, mi);
+    if (!g || !g->armed || !self || !g->LinkMenu() || !main_thread::IsMainThread() || g->Faulted()) return;
+    g_guard.Run([&] { g->rowsHookHid += g->HideRow(self); });
+}
+
+void RowFocusDetour(Il2CppObject* self, Il2CppObject* evt, const MethodInfo* mi) {
+    g_origRowFocus(self, evt, mi);
+    if (!g || !g->armed || !self || !g->LinkMenu() || !main_thread::IsMainThread() || g->Faulted()) return;
+    g_guard.Run([&] { g->rowsHookHid += g->HideRow(self); });
 }
 
 // ---------------------------------------------------------------- definition --
@@ -1705,6 +1749,8 @@ void Impl::BuildGhost(Rec& rec, Il2CppObject* modelTr, Il2CppObject* holderTr) {
 // the link's are never touched), colour properties dark cyan with a low alpha and emission properties a dim cyan, so
 // whatever the phase-through pass takes from the ghost's own surface is dark, not the link's near-white. Property
 // names as in Tint; the copies keep kMatTag in their names (Undecorate destroys them). Returns the materials made.
+// Round 17: the pass's shader reads only the ghost's depth (re/drones.md), so these change nothing there (the white
+// was the pass's HDR edge colour: ApplyPassLook); they only matter where the copy shows outside the link.
 int Impl::GhostMaterials(Il2CppObject* ghost) {
     if (!matCopyCtor || !materialClass || !rendGetShared || !rendSetShared || !matPropNames || !matSetColor) return 0;
     int mats = 0;
@@ -1787,6 +1833,90 @@ void Impl::PhaseOn(Rec& rec) {
         unity::SetActive(v, true);
         volumeForced = true;
     }
+    if (v && phaseUsers == 1) ApplyPassLook(v);
+}
+
+// Round 17 ("can we somehow make the white transparent? otherwise clean"): the ranch pass's fullscreen material (shared
+// with the drones, so only while a ghost phases: kPhaseMin-Max s every kQuantumMin-Max s per link) gets a plain cyan
+// close edge (kPassEdge, was HDR ~350: the white), its other colours clamped to LDR, and kPassAlpha of its scanline
+// alphas (the only alpha the shader outputs; colour alphas are unused). A drone crossing a wall meanwhile looks the same
+// way for that moment. RestorePassLook puts the saved values back.
+void Impl::ApplyPassLook(Il2CppObject* volumeGo) {
+    if (passMat || !passVolumeClass || !phasePassClass || !offPassList || !offPassFilter || !offPassMat || !matGetFloat ||
+        !matSetFloat || !matGetColor || !matSetColor)
+        return;
+    Il2CppObject* vol = unity::GetComponent(volumeGo, passVolumeClass);
+    void* list = vol ? unity::Field<void*>(vol, offPassList) : nullptr;
+    Il2CppObject* mat = nullptr;
+    for (size_t i = 0, n = list ? unity::ListCount(list) : 0; i < n && i < 16 && !mat; ++i) {
+        auto* pass = static_cast<Il2CppObject*>(unity::ListAt(list, i));
+        if (!pass || !IsA(pass, phasePassClass)) continue;
+        if (static_cast<uint32_t>(unity::Field<int32_t>(pass, offPassFilter)) != kRanchDronePhaseBit) continue;
+        Il2CppObject* m = unity::Field<Il2CppObject*>(pass, offPassMat);
+        if (unity::IsAlive(m)) mat = m;
+    }
+    if (!mat) {
+        if (!loggedPassLook)
+            SR2_INFO("[{}] quantum link: the ranch phase pass's material was not found ({}) - the ghost keeps the drones' look",
+                     module, vol ? "no matching pass" : "no CustomPassVolume");
+        loggedPassLook = true;
+        return;
+    }
+    bool ok = false;
+    std::string was;
+    static constexpr const char* kColors[] = {"_IntersectionEdgeColorClose", "_IntersectionEdgeColorFar", "_ScanlineBGColor",
+                                              "_ScanlineLineColor", "_ScanlineOutlineColor"};
+    for (const char* name : kColors) {
+        Il2CppString* s = unity::NewString(name);
+        const Color c = Value<Color>(Call(matGetColor, mat, {s}, "Material.GetColor", &ok));
+        if (!ok) continue;
+        Color out = c;
+        if (name == kColors[0]) {
+            out = {kCyan.r * kPassEdge, kCyan.g * kPassEdge, kCyan.b * kPassEdge, c.a};
+        } else if (const float mx = std::max({c.r, c.g, c.b}); mx > 1.0f) {
+            out = {c.r / mx, c.g / mx, c.b / mx, c.a};
+        }
+        Call(matSetColor, mat, {s, &out}, "Material.SetColor", &ok);
+        if (!ok) continue;
+        passColors.emplace_back(name, c);
+        was += std::format("{}{} ({:.2f}, {:.2f}, {:.2f})", was.empty() ? "" : ", ", name, c.r, c.g, c.b);
+    }
+    for (const char* name : {"_ScanlineBGAlpha", "_ScanlineLineAlpha"}) {
+        Il2CppString* s = unity::NewString(name);
+        const float f = Value<float>(Call(matGetFloat, mat, {s}, "Material.GetFloat", &ok));
+        if (!ok) continue;
+        float out = f * kPassAlpha;
+        Call(matSetFloat, mat, {s, &out}, "Material.SetFloat", &ok);
+        if (!ok) continue;
+        passFloats.emplace_back(name, f);
+        was += std::format(", {} {:.2f}", name, f);
+    }
+    passMat = unity::NewGCHandle(mat);
+    if (!loggedPassLook)
+        SR2_INFO("[{}] quantum link: phase pass material '{}' toned down while a ghost phases (close edge = cyan x{:.2f}, "
+                 "colours LDR, alphas x{:.2f}); its values: {}",
+                 module, unity::GetName(mat), kPassEdge, kPassAlpha, was);
+    loggedPassLook = true;
+}
+
+void Impl::RestorePassLook(bool calls) {
+    if (!passMat) return;
+    Il2CppObject* mat = unity::GCHandleTarget(passMat);
+    if (calls && unity::IsAlive(mat)) {
+        bool ok = false;
+        for (auto& [name, c] : passColors) {
+            Il2CppString* s = unity::NewString(name);
+            Call(matSetColor, mat, {s, &c}, "Material.SetColor", &ok);
+        }
+        for (auto& [name, f] : passFloats) {
+            Il2CppString* s = unity::NewString(name);
+            Call(matSetFloat, mat, {s, &f}, "Material.SetFloat", &ok);
+        }
+    }
+    FreeLater({passMat});
+    passMat = nullptr;
+    passColors.clear();
+    passFloats.clear();
 }
 
 void Impl::PhaseOff(Rec& rec) {
@@ -1796,6 +1926,7 @@ void Impl::PhaseOff(Rec& rec) {
     if (calls && unity::IsAlive(rec.ghost)) unity::SetActive(rec.ghost, false);
     if (--phaseUsers > 0) return;
     phaseUsers = 0;
+    RestorePassLook(calls);
     if (volumeForced) {
         volumeForced = false;
         if (!calls) return;
@@ -1887,6 +2018,7 @@ bool Impl::OpenCloudMenu() {
     cloudReqAt = Now();
     cloudActiveAt = 0.0;
     cloudTries = 0;
+    rowsHookHid = 0;
     return cloudReq != nullptr;
 }
 
@@ -1961,7 +2093,7 @@ void Impl::CloudFrame() {
         EndRows(false);
         int rows = 0;
         const int hid = HideRowHints(list, &rows);
-        rowHints = std::format("{} row(s), {} hint part(s) hidden", rows, hid);
+        rowHints = std::format("{} row(s), {} hint part(s) hidden, {} before by the row detours", rows, hid, rowsHookHid);
         rowsList = unity::NewGCHandle(list);
         rowsNext = Now() + kRowsSeconds;
     }
@@ -1981,18 +2113,26 @@ int Impl::HideRowHints(Il2CppObject* list, int* rows) {
     for (Il2CppObject* btn : AllInChildren(list, listButtonClass)) {
         if (rows) ++*rows;
         if (!rowsDone.insert(btn).second) continue;
-        Il2CppObject* anim = NamedChild(unity::TransformOf(btn), "AnimateInRoot");
-        Il2CppObject* focused = anim ? NamedChild(anim, "FocusedContent") : nullptr;
-        if (!focused) continue;
-        for (Il2CppObject* child : ChildTransforms(focused)) {
-            Il2CppObject* go = unity::GameObjectOf(child);
-            bool ok = false;
-            if (!unity::IsAlive(go)) continue;
-            if (goActiveSelf && (!Value<bool>(Call(goActiveSelf, go, {}, "GameObject.get_activeSelf", &ok)) || !ok)) continue;
-            unity::SetActive(go, false);
-            ++hid;
-        }
+        hid += HideRow(btn);
         if (Faulted()) break;
+    }
+    return hid;
+}
+
+// One row's FocusedContent children off (the ones still on). Also called by the row detours (round 17), so a row bound
+// or focused while the link's menu opens never shows the hint for a frame. Returns the parts switched off.
+int Impl::HideRow(Il2CppObject* btn) {
+    Il2CppObject* anim = unity::IsAlive(btn) ? NamedChild(unity::TransformOf(btn), "AnimateInRoot") : nullptr;
+    Il2CppObject* focused = anim ? NamedChild(anim, "FocusedContent") : nullptr;
+    if (!focused) return 0;
+    int hid = 0;
+    for (Il2CppObject* child : ChildTransforms(focused)) {
+        Il2CppObject* go = unity::GameObjectOf(child);
+        bool ok = false;
+        if (!unity::IsAlive(go)) continue;
+        if (goActiveSelf && (!Value<bool>(Call(goActiveSelf, go, {}, "GameObject.get_activeSelf", &ok)) || !ok)) continue;
+        unity::SetActive(go, false);
+        ++hid;
     }
     return hid;
 }
@@ -2779,6 +2919,22 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
         p->goActiveSelf = R.Method(p->gameObjectClass, "get_activeSelf", 0, nullptr);
         p->passCtrlClass = R.Class(kImage, "MonomiPark.SlimeRancher.Drone", "DroneCustomPassController", nullptr);
         if (auto o = p->passCtrlClass ? R.FieldOffset(p->passCtrlClass, "_phaseThroughCustomPassVolume") : std::nullopt) p->offPassVolume = *o;
+        // optional (round 17): the pass's fullscreen material toned down while a ghost phases (ApplyPassLook)
+        p->passVolumeClass = R.Class("Unity.RenderPipelines.HighDefinition.Runtime", "UnityEngine.Rendering.HighDefinition",
+                                     "CustomPassVolume", nullptr);
+        p->phasePassClass = R.Class(kImage, "MonomiPark.SlimeRancher.Rendering.Pass", "DronePhaseThroughCustomPass", nullptr);
+        if (auto o = p->passVolumeClass ? R.FieldOffset(p->passVolumeClass, "customPasses") : std::nullopt) p->offPassList = *o;
+        if (auto o = p->phasePassClass ? R.FieldOffset(p->phasePassClass, "_renderingLayerMaskFilter") : std::nullopt)
+            p->offPassFilter = *o;
+        if (auto o = p->phasePassClass ? R.FieldOffset(p->phasePassClass, "_fullscreenPhaseMaterial") : std::nullopt)
+            p->offPassMat = *o;
+        p->matGetFloat = R.MethodByParams(material, "GetFloat", {"System.String"});
+        p->matSetFloat = R.MethodByParams(material, "SetFloat", {"System.String", "System.Single"});
+        if (!p->offPassList || !p->offPassFilter || !p->offPassMat || !p->matGetFloat || !p->matSetFloat)
+            SR2_WARN("[{}] quantum link: the phase pass's material can't be toned down (CustomPassVolume {}, "
+                     "DronePhaseThroughCustomPass {}, Material.Get/SetFloat {}) - the ghost may draw white",
+                     p->module, p->offPassList ? "ok" : "missing", p->offPassMat && p->offPassFilter ? "ok" : "missing",
+                     p->matSetFloat && p->matGetFloat ? "ok" : "missing");
         if (!p->mfGetMesh || !p->mfSetMesh || !p->rendGetLayers || !p->rendSetLayers || !p->goActiveSelf || !p->offPassVolume)
             SR2_WARN("[{}] quantum link: round 14 look partly unavailable (MeshFilter {}, renderingLayerMask {}, phase volume {}) "
                      "- the port arrows / phase ghost may stay vanilla", p->module, p->mfSetMesh ? "ok" : "missing",
@@ -2848,6 +3004,27 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
             return false;  // hooks made so far only pass through (not armed, no definition is ever built)
         }
         report += std::format(" {}@0x{:X}", hooks[i].name, Resolver::Rva(ptrs[i]));
+    }
+    // Optional (round 17): the drone rows' hint hidden the frame a row is bound / focused in the link's menu; without
+    // them the 0.25 s sweep (RowsFrame) still hides it, a moment later.
+    if (p->listButtonClass) {
+        const MethodInfo* focusMi = nullptr;
+        const std::string sufErr = MethodBySuffixName(p->listButtonClass, ".OnFocusReceived", 1, focusMi);
+        const H rowHooks[] = {
+            {"DroneListButton.BindItem", R.Method(p->listButtonClass, "BindItem", 2, nullptr),
+             reinterpret_cast<void*>(&RowBindDetour), reinterpret_cast<void**>(&g_origRowBind)},
+            {"DroneListButton.OnFocusReceived", focusMi, reinterpret_cast<void*>(&RowFocusDetour),
+             reinterpret_cast<void**>(&g_origRowFocus)},
+        };
+        for (const H& h : rowHooks) {
+            std::string err;
+            void* ptr = h.mi ? R.MethodPointer(h.mi, &err) : nullptr;
+            if (ptr && ctx.HookAddress(h.name, ptr, h.detour, h.orig))
+                report += std::format(" {}@0x{:X}", h.name, Resolver::Rva(ptr));
+            else
+                SR2_WARN("[{}] quantum link: hook {} not made ({}) - the drone rows' hint is hidden up to 0.25 s late",
+                         p->module, h.name, h.mi ? (ptr ? "hook failed" : err) : (sufErr.empty() ? "not found" : sufErr));
+        }
     }
     p->armed = true;
     ready_ = true;
@@ -2962,6 +3139,10 @@ void QuantumLink::Reset() {
     p.stableTicks = 0;
     p.phaseUsers = 0;        // the next scene group load sets the pass volume again (DroneCustomPassController)
     p.volumeForced = false;
+    if (p.passMat)  // the pass's material (an asset that outlives the scene) gets its values back next tick
+        main_thread::Post([] {
+            if (g && g->phaseUsers == 0) g_guard.Run([] { g->RestorePassLook(!g->Faulted()); });
+        });
     ++p.generation;
     for (int i = 0; i < kSlots; ++i) {
         p.slotType[i] = nullptr;

@@ -49,6 +49,8 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | DeathHandler.Kill(GameObject, Damage) (MP.SR.Damage, static) | 0xAC5BA0 | sandbox.DeathHandler.Kill | sandbox/noclip.cpp | noclip: drop kills of the noclipping player (every kill volume ends here; opt) |
 | DeathObscurer.StartObscuring(3) | 0x8670C0 | quick_travel.DeathObscurer.StartObscuring | quick_travel/module.cpp | shorten death fade |
 | DetailsMoreButtonView.BindData(1) | 0x839F00 | sell_upgrades.DetailsMoreButtonView.BindData | sell_upgrades/module.cpp | Sell button on plot card |
+| DroneListButton.BindItem(2) | 0x8153C0 | custom_upgrades.DroneListButton.BindItem | custom_upgrades/quantum_link.cpp | drone row Go To hint hidden at bind in a Quantum Storage Link's menu (opt, round 17) |
+| DroneListButton.IFocusReceivedHandler.OnFocusReceived(1) | 0x8159B0 | custom_upgrades.DroneListButton.OnFocusReceived | custom_upgrades/quantum_link.cpp | the same at focus (opt, round 17); explicit interface, by suffix |
 | DroneProgramMenu.HandleActivateDrone(1) | 0x81AA20 | drone_price_limit.DroneProgramMenu.HandleActivateDrone | drone_price_limit/station_dialog.cpp | station menu dialog / programs |
 | DroneProgramMenu.HandleClearAllOptions(1) | 0x81AF90 | drone_price_limit.DroneProgramMenu.HandleClearAllOptions | drone_price_limit/station_dialog.cpp | blocked while a dialog is open; in the programs dialog it is Delete (Z / its pad button) |
 | DroneProgramMenu.SetViewModel(1) | 0x81BE10 | drone_price_limit.DroneProgramMenu.SetViewModel | drone_price_limit/station_dialog.cpp | inject Price limit / Programs actions |
@@ -243,7 +245,7 @@ SaveGameImpl hook, see Notes), collectibles, debug_tools, discord_rpc, wall_mark
 - Quantum Storage Link hooks (quantum_link.cpp): GetPersistenceId, GadgetDirector.HasBlueprint /
   GetItemCount, GadgetDirectorHelper.HasBlueprint, GadgetFabricateCategoryRuntime..ctor,
   GadgetFabricatableItem.get_ShouldShowPlaceholder / FabricateAndSpendCost, GadgetItem.PlaceGadgetEvent /
-  PickupGadget, Gadget.ChangeVariant. Other runtime GadgetDefinition clones implement
+  PickupGadget, Gadget.ChangeVariant, DroneListButton.BindItem / OnFocusReceived (optional). Other runtime GadgetDefinition clones implement
   `variant_ext::Extension` (custom_upgrades/variant_ext.h) and call `variant_ext::Set` (dj_buildables does).
 - gadget_look.cpp owns GadgetDefinition.get_LocalizedDescription, GadgetDirector.GetTargetGadgetInfo,
   GadgetItem.SetHeldGadget, FabricatorItemDetails.SetItem ("nobody else may hook them"). Use
