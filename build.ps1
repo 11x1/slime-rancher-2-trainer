@@ -17,7 +17,8 @@ param(
   [string]$Config = 'Release',
   [switch]$Clean,
   [switch]$Regen,
-  [switch]$NoVerify
+  [switch]$NoVerify,
+  [int]$Jobs = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -83,7 +84,19 @@ if ($Clean -and (Test-Path $buildDir)) { Remove-Item -Recurse -Force $buildDir }
 & $cmake -S $root -B $buildDir -G Ninja "-DCMAKE_BUILD_TYPE=$Config" "-DCMAKE_MAKE_PROGRAM=$ninja" `
   -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
-& $cmake --build $buildDir
+if ($Jobs -le 0 -and $env:SR2MODS_BUILD_JOBS) { $Jobs = [int]$env:SR2MODS_BUILD_JOBS }
+if ($Jobs -le 0) {
+  # a linked worktree (agent) has its own .git file; its git dir differs from the common dir
+  $gitDir = (& git -C $root rev-parse --path-format=absolute --git-dir 2>$null)
+  $common = (& git -C $root rev-parse --path-format=absolute --git-common-dir 2>$null)
+  if ($gitDir -and $common -and $gitDir -ne $common) { $Jobs = 2 }
+}
+if ($Jobs -gt 0) {
+  Write-Host "Parallel jobs: $Jobs"
+  & $cmake --build $buildDir -j $Jobs
+} else {
+  & $cmake --build $buildDir
+}
 if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 
 $dll = Join-Path $buildDir 'version.dll'
