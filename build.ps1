@@ -89,11 +89,14 @@ $gitDir = (& git -C $root rev-parse --path-format=absolute --git-dir 2>$null)
 $common = (& git -C $root rev-parse --path-format=absolute --git-common-dir 2>$null)
 $isWorktree = [bool]($gitDir -and $common -and $gitDir -ne $common)
 if ($Jobs -le 0 -and $env:SR2MODS_BUILD_JOBS) { $Jobs = [int]$env:SR2MODS_BUILD_JOBS }
-if ($Jobs -le 0 -and $isWorktree) { $Jobs = 2 }
+# `git config sr2mods.parallelbuilds true` (the user is away from the PC): agent builds run
+# side by side at normal priority with all cores; unset it to go back to taking turns.
+$parallel = ((& git -C $root config --get sr2mods.parallelbuilds 2>$null) -eq 'true')
+if ($Jobs -le 0 -and $isWorktree -and -not $parallel) { $Jobs = 2 }
 # Agent builds take turns (one worktree compiles at a time) at below-normal priority, which
 # ninja and cl inherit, so several agents don't flood the user's CPU.
 $buildLock = $null
-if ($isWorktree) {
+if ($isWorktree -and -not $parallel) {
   try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch {}
   $buildLock = New-Object System.Threading.Mutex($false, 'Local\sr2mods-agent-build')
   Write-Host "Waiting for other agent builds to finish..."
