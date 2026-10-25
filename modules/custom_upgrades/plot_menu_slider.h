@@ -130,6 +130,10 @@ public:
     // when the event is for the other input (Shift held or not, SliderInput). A polled press that
     // already stepped is not stepped again; repeats then come from the host's events.
     bool Step(int dir);
+    // Main thread, for a two-position switch (min = off, max = on) driven by a host key (the plot menu's
+    // Submit): jump to the other end and call onChange, also for a mouse-only slider. false while no slider
+    // is shown, it is not interactable or a PopupPrompt is open.
+    bool Flip();
 
 private:
     struct Impl;
