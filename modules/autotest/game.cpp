@@ -15,6 +15,7 @@
 #include "core/log.h"
 #include "core/resolver.h"
 #include "core/unity.h"
+#include "modules/minimap/api.h"
 
 namespace sr2::modules::autotest::game {
 namespace {
@@ -80,6 +81,11 @@ struct Syms {
     const MethodInfo* getCurrency = nullptr;
     const MethodInfo* currentZone = nullptr;
     std::vector<std::pair<std::string, Il2CppClass*>> menus;  // UI roots for OpenMenus
+    // screenshots: hiding the HUD
+    Il2CppClass* hudUI = nullptr;
+    Il2CppClass* canvas = nullptr;
+    const MethodInfo* behGetEnabled = nullptr;
+    const MethodInfo* behSetEnabled = nullptr;
 };
 Syms g_s;
 
@@ -337,6 +343,11 @@ void Resolve(std::string& report) {
     s.defaultCurrency = Meth(Cls(kImage, "MonomiPark.SlimeRancher.Economy", "CurrencyUtility"), "get_DefaultCurrency", 0);
     s.getCurrency = Meth(Cls(kImage, "", "PlayerState"), "GetCurrency", 1);
     s.currentZone = Meth(Cls(kImage, "", "PlayerZoneTracker"), "GetCurrentZone", 0);
+    s.hudUI = Cls(kImage, "MonomiPark.SlimeRancher.UI", "HudUI");
+    s.canvas = Cls("UnityEngine.UIModule", "UnityEngine", "Canvas");
+    Il2CppClass* beh = Cls("UnityEngine.CoreModule", "UnityEngine", "Behaviour");
+    s.behGetEnabled = Meth(beh, "get_enabled", 0);
+    s.behSetEnabled = Meth(beh, "set_enabled", 1);
 
     // UI roots whose active instance means "that menu is open" (state.menus).
     const std::pair<const char*, const char*> menus[] = {
@@ -613,6 +624,59 @@ std::vector<std::string> OpenMenus() {
         if (o && unity::IsAlive(o)) cached.push_back(name);
     }
     return cached;
+}
+
+namespace {
+void Append(std::string& list, const char* what) {
+    if (!list.empty()) list += ", ";
+    list += what;
+}
+}  // namespace
+
+HiddenUi HideUi(bool hud, bool minimap) {
+    HiddenUi h;
+    if (hud) {
+        if (!g_s.hudUI || !g_s.canvas || !g_s.behGetEnabled || !g_s.behSetEnabled)
+            throw Error("hiding the HUD is unavailable (HudUI, Canvas or Behaviour.enabled not resolved; see sr2mods.log)");
+        // HudUI deactivates its own GameObject while the game hides the HUD: then there is nothing to hide.
+        Il2CppObject* ui = Alive(unity::FindObjectOfType(g_s.hudUI));
+        Il2CppObject* cv = ui ? Alive(unity::GetComponent(ui, g_s.canvas)) : nullptr;
+        if (cv && CallValue<bool>(g_s.behGetEnabled, cv, {}, "Canvas.get_enabled")) {
+            bool off = false;
+            Call(g_s.behSetEnabled, cv, {&off}, "Canvas.set_enabled(false)");
+            h.hudCanvas = unity::NewGCHandle(cv);
+            Append(h.what, "HUD");
+        }
+    }
+    if (hud || minimap) {
+        // The minimap has a nested Canvas of its own under the HUD's: hidden by its root as well.
+        sr2::modules::minimap::api::Snapshot snap;
+        if (sr2::modules::minimap::api::Get(snap) && snap.visible && Alive(snap.root) && unity::ActiveInHierarchy(snap.root)) {
+            unity::SetActive(snap.root, false);
+            h.minimapRoot = unity::NewGCHandle(snap.root);
+            Append(h.what, "minimap");
+        }
+    }
+    return h;
+}
+
+void RestoreUi(HiddenUi& h) {
+    if (h.hudCanvas) {
+        Il2CppObject* cv = Alive(unity::GCHandleTarget(h.hudCanvas));
+        unity::FreeGCHandle(h.hudCanvas);
+        h.hudCanvas = nullptr;
+        bool on = true;
+        if (cv) Call(g_s.behSetEnabled, cv, {&on}, "Canvas.set_enabled(true)");
+    }
+    if (h.minimapRoot) {
+        Il2CppObject* root = Alive(unity::GCHandleTarget(h.minimapRoot));
+        unity::FreeGCHandle(h.minimapRoot);
+        h.minimapRoot = nullptr;
+        // Back on only while the minimap still wants to show (it may have hidden itself meanwhile: a map
+        // opened, a scene change); it sets its root's active state itself only when that state changes.
+        sr2::modules::minimap::api::Snapshot snap;
+        if (root && sr2::modules::minimap::api::Get(snap) && snap.root == root && snap.visible) unity::SetActive(root, true);
+    }
 }
 
 }  // namespace sr2::modules::autotest::game

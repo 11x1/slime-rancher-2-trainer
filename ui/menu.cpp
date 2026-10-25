@@ -7,6 +7,7 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cfloat>
 #include <climits>
 #include <cmath>
@@ -23,6 +24,7 @@
 #include "core/build_info.h"
 #include "core/log.h"
 #include "core/profiles.h"
+#include "autotest_view.h"
 #include "discord_bridge.h"
 #include "game_input.h"
 #include "hud_edit.h"
@@ -744,6 +746,46 @@ void JumpTo(const spotlight::Target& t) {
     g_hl.module = t.module;
     g_hl.key = t.key;
     g_hl.requested = ImGui::GetTime();
+}
+
+// The test harness asked for a page (autotest_view.h RequestPage, for screenshots of the menu): category
+// by id or title, tab by title or index, both case-insensitive.
+void ApplyPageRequest(const autotest::PageRequest& req, const std::vector<Category>& cats) {
+    auto same = [](std::string_view a, std::string_view b) {
+        return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+                   return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+               });
+    };
+    auto list = [&] {
+        std::string s;
+        for (const Category& c : cats) {
+            s += (s.empty() ? "" : "; ") + c.id + " (";
+            for (size_t i = 0; i < c.tabs.size(); ++i) s += (i ? ", " : "") + c.tabs[i].title;
+            s += ")";
+        }
+        return s;
+    };
+    const auto cat = std::find_if(cats.begin(), cats.end(), [&](const Category& c) { return same(c.id, req.cat) || same(c.title, req.cat); });
+    if (cat == cats.end()) {
+        autotest::PageDone(req.id, false, std::format("no category '{}'; pages: {}", req.cat, list()));
+        return;
+    }
+    int tab = -1;
+    if (req.tab.empty()) {
+        tab = std::clamp(g_tab[cat->id], 0, static_cast<int>(cat->tabs.size()) - 1);
+    } else {
+        for (size_t i = 0; i < cat->tabs.size() && tab < 0; ++i)
+            if (same(cat->tabs[i].title, req.tab)) tab = static_cast<int>(i);
+        if (tab < 0 && std::all_of(req.tab.begin(), req.tab.end(), [](char c) { return c >= '0' && c <= '9'; }) && req.tab.size() < 4)
+            if (const int i = std::stoi(req.tab); i < static_cast<int>(cat->tabs.size())) tab = i;
+    }
+    if (tab < 0) {
+        autotest::PageDone(req.id, false, std::format("no tab '{}' in {}; pages: {}", req.tab, cat->id, list()));
+        return;
+    }
+    g_cat = cat->id;
+    g_tab[cat->id] = tab;
+    autotest::PageDone(req.id, true, cat->id + " / " + cat->tabs[static_cast<size_t>(tab)].title);
 }
 
 // One setting: label on the left (dim while its switch is off), control on the right.
@@ -5019,6 +5061,7 @@ bool Draw(const Host& h) {
     const auto views = BuildModuleViews();
     const auto cats = layout::Build(views);
     const ModuleView* ui = FindView(views, kUiModule);
+    if (autotest::PageRequest req; autotest::TakePageRequest(req)) ApplyPageRequest(req, cats);
 
     auto catIt = std::find_if(cats.begin(), cats.end(), [](const Category& c) { return c.id == g_cat; });
     if (catIt == cats.end()) catIt = cats.begin();

@@ -69,11 +69,35 @@ The contract from the plan (unchanged) plus additions (marked +). Slots are the 
 | `find` | `type`, `name`, `near`, `radius` (30 with near), `limit` (50), `fields`, `include_inactive`+ | `{objects: [{id, name, class, pos, distance, fields}], matched, scanned}`; `FindObjectsOfTypeAll` on request only; fields by name (instance fields, else a `get_<name>` getter): numbers, bools, strings, enums (int), Vector2/3, Quaternion/Color, objects as `{class, ptr, name}` |
 | `probe` / `exec` | `name`, `args` | the registered function's result |
 | `input` | `action` or `key`, `press` / `release` / `tap` (bools; default tap), `hold_ms`+ (80) | `key`: `SendInput` with scan codes from the command thread, refused unless the game window is in front; `action`: a game `InputEvent` by asset name or Input System action name (`InputActionController` bindings), press = `StartInput` + `Perform`, release = `Cancel`, tap = press now and release `hold_ms` later on the main thread. `probe list_inputs` lists the names |
-| `screenshot` | `name`, `overlay`+ (false) | `{path, width, height}`; `<game folder>\sr2mods_autotest\shots\<name>_<time>.png`. The back buffer of the next frame, before the overlay drew (with `overlay: true` after it) |
+| `screenshot` | `name`, `overlay`+ (false), `hide_hud`+, `hide_minimap`+, `hide_harness`+ (all false), `menu`+ `{cat, tab}`, `settle_ms`+ | `{path, width, height}`; `<game folder>\sr2mods_autotest\shots\<name>_<time>.png`. The back buffer of the next frame, before the overlay drew (with `overlay: true` after it). Showcase options below |
+| `overlay`+ | `open` (true), `cat`, `tab` | `{open, page}`: opens / closes the mod menu, at a page (category id or title, tab title or 0-based index); waits until the menu drew that page. An unknown page fails with the list of pages |
 | `ask` | `question`, `options` (2-4), `timeout_s` (600), `case`, `step`, `wait`+ (true) | `{answer, note}`: the chosen label, `"timeout"` or `"cancelled"`. `wait: false`: `{pending, ask_id}` now and an `answer` event later |
 | `cancel_ask` | `ask_id`+ (optional) | `{cancelled}` |
 | `subscribe_log` | `on`+ (true) | `{subscribed}` |
 | `list_names`+ | | `{commands, probes, actions}` |
+
+## Screenshots for the showcase
+
+`autotest/showcase.py` (README there) takes release-page shots through `screenshot`. What is hidden is hidden
+for the shot only and put back right after (also on errors and timeouts, `ShotRestore`):
+- **The mod's own bits**: the game-only frame (`overlay: false`, before the overlay drew) never has them (tag,
+  question panel, edges, HUD markers, speed panel: all ImGui). With `overlay: true` and `hide_harness`,
+  `autotest_view` leaves the tag, panel and edges out of the frame it captures: `Draw` skips them while such a
+  shot is pending and marks the frame (`g_frameHidden`); `ShotWanted(true)` takes only a marked frame, so a shot
+  asked for between `Draw` and the capture waits one frame.
+- **`hide_hud`**: `Behaviour.enabled = false` on the Canvas of HudUI's GameObject (re/ui.md, HudUI: that Canvas
+  is the HUD's), plus the minimap below; `game::HideUi` / `RestoreUi`. Not `SetActive` on HudUI: its
+  OnDisable / OnEnable run game logic. Only an enabled Canvas is touched; GC handles keep what was changed until
+  the restore. While the game itself hides the HUD (HudUI's GameObject inactive) there is nothing to hide.
+- **`hide_minimap`**: the minimap root (`minimap::api::Get` -> `Snapshot.root`, the collectibles tracker is its
+  child) `SetActive(false)`; back on only if the minimap still says `visible` with the same root (the minimap sets
+  its root's active state only when its own visibility changes, so it does not fight the shot).
+- **`menu {cat, tab}`**: the overlay opened (`overlay::SetOpen`) and the page asked for through
+  `autotest_view::RequestPage`; `menu.cpp` applies it at the top of its next `Draw` (`ApplyPageRequest`: category
+  by id or title, tab by title or index) and reports back. Closed again after the shot if it was closed.
+- Then `settle_ms` (default 300 when something changed, else 0) before asking for the frame, so the change is
+  on screen.
+One log line per shot that changed something: `screenshot '<name>': menu sandbox / Spawn & Craft, hid HUD, minimap`.
 
 ## Save guard
 
@@ -148,4 +172,6 @@ Everything here was built and reasoned about but not run: the pipe with the Pyth
 settings model built outside the New Game screen (which `OptionsItemDefinitionList` it picks is logged), `BeginLoad`
 right after the title loads (1.5 s settle), the `InputEvent` press/release path, `SendInput` reaching the Input
 System, the panel's input routing with the overlay closed, the screenshot formats (8-bit RGBA/BGRA, 10-bit and
-FP16 handled), and `quit_to_title` without the save leaving the game in a clean state.
+FP16 handled), and `quit_to_title` without the save leaving the game in a clean state. The showcase options too:
+whether the HudUI Canvas holds every HUD element (anything on another canvas stays in the shot), whether 300 ms is
+enough for the change to reach the frame at low frame rates, and the mod menu opened from the command thread.

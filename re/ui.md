@@ -180,7 +180,8 @@ Unity's new Input System only, through a ScriptableObject event bus; gameplay su
 - methods: `UpdateHudVisibility` 0x6997D0 / `HideUI` - deactivate HudUI's OWN GameObject while the HUD is hidden (find with include-inactive) (IDA)
 - methods: `GetSortOrder` - uses a Canvas on HudUI (HudUI GameObject carries the HUD Canvas) (IDA)
 - fields: `_debugText` (TMP; font source)
-- mod: MM (parent canvas)
+- gotchas: to hide the whole HUD for a moment (screenshots), turn that Canvas off (`Behaviour.set_enabled(false)`) rather than `SetActive(false)` on the GameObject, which runs HudUI's `OnDisable` / `OnEnable` (event subscriptions); the minimap's nested Canvas is hidden by its own root as well, to be safe (not verified in game)
+- mod: MM (parent canvas), autotest (screenshot `hide_hud`)
 
 ### UIDisplayManager (MonomiPark.SlimeRancher.UI.Framework.Displays)
 - methods: `get_Instance` (static)

@@ -54,7 +54,24 @@ struct Shot {
 };
 // Asks the render thread for the next frame's back buffer (`withOverlay`: after the overlay drew, else
 // the game's frame only) and waits at most `timeoutMs`. One at a time (a second caller waits its turn).
-Shot TakeShot(bool withOverlay, long long timeoutMs);
+// `hideHarness` (with the overlay): the captured frame is drawn without the tag, the question panel and
+// the flashing edges (they are back the frame after). The game-only frame never has them.
+Shot TakeShot(bool withOverlay, long long timeoutMs, bool hideHarness = false);
+
+// ---- mod menu page (module side asks, the menu applies it) ----
+// Asks the settings window to show a page: `cat` = category id or title ("ranch", "Sandbox"), `tab` = tab
+// title or 0-based index ("" = the category's current tab). Applied by the next menu frame, so the overlay
+// must be open (overlay::SetOpen). Any thread. Returns the request id.
+uint64_t RequestPage(const std::string& cat, const std::string& tab);
+// 0 = not applied yet, 1 = shown, -1 = no such page (`detail` says why and lists the pages).
+int PageResult(uint64_t id, std::string& detail);
+// Render thread (menu.cpp): the pending request, if any; then PageDone with the outcome.
+struct PageRequest {
+    uint64_t id = 0;
+    std::string cat, tab;
+};
+bool TakePageRequest(PageRequest& out);
+void PageDone(uint64_t id, bool ok, const std::string& detail);
 
 // ---- render thread (overlay.cpp) ----
 // Anything to draw (tag or question): the overlay renders a frame for it.
