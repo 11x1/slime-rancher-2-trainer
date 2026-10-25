@@ -149,7 +149,7 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | PlayerState.InitModel(1) | 0x87B4F0 | custom_upgrades.PlayerState.InitModel | custom_upgrades/vacpack_upgrades.cpp | apply vacpack tiers |
 | PlayerState.Reset(1) | 0x87BC70 | custom_upgrades.PlayerState.Reset | custom_upgrades/vacpack_upgrades.cpp | apply vacpack tiers |
 | PlayerUpgradeFabricateCategoryRuntime..ctor(2) | 0x82BE90 | custom_upgrades.PlayerUpgradeFabricateCategoryRuntime..ctor | custom_upgrades/vacpack_upgrades.cpp | add upgrade cards (own ctor, no parent walk) |
-| PlortCollectorActivator.Activate(0) | 0x52DD60 | custom_upgrades.PlortCollectorActivator.Activate | custom_upgrades/module.cpp | silo Sell-All + Hen Collector buttons (silo_world, coop_world) (opt) |
+| PlortCollectorActivator.Activate(0) | 0x52DD60 | custom_upgrades.PlortCollectorActivator.Activate | custom_upgrades/module.cpp | silo Sell-All, Corral Radio + Hen Collector buttons (silo_world, coop_world) (opt) |
 | ProducePlortsOnHit.ProducePlort(0) | 0x885CA0 | custom_upgrades.ProducePlortsOnHit.ProducePlort | custom_upgrades/shadow_catcher.cpp | lift hit-plort despawn limit (opt) |
 | PurchaseItemDetailsContentView.BindData(1) | 0x6D9EA0 | custom_upgrades.PurchaseItemDetailsContentView.BindData | custom_upgrades/module.cpp | Hen Collector limit sliders (opt; the class's own override) |
 | RanchDrone.GatherSourceTask(1) | 0xA19B40 | custom_upgrades.RanchDrone.GatherSourceTask | custom_upgrades/drone_source.cpp | custom drone sources |
@@ -231,8 +231,9 @@ debug_tools, discord_rpc, wall_markers (reads the overlay's Present), proxy/.
 - gadget_look.cpp owns GadgetDefinition.get_LocalizedDescription, GadgetDirector.GetTargetGadgetInfo,
   GadgetItem.SetHeldGadget, FabricatorItemDetails.SetItem ("nobody else may hook them"). Use
   `gadget_look::Register(def, Look)` and `AddPlacedLabel(provider)` (custom_upgrades/gadget_look.h).
-- `PlortCollectorActivator.Activate` (custom_upgrades/module.cpp) serves both silo_world (Sell-All
-  button) and coop_world (Hen Collector button); the Hen button exists only with this detour.
+- `PlortCollectorActivator.Activate` (custom_upgrades/module.cpp) serves silo_world (Sell-All button and,
+  round 11, the blue Corral Radio button: a second `SiloButtons` with `RadioButtonLook`, which calls
+  slime_dj `OpenRadioMenu`) and coop_world (Hen Collector button); those buttons exist only with this detour.
 - drone_price_limit/station_dialog.cpp owns the DroneProgramMenu / FocusManager hooks and also hosts
   custom_upgrades' drone-programs UI (drone_programs.h). drone_source.cpp's DroneStationGadgetModel.Pull
   detour asks drone_programs through `drones::SetProgramHooks` (callbacks, not a second hook).

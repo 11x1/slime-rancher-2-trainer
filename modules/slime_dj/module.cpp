@@ -72,6 +72,7 @@
 #include "modules/custom_upgrades/api.h"
 #include "modules/slime_dj/emitters.h"
 #include "modules/slime_dj/library.h"
+#include "modules/slime_dj/radio_menu.h"
 #include "modules/slime_dj/stream.h"
 #include "modules/slime_dj/walls.h"
 #include "ui/slime_dj_bridge.h"
@@ -332,6 +333,8 @@ public:
         std::string danceWhy;
         if (!dancer_.Ready() && !dancer_.Resolve(danceWhy))
             SR2_WARN("slime_dj: 'Walls dance to the music' unavailable ({})", danceWhy);
+        if (std::string menuWhy; !menu_.Ready() && !menu_.Setup(Resolver::Get(), menuWhy))
+            SR2_WARN("slime_dj: Corral Radio playlist menu unavailable ({}); playlists only in the Slime DJ tab", menuWhy);
         SR2_INFO("slime_dj: resolved (AudioClip/AudioSource, MusicBoxUpgrader; SECTR source {}, cue {}, bus {}, system {}; "
                  "walls dance {})",
                  sectrSourceClass_ ? "yes" : "no", cueClass_ ? "yes" : "no", busClass_ ? "yes" : "no",
@@ -619,6 +622,9 @@ private:
 
     // Permanent stop: no further game calls this session (handles are leaked on purpose).
     void Die(const std::string& why) {
+        // The menu pauses the game (UIInputLocker): never leave it open, whatever happened.
+        if (menu_.IsOpen()) core::Try([this] { menu_.Close("Slime DJ stopped"); });
+        menuKey_.clear();
         dead_.store(true);
         g_recording.store(false);
         bridge::SetHandler(nullptr);
@@ -1160,14 +1166,15 @@ private:
         return std::any_of(speakers_.begin(), speakers_.end(), [&](const Speaker& sp) { return sp.ch == &ch; });
     }
     // "Corral 2419": the last characters of the plot key (stable, short; the full key is in the tooltip).
-    static std::string RadioName(const Channel& r) {
+    static std::string RadioName(const Channel& r) { return RadioName(r.key); }
+    static std::string RadioName(const std::string& key) {
         std::string tail;
-        for (size_t i = r.key.size(); i > 0 && tail.size() < 4; --i) {
-            const char c = r.key[i - 1];
+        for (size_t i = key.size(); i > 0 && tail.size() < 4; --i) {
+            const char c = key[i - 1];
             if (std::isalnum(static_cast<unsigned char>(c))) tail.insert(tail.begin(), c);
             else if (!tail.empty()) break;
         }
-        return "Corral " + (tail.empty() ? r.key : tail);
+        return "Corral " + (tail.empty() ? key : tail);
     }
 
     void StopCurrent(Channel& ch) {
@@ -1913,7 +1920,7 @@ private:
         // Song started or tab opened after being idle: one scene search as a safety net (on a click, so
         // a one-off hitch); the hook keeps the cache current from then on.
         const bool radiosOn = std::any_of(radios_.begin(), radios_.end(), [](const auto& r) { return r->on; });
-        const bool active = global_.cur || radiosOn || viewed;
+        const bool active = global_.cur || radiosOn || viewed || !menuKey_.empty();
         if (active != wasActive_) {
             wasActive_ = active;
             if (active) fullScan_ = true;
@@ -1953,6 +1960,7 @@ private:
         TickMix();
         TickMuffle(dt);
         TickDancer(dt);
+        TickMenu(dt);
         const Current* g = global_.cur.get();
         dj::emitters::SetPlaying(g && g->started && !g->userPaused &&
                                      std::any_of(speakers_.begin(), speakers_.end(), [&](const Speaker& sp) { return sp.live && sp.ch == &global_; }),
@@ -1965,6 +1973,8 @@ private:
     }
 
     void Shutdown() {
+        menu_.Close("Slime DJ off");
+        menuKey_.clear();
         dancer_.Clear();
         dancePlots_ = 0;
         StopAll();
@@ -1979,6 +1989,156 @@ private:
         busRetry_ = 0;
     }
 
+    // ------------------------------------------------------------- radio menu ----
+    // The Corral Radio button (custom_upgrades) asks for the menu through api.h OpenRadioMenu; the next
+    // tick scans (the radio channel exists once its corral was seen) and opens it. The menu edits the
+    // radio through the same requests as the Slime DJ tab (HandleRadio).
+public:
+    bool RequestMenu(Il2CppObject* plot, std::string* why) {
+        auto no = [&](const char* w) {
+            if (why) *why = w;
+            return false;
+        };
+        if (dead_.load() || !frameCb_) return no("Slime DJ is off (overlay: Ranch > Slime DJ)");
+        if (!menu_.Ready()) return no("the playlist menu is unavailable; use the overlay's Slime DJ tab");
+        if (menu_.IsOpen() || !menuKey_.empty()) return no("the playlist menu is already open");
+        std::string key = cu::PlotKey(plot);
+        if (key.empty()) return no("this corral is not known yet; try again in a moment");
+        menuKey_ = std::move(key);
+        menuPending_ = true;
+        menuAge_ = 0;
+        menuRefresh_ = 0;
+        boxScan_ = 0;  // find the corral's radio in the next tick
+        return true;
+    }
+
+private:
+    std::shared_ptr<const std::vector<dj::MenuSong>> MenuSongs() {
+        RefreshSongIndex();
+        if (songs_ != menuSongsFrom_ || !menuSongs_) {
+            menuSongsFrom_ = songs_;
+            if (!songs_) {
+                menuSongs_.reset();
+                return menuSongs_;
+            }
+            auto v = std::make_shared<std::vector<dj::MenuSong>>();
+            v->reserve(songs_->size());
+            for (const auto& x : *songs_) v->push_back({x.id, x.name, x.seconds, x.error.empty()});
+            std::stable_sort(v->begin(), v->end(), [](const dj::MenuSong& a, const dj::MenuSong& b) {
+                return _stricmp(a.name.c_str(), b.name.c_str()) < 0;
+            });
+            menuSongs_ = std::move(v);
+        }
+        return menuSongs_;
+    }
+
+    dj::MenuState MenuStateFor(const Channel* r) {
+        dj::MenuState m;
+        m.title = RadioName(menuKey_);
+        if (!r) {
+            m.available = false;
+            m.status = menuAge_ < 3.0f ? "Tuning in..."
+                                       : "This corral's radio can't play right now: it needs its Music Box, and custom upgrades on.";
+            return m;
+        }
+        m.on = r->on;
+        m.shuffle = r->shuffle;
+        m.playing = r->index;
+        for (const std::string& f : r->playlist) {
+            const dj::SongInfo* song = FindSongByFile(f);
+            m.playlist.push_back({song ? song->name : std::filesystem::path(f).stem().string(), song ? song->seconds : 0.0,
+                                  !song || !song->error.empty()});
+        }
+        if (r->cur) {
+            const Current& c = *r->cur;
+            m.status = "Now playing: " + c.name;
+            if (GamePaused()) m.status += "  (paused while this menu is open)";
+            else if (c.buffering || !c.started) m.status += "  (loading)";
+        } else if (r->on && !r->slot) {
+            m.status = std::format("On - waiting: {} radios play already (the nearest ones get the next free slot).", kMaxRadioStreams);
+        } else if (r->on) {
+            m.status = songs_ ? "On" : "On - reading the music folder...";
+        } else {
+            m.status = r->playlist.empty() ? "Off - add songs, then switch the radio on." : "Off - press Radio to play this playlist here.";
+        }
+        return m;
+    }
+
+    void TickMenu(float dt) {
+        if (menuKey_.empty()) return;
+        menuAge_ += std::isfinite(dt) ? std::clamp(dt, 0.0f, 0.25f) : 0.0f;
+        if (menuPending_) {
+            menuPending_ = false;
+            Channel* r = FindRadio(menuKey_);
+            if (!menu_.Open(MenuStateFor(r), MenuSongs())) {
+                menuKey_.clear();
+                return;
+            }
+            SR2_INFO("slime_dj: radio menu for '{}' (plot '{}'){}", RadioName(menuKey_), menuKey_,
+                     r ? "" : ": its radio is not found yet (scanning)");
+        }
+        if (!menu_.IsOpen()) {
+            menuKey_.clear();
+            return;
+        }
+        for (const dj::MenuAction& a : menu_.Tick(dt)) {
+            if (a.op == dj::MenuOp::kClose) {
+                menu_.Close("closed");
+                menuKey_.clear();
+                return;
+            }
+            MenuAct(a);
+        }
+        if ((menuRefresh_ -= dt) <= 0.0f) {
+            menuRefresh_ = 0.25f;
+            menu_.SetSongs(MenuSongs());
+            menu_.Update(MenuStateFor(FindRadio(menuKey_)));
+        }
+    }
+
+    void MenuAct(const dj::MenuAction& a) {
+        Channel* r = FindRadio(menuKey_);
+        if (!r) return;
+        bridge::Action b;
+        b.radio = menuKey_;
+        b.index = a.index;
+        switch (a.op) {
+            case dj::MenuOp::kAdd: {
+                const dj::SongInfo* s = FindSong(a.song);
+                if (!s) return;
+                if (r->playlist.size() >= kMaxPlaylist) {
+                    menu_.Note(std::format("The playlist is full ({} songs).", kMaxPlaylist), false);
+                    return;
+                }
+                b.op = bridge::Op::RadioAdd;
+                b.song = a.song;
+                menu_.Note("Added " + s->name, true);
+                break;
+            }
+            case dj::MenuOp::kRemove: b.op = bridge::Op::RadioRemove; break;
+            case dj::MenuOp::kUp: b.op = bridge::Op::RadioUp; break;
+            case dj::MenuOp::kDown: b.op = bridge::Op::RadioDown; break;
+            case dj::MenuOp::kClear:
+                b.op = bridge::Op::RadioClear;
+                menu_.Note("Playlist emptied; the radio is off.", true);
+                break;
+            case dj::MenuOp::kShuffle: b.op = bridge::Op::RadioShuffle; break;
+            case dj::MenuOp::kPlayAt: b.op = bridge::Op::RadioPlayAt; break;
+            case dj::MenuOp::kToggle:
+                if (!r->on && r->playlist.empty()) {
+                    menu_.Note("Add songs to the playlist first.", false);
+                    return;
+                }
+                b.op = bridge::Op::RadioToggle;
+                menu_.Note(r->on ? "Radio switched off." : "Radio switched on.", true);
+                break;
+            default: return;
+        }
+        Handle(b);
+        menu_.Update(MenuStateFor(FindRadio(menuKey_)));
+    }
+
+private:
     // ------------------------------------------------------------- requests ----
     void Handle(const bridge::Action& a) {
         if (cfgDirty_.exchange(false)) cfg_ = LoadCfg();
@@ -2281,6 +2441,12 @@ private:
     bool hooked_ = false, fullScan_ = true, dropApplied_ = false, wasActive_ = false, probe_ = false;
     ScanPerf perf_;
     dj::WallDancer dancer_;
+    dj::RadioMenu menu_;            // Corral Radio playlist menu (radio_menu.h)
+    std::string menuKey_;           // plot key of the radio the menu is for ("" = no menu)
+    bool menuPending_ = false;      // requested, opens in the next tick
+    float menuAge_ = 0, menuRefresh_ = 0;
+    dj::SongList menuSongsFrom_;
+    std::shared_ptr<const std::vector<dj::MenuSong>> menuSongs_;
     size_t dancePlots_ = 0;
     uint64_t danceLast_ = 0;
     unsigned danceGen_ = 0;
@@ -2317,5 +2483,22 @@ private:
 }  // namespace
 
 std::unique_ptr<sr2::core::Module> CreateSlimeDj() { return std::make_unique<SlimeDjModule>(); }
+
+namespace slime_dj {
+
+bool OpenRadioMenu(Il2CppObject* landPlot, std::string* why) {
+    if (!sr2::core::main_thread::IsMainThread() || !landPlot) {
+        if (why) *why = "not on the main thread";
+        return false;
+    }
+    SlimeDj* self = g_self;
+    if (!self) {
+        if (why) *why = "Slime DJ is off (overlay: Ranch > Slime DJ)";
+        return false;
+    }
+    return self->RequestMenu(landPlot, why);
+}
+
+}  // namespace slime_dj
 
 }  // namespace sr2::modules

@@ -61,6 +61,12 @@
 // renderer of the button once (GameObject, renderer class, material, shader, its Color / Texture properties,
 // whether a property block is set) so the log shows what draws it.
 //
+// Round 11: the same class builds the blue Corral Radio button (a second instance with another
+// ButtonLook: name "sr2mods_RadioButton#", corral plots, the corral's free (+x, -z) corner, blue). The
+// corral's own corners: plot menu terminal (-x, -z), Music Box speaker (-x, +z) up on the post, plort
+// collector button (+x, +z) outside at the ground, auto-feeder distributor (+x, -z) up on the post at
+// 2.5 m - so the ground outside the (+x, -z) post is free, the same plot-local spot as the silo button.
+//
 // Silo plots: the plot ids module.cpp passes -> SceneContext.GameModel.GetLandPlotModel(id)
 // (a TryGetValue, null if unknown) -> LandPlotModel.gameObj (the LandPlotLocation object) ->
 // GetComponentInChildren<LandPlot>. A demolished / rebuilt plot is a new object: its button went
@@ -96,15 +102,11 @@ using sr2::il2cpp::Resolver;
 constexpr const char* kImage = "Assembly-CSharp";
 constexpr const char* kCore = "UnityEngine.CoreModule";
 constexpr int32_t kPlotCorral = 2;
-constexpr int32_t kPlotSilo = 5;
-constexpr std::string_view kName = "sr2mods_SiloSellButton#";
-constexpr const char* kHudOwner = "custom_upgrades.silo_button";
 constexpr unsigned long long kPressGapMs = 400;  // vanilla TIME_BETWEEN_ACTIVATIONS
 constexpr float kMessageRange = 40.0f;
-constexpr float kTintCap = 0.85f;   // blend towards kTintColor: the cap
+constexpr float kTintCap = 0.85f;   // blend towards the look's tint: the cap
 constexpr float kTintBase = 0.35f;  // ... the button's base
 constexpr float kTintAll = 0.4f;    // ... every renderer (no cap found)
-constexpr std::string_view kGoldMat = "sr2mods_gold";  // name of our instanced (tinted) materials
 constexpr int kShaderPropColor = 0;  // UnityEngine.Rendering.ShaderPropertyType.Color
 
 struct Vec3 {
@@ -119,13 +121,21 @@ struct Mat4 {
 struct Color {
     float r, g, b, a;
 };
-constexpr Color kTintColor{1.0f, 0.78f, 0.18f, 1.0f};  // gold (the Newbucks coin)
-constexpr Color kGoldLit{1.0f, 0.74f, 0.16f, 1.0f};    // _BaseColor of the cap's own HDRP/Lit material
 
 }  // namespace
 
 struct SiloButtons::Impl {
     const char* module = "custom_upgrades";
+    // The look (silo_world.h ButtonLook): clone name prefix, plot type, place, colours, log name.
+    std::string kName = "sr2mods_SiloSellButton#";
+    std::string kGoldMat = "sr2mods_gold";  // name of our instanced (tinted) materials
+    std::string label = "silo sell button";
+    std::string kHudOwner = "custom_upgrades.silo_button";
+    int32_t plotType = 5;
+    Vec3 pos{5.58f, 1.20f, -5.58f};
+    Quat rot{0.0f, 0.92387953f, 0.0f, 0.38268343f};
+    Color kTintColor{1.0f, 0.78f, 0.18f, 1.0f};  // palette tint (gold: the Newbucks coin)
+    Color kGoldLit{1.0f, 0.74f, 0.16f, 1.0f};    // _BaseColor of the cap's own HDRP/Lit material
     Il2CppClass* plotClass = nullptr;
     Il2CppClass* upgraderClass = nullptr;   // PlortCollectorUpgrader
     Il2CppClass* activatorClass = nullptr;  // PlortCollectorActivator
@@ -329,9 +339,18 @@ struct SiloButtons::Impl {
 
 // ---------------------------------------------------------------- setup --
 
-bool SiloButtons::Setup(Resolver& R, const char* module, std::string& why) {
+bool SiloButtons::Setup(Resolver& R, const char* module, std::string& why, const ButtonLook& look) {
     auto* p = new Impl();
     p->module = module;
+    p->kName = look.name;
+    p->kGoldMat = look.material;
+    p->label = look.what;
+    p->kHudOwner = look.hudOwner;
+    p->plotType = look.plotType;
+    p->pos = Vec3{look.pos[0], look.pos[1], look.pos[2]};
+    p->rot = Quat{look.rot[0], look.rot[1], look.rot[2], look.rot[3]};
+    p->kTintColor = Color{look.tint[0], look.tint[1], look.tint[2], 1.0f};
+    p->kGoldLit = Color{look.lit[0], look.lit[1], look.lit[2], 1.0f};
     auto parentOf = [](Il2CppClass* c) { return api().il2cpp_class_get_parent ? api().il2cpp_class_get_parent(c) : nullptr; };
     auto cls = [&](const char* image, const char* ns, const char* name) -> Il2CppClass* {
         std::string err;
@@ -447,7 +466,7 @@ bool SiloButtons::Setup(Resolver& R, const char* module, std::string& why) {
             }
             if (!p->objectNew || !p->mpbClass || !p->mpbCtor || !p->mpbSetColor || !p->rendGetBlock || !p->rendSetBlock) {
                 p->mpbClass = nullptr;
-                SR2_WARN("[{}] silo sell button: no MaterialPropertyBlock ({}) - material colours only", module,
+                SR2_WARN("[{}] {}: no MaterialPropertyBlock ({}) - material colours only", module, p->label,
                          berr.empty() ? "a method is missing" : berr);
             }
         }
@@ -466,14 +485,14 @@ bool SiloButtons::Setup(Resolver& R, const char* module, std::string& why) {
             p->rendHasBlock = R.Method(p->rendererClass, "HasPropertyBlock", 0, &herr);
             if (!p->shaderFind || !p->propToId || !p->matCtor || !p->matSetFloat || !p->rendSetShared || !p->objectNew) {
                 p->goldFailed = true;
-                SR2_WARN("[{}] silo sell button: no gold material ({}) - the cap gets the palette tint", module,
+                SR2_WARN("[{}] {}: no gold material ({}) - the cap gets the palette tint", module, p->label,
                          gerr.empty() ? "a method is missing" : gerr);
             }
         }
         if (!p->compsInChildren || !p->rendMaterials || !p->matShader || !p->matGetColor || !p->matSetColor ||
             !p->shPropCount || !p->shPropType || !p->shPropNameId || !p->rendSharedMaterial) {
             p->rendererClass = nullptr;
-            SR2_WARN("[{}] silo sell button tint unavailable ({}) - the button keeps the prefab's colours", module,
+            SR2_WARN("[{}] {} tint unavailable ({}) - the button keeps the prefab's colours", module, p->label,
                      err.empty() ? "a Renderer / Material / Shader method is missing" : err);
         }
     }
@@ -488,14 +507,14 @@ void SiloButtons::Impl::Create(Il2CppObject* plot, Il2CppObject* lookup, const s
     if (broken) return;
     Il2CppObject* src = Source(lookup);
     if (!src) {
-        if (!loggedNoSource) SR2_WARN("[{}] silo sell button: corral Plort Collector button not found in the prefab", module);
+        if (!loggedNoSource) SR2_WARN("[{}] {}: corral Plort Collector button not found in the prefab", module, label);
         loggedNoSource = true;
         return;
     }
     Il2CppObject* plotTr = unity::TransformOf(plot);
     Il2CppObject* clone = unity::Instantiate(src, plotTr);
     if (!unity::IsAlive(clone) || !IsA(clone, gameObjectClass)) {
-        SR2_WARN("[{}] silo sell button: Instantiate failed", module);
+        SR2_WARN("[{}] {}: Instantiate failed", module, label);
         broken = true;
         return;
     }
@@ -504,7 +523,7 @@ void SiloButtons::Impl::Create(Il2CppObject* plot, Il2CppObject* lookup, const s
     Il2CppObject* act = InChildren(root, activatorClass);
     if (!act || unity::Field<Il2CppObject*>(act, offActCollector) == nullptr) {
         // Never expected: no activator, or the prefab's own (shared) one.
-        SR2_WARN("[{}] silo sell button: cloned button has no own PlortCollectorActivator - not built", module);
+        SR2_WARN("[{}] {}: cloned button has no own PlortCollectorActivator - not built", module, label);
         DestroyNow(clone);
         broken = true;
         return;
@@ -513,8 +532,7 @@ void SiloButtons::Impl::Create(Il2CppObject* plot, Il2CppObject* lookup, const s
     void** slot = reinterpret_cast<void**>(reinterpret_cast<char*>(act) + offActCollector);
     if (wbarrier) wbarrier(act, slot, nullptr);
     else *slot = nullptr;
-    Vec3 pos{5.58f, 1.20f, -5.58f};                // outer (+x, -z) corner, front side of the silo
-    Quat rot{0.0f, 0.92387953f, 0.0f, 0.38268343f};  // 135 deg: faces outwards (diagonal)
+    // Silo: outer (+x, -z) corner, front side; 135 deg faces outwards (diagonal). Corral radio: the same.
     Vec3 one{1.0f, 1.0f, 1.0f};
     Call(trSetLocalPosition, root, {&pos}, "Transform.set_localPosition");
     Call(trSetLocalRotation, root, {&rot}, "Transform.set_localRotation");
@@ -525,7 +543,7 @@ void SiloButtons::Impl::Create(Il2CppObject* plot, Il2CppObject* lookup, const s
         return;
     }
     unity::SetActive(clone, true);
-    SR2_INFO("[{}] silo sell button built on plot '{}' (clone of corral '{}')", module, id, unity::GetName(src));
+    SR2_INFO("[{}] {} built on plot '{}' (clone of corral '{}')", module, label, id, unity::GetName(src));
 }
 
 // Our gold material on HDRP/Lit (see the header), made once and kept for the session.
@@ -548,7 +566,7 @@ Il2CppObject* SiloButtons::Impl::GoldMaterial() {
             }
     }
     if (!shader) {
-        SR2_WARN("[{}] silo sell button: shader '{}' not found - the cap gets the palette tint", module, kShaderName);
+        SR2_WARN("[{}] {}: shader '{}' not found - the cap gets the palette tint", module, label, kShaderName);
         goldTried = true;
         return nullptr;
     }
@@ -576,7 +594,7 @@ Il2CppObject* SiloButtons::Impl::GoldMaterial() {
         if (pid != -1) Call(matSetFloat, mat, {&pid, &f}, "Material.SetFloat", &ok);
     }
     goldMat = mat;
-    SR2_INFO("[{}] silo sell button: gold material made on '{}' (found through {}), {} colour propert{} set", module,
+    SR2_INFO("[{}] {}: cap material made on '{}' (found through {}), {} colour propert{} set", module, label,
              kShaderName, how, set, set == 1 ? "y" : "ies");
     return goldMat;
 }
@@ -614,7 +632,7 @@ void SiloButtons::Impl::Dump(Il2CppObject* button, const std::string& id) {
                            unity::IsAlive(sh) ? unity::GetName(sh) : std::string("?"), block ? ", property block set" : "",
                            props.empty() ? std::string("no colour / texture properties") : props);
     }
-    SR2_INFO("[{}] silo sell button on plot '{}': renderers before the gold:{}", module, id, out);
+    SR2_INFO("[{}] {} on plot '{}': renderers before the gold:{}", module, label, id, out);
 }
 
 // Gold accent (see the header comment). Called on every tick for a built button: returns at once
@@ -723,14 +741,14 @@ void SiloButtons::Impl::Tint(Il2CppObject* button, const std::string& id) {
     const int n = ++tintCount[id];
     if (!loggedTint) {
         loggedTint = true;
-        SR2_INFO("[{}] silo sell button on plot '{}' made gold ({}): {} palette colour(s); {}; property block on {} "
+        SR2_INFO("[{}] {} on plot '{}' tinted ({}): {} palette colour(s); {}; property block on {} "
                  "renderer(s)",
-                 module, id, anyCap ? "cap + base" : "no cap found - whole button", colours,
+                 module, label, id, anyCap ? "cap + base" : "no cap found - whole button", colours,
                  done.empty() ? "nothing" : done, blocks);
     } else if (n > 1 && loggedRetint < 5) {
         ++loggedRetint;
-        SR2_INFO("[{}] silo sell button on plot '{}': materials were replaced (was '{}') - tinted again ({} colour(s))",
-                 module, id, was, colours);
+        SR2_INFO("[{}] {} on plot '{}': materials were replaced (was '{}') - tinted again ({} colour(s))",
+                 module, label, id, was, colours);
     }
 }
 
@@ -753,7 +771,7 @@ void SiloButtons::Tick(const std::vector<std::string>& wanted, const std::functi
             continue;
         }
         Il2CppObject* btn = p.Scan(plot, generation_, false);
-        const bool want = p.PlotType(plot) == kPlotSilo && std::find(wanted.begin(), wanted.end(), id) != wanted.end();
+        const bool want = p.PlotType(plot) == p.plotType && std::find(wanted.begin(), wanted.end(), id) != wanted.end();
         if (want && !btn) {
             if (!lookupTried) {
                 lookupTried = true;
@@ -765,7 +783,7 @@ void SiloButtons::Tick(const std::vector<std::string>& wanted, const std::functi
         } else if (!want && btn) {
             p.tintCount.erase(id);
             p.Destroy(btn);
-            SR2_INFO("[{}] silo sell button removed from plot '{}' (not owned)", p.module, id);
+            SR2_INFO("[{}] {} removed from plot '{}' (not owned)", p.module, p.label, id);
         }
         if (want) built_.insert(id);
         else built_.erase(id);
@@ -775,7 +793,7 @@ void SiloButtons::Tick(const std::vector<std::string>& wanted, const std::functi
 
 void SiloButtons::RemoveAll() {
     if (!ready_ || !impl_) return;
-    sr2::ui::hud::Clear(kHudOwner);
+    sr2::ui::hud::Clear(impl_->kHudOwner.c_str());
     impl_->msgActive = false;
     Il2CppObject* gm = built_.empty() ? nullptr : impl_->GameModel();
     if (gm)
@@ -789,7 +807,7 @@ void SiloButtons::Remove(Il2CppObject* plot) {
     if (!ready_ || !impl_ || !unity::IsAlive(plot) || !impl_->IsA(plot, impl_->plotClass)) return;
     if (Il2CppObject* btn = impl_->Scan(plot, generation_, false)) {
         impl_->Destroy(btn);
-        SR2_INFO("[{}] silo sell button removed (sold)", impl_->module);
+        SR2_INFO("[{}] {} removed (sold)", impl_->module, impl_->label);
     }
 }
 
@@ -797,7 +815,7 @@ void SiloButtons::Reset() {
     ++generation_;  // built_ is kept: those plots are visited once more and stale buttons destroyed
     if (impl_) {
         impl_->msgActive = false;
-        sr2::ui::hud::Clear(kHudOwner);
+        sr2::ui::hud::Clear(impl_->kHudOwner.c_str());
     }
 }
 
@@ -807,7 +825,7 @@ bool SiloButtons::IsOurs(Il2CppObject* activator) {
     Il2CppObject* tr = unity::TransformOf(activator);
     for (int depth = 0; tr && depth < 4; ++depth, tr = impl_->Parent(tr)) {
         Il2CppObject* go = unity::GameObjectOf(tr);
-        if (go && unity::GetName(go).rfind(kName, 0) == 0) return true;
+        if (go && unity::GetName(go).rfind(impl_->kName, 0) == 0) return true;
     }
     return false;
 }
@@ -815,7 +833,7 @@ bool SiloButtons::IsOurs(Il2CppObject* activator) {
 Il2CppObject* SiloButtons::OwnerPlot(Il2CppObject* activator) {
     if (!ready_ || !impl_) return nullptr;
     Il2CppObject* plot = impl_->InParent(activator, impl_->plotClass);
-    return plot && impl_->PlotType(plot) == kPlotSilo ? plot : nullptr;
+    return plot && impl_->PlotType(plot) == impl_->plotType ? plot : nullptr;
 }
 
 bool SiloButtons::Press(Il2CppObject* activator) {
@@ -860,7 +878,7 @@ void SiloButtons::Frame() {
     Impl& p = *impl_;
     if (GetTickCount64() > p.msgUntil) {
         p.msgActive = false;
-        sr2::ui::hud::Clear(kHudOwner);
+        sr2::ui::hud::Clear(p.kHudOwner.c_str());
         return;
     }
     Il2CppObject* cam = unity::Camera_main();
@@ -883,7 +901,7 @@ void SiloButtons::Frame() {
     const float dx = p.msgPos.x - cx, dy = p.msgPos.y - cy, dz = p.msgPos.z - cz;
     const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
     if (!std::isfinite(d) || d > kMessageRange) {
-        sr2::ui::hud::Clear(kHudOwner);
+        sr2::ui::hud::Clear(p.kHudOwner.c_str());
         return;
     }
     f.markers.push_back({p.msgPos.x, p.msgPos.y, p.msgPos.z, d});
@@ -892,7 +910,7 @@ void SiloButtons::Frame() {
     f.textOnly = true;
     f.tag = p.msgText;
     f.color = p.msgColor;
-    sr2::ui::hud::Publish(kHudOwner, std::move(f));
+    sr2::ui::hud::Publish(p.kHudOwner.c_str(), std::move(f));
 }
 
 }  // namespace sr2::modules::custom_upgrades::world

@@ -28,6 +28,7 @@ reason. At most 2000 songs per folder.
 | `stream.cpp/.h` | one song decoded on a background thread into 0.5 s chunks (bounded queue) |
 | `beat.cpp/.h` | beat analysis of the decoded PCM on the decoder thread (bass level + onsets per 10 ms) |
 | `walls.cpp/.h` | "Walls dance to the music": beat ripples round the corral energy walls, walls and Air Net glow |
+| `radio_menu.cpp/.h` | the Corral Radio playlist menu (runtime uGUI, game-styled), opened by the blue corral button |
 | `codecs.c/.h` | the only TU that compiles stb_vorbis, dr_mp3, dr_wav (CMake target `sr2_codecs`, C, `/W0`) behind a small streaming C API |
 | `ui/slime_dj_bridge.cpp/.h` | snapshot / request exchange with the overlay tab (same pattern as the sandbox) |
 
@@ -139,6 +140,7 @@ dj::RegisterEmitter(go, dj::EmitterKind::kBooth);            // or kSpeaker / kR
 dj::RegisterEmitter(go, dj::EmitterKind::kRadio, 0.5f, 0.8f); // half the hearing range, 80 % volume
 dj::UnregisterEmitter(go);
 bool on = dj::SongPlaying(); std::string name = dj::SongName();  // any thread; the global song
+std::string why; dj::OpenRadioMenu(corralLandPlot, &why);       // main thread; the Corral Radio menu
 ```
 
 - `obj` is a GameObject or any Component on it. Slime DJ adds a child `sr2dj_Speaker` (same 3D setup as a
@@ -180,6 +182,31 @@ that changes channel stops, drops its clip and joins the other channel at its cl
 - *After a load*: with custom upgrades on, an Apply record triggers one probe scan even while idle, so a
   radio left on in the save starts.
 - Not per radio: walls dance and `SongPlaying` / `SongName` follow the global song only.
+
+### Corral Radio menu (round 11, `radio_menu.cpp`)
+
+User: "Add a button in the last empty corner (color it blue; like you did for silo's button) and let the
+button open a menu to build a queue from". custom_upgrades builds the button (a second `SiloButtons` with
+`RadioButtonLook`: clone of the corral Plort Collector button, blue, on every corral that owns the Corral
+Radio, at the free (+x, -z) corner; see `modules/custom_upgrades/NOTES.md`). Its press calls `api.h
+OpenRadioMenu(plot, &why)`: it only records the plot key (`RequestMenu`; refused with a reason when Slime
+DJ is off, the menu unavailable or already open; custom_upgrades shows the reason above the button). The
+next tick counts as active (box scan now, so the radio channel exists), then opens the menu.
+
+- *Look*: a runtime uGUI panel like custom_upgrades' Sell-All receipt (same palette, SDF shapes, the HUD's
+  TMP font, overlay Canvas 1920 x 1080 + UIInputLocker: game paused, cursor free). Title, corral name,
+  status line, two virtual lists (Songs sorted by name; the playlist numbered, the playing entry pink with
+  `>`), a feedback line, buttons Radio on/off, Shuffle, Clear (press twice), Done under the songs and Play,
+  Up, Down, Remove for the selected entry under the playlist, key hints. 5..11 rows per list (canvas
+  height); only changed texts / colours are written.
+- *Input*: polled (InputSystem devices, Toggle clicks), 0.3 s grace; see the `radio_menu.h` header for the
+  key map (keyboard, pad, mouse wheel over a list, click a song = add, click an entry = select).
+- *Edits* go through `HandleRadio` (the tab's requests), so the sidecar is written and playback reacts the
+  same way; the menu's state refreshes every 0.25 s and after each action.
+- While open the game is paused, so the speakers pause too (status says so); the radio plays after Done.
+- No search box (a TMP input field was not attempted); Page Up / Down (pad LT / RT), Home / End and the
+  wheel move through long lists.
+- Closed on Done / Esc / pad B / backdrop click, module off, and before a fault stops the module.
 
 ### Muffle behind High Walls (`muffle_walls`, default on)
 
@@ -277,6 +304,9 @@ All prefixed `slime_dj:`; grep for these when reading `sr2mods.log`:
   `… no CorralBarrierRipples in the scene yet`, `walls dance without beat ripples (…)`, `walls dance at N
   corral(s)`, `walls dance stopped (setting off|no song); walls restored`, `'Walls dance to the music'
   unavailable (…)`
+- radio menu: `radio menu ready[; NOT available: ...]`, `radio menu for 'Corral NNNN' (plot '...')[: its radio is not
+  found yet (scanning)]`, `radio menu opened (N rows per list, M song(s), font ...)` (first), `radio menu closed (why)`,
+  `radio menu not opened: ...`
 - corrals / muffle / radio: `N corral(s) with a music box, M with High Walls / Air Net …`, `'Muffle behind High
   Walls' unavailable (…)`, `AudioLowPassFilter could not be added; …`, `Corral Radio unavailable (…)`,
   `radio 'Corral NNNN' (plot '…'): N song(s) in its playlist, on|off[, shuffle]`, `radio '…' playing|switched
@@ -291,7 +321,9 @@ Music Box II second speaker, seeking + sync; box cache (no `frame:slime_dj took`
 `scene searches 0`, new boxes within ~2 s); muffle audible, footprint test, transition speed; Corral Radio
 sidecar round trip, four radios + global (five decoder threads), slot hand-over, channel switch on buy /
 sell; walls dance ripples bulge and travel, `_Intensity` / `_Color` visible on both shaders, beat in time
-(40 ms lag), everything restored after Stop / Pause / setting off / leaving the ranch.
+(40 ms lag), everything restored after Stop / Pause / setting off / leaving the ranch. Round 11: calm walls in
+quiet parts, Amplify above full volume (PCM gain, no clipping / pumping at chunk edges), the Corral Radio menu
+(build, input, input lock released on every close path).
 
 ## History
 
@@ -300,4 +332,5 @@ sell; walls dance ripples bulge and travel, `_Intensity` / `_Color` visible on b
 - Round 9: beat analysis retuned for hardtekk; beat ripples through `CorralBarrierRipples`.
 - Perf round (2026-10-24): box scan from scene search every 2 s to the Apply-hook cache.
 - Corral Radio channels and Muffle behind High Walls (round 4 ideas).
-- Round 11: calm walls in quiet parts (energy), Amplify louder than full volume and spatial.
+- Round 11: calm walls in quiet parts (energy), Amplify louder than full volume and spatial, the Corral Radio
+  menu behind the blue corral button.
