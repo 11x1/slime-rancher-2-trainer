@@ -2060,17 +2060,11 @@ private:
     // Box scan: every speaker that plays its channel's song now (music boxes, emitters: DJ Booth,
     // speaker stacks, Slime Radios, Corral Radio corrals); lamps.cpp pulses the lamps near them.
     void SyncLamps() {
-        if (!cfg_.danceLamps || !lamps_.Ready() || !trGetPosition_) return;
+        if (!cfg_.danceLamps || !lamps_.Ready()) return;
         std::vector<dj::LampPulser::Source> src;
-        for (const Speaker& sp : speakers_) {
-            // volume 0 = an emitter that is switched off (a DJ Booth / Boombox not playing the song)
-            if (!sp.live || !sp.ch || !sp.ch->cur || sp.clipGen != sp.ch->cur->clipGen || sp.volScale <= 0.01f) continue;
-            Il2CppObject* go = Target(sp.go);
-            Il2CppObject* tr = go ? unity::TransformOf(go) : nullptr;
-            if (!unity::IsAlive(tr)) continue;
-            const Vec3 p = trGetPosition_.fn(tr, trGetPosition_.mi);
-            if (Finite(p)) src.push_back({p.x, p.y, p.z, sp.ch});
-        }
+        for (const Speaker& sp : speakers_)  // positions from UpdateBoost in this scan; silent = a switched-off booth / Boombox
+            if (Audible(sp) && sp.posOk && sp.ch && sp.ch->cur && sp.clipGen == sp.ch->cur->clipGen)
+                src.push_back({sp.pos.x, sp.pos.y, sp.pos.z, sp.ch});
         lamps_.Sync(src, cfg_.lampRange);
     }
 
