@@ -73,7 +73,8 @@
 // DetourGuard: a native fault marks the module faulted for the session (hooks
 // disabled, detours pass straight through); runtime_invoke native faults do the
 // same. Managed objects are re-found with FindObjectOfType when needed; cached
-// Il2CppObject* values are only compared, never dereferenced.
+// Il2CppObject* values are only compared, never dereferenced, except the main
+// menu, held by a GC handle and checked with IsAlive before every use.
 
 #include <windows.h>
 
@@ -136,6 +137,8 @@ constexpr double kPromptGiveUp = 20.0;       // s: prompt never became ready -> 
 constexpr double kMenuPollInterval = 0.1;    // s between main-menu readiness checks
 constexpr double kMenuGiveUp = 120.0;        // s after "menu seen" without ever being ready
 constexpr double kMenuSoftWait = 3.0;        // s the soft readiness checks may hold it up (see MenuState)
+constexpr double kMenuIdleMin = 0.3;         // s without a scene load before a new load counts as the player's
+constexpr double kMenuGoneWait = 2.0;        // s the menu may be gone (no load running) before we stop
 constexpr int kMaxWaitLogs = 8;              // "waiting for the main menu" lines per launch
 
 // CompanyLogoScene timing floats, with how often StartUpCoroutine waits for
@@ -227,7 +230,12 @@ private:
     void CheckShift();
     void TryAutoContinue();
     Il2CppObject* GameSceneLoader();
-    enum class Menu { Ready, Soft, Hard };
+    Il2CppObject* Landing();
+    void TakePendingLanding();
+    void ReleaseLanding();
+    // Ready: Continue may fire. Soft: only cosmetic checks fail. Hard: wait (a Continue would do
+    // nothing or the menu is not shown). Gone: the menu instance was destroyed.
+    enum class Menu { Ready, Soft, Hard, Gone };
     Menu MenuState(Il2CppObject*& landing, bool& loading, std::string& why);
     void LogMenuWait(const std::string& why);
     Il2CppObject* FindContinueModel(Il2CppObject* landing, size_t listOffset);
@@ -296,7 +304,16 @@ private:
     Clock::time_point menuSeenAt_{};
     bool menuReady_ = false;
     bool menuEverReady_ = false;
-    bool menuIdleSeen_ = false;  // the landing menu was there with no scene load running
+    bool menuIdleSeen_ = false;  // no scene load ran for kMenuIdleMin after the menu was enabled
+    bool idleTiming_ = false;
+    Clock::time_point idleSince_{};
+    bool goneTiming_ = false;
+    Clock::time_point goneSince_{};
+    bool findDiagDone_ = false;  // logged whether FindObjectOfType sees the active menu
+    // The MainMenuLandingRootUI handed to the OnEnable listener. The listener only stores the raw
+    // pointer (no GC handle work inside a hook); the next Frame() class-checks it and takes a handle.
+    Il2CppObject* pendingLanding_ = nullptr;
+    Il2CppGCHandle landingHandle_ = nullptr;
     Clock::time_point menuReadyAt_{};
     bool softWaiting_ = false;  // only soft checks fail, since softSince_
     Clock::time_point softSince_{};
@@ -692,10 +709,35 @@ void QuickStart::TryAutoInteract() {
 // ------------------------------------------------------------ auto_continue --
 
 void QuickStart::OnMenuEnable(Il2CppObject* self) {
-    if (!continueOk_ || menuSeen_ || continueDone_ || !IsA(self, landingClass_)) return;
+    if (!continueOk_ || continueDone_ || !IsA(self, landingClass_)) return;
+    pendingLanding_ = self;  // handle taken by the next Frame() (also on a re-enable after a submenu)
+    if (menuSeen_) return;
     menuSeen_ = true;
     menuSeenAt_ = Clock::now();
     SR2_INFO("[{}] main menu UI enabled | {}", kModule, ProcessTime());
+}
+
+// Main thread, from Frame(): the menu handed to the OnEnable listener, now held by a GC handle.
+// A scene object is kept alive by its native side, so the raw pointer is still valid one frame later.
+void QuickStart::TakePendingLanding() {
+    Il2CppObject* p = pendingLanding_;
+    pendingLanding_ = nullptr;
+    if (!p || !IsA(p, landingClass_) || !unity::IsAlive(p)) return;
+    if (Landing() == p) return;
+    ReleaseLanding();
+    landingHandle_ = unity::NewGCHandle(p);
+    if (!landingHandle_) SR2_WARN("[{}] auto_continue: no GC handle for the main menu - it cannot be checked", kModule);
+}
+
+void QuickStart::ReleaseLanding() {
+    if (landingHandle_) unity::FreeGCHandle(landingHandle_);
+    landingHandle_ = nullptr;
+}
+
+// The held main menu while its native object lives, else nullptr.
+Il2CppObject* QuickStart::Landing() {
+    Il2CppObject* o = landingHandle_ ? unity::GCHandleTarget(landingHandle_) : nullptr;
+    return o && unity::IsAlive(o) && IsA(o, landingClass_) ? o : nullptr;
 }
 
 void QuickStart::ContinueDone(std::string_view why, bool info) {
@@ -731,9 +773,12 @@ Il2CppObject* QuickStart::GameSceneLoader() {
     return loader && unity::IsAlive(loader) && IsA(loader, loaderClass_) ? loader : nullptr;
 }
 
-// Hard checks (a Continue would not work otherwise): the game's SceneLoader is there and not loading.
-// Soft checks (cosmetic, wait for them at most kMenuSoftWait): the landing menu is active and the boot
-// overlays (logo scene, engagement prompt) are gone. why = the first check that fails.
+// Hard checks (no timeout): the game's SceneLoader is there and not loading (a Continue does nothing
+// otherwise), and the main menu the OnEnable listener handed us is alive and active in the hierarchy
+// (round 11: Continue was invoked on a menu that was not up and the next step dereferenced it).
+// Gone: that menu was destroyed (the scene changed). Soft checks (cosmetic, wait for them at most
+// kMenuSoftWait): the boot overlays (logo scene, engagement prompt) are gone. why = the first check
+// that fails. `landing` is only set when the menu is alive and active.
 QuickStart::Menu QuickStart::MenuState(Il2CppObject*& landing, bool& loading, std::string& why) {
     landing = nullptr;
     loading = false;
@@ -747,11 +792,23 @@ QuickStart::Menu QuickStart::MenuState(Il2CppObject*& landing, bool& loading, st
         why = "a scene load is in progress";
         return Menu::Hard;
     }
-    Il2CppObject* l = unity::FindObjectOfType(landingClass_);  // active GameObjects only
-    if (l && unity::IsAlive(l) && IsA(l, landingClass_)) landing = l;
-    if (!landing || !unity::ActiveInHierarchy(landing)) {
+    Il2CppObject* l = Landing();
+    if (!l) {
+        why = landingHandle_ ? "the main menu (MainMenuLandingRootUI) was destroyed"
+                             : "no main menu (MainMenuLandingRootUI) instance yet";
+        return landingHandle_ ? Menu::Gone : Menu::Hard;
+    }
+    if (!unity::ActiveInHierarchy(l)) {
         why = "the main menu (MainMenuLandingRootUI) is not active";
-        return Menu::Soft;
+        return Menu::Hard;
+    }
+    landing = l;
+    if (!findDiagDone_) {
+        // Rounds 10/11: FindObjectOfType(MainMenuLandingRootUI) never found the menu the player saw.
+        findDiagDone_ = true;
+        Il2CppObject* found = unity::FindObjectOfType(landingClass_);
+        SR2_INFO("[{}] auto_continue: main menu active; FindObjectOfType(MainMenuLandingRootUI) {}", kModule,
+                 found == l ? "finds the same instance" : found ? "finds another instance" : "finds nothing");
     }
     // Boot overlays still up? (both deactivate themselves when the menu is revealed)
     if (logoClass_ && unity::FindObjectOfType(logoClass_)) {
@@ -825,11 +882,32 @@ void QuickStart::TryAutoContinue() {
     std::string why;
     const Menu state = MenuState(landing, loading, why);
     if (!loading) {
-        if (landing) menuIdleSeen_ = true;  // in the menu with no load running
-    } else if (menuIdleSeen_) {
-        // The menu was idle and a load started: the player chose something (Continue, Load, New Game).
-        ContinueDone("a scene load started from the main menu before auto-continue fired - cancelled", true);
-        return;
+        // No load ran for a moment after the menu was enabled: any load from now on was started
+        // by the player (Continue, Load, New Game), whether or not the menu counted as ready.
+        if (!idleTiming_) {
+            idleTiming_ = true;
+            idleSince_ = Clock::now();
+        }
+        if (SecondsSince(idleSince_) >= kMenuIdleMin) menuIdleSeen_ = true;
+    } else {
+        idleTiming_ = false;
+        if (menuIdleSeen_) {
+            ContinueDone("a scene load started from the main menu before auto-continue fired - cancelled", true);
+            return;
+        }
+    }
+    if (state == Menu::Gone) {
+        // The menu was destroyed with no load running: wait briefly for a new one, then stop.
+        if (!goneTiming_) {
+            goneTiming_ = true;
+            goneSince_ = Clock::now();
+        }
+        if (SecondsSince(goneSince_) >= kMenuGoneWait) {
+            ContinueDone("the main menu closed before auto-continue fired - cancelled", true);
+            return;
+        }
+    } else {
+        goneTiming_ = false;
     }
     bool go = state == Menu::Ready;
     if (state == Menu::Soft) {
@@ -867,6 +945,7 @@ void QuickStart::TryAutoContinue() {
     }
     const double delay = settings::GetFloat(kModule, kAutoContinueDelay);
     if (SecondsSince(menuReadyAt_) < delay) return;
+    if (!landing) return;  // go implies an active menu (Ready / Soft); never act without one
 
     std::string err;
     Il2CppObject* boxed = sr2::il2cpp::Resolver::Get().Invoke(hasContinueMi_, nullptr, nullptr, &err);
@@ -963,6 +1042,9 @@ bool QuickStart::OnIntroStartFrame(Il2CppObject* self, int index) {
 // ----------------------------------------------------------------- per frame --
 
 void QuickStart::Frame() {
+    // GC handle bookkeeping on the main-thread tick, never inside a hook.
+    if (pendingLanding_) TakePendingLanding();
+    if (landingHandle_ && (continueDone_ || !Enabled())) ReleaseLanding();
     if (!Enabled()) return;
     if (introOk_) {
         // Fallback for a late hook install: patch the logo scene found by polling.
