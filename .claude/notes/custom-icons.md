@@ -11,7 +11,7 @@ The user is replacing AI-drawn / script-drawn art with their own drawings ("tryi
 The extracted game icons for reference are in `assets/icons/game/` (gitignored); browse them with `python assets/icons/src/build_viewer.py` and open `assets/icons/game/index.html`.
 
 ## Done by the user
-- `mods_tab` (Options menu Mods tab), `hen_collector_source`, `elder_collector_source`, `dj_speaker` (DJ Speaker Stack card, from stackedradio.png), `dj_booth` (DJ Booth card, with a 512 px `dj_booth_large`).
+- `mods_tab` (Options menu Mods tab), `hen_collector_source`, `elder_collector_source`, `dj_speaker` (DJ Speaker Stack card, from stackedradio.png), `dj_booth` (DJ Booth card, with a 512 px `dj_booth_large`), `slime_radio` (Slime Radio card, the same stacked-radio drawing as `dj_speaker`, the user's choice).
 
 ## Vanilla icon now, the user draws later (done 2026-10-25, branch chore/vanilla-card-icons)
 The script-drawn PNGs were removed from `assets/icons/`. Each name below has nothing embedded, so the vanilla icon shows; a drawing saved as `assets/icons/<name>.png` takes over at the next build (the code checks `mod_icons::Has(name)` first).
