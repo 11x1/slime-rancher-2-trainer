@@ -43,8 +43,8 @@ Passed: quick start auto-continue, Sandbox gadget refresh and Fill, all keyboard
 - "add (to slime context menu) to spawn their shiny version (or whatever the cool rare types are)". Find SR2's rare variants (e.g. shiny / gilded / other rare appearance) and add a spawn entry for them.
 - "noclip would be nice to have aswell as a sandbox feature (bindable to a key)". Sandbox-only, bindable through the existing keybind component, off when Sandbox is off.
 
-## Open question for the user
-- Drones and the incinerator: "OMG the ash had to be empty for it to consider, seems to work now / this should be behind a refinery upgrade tbf". Meaning to confirm: a refinery (drone) upgrade that lets drones burn into an incinerator even when its Ash Trough is full?
+## G. Drone programs behind an upgrade (`feature/drone-programs-upgrade`)
+- "this should be behind a refinery upgrade tbf". The user confirmed this means several programs per station: lock that feature behind a new custom drone upgrade (bought like Battery Saver). Without the upgrade, one program (vanilla). Programs already stored in a save stay stored and come back when the upgrade is bought.
 
 ## Carry-over (untested, re-add under Skipped)
 Skipped this round: r11cr3 (radio playlist after reload), r11qs2-4 (manual Continue, Shift, submenu). Still untested: r7sb8, r9wx3, r9wx4, r10cr3, r10cr4, r7bd6, r9rs3, r10dj6, r10dp3, r9dp4, r9dp5, r7dr2, r4dr3, r10sh2-5, r9sh4, r9sh5, r9sh7, r8tp3, r4mm4, r6vu4, hc4, p7, ug2, ug3, sv2, ut6.
