@@ -198,7 +198,7 @@ inside and outside a corral). Why the cutoff can't be overridden by a distance c
 *Analysis* (`beat.cpp`, no libraries, no game calls; constants there and in `beat.h`). The decoder thread
 feeds every decoded chunk (after the down-mix) into the stream's `BeatTrack`, seconds ahead of the play
 head: mono mix, Hann window ~23 ms (1024 frames at 44.1/48 kHz), one radix-2 FFT per 10 ms hop, one 16-bit
-entry per hop (7 KB per minute, capped at 6 hours; after a seek `Reset(rate, startFrame)`): a 0..1 bass
+entry per hop (4 bytes: level, onset, energy; 24 KB per minute, capped at 6 hours; after a seek `Reset(rate, startFrame)`): a 0..1 bass
 level (35-160 Hz, adaptive peak / floor window, 0 in breaks) and an onset strength (spectral flux + bass
 rise above an adaptive threshold, at least 180 ms apart). Tuned offline on the user's hardtekk songs
 (170-205 onsets/min = the kick); a synthetic 120 BPM track gives every kick.
