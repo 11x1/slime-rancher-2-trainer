@@ -4087,7 +4087,7 @@ void DjNowPlaying(const Host& h, const ModuleView& mv, const djb::Snapshot& s, f
     ImGui::Dummy(ImVec2(0, U(2)));
     // settings of the module
     for (const char* key : {"shuffle", "volume", "range", "amplify", "mute_vanilla", "muffle_walls", "dance_walls",
-                            "dance_intensity", "dance_lamps", "lamp_range"})
+                            "dance_intensity", "dance_lamps", "lamp_range", "dance_plorts", "plort_range"})
         if (const settings::Def* d = FindDef(mv, key); d && ParentChainAllows(mv, *d)) DrawRow(h, *d, d->label, false);
     EndCard();
 }

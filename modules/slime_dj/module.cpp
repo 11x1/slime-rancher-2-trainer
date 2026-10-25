@@ -74,6 +74,7 @@
 #include "modules/slime_dj/emitters.h"
 #include "modules/slime_dj/lamps.h"
 #include "modules/slime_dj/library.h"
+#include "modules/slime_dj/plorts.h"
 #include "modules/slime_dj/radio_menu.h"
 #include "modules/slime_dj/stream.h"
 #include "modules/slime_dj/walls.h"
@@ -188,6 +189,8 @@ struct Cfg {
     bool muffle = true;
     bool danceLamps = true;
     float lampRange = 20.0f;  // m around a playing speaker
+    bool dancePlorts = true;  // plorts.cpp
+    float plortRange = 15.0f;
 };
 
 struct Channel;
@@ -392,6 +395,8 @@ public:
             SR2_WARN("slime_dj: 'Walls dance to the music' unavailable ({})", danceWhy);
         if (std::string lampWhy; !lamps_.Ready() && !lamps_.Resolve(lampWhy))
             SR2_WARN("slime_dj: 'Lamps pulse to the music' unavailable ({})", lampWhy);
+        if (std::string plortWhy; !plorts_.Ready() && !plorts_.Resolve(plortWhy))
+            SR2_WARN("slime_dj: 'Plorts glow to the music' unavailable ({})", plortWhy);
         if (std::string menuWhy; !menu_.Ready() && !menu_.Setup(Resolver::Get(), menuWhy))
             SR2_WARN("slime_dj: Corral Radio playlist menu unavailable ({}); playlists only in the Slime DJ tab", menuWhy);
         SR2_INFO("slime_dj: resolved (AudioClip/AudioSource, MusicBoxUpgrader; SECTR source {}, cue {}, bus {}, system {}; "
@@ -676,6 +681,7 @@ private:
         settings::SetDisplay(kModule, "dance_intensity", "%", {}, 100);
         settings::SetDisplay(kModule, "range", " m");
         RegisterLampSettings();
+        dj::RegisterPlortSettings();
     }
 
     static Cfg LoadCfg() {
@@ -693,6 +699,9 @@ private:
         c.danceLamps = settings::GetBool(kModule, "dance_lamps");
         c.lampRange = std::clamp(settings::GetFloat(kModule, "lamp_range"), 5.0f, 100.0f);
         if (!std::isfinite(c.lampRange)) c.lampRange = 20.0f;
+        c.dancePlorts = settings::GetBool(kModule, "dance_plorts");
+        c.plortRange = std::clamp(settings::GetFloat(kModule, "plort_range"), 5.0f, 60.0f);
+        if (!std::isfinite(c.plortRange)) c.plortRange = 15.0f;
         return c;
     }
 
@@ -2251,13 +2260,28 @@ private:
         if (LampSignature() != lampSig_ || lamps_.Placed()) SyncLamps();  // Placed: a lamp was just put down
     }
 
-    // Every frame: each channel's song position (read like TickDancer: kDanceLagSeconds behind).
+    // Every frame: each channel's song position (BeatChannels).
     void TickLamps(float dt) {
         if (!lamps_.Ready()) return;
         if (!cfg_.danceLamps || !AnySong()) {
             if (lamps_.Lamps()) lamps_.Clear();
             return;
         }
+        lamps_.Tick(dt, BeatChannels());
+    }
+
+    // ------------------------------------------------------- plorts glow ----
+    // plorts.cpp: the lamps' sources (LampSource) and channels (BeatChannels), its own setting and range.
+    void SyncPlorts() {
+        if (!cfg_.dancePlorts || !plorts_.Ready()) return;
+        std::vector<dj::PlortPulser::Source> src;
+        for (const Speaker& sp : speakers_)
+            if (LampSource(sp)) src.push_back({sp.pos.x, sp.pos.y, sp.pos.z, sp.ch, std::clamp(sp.volScale * sp.lpVol, 0.0f, 2.0f)});
+        plortSig_ = LampSignature();
+        plorts_.Sync(src, cfg_.plortRange);
+    }
+    // Each channel's song position for the lamps and plorts (read like TickDancer: kDanceLagSeconds behind).
+    std::vector<dj::LampPulser::Channel> BeatChannels() {
         const bool gamePaused = GamePaused();
         std::vector<dj::LampPulser::Channel> chs;
         auto add = [&](const Channel& ch) {
@@ -2275,7 +2299,22 @@ private:
         };
         add(global_);
         for (const auto& r : radios_) add(*r);
-        lamps_.Tick(dt, chs);
+        return chs;
+    }
+    // Every frame: resync within kLampPollInterval when the playing speakers changed, then the beat.
+    void TickPlorts(float dt) {
+        plorts_.Debug(debug_marks::Wanted());
+        if (!plorts_.Ready()) return;
+        if (!cfg_.dancePlorts || !AnySong()) {
+            if (plorts_.Plorts()) plorts_.Clear();
+            return;
+        }
+        plortPoll_ -= std::isfinite(dt) ? dt : 0.0f;
+        if (plortPoll_ <= 0) {
+            plortPoll_ = kLampPollInterval;
+            if (LampSignature() != plortSig_) SyncPlorts();
+        }
+        plorts_.Tick(dt, BeatChannels());
     }
 
     // Debug highlighter (modules/common/debug_marks.h): the speakers of this box scan, playing ones with the
@@ -2375,6 +2414,7 @@ private:
                 for (auto& r : radios_) Resync(*r);
                 SyncDancer();
                 SyncLamps();
+                SyncPlorts();
                 PublishSpeakerMarks();
             }
             perf_.Scan(Qpc() - scan0);
@@ -2391,6 +2431,7 @@ private:
         PollLamps(dt);
         TickLamps(dt);
         lamps_.Debug(debug_marks::Wanted());
+        TickPlorts(dt);
         if (!debug_marks::Wanted() || !AnySong()) RemoveSpeakerMarks();
         TickMenu(dt);
         const Current* g = global_.cur.get();
@@ -2412,6 +2453,8 @@ private:
         danceState_ = {0, 0, 0};
         lamps_.Clear();
         lamps_.Debug(false);
+        plorts_.Clear();
+        plorts_.Debug(false);
         RemoveSpeakerMarks();
         StopAll();
         DropRadios();
@@ -2923,6 +2966,9 @@ private:
     ScanPerf perf_;
     dj::WallDancer dancer_;
     dj::LampPulser lamps_;          // "Lamps pulse to the music" (lamps.h)
+    dj::PlortPulser plorts_;        // "Plorts glow to the music" (plorts.h)
+    float plortPoll_ = 0;           // TickPlorts: playing speakers changed check countdown
+    uint64_t plortSig_ = 0;         // LampSignature at the last SyncPlorts
     bool speakerMarks_ = false;     // speaker boxes published to the debug highlighter
     dj::RadioMenu menu_;            // Corral Radio playlist menu (radio_menu.h)
     std::string menuKey_;           // plot key of the radio the menu is for ("" = no menu)
