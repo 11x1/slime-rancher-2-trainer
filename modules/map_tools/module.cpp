@@ -50,6 +50,7 @@
 #include "core/log.h"
 #include "core/main_thread.h"
 #include "core/module.h"
+#include "core/perf.h"
 #include "core/resolver.h"
 #include "core/settings.h"
 #include "core/unity.h"
@@ -84,6 +85,13 @@ constexpr size_t kNoOff = static_cast<size_t>(-1);
 inline bool Has(size_t off) { return off != kNoOff; }
 constexpr float kIconRefresh = 2.0f;   // full map icons re-collected this often while the map is open
 constexpr int kClosedTicks = 3;        // no MapUI.LateUpdate for this many frames = map closed
+// Icons and the key bar hint wait this long after the map opened (round 13: the first M of a save opened the
+// map and closed it again; that open was the only one with a long frame of ours (37 ms: first icon scan, 77
+// icon objects, mouse glyph search, hint clone) right after the game's own open hitch, while the M key is
+// still down. The map closes on the *release* of its close input (MapUI.Start: UIInputFocusRegistrar.
+// BindCanceled(_closeInput)), so the first frames of an open stay light.)
+constexpr float kOpenSettle = 0.35f;
+constexpr float kShortOpen = 1.0f;     // an open shorter than this is logged when it closes (diagnostics)
 constexpr float kHintDiagDelay = 3.0f; // no hint this long after the map opened: log why (once per session)
 constexpr float kHintMsgSeconds = 3.0f; // a refusal stays in the key bar hint this long
 constexpr float kTravelTimeout = 90.0f;  // zone change: give up if the player is not in the new zone by then
@@ -609,6 +617,10 @@ private:
     uint32_t lastLate_ = 0;
     int closedTicks_ = kClosedTicks;
     bool open_ = false;
+    float openedAt_ = 0;       // time_ of this map open
+    int openFrames_ = 0;       // frames of this open
+    bool openWorkDone_ = false;  // icons / hint ran in this open (after kOpenSettle)
+    int opens_ = 0;            // map opens this session
     Ref mapUI_, map_, mapT_;
     float time_ = 0;
 
@@ -630,6 +642,7 @@ private:
         bool intact = true;
     };
     std::vector<CachedWall> wallCache_;
+    std::string wallMap_;     // name of the MapDefinition the walls belong to (the minimap's page while they were live)
     std::string wallSaved_;   // the sidecar value last read or written
     float wallPollAt_ = 0;
     std::vector<walls::Wall> wallLive_;
@@ -805,30 +818,49 @@ private:
         if (ui != mapUI_.get()) {
             OnMapClosed();
             mapUI_.Reset(ui);
+            openedAt_ = time_;
+            openFrames_ = 0;
+            openWorkDone_ = false;
+            ++opens_;
             SR2_DEBUG("map_tools: full map opened");
         }
         open_ = true;
+        ++openFrames_;
         Il2CppObject* map = F<Il2CppObject*>(ui, s_.uiMap);
         if (!ugui::IsA(map, s_.map)) return;
         if (map != map_.get()) OnNewPage(map);
 
         Step("reveal");
-        UpdateReveal(cfgChanged);
+        {
+            SR2_PERF_DETAIL("map_tools.reveal");
+            UpdateReveal(cfgChanged);
+        }
         if (int forced = g_forcedMaps.load(); forced != forcedLogged_) {
             SR2_INFO("map_tools: reveal: {} map tab(s) listed that the save has not unlocked yet ({} so far this session)",
                      forced - forcedLogged_, forced);
             forcedLogged_ = forced;
         }
+        if (time_ - openedAt_ < kOpenSettle) {  // keep the open's first frames light (kOpenSettle)
+            Step("teleport");
+            g_rightClick.store(false);
+            Step("idle");
+            return;
+        }
+        openWorkDone_ = true;
         Step("icons");
         iconAcc_ += dt;
         if (iconAcc_ >= kIconRefresh) {
             iconAcc_ = 0;
+            SR2_PERF_DETAIL("map_tools.icons (2 s)");
             RefreshIcons();
         }
         Step("icon scale");
         UpdateIconScale();
         Step("legend");
-        UpdateLegend();
+        {
+            SR2_PERF_DETAIL("map_tools.legend");
+            UpdateLegend();
+        }
         Step("teleport");
         if (g_rightClick.exchange(false) && cfg_.teleport) Teleport();
         Step("idle");
@@ -848,6 +880,10 @@ private:
 
     void OnMapClosed() {
         Step("map closed");
+        if (open_ && time_ - openedAt_ < kShortOpen)
+            SR2_INFO("map_tools: full map closed {:.2f} s ({} frames) after it opened (open #{} this session; icons / "
+                     "hint {})",
+                     time_ - openedAt_, openFrames_, opens_, openWorkDone_ ? "had run" : "not started yet");
         hintSince_ = -1;
         RestoreStaticFog();
         DestroyContainer();
@@ -1078,7 +1114,9 @@ private:
                 iconMismatchLogged_ = true;
                 SR2_INFO("map_tools: icons: the full map shows '{}', the icons belong to '{}' - hidden on this map{}",
                          shownDef ? unity::GetName(shownDef) : std::string("?"), unity::GetName(pageDef),
-                         cfg_.icons[mapi::kIconNullWall] ? " (only the cached Nullifier walls are drawn here)" : "");
+                         !cfg_.icons[mapi::kIconNullWall] ? ""
+                         : WallMapIs(shownDef)            ? " (only the cached Nullifier walls are drawn here)"
+                                                          : " (the cached Nullifier walls too: they belong to another map)");
             }
             // Another tab (e.g. the Grey Labyrinth while the player is elsewhere): the cached walls only.
             if (!shownDef || !CachedWallIcons(shownDef)) {
@@ -1153,13 +1191,26 @@ private:
             std::string v = custom_upgrades::SaveValue(kWallKey);
             if (v != wallSaved_) {  // another save (or its sidecar) loaded
                 wallSaved_ = v;
-                wallCache_ = ParseWalls(v);
-                SR2_INFO("map_tools: Nullifier walls: {} cached in the loaded save", wallCache_.size());
+                wallCache_ = ParseWalls(v, wallMap_);
+                SR2_INFO("map_tools: Nullifier walls: {} cached in the loaded save (map '{}')", wallCache_.size(),
+                         wallMap_.empty() ? "not recorded yet" : wallMap_);
             }
         }
         if (!walls::Resolved()) return;
         wallLive_.clear();
         if (!walls::Collect(wallLive_, nullptr, true) || wallLive_.empty()) return;
+        // The walls' map: the minimap's page while they are live (the player is in the Labyrinth then). Re-read on
+        // every poll, so a page that lags behind a zone change is corrected 3 s later.
+        bool mapChanged = false;
+        mapi::Snapshot snap;
+        if (mapi::Get(snap) && snap.mapDefinition && !snap.loading) {
+            std::string name = unity::GetName(snap.mapDefinition);
+            if (!name.empty() && name != wallMap_) {
+                SR2_INFO("map_tools: Nullifier walls belong to map '{}' (was '{}')", name, wallMap_.empty() ? "-" : wallMap_);
+                wallMap_ = name;
+                mapChanged = true;
+            }
+        }
         int added = 0, updated = 0;
         for (const walls::Wall& w : wallLive_) {
             if (!std::isfinite(w.x) || !std::isfinite(w.y) || !std::isfinite(w.z)) continue;
@@ -1180,8 +1231,9 @@ private:
                 ++updated;
             }
         }
-        if (!added && !updated) return;
-        std::string v;
+        if (!added && !updated && !mapChanged) return;
+        // "@<map>" first (older builds skip it: not a wall entry), then "x,y,z,intact" per wall
+        std::string v = wallMap_.empty() ? std::string() : "@" + wallMap_;
         for (const CachedWall& c : wallCache_)
             v += std::format("{}{:.1f},{:.1f},{:.1f},{}", v.empty() ? "" : ";", c.x, c.y, c.z, c.intact ? 1 : 0);
         bool stored = custom_upgrades::Active() && custom_upgrades::SetSaveValue(kWallKey, v);
@@ -1190,13 +1242,18 @@ private:
                  stored ? " (kept in the save's sidecar with the next save)" : " (this session only: custom_upgrades is off)");
     }
 
-    static std::vector<CachedWall> ParseWalls(const std::string& v) {
+    static std::vector<CachedWall> ParseWalls(const std::string& v, std::string& map) {
         std::vector<CachedWall> out;
+        map.clear();
         size_t pos = 0;
         while (pos < v.size() && out.size() < 256) {
             size_t end = v.find(';', pos);
             std::string item = v.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
             pos = end == std::string::npos ? v.size() : end + 1;
+            if (!item.empty() && item[0] == '@') {
+                map = item.substr(1);
+                continue;
+            }
             CachedWall c;
             int intact = 1;
             if (sscanf_s(item.c_str(), "%f,%f,%f,%d", &c.x, &c.y, &c.z, &intact) != 4) continue;
@@ -1211,7 +1268,7 @@ private:
     // anchors, as the right-click teleport's inverse): buf_. False when there is none to draw.
     bool CachedWallIcons(Il2CppObject* shownDef) {
         buf_.clear();
-        if (!cfg_.icons[mapi::kIconNullWall] || wallCache_.empty()) return false;
+        if (!cfg_.icons[mapi::kIconNullWall] || wallCache_.empty() || !WallMapIs(shownDef)) return false;
         float rgba[4] = {1, 1, 1, 1};
         Il2CppObject* sprite = mapi::NullWallSprite(rgba);
         Il2CppObject* vm = F<Il2CppObject*>(mapUI_.get(), s_.uiViewModel);
@@ -1236,6 +1293,16 @@ private:
                      unity::GetName(shownDef), wallCache_.size());
         }
         return !buf_.empty();
+    }
+
+    // True when `def` is the map the cached walls belong to. Round 13: the walls were drawn on every other tab,
+    // also on Rainbow Island while in the Labyrinth. Sidecars from before the map was recorded: any map named
+    // "*Labyrinth*" (the only map with Nullifier walls in 1.3.0); the next Labyrinth visit records the real one.
+    bool WallMapIs(Il2CppObject* def) const {
+        if (!def) return false;
+        std::string name = unity::GetName(def);
+        if (!wallMap_.empty()) return name == wallMap_;
+        return name.find("Labyrinth") != std::string::npos;
     }
 
     // World units per local unit along x (uniform scale assumed, as uGUI pages are).

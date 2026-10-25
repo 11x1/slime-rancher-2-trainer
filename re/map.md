@@ -77,6 +77,10 @@ Zone (`_lastNotNullZone`) -> `MapDirector.GetMapForZone` -> background sprite de
 - fields: `_mapPrefabMapping`, `_mapDirector`, `_map` (live page, a Map RectTransform), `_viewModel`, `_fogReveal`, `_inputLegend` (ComponentInterface<IInputLegend>), `_failedPlaceWaypointCue` (UIAudioCueHandle) (dump)
 - gotchas: one hook per address: MM hooks Awake, MT hooks LateUpdate (absence for 3 frames = map closed)
 - gotchas: close the map like `DroneUIDisplay.CloseThisDisplay`: `UIDisplayManager.Instance.CloseDisplayByObjectInHierarchy(MapUI)`
+- methods: `Start` 0x713C30 - `_inputRegistrar.BindCanceled(_closeInput, OnCloseInput)` (and `_toggleFiltersInput`, `_toggleDroneMenuInput`, also on *canceled*): the map closes on the RELEASE of its close input; UIInputFocusRegistrar applies the bindings when it receives focus (IDA)
+- methods: `ICancelHandler.OnCancel` 0x714C90 - only closes the filter menu / drone menu when they hold focus, never the map (IDA)
+- other: `MapUIRoot.TryOpenMap` 0x729D40 - `_openMapInput` *Performed* (press) -> `UIDisplayManager.OpenDisplay(_mapDisplay, WithData(_mapDirector))`; skipped in the ranch house, while dead, while time fast-forwards (IDA)
+- gotchas: round 13 "first M of a save opens and closes the map": a long mod frame right after the open (M still held) is the suspect; map_tools keeps the first 0.35 s of an open light (modules/map_tools/NOTES.md, "Open settle")
 - mod: MM (hook Awake: full-map-open detection, mapping, director), MT (hook LateUpdate; teleport close)
 
 ### MapUIRoot (MonomiPark.SlimeRancher.UI.Map)  -- scene object
