@@ -2706,7 +2706,14 @@ bool CustomUpgrades::WorldStep(int step) {
         if (!feederLights_.Ready()) return false;
         {
             SR2_PERF_DETAIL("custom_upgrades.world: feeder lights");
-            feederLights_.Tick();
+            // The save's plot list (GameModel.landPlots) instead of a scene-wide search (round 18: 22-32 ms hitches).
+            Il2CppObject* gm = nullptr;
+            if (offScGameModel_) {
+                bool ok = false;
+                Il2CppObject* sc = Invoke(sceneCtxInstMi_, nullptr, {}, "SceneContext.Instance", &ok);
+                gm = ok && unity::IsAlive(sc) ? unity::Field<Il2CppObject*>(sc, offScGameModel_) : nullptr;
+            }
+            feederLights_.Tick(unity::IsAlive(gm) ? gm : nullptr);
         }
         return true;
     default:
