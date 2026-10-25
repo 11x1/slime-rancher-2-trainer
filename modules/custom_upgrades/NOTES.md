@@ -313,6 +313,13 @@ GadgetItem, Fabricator categories), re/save.md (GetPersistenceId, `_reverseIndex
   false)` on the `_inputLegend` component) except events named cancel / back / close / exit; the log names
   each hint's label and event. Not seen in game: whether the station's own menu reuses that display object
   (then those hints would stay off there too; the withdraw / send hints are re-enabled by the game).
+  Round 13 ("nope, in the link still shows '[SPACE] Go To'"; log `UpdateShowData(null) failed:
+  System.NullReferenceException` on every open): the call ran the first frame the display GameObject existed
+  and its throw returned before the tab switch and `HideCloudHints`, so the menu stayed on the drone list tab
+  ("[SPACE] Go To"). `CloudFrame` now waits until the menu is active plus 0.15 s, retries a throw up to 3
+  times, and selects the cloud tab and hides its hints either way. Logs `Quantum Cloud menu open (cloud tab N;
+  view only, no station, filled on try N | not filled; legend: ...)` and, once per session,
+  `UpdateShowData(null) threw N time(s) (...) - the cloud tab and legend are set anyway`. RE: re/drones.md.
 - **Drone source** (`0x53520110`, after Silo, every target, while a link with a drone port is built):
   `GetSources` returns hidden storages (`sr2qstore`: `SiloStorage`, 8 slots, no type group, 999 each,
   own `AmmoModel`, active in hierarchy); catcher = the link's own `SiloCatcher`. Accepted cloud types
@@ -401,6 +408,16 @@ ToggleVariant, stacking), re/audio.md (GadgetMusicPlayer, corral Music Box), re/
   `RadioHeld` only clears stale freeze bits. Logs `Slime Radio actor N held in the vacuum` / `let go`; the
   dressed line ends with `ball on (r 0.47), flat base yes, low centre of mass yes, grip yes, rolls yes`.
   Hitboxes can be checked with debug_tools' Show entity hitboxes.
+  Round 13 ("the round hitbox should be more like the Fox Toy's but the egg shaped oval should be taller ...
+  (i think the speaker has too much weight though, doesnt seem to roll over at ALL now)"): the Fox Toy's setup
+  (re/fabricator.md `toySteamFox`: a box base under a round top) with a taller egg. The ball is switched off and
+  a `CapsuleCollider` added on the toy root (radius 0.8 r, 2.1 r high, bottom 0.05 r above the floor; reused if a
+  lost record left one, destroyed on undress); the bottom box becomes the base in the fox's proportions (1.47 x
+  1.29 egg radii = 1.18 r wide, 1.03 r high, bottom = the floor); the stack stands 0.14 r up as before. The centre
+  of mass is automatic again (`ResetCenterOfMass` after the collider changes: about 0.9 r up, so it tips at
+  ~30 degrees and rolls on the egg), angular damping >= 0.8 (was 1.5), mass unchanged (0.5 kg, as the fox).
+  Without CapsuleCollider members the round 12 ball + thin base stay. Dressed line: `ball r 0.47 off, egg r
+  0.38 x 0.99 high, box base yes, automatic centre of mass yes, grip yes, rolls yes`.
 - **Fabricator** (Decorations): booth after the Scientist Desk (Newbucks x2.5, items x2), stack after the
   Boombox (x1.5), radio after the stack (x0.5), Newbucks rounded to 5. Card icons (tile + details):
   `assets/icons/dj_booth.png` / `dj_speaker.png` / `slime_radio.png` when the user has drawn them, else the

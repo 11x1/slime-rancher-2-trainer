@@ -154,6 +154,8 @@ constexpr float kGlowScale = 0.22f;
 constexpr float kGlowHeight = 1.0f;
 constexpr double kUseCooldown = 1.5;    // Use on a link: the cloud menu / notices at most this often
 constexpr double kCloudOpenSeconds = 10.0;  // the Quantum Cloud menu must load within this time
+constexpr double kCloudSettleSeconds = 0.15;  // ... then be active this long before it is filled (and between tries)
+constexpr int kCloudTries = 3;               // UpdateShowData(null) tries before the tab and legend are set anyway
 constexpr int kUseLines = 5;            // cloud types listed by Use
 
 struct Vec3 {
@@ -344,6 +346,9 @@ struct Impl {
     bool cloudDisplayLooked = false;
     Il2CppGCHandle cloudReq = nullptr; // UIDisplayRequestHandle of the menu being opened
     double cloudReqAt = 0.0;
+    double cloudActiveAt = 0.0;        // when the loaded menu was first seen active (0 = not yet)
+    int cloudTries = 0;                // UpdateShowData(null) calls that threw for this request
+    bool cloudFailLogged = false;      // its failure is logged once per session
     const void* reqClass = nullptr;
     const MethodInfo* reqTryGet = nullptr;
     const void* rtClass = nullptr;
@@ -1530,6 +1535,8 @@ bool Impl::OpenCloudMenu() {
     if (!ok || !req) return false;
     cloudReq = unity::NewGCHandle(req);
     cloudReqAt = Now();
+    cloudActiveAt = 0.0;
+    cloudTries = 0;
     return cloudReq != nullptr;
 }
 
@@ -1540,6 +1547,12 @@ void Impl::EndCloudRequest() {
 
 // While the menu loads (every frame, at most kCloudOpenSeconds): the request's display -> its GameObject ->
 // DroneUIDisplay -> UpdateShowData(null), the Quantum Cloud tab.
+// Round 13 ("nope, in the link still shows '[SPACE] Go To'"; log: `UpdateShowData(null) failed:
+// System.NullReferenceException`, no managed trace): it was called the first frame the display's GameObject
+// existed, before the menu was active (its components' Awake / Start not run yet), and the throw returned before
+// the tab switch and the legend, so the menu stayed on its first tab (the drone list: "[SPACE] Go To"). Now it
+// waits until the menu is active plus kCloudSettleSeconds, tries again (kCloudTries) when it still throws, and
+// selects the Quantum Cloud tab and hides its hints either way.
 void Impl::CloudFrame() {
     Il2CppObject* req = unity::GCHandleTarget(cloudReq);
     if (!req || Now() - cloudReqAt > kCloudOpenSeconds) {
@@ -1565,10 +1578,29 @@ void Impl::CloudFrame() {
     Il2CppObject* go = rtDisplayGo ? unity::Field<Il2CppObject*>(display, rtDisplayGo) : nullptr;
     if (!unity::IsAlive(go)) return;  // still loading
     Il2CppObject* dui = InChildren(go, droneUiClass);
-    if (!dui) return;
+    if (!dui || !unity::ActiveInHierarchy(go) || !unity::ActiveInHierarchy(unity::GameObjectOf(dui))) return;
+    if (cloudActiveAt <= 0.0) cloudActiveAt = Now();
+    if (Now() - cloudActiveAt < kCloudSettleSeconds) return;
+    std::string err;
+    void* noData[1] = {nullptr};
+    Resolver::Get().Invoke(droneShowData, dui, noData, &err);  // not Call: a managed throw is retried, not warned
+    if (!err.empty()) {
+        if (err.rfind("native exception", 0) == 0) {  // as Call: a native fault stops the module
+            EndCloudRequest();
+            sr2::core::MarkModuleFaulted(module, std::format("quantum link: DroneUIDisplay.UpdateShowData(null): {}", err));
+            return;
+        }
+        if (++cloudTries < kCloudTries) {
+            cloudActiveAt = Now();  // try again a little later
+            return;
+        }
+        if (!cloudFailLogged)
+            SR2_INFO("[{}] quantum link: DroneUIDisplay.UpdateShowData(null) threw {} time(s) ({}) - the cloud tab and legend "
+                     "are set anyway",
+                     module, cloudTries, err);
+        cloudFailLogged = true;
+    }
     EndCloudRequest();
-    Call(droneShowData, dui, {nullptr}, "DroneUIDisplay.UpdateShowData(null)", &ok);
-    if (!ok) return;
     // The Quantum Cloud tab: the DroneTabSetup whose Target is the cloud inventory's transform.
     Il2CppObject* menu = unity::Field<Il2CppObject*>(dui, offMenuRoot);
     Il2CppObject* cloud = unity::IsAlive(menu) ? unity::Field<Il2CppObject*>(menu, offMenuCloud) : nullptr;
@@ -1582,9 +1614,9 @@ void Impl::CloudFrame() {
     bool switched = false;
     if (index >= 0 && unity::IsAlive(tabbed)) switched = Value<bool>(Call(tabGoTo, tabbed, {&index}, "TabbedControl.GoToTab", &ok)) && ok;
     const std::string hints = unity::IsAlive(cloud) ? HideCloudHints(cloud) : std::string("no cloud page");
-    SR2_INFO("[{}] quantum link: Quantum Cloud menu open ({}; view only, no station; legend: {})", module,
+    SR2_INFO("[{}] quantum link: Quantum Cloud menu open ({}; {}; legend: {})", module,
              switched ? std::format("cloud tab {}", index + 1) : index < 0 ? std::string("cloud tab not found") : std::string("already on the cloud tab"),
-             hints);
+             err.empty() ? std::format("view only, no station, filled on try {}", cloudTries + 1) : std::string("not filled"), hints);
 }
 
 // Round 12: "the row shows to press [SPACE] and a magnifying glass, #watdatmean". Without a station

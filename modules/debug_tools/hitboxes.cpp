@@ -28,6 +28,7 @@ constexpr const char* kModule = "debug_tools";
 constexpr const char* kHudOwner = "debug_tools.hitboxes";
 constexpr float kRefreshSeconds = 0.5f;
 constexpr size_t kMaxColliders = 160;
+constexpr size_t kMaxQueried = 8192;  // of the physics query's result (it is not sorted by distance)
 constexpr int kCircleSegments = 20;
 
 struct Vec3 {
@@ -67,6 +68,7 @@ struct State {
     const MethodInfo* boxCenter = nullptr, *boxSize = nullptr, *sphCenter = nullptr, *sphRadius = nullptr;
     const MethodInfo* capCenter = nullptr, *capRadius = nullptr, *capHeight = nullptr, *capDir = nullptr;
     const MethodInfo* trMatrix = nullptr, *trPosition = nullptr, *camView = nullptr, *camProj = nullptr;
+    const MethodInfo* tryScene = nullptr, *scPlayer = nullptr;  // optional: the player's own colliders are skipped
     std::vector<Kept> kept;
     float sinceRefresh = kRefreshSeconds;
     float lastRange = -1;
@@ -120,7 +122,24 @@ bool CameraPos(Vec3& out) {
     return ok;
 }
 
+// The player's GameObject (SceneContext.Player), or null.
+Il2CppObject* PlayerObject() {
+    if (!g.tryScene || !g.scPlayer) return nullptr;
+    Il2CppObject* sc = nullptr;
+    bool ok = false;
+    Il2CppObject* found = Call(g.tryScene, nullptr, {&sc}, "SceneContextUtility.TryGetSceneContext", &ok);
+    if (!ok || !Value<bool>(found) || !unity::IsAlive(sc)) return nullptr;
+    Il2CppObject* go = Call(g.scPlayer, sc, {}, "SceneContext.get_Player", &ok);
+    return ok && unity::IsAlive(go) ? go : nullptr;
+}
+
 // The colliders of entities around the camera, nearest first.
+// Round 13 ("They sometimes disappear when on screen and close enough"): the query's result is in no particular
+// order and only its first 1024 were looked at (1184 found in one log), so near colliders past that dropped in and
+// out between refreshes; and a collider whose world AABB held the camera was taken for the player, which hid
+// large or rotated ones (and every trigger with Show triggers) once the camera came close. Now every collider is
+// sorted by its AABB's distance first (one call each), the expensive checks run on the nearest only, and the
+// player is skipped by its GameObject (the bounds test is the fallback when SceneContext is not there).
 void Refresh(float range, bool triggers) {
     Release();
     Vec3 eye{};
@@ -129,28 +148,36 @@ void Refresh(float range, bool triggers) {
     bool ok = false;
     Il2CppObject* arr = Call(g.overlap, nullptr, {&eye, &range, &mask, &query}, "Physics.OverlapSphere", &ok);
     if (!ok || !arr) return;
+    Il2CppObject* player = PlayerObject();
     struct Found {
         Il2CppObject* col;
         float d2;
-        Bounds b;
+        bool holdsEye;
     };
     std::vector<Found> found;
-    for (size_t i = 0, n = std::min<size_t>(unity::ArrayLength(arr), 1024); i < n; ++i) {
+    const size_t total = unity::ArrayLength(arr);
+    found.reserve(std::min(total, kMaxQueried));
+    for (size_t i = 0, n = std::min(total, kMaxQueried); i < n; ++i) {
         auto* c = static_cast<Il2CppObject*>(unity::ArrayAt(arr, i));
         if (!unity::IsAlive(c)) continue;
-        if (!Value<bool>(Call(g.colEnabled, c, {}, "Collider.get_enabled", &ok)) || !ok) continue;
-        bool inactive = false;
-        if (!Call(g.inParent, c, {unity::TypeOf(g.identClass), &inactive}, "GetComponentInParent(Identifiable)", &ok) || !ok) continue;
         const Bounds b = Value<Bounds>(Call(g.colBounds, c, {}, "Collider.get_bounds", &ok));
-        if (!ok) continue;
-        const float dx = b.center.x - eye.x, dy = b.center.y - eye.y, dz = b.center.z - eye.z;
-        if (std::fabs(dx) <= b.extents.x && std::fabs(dy) <= b.extents.y && std::fabs(dz) <= b.extents.z) continue;  // the player
-        found.push_back({c, dx * dx + dy * dy + dz * dz, b});
         if (g.faulted) return;
+        if (!ok) continue;
+        // distance from the camera to the box (0 inside)
+        const float dx = std::max(0.0f, std::fabs(b.center.x - eye.x) - b.extents.x);
+        const float dy = std::max(0.0f, std::fabs(b.center.y - eye.y) - b.extents.y);
+        const float dz = std::max(0.0f, std::fabs(b.center.z - eye.z) - b.extents.z);
+        found.push_back({c, dx * dx + dy * dy + dz * dz, dx == 0.0f && dy == 0.0f && dz == 0.0f});
     }
     std::sort(found.begin(), found.end(), [](const Found& a, const Found& b) { return a.d2 < b.d2; });
-    if (found.size() > kMaxColliders) found.resize(kMaxColliders);
     for (const Found& f : found) {
+        if (g.kept.size() >= kMaxColliders) break;
+        if (!Value<bool>(Call(g.colEnabled, f.col, {}, "Collider.get_enabled", &ok)) || !ok) continue;
+        bool inactive = false;
+        Il2CppObject* ident = Call(g.inParent, f.col, {unity::TypeOf(g.identClass), &inactive}, "GetComponentInParent(Identifiable)", &ok);
+        if (g.faulted) return;
+        if (!ok || !ident) continue;
+        if (player ? unity::GameObjectOf(ident) == player : f.holdsEye) continue;  // the player
         Kept k;
         k.trigger = Value<bool>(Call(g.colTrigger, f.col, {}, "Collider.get_isTrigger", &ok));
         if (IsExactly(f.col, g.boxClass)) {
@@ -174,8 +201,9 @@ void Refresh(float range, bool triggers) {
     }
     if (!g.loggedFirst && !g.kept.empty()) {
         g.loggedFirst = true;
-        SR2_INFO("[{}] hitboxes: showing {} entity collider(s) within {:.0f} m of the camera ({} found by the physics query)",
-                 kModule, g.kept.size(), range, unity::ArrayLength(arr));
+        SR2_INFO("[{}] hitboxes: showing {} entity collider(s) within {:.0f} m of the camera ({} found by the physics query; "
+                 "player skipped by {})",
+                 kModule, g.kept.size(), range, total, player ? "its GameObject" : "the camera inside its bounds");
     }
 }
 
@@ -312,6 +340,10 @@ bool Setup(sr2::core::ModuleContext& ctx, std::string& why) {
     g.camView = method(g.camClass, "get_worldToCameraMatrix", 0);
     g.camProj = method(g.camClass, "get_projectionMatrix", 0);
     if (!why.empty()) return false;
+    // optional: the player by its GameObject (else the camera-inside-bounds test)
+    if (Il2CppClass* scu = R.Class("Assembly-CSharp", "MonomiPark.SlimeRancher.Util", "SceneContextUtility"))
+        g.tryScene = R.Method(scu, "TryGetSceneContext", 1);
+    if (Il2CppClass* sc = R.Class("Assembly-CSharp", "", "SceneContext")) g.scPlayer = R.Method(sc, "get_Player", 0);
     g.ready = true;
     return true;
 }
