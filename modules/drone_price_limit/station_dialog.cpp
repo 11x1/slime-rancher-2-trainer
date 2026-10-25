@@ -81,6 +81,7 @@
 #include "core/resolver.h"
 #include "core/text_override.h"
 #include "core/unity.h"
+#include "modules/common/game_button.h"
 #include "modules/custom_upgrades/drone_programs.h"
 #include "modules/custom_upgrades/plot_menu_slider.h"
 
@@ -123,6 +124,7 @@ namespace main_thread = sr2::core::main_thread;
 namespace sui = sr2::modules::custom_upgrades::ui;
 namespace progs = sr2::modules::custom_upgrades::drone_programs;
 namespace drones = sr2::modules::custom_upgrades::drones;
+namespace gbn = sr2::modules::game_button;
 using sr2::modules::custom_upgrades::drones::ProgramData;
 using sr2::il2cpp::api;
 using sr2::il2cpp::Resolver;
@@ -141,6 +143,8 @@ constexpr int kAlignLeft = 513, kAlignCenter = 514, kAlignRight = 516, kAlignTop
 constexpr int kStateFrames = 10;      // menu state (destination / station) re-read every N frames
 constexpr int kReapplyFrames = 4;     // re-assert the cloned prompt's key / label for a few frames
 constexpr float kPillPadX = 22.0f;    // price-limit pill: inner padding left and right of its key + label
+constexpr float kPillScale = 0.8f;    // game buttons on the page (popup button: pill 59, glyph 78 -> 47 / 62)
+constexpr float kDialogScale = 0.72f; // game buttons in the dialogs (pill ~42, glyph ~56 = kRowH)
 constexpr uint64_t kOtherTabMs = 120000;  // another tab of the station menu counts as "open" this long
 
 struct Vec2 {
@@ -197,6 +201,9 @@ struct StationUi::Impl {
     size_t offTplPopup = 0, offPopupNegative = 0;
     const MethodInfo* gcGetTemplates = nullptr, *trGetSibling = nullptr, *trSetSibling = nullptr;
     bool popupGlyphOk = false, loggedGlyph = false;
+    // optional: the game's popup button (modules/common/game_button.h) for the pills and every dialog button
+    bool gameButtonsOk = false, loggedGameButtonMiss = false;
+    const MethodInfo* rtGetAnchorMin = nullptr, *rtGetPivot = nullptr;
     size_t offGcLookup = 0, offLookupCurrencies = 0, offCurrencyArr = 0, offCurrencyIcon = 0;  // optional (coin)
 
     // ---- methods ----
@@ -240,9 +247,14 @@ struct StationUi::Impl {
         bool shown = false, logged = false, loggedFail = false;
         std::string text;                      // label last set
         std::string key, want;                 // dialog pills: key glyph ("" = none) and label to re-assert
+        gbn::Button gb;                        // the game's button (gb.Exists(): used instead of the clone)
+        float placed[4] = {-1e9f, -1e9f, -1e9f, -1e9f};  // gb: last anchor x / y and position x / y
     };
     Pill limitPill, progPill;
-    std::vector<Pill> dialogPills;  // the programs dialog's buttons: clones of the same game prompt
+    std::vector<Pill> dialogPills;  // fallback dialog buttons: clones of the Change prompt
+    std::vector<gbn::Button> dialogButtons;  // the dialogs' game buttons (index = PBtn.gbi / closeGb / modeGb)
+    std::vector<char> dialogClicks;          // their clicks this frame (Tick polls every one once per frame)
+    int closeGb = -1, modeGb[2] = {-1, -1};
     Held menuDisplay;               // the menu's DroneUIDisplay (open = any tab of the station menu shown)
     bool displayActive = false;
     uint64_t lastPageMs = 0;        // the program page was last seen active (GetTickCount64)
@@ -280,11 +292,14 @@ struct StationUi::Impl {
     enum Action { kActEdit = 1, kActRemove, kActAdd, kActModeIdle, kActModeDelivery };
     struct PBtn {
         Il2CppObject* toggle = nullptr;
+        int gbi = -1;  // index into dialogButtons (the game's button), -1 = toggle
+        bool right = false;  // a game button placed by its right edge (x + w)
         int action = 0, index = 0;
         float x = 0, y = 0, w = 0, h = 0;  // in the panel
     };
     std::vector<std::vector<PBtn>> pRows;  // focus grid: one row per program, Add, mode
     int pRow = 0, pCol = 0, pRunning = 0, pCount = 0;
+    int focusRefresh = 0;  // frames left to re-fit the focus frame to the laid-out game button
     Il2CppObject* pHint = nullptr;  // the Add row's text (TMP)
 
     // ---- helpers ----
@@ -466,6 +481,11 @@ struct StationUi::Impl {
         Call(tglSetOnQuiet, t, {&off}, "Toggle.SetIsOnWithoutNotify");
         return t;
     }
+    // A dialog button's click this frame: its game button (index gbi) or its toggle.
+    bool Clicked(Il2CppObject* toggle, int gbi) {
+        if (gbi >= 0) return gbi < static_cast<int>(dialogClicks.size()) && dialogClicks[static_cast<size_t>(gbi)];
+        return Clicked(toggle);
+    }
     // true once per click.
     bool Clicked(Il2CppObject* toggle) {
         if (!unity::IsAlive(toggle)) return false;
@@ -524,8 +544,10 @@ struct StationUi::Impl {
     // ---- prompts ----
     bool ClonePrompt(Pill& P, Il2CppObject* orig, Il2CppObject* parentTr, const char* name);
     bool UsePopupGlyph(Pill& P, Il2CppObject* pillTr);
-    void EnsurePill(Pill& P, size_t buttonOff, const char* name, const char* what);
-    void SyncPill(Pill& P, bool want, size_t buttonOff, const char* name, const char* what);
+    bool GamePill(Pill& P, Il2CppObject* orig, Il2CppObject* parentTr, const char* name, const char* key, const char* label);
+    bool PillClicked(Pill& P);
+    void EnsurePill(Pill& P, size_t buttonOff, const char* name, const char* what, const char* key);
+    void SyncPill(Pill& P, bool want, size_t buttonOff, const char* name, const char* what, const char* key);
     void ApplyPillLook(Pill& P, const char* key);
     void PlacePill(Pill& P);
     void SetPillText(Pill& P, const std::string& text);
@@ -538,6 +560,11 @@ struct StationUi::Impl {
                          Color bg, Color fg, int layer, float border = 0.0f);
     Il2CppObject* PillButton(Il2CppObject* prt, const char* name, float x, float y, float w, float h, const char* key,
                              const std::string& label, const Color* bg, const Color* fg, int layer);
+    // A dialog button: the game's popup button (returns its dialogButtons index in gbi, toggle nullptr), else
+    // PillButton. `selected` = the teal selected look; `right` = (x + w) is its right edge.
+    Il2CppObject* DialogButton(Il2CppObject* prt, const char* name, float x, float y, float w, float h, const char* key,
+                               const std::string& label, bool selected, int layer, int& gbi, bool right = false,
+                               const Color* fallbackBg = nullptr, const Color* fallbackFg = nullptr);
     void FollowStation();
     bool Open();
     // ---- programs dialog ----
@@ -754,6 +781,8 @@ bool StationUi::Setup(sr2::core::ModuleContext& ctx, const char* module, DialogH
     p->rtSetPos = method(p->rtClass, "set_anchoredPosition", 1);
     p->rtGetSize = method(p->rtClass, "get_sizeDelta", 0);
     p->rtGetPos = method(p->rtClass, "get_anchoredPosition", 0);
+    p->rtGetAnchorMin = method(p->rtClass, "get_anchorMin", 0, false);
+    p->rtGetPivot = method(p->rtClass, "get_pivot", 0, false);
     p->objDestroy = byParams(uobject, "Destroy", {"UnityEngine.Object"});
     p->behSetEnabled = method(behaviour, "set_enabled", 1);
     p->compInParent = byParams(component, "GetComponentInParent", {"System.Type", "System.Boolean"});
@@ -838,6 +867,13 @@ bool StationUi::Setup(sr2::core::ModuleContext& ctx, const char* module, DialogH
         p->popupGlyphOk = p->gcInstance && p->gcGetTemplates && p->popupClass && p->offTplPopup && p->offPopupNegative &&
                           p->trGetSibling && p->trSetSibling;
         if (!p->popupGlyphOk) report += " silo-style key glyphs: NOT available (the Change prompt's glyph);";
+        // Every button as the silo receipt's: the game's popup button (shared helper).
+        {
+            std::string gerr;
+            p->gameButtonsOk = gbn::Resolve(R, gerr) && p->rtGetAnchorMin && p->rtGetPivot;
+            if (!p->gameButtonsOk) report += " game buttons: NOT available (Change prompt clones" + (gerr.empty() ? std::string() : ": " + gerr) + ");";
+            else if (!gerr.empty()) report += " game buttons:" + gerr;
+        }
         // Hotkeys: C and the pad's right stick click.
         Il2CppClass* kb = R.Class(kInput, "UnityEngine.InputSystem", "Keyboard", &err);
         Il2CppClass* pad = R.Class(kInput, "UnityEngine.InputSystem", "Gamepad", &err);
@@ -962,7 +998,9 @@ Il2CppObject* StationUi::Impl::StationModel() {
 }
 
 void StationUi::Impl::DestroyPill(Pill& P) {
-    if (P.go && !Faulted()) Destroy(P.go);
+    if (P.go && !Faulted()) Destroy(P.go);  // a game button's slot or the cloned prompt
+    P.gb.Forget();
+    for (float& f : P.placed) f = -1e9f;
     P.go = P.toggle = P.label = P.keyText = P.orig = P.ied = P.group = nullptr;
     P.icons.clear();
     P.shown = false;
@@ -970,8 +1008,8 @@ void StationUi::Impl::DestroyPill(Pill& P) {
     FreeLater(P.handles);
 }
 
-void StationUi::Impl::EnsurePill(Pill& P, size_t buttonOff, const char* name, const char* what) {
-    if (P.go && unity::IsAlive(P.go)) return;
+void StationUi::Impl::EnsurePill(Pill& P, size_t buttonOff, const char* name, const char* what, const char* key) {
+    if (P.go && unity::IsAlive(P.go) && (!P.gb.Exists() || P.gb.Alive())) return;
     if (P.go) DestroyPill(P);  // died with the menu
     Il2CppObject* button = unity::Field<Il2CppObject*>(menu.p, buttonOff);
     if (!unity::IsAlive(button) || !IsA(button, optionButtonClass)) return;
@@ -979,6 +1017,19 @@ void StationUi::Impl::EnsurePill(Pill& P, size_t buttonOff, const char* name, co
     if (!unity::IsAlive(orig) || !IsA(orig, rtClass)) {
         if (!P.loggedFail) SR2_WARN("[{}] station ui: the option has no prompt container - no {} action", module, what);
         P.loggedFail = true;
+        return;
+    }
+    // Round 11: "[P] has wrong style for button" - the game's popup button (as the silo receipt's), the
+    // Change prompt clone only when that is not available.
+    if (gameButtonsOk && GamePill(P, orig, unity::TransformOf(button), name, key, what)) {
+        unity::SetActive(P.go, false);
+        P.shown = false;
+        P.reapply = kReapplyFrames;
+        P.text.clear();
+        if (!P.logged) {
+            P.logged = true;
+            SR2_INFO("[{}] station ui: {} action is a game popup button (key {})", module, what, key);
+        }
         return;
     }
     if (!ClonePrompt(P, orig, unity::TransformOf(button), name)) {
@@ -1116,8 +1167,37 @@ bool StationUi::Impl::UsePopupGlyph(Pill& P, Il2CppObject* pillTr) {
     return true;
 }
 
-void StationUi::Impl::SyncPill(Pill& P, bool want, size_t buttonOff, const char* name, const char* what) {
-    if (want) EnsurePill(P, buttonOff, name, what);
+// The page pill as the game's popup button under the option `parentTr`, right of its Change prompt `orig`
+// (PlacePill). Label set by the caller (UpdatePillLabel / UpdateProgramsLabel).
+bool StationUi::Impl::GamePill(Pill& P, Il2CppObject* orig, Il2CppObject* parentTr, const char* name, const char* key,
+                               const char* what) {
+    gbn::Spec spec;
+    spec.name = name;
+    spec.label = std::string(what) == "programs" ? "Programs" : "Limit";
+    spec.key = key ? key : "";
+    spec.scale = kPillScale;
+    spec.module = module;
+    std::string why;
+    if (!P.gb.Create(parentTr, spec, why)) {
+        if (!loggedGameButtonMiss) SR2_WARN("[{}] station ui: game button not created ({}) - Change prompt clone", module, why);
+        loggedGameButtonMiss = true;
+        return false;
+    }
+    P.go = P.gb.Slot();
+    P.orig = orig;
+    Keep(P.handles, orig);
+    P.key = spec.key;
+    return true;
+}
+
+// A pill's click this frame (the game button is polled every frame while shown).
+bool StationUi::Impl::PillClicked(Pill& P) {
+    if (P.gb.Exists()) return P.gb.Tick();
+    return Clicked(P.toggle);
+}
+
+void StationUi::Impl::SyncPill(Pill& P, bool want, size_t buttonOff, const char* name, const char* what, const char* key) {
+    if (want) EnsurePill(P, buttonOff, name, what, key);
     if (P.go && !unity::IsAlive(P.go)) DestroyPill(P);
     if (P.go && want != P.shown) {
         unity::SetActive(P.go, want);
@@ -1128,6 +1208,10 @@ void StationUi::Impl::SyncPill(Pill& P, bool want, size_t buttonOff, const char*
 }
 
 void StationUi::Impl::ApplyPillLook(Pill& P, const char* key) {
+    if (P.gb.Exists()) {
+        P.gb.SetKey(key ? key : "");
+        return;
+    }
     if (!key || !*key) {  // label only (a dialog button without a hotkey)
         if (unity::IsAlive(P.ied)) unity::SetActive(unity::GameObjectOf(P.ied), false);
         P.text.clear();
@@ -1165,13 +1249,18 @@ void StationUi::Impl::ApplyPillLook(Pill& P, const char* key) {
 }
 
 void StationUi::Impl::SetPillText(Pill& P, const std::string& text) {
+    if (P.gb.Exists()) {
+        P.gb.SetLabel(text);
+        P.text = text;
+        return;
+    }
     if (!P.label || text == P.text) return;
     SetText(P.label, text);
     P.text = text;
 }
 
 void StationUi::Impl::UpdatePillLabel() {
-    if (!limitPill.label || !haveStation || !host.get) return;
+    if ((!limitPill.label && !limitPill.gb.Exists()) || !haveStation || !host.get) return;
     const StationLimit l = host.get(station);
     // Short label: "Price limit: 200%" overflowed the pill and wrapped.
     std::string s = "Limit";
@@ -1180,7 +1269,7 @@ void StationUi::Impl::UpdatePillLabel() {
 }
 
 void StationUi::Impl::UpdateProgramsLabel() {
-    if (!progPill.label) return;
+    if (!progPill.label && !progPill.gb.Exists()) return;
     progs::View v;
     Il2CppObject* model = StationModel();
     if (!model || !progs::Get(model, v)) return;
@@ -1190,6 +1279,20 @@ void StationUi::Impl::UpdateProgramsLabel() {
 
 void StationUi::Impl::PlacePill(Pill& P) {
     if (!unity::IsAlive(P.go) || !unity::IsAlive(P.orig)) return;
+    if (P.gb.Exists()) {
+        // In the Change prompt's anchor space: left edge 12 right of its right edge, vertically centred on it.
+        const Vec2 amin = GetVec(rtGetAnchorMin, P.orig, "RectTransform.get_anchorMin");
+        const Vec2 piv = GetVec(rtGetPivot, P.orig, "RectTransform.get_pivot");
+        const Vec2 opos = GetVec(rtGetPos, P.orig, "RectTransform.get_anchoredPosition");
+        const Vec2 osize = GetVec(rtGetSize, P.orig, "RectTransform.get_sizeDelta");
+        const float want[4] = {amin.x, amin.y, opos.x + osize.x * (1.0f - piv.x) + 12.0f, opos.y + osize.y * (0.5f - piv.y)};
+        bool same = true;
+        for (int i = 0; i < 4; ++i) same = same && std::fabs(want[i] - P.placed[i]) < 0.5f;
+        if (same) return;
+        for (int i = 0; i < 4; ++i) P.placed[i] = want[i];
+        P.gb.PlaceAnchored(want[0], want[1], want[2], want[3], 0.0f, 0.5f);
+        return;
+    }
     Il2CppObject* rt = unity::TransformOf(P.go);
     const Vec2 opos = GetVec(rtGetPos, P.orig, "RectTransform.get_anchoredPosition");
     const Vec2 osize = GetVec(rtGetSize, P.orig, "RectTransform.get_sizeDelta");
@@ -1312,6 +1415,41 @@ Il2CppObject* StationUi::Impl::PillButton(Il2CppObject* prt, const char* name, f
     return t;
 }
 
+// Round 11: "use Silo's GUI buttons, theyre the best ones we have rn that look similiar to SR2's style" -
+// every dialog button is the game's popup button (game_button: pink pill, hover colour and bounce, the key
+// glyph on the left when `key` is set), placed with its left edge at x (right: its right edge at x + w) and
+// centred on the row (y, h); the label is at least w wide (minus the pill's ends). Selected = teal.
+Il2CppObject* StationUi::Impl::DialogButton(Il2CppObject* prt, const char* name, float x, float y, float w, float h,
+                                           const char* key, const std::string& label, bool selected, int layer, int& gbi,
+                                           bool right, const Color* fallbackBg, const Color* fallbackFg) {
+    gbi = -1;
+    if (gameButtonsOk) {
+        gbn::Spec spec;
+        spec.name = name;
+        spec.label = label;
+        spec.key = key ? key : "";
+        spec.scale = kDialogScale;
+        // The pill adds ~54 px (label inset 30 + padding 24) around the label; a glyph overlaps its left end.
+        spec.minWidth = std::max(0.0f, w - (key && *key ? 110.0f : 54.0f) * kDialogScale);
+        spec.module = module;
+        gbn::Button b;
+        std::string why;
+        if (b.Create(prt, spec, why)) {
+            b.Place(right ? x + w : x, y + h * 0.5f, right ? 1.0f : 0.0f);
+            if (selected) b.SetSelected(true);
+            dialogButtons.push_back(std::move(b));
+            dialogClicks.push_back(0);
+            gbi = static_cast<int>(dialogButtons.size()) - 1;
+            return nullptr;
+        }
+        if (!loggedGameButtonMiss) SR2_WARN("[{}] station ui: game button not created ({}) - Change prompt clone", module, why);
+        loggedGameButtonMiss = true;
+    }
+    const Color* bg = selected ? &kTeal : fallbackBg;
+    const Color* fg = selected ? &kWhite : fallbackFg;
+    return PillButton(prt, name, x, y, w, h, key, label, bg, fg, layer);
+}
+
 // The station's program changed while its menu is open (the rotation, a drone source falling back to
 // Coop, ...): the page still shows the old one, and closing the menu would ask whether to discard
 // "changes" the player never made (DroneUIDisplay.OnCancel -> _unappliedChangesConfirm when
@@ -1414,6 +1552,11 @@ bool StationUi::Impl::Open() {
     const char* modeNames[2] = {"Minimum price", "Fraction of base price"};
     const float modeX[2] = {kPad + 240.0f, kPad + 240.0f + 360.0f};
     for (int i = 0; i < 2; ++i) {
+        if (gameButtonsOk) {
+            modeToggle[i] = DialogButton(prt, i == 0 ? "ModePrice" : "ModeFraction", modeX[i], modeRowY, 340, kRowH, nullptr,
+                                         modeNames[i], static_cast<int>(mode) == i, layer, modeGb[i]);
+            if (modeGb[i] >= 0 || modeToggle[i]) continue;
+        }
         Il2CppObject* b = NewUi(i == 0 ? "ModePrice" : "ModeFraction", prt, layer);
         if (!b) return failOpen("mode button failed");
         At(unity::TransformOf(b), modeX[i], modeRowY, 340, kRowH);
@@ -1452,7 +1595,11 @@ bool StationUi::Impl::Open() {
     // Footer: input help + Close.
     Text(prt, "Help", kPad, footY, kPanelW - 2 * kPad - 240, kRowH,
          "Up / Down: choose    Left / Right: change    C or Esc: close", 22.0f, kNavy, kAlignLeft, bodySrc);
-    if (Il2CppObject* cb = NewUi("Close", prt, layer)) {
+    if (gameButtonsOk)
+        closeToggle = DialogButton(prt, "Close", kPanelW - kPad - 220, footY, 220, kRowH, "C", "Close", false, layer, closeGb,
+                                   true);
+    Il2CppObject* cb = closeGb < 0 && !closeToggle ? NewUi("Close", prt, layer) : nullptr;
+    if (cb) {
         At(unity::TransformOf(cb), kPanelW - kPad - 220, footY, 220, kRowH);
         SetRaycast(Shape(cb, kCyan, 28.0f), true);
         Text(unity::TransformOf(cb), "Label", 0, 0, 220, kRowH, "Close", 26.0f, kNavy, kAlignCenter, titleSrc);
@@ -1489,6 +1636,10 @@ void StationUi::Impl::Close(const char* why) {
     pRows.clear();
     for (Pill& P : dialogPills) FreeLater(P.handles);  // destroyed with root
     dialogPills.clear();
+    for (gbn::Button& b : dialogButtons) b.Forget();  // destroyed with root
+    dialogButtons.clear();
+    dialogClicks.clear();
+    closeGb = modeGb[0] = modeGb[1] = -1;
     FreeLater(dialogHandles);
     if (!was || !why) return;  // why == nullptr: rebuilt in place, no line
     if (kind == kDlgPrograms) SR2_INFO("[{}] station ui: programs dialog closed ({}), station {}", module, why, openStation);
@@ -1546,6 +1697,10 @@ void StationUi::Impl::SetMode(LimitMode m) {
 void StationUi::Impl::StyleModes() {
     for (int i = 0; i < 2; ++i) {
         const bool sel = static_cast<int>(mode) == i;
+        if (modeGb[i] >= 0 && modeGb[i] < static_cast<int>(dialogButtons.size())) {
+            dialogButtons[static_cast<size_t>(modeGb[i])].SetSelected(sel);
+            continue;
+        }
         SetColor(modeBg[i], sel ? kTeal : kBacker);
         if (unity::IsAlive(modeText[i])) {
             Color c = sel ? kWhite : kNavy;
@@ -1638,8 +1793,8 @@ void StationUi::Impl::Tick(float dt) {
         const bool wantLimit = pageActive && marketSelected && haveStation;
         // Programs: only with the Drone Program Scheduler upgrade (custom_upgrades; vanilla one program without).
         const bool wantProg = pageActive && haveStation && progs::Owned();
-        SyncPill(limitPill, wantLimit, offMenuDest, "sr2mods_PriceLimitPrompt", "price-limit");
-        SyncPill(progPill, wantProg, offMenuTarget, "sr2mods_ProgramsPrompt", "programs");
+        SyncPill(limitPill, wantLimit, offMenuDest, "sr2mods_PriceLimitPrompt", "price-limit", "C");
+        SyncPill(progPill, wantProg, offMenuTarget, "sr2mods_ProgramsPrompt", "programs", "P");
         // No program switch while the station menu is open (any tab: closing it from the Drone List tab
         // also asks about unapplied page changes); and the page follows the station's program.
         if ((menuActive || displayActive) && haveStation && progs::Available()) {
@@ -1681,20 +1836,24 @@ void StationUi::Impl::Tick(float dt) {
                       (KeyPressed(kbCurrent, kbC) || KeyPressed(padCurrent, padR3));
     const bool hotP = (progPill.shown || (open && dialogKind == kDlgPrograms)) &&
                       (KeyPressed(kbCurrent, kbP) || KeyPressed(padCurrent, padL3));
-    const bool clickedLimit = limitPill.shown && Clicked(limitPill.toggle);
-    const bool clickedProg = progPill.shown && Clicked(progPill.toggle);
+    const bool clickedLimit = limitPill.shown && PillClicked(limitPill);
+    const bool clickedProg = progPill.shown && PillClicked(progPill);
     if (open) {
+        // Every game button once per frame (its press / release edge and the reapplied look).
+        dialogClicks.resize(dialogButtons.size());
+        for (size_t i = 0; i < dialogButtons.size(); ++i) dialogClicks[i] = dialogButtons[i].Tick() ? 1 : 0;
         const bool hot = dialogKind == kDlgPrograms ? hotP : hotC;
-        if (hot || Clicked(closeToggle) || Clicked(blockerToggle)) {
+        if (hot || Clicked(closeToggle, closeGb) || Clicked(blockerToggle)) {
             Close(hot ? (dialogKind == kDlgPrograms ? "P" : "C") : "click");
             return;
         }
         if (dialogKind == kDlgPrograms) {
+            if (focusRefresh > 0 && --focusRefresh % 5 == 0) ProgFocus();
             ProgClicks();
             return;
         }
         for (int i = 0; i < 2; ++i)
-            if (Clicked(modeToggle[i])) {
+            if (Clicked(modeToggle[i], modeGb[i])) {
                 SetFocus(0);
                 SetMode(static_cast<LimitMode>(i));
             }
@@ -1824,14 +1983,17 @@ bool StationUi::Impl::OpenPrograms(int row, int col) {
         edit.y = ry + (kProgRowH - btnH) * 0.5f;
         edit.w = btnW;
         edit.h = btnH;
-        edit.toggle = PillButton(prt, "Edit", edit.x, edit.y, btnW, btnH, nullptr, running ? "Running" : "Edit",
-                                 running ? &kTeal : nullptr, running ? &kWhite : nullptr, layer);
+        edit.right = true;  // grows to the left ("Running" is wider), Remove to the right: no overlap
+        edit.toggle = DialogButton(prt, "Edit", edit.x, edit.y, btnW, btnH, nullptr, running ? "Running" : "Edit", running,
+                                   layer, edit.gbi, true);
         btns.push_back(edit);
         if (n >= 2) {
             PBtn rem = edit;
             rem.action = kActRemove;
+            rem.right = false;
             rem.x = kPad + removeX;
-            rem.toggle = PillButton(prt, "Remove", rem.x, rem.y, btnW, btnH, nullptr, "Remove", &kWhite, &kNavy, layer);
+            rem.toggle = DialogButton(prt, "Remove", rem.x, rem.y, btnW, btnH, nullptr, "Remove", false, layer, rem.gbi, false,
+                                      &kWhite, &kNavy);
             btns.push_back(rem);
         }
         pRows.push_back(btns);
@@ -1845,7 +2007,7 @@ bool StationUi::Impl::OpenPrograms(int row, int col) {
         add.y = addY;
         add.w = 380.0f;
         add.h = kRowH;
-        add.toggle = PillButton(prt, "Add", add.x, add.y, add.w, add.h, nullptr, "Add program", nullptr, nullptr, layer);
+        add.toggle = DialogButton(prt, "Add", add.x, add.y, add.w, add.h, nullptr, "Add program", false, layer, add.gbi);
         pRows.push_back({add});
         pHint = Text(prt, "AddHint", kPad + 400.0f, addY, kPanelW - 2 * kPad - 400.0f, kRowH,
                      "A copy of the running program; it runs now - change it on this page and press Start Program.", 20.0f,
@@ -1870,8 +2032,8 @@ bool StationUi::Impl::OpenPrograms(int row, int col) {
             b.y = modeY;
             b.w = 340.0f;
             b.h = kRowH;
-            b.toggle = PillButton(prt, i == 0 ? "ModeIdle" : "ModeDelivery", b.x, b.y, b.w, b.h, nullptr, names[i],
-                                  sel ? &kTeal : &kBacker, sel ? &kWhite : &kNavy, layer);
+            b.toggle = DialogButton(prt, i == 0 ? "ModeIdle" : "ModeDelivery", b.x, b.y, b.w, b.h, nullptr, names[i], sel,
+                                    layer, b.gbi, false, &kBacker, &kNavy);
             btns.push_back(b);
         }
         pRows.push_back(btns);
@@ -1880,7 +2042,7 @@ bool StationUi::Impl::OpenPrograms(int row, int col) {
     // ---- footer ----
     Text(prt, "Help", kPad, footY, kPanelW - 2 * kPad - 240, kRowH,
          "Arrows: choose    Enter: select    Esc: close", 22.0f, kNavy, kAlignLeft, bodySrc);
-    closeToggle = PillButton(prt, "Close", kPanelW - kPad - 220, footY, 220, kRowH, "P", "Close", nullptr, nullptr, layer);
+    closeToggle = DialogButton(prt, "Close", kPanelW - kPad - 220, footY, 220, kRowH, "P", "Close", false, layer, closeGb, true);
     if (Faulted()) return failOpen("faulted");
 
     unity::SetActive(root, true);
@@ -1889,6 +2051,7 @@ bool StationUi::Impl::OpenPrograms(int row, int col) {
     pRow = std::clamp(row, 0, std::max(0, static_cast<int>(pRows.size()) - 1));
     pCol = pRows.empty() ? 0 : std::clamp(col, 0, static_cast<int>(pRows[pRow].size()) - 1);
     ProgFocus();
+    focusRefresh = 30;
     if (!loggedProgOpen) {
         loggedProgOpen = true;
         SR2_INFO("[{}] station ui: programs dialog opened for station {} ({} program(s), program {} runs, {})", module,
@@ -1902,7 +2065,18 @@ void StationUi::Impl::ProgFocus() {
     const auto& r = pRows[pRow];
     if (pCol < 0 || pCol >= static_cast<int>(r.size())) return;
     const PBtn& b = r[pCol];
-    At(unity::TransformOf(focusFrame), b.x - 8.0f, b.y - 8.0f, b.w + 16.0f, b.h + 16.0f);
+    float x = b.x, w = b.w, h = b.h, y = b.y;
+    if (b.gbi >= 0 && b.gbi < static_cast<int>(dialogButtons.size())) {  // the game button's laid-out size
+        float gw = 0, gh = 0;
+        dialogButtons[static_cast<size_t>(b.gbi)].Size(gw, gh);
+        if (gw > 1.0f && gh > 1.0f) {
+            if (b.right) x = b.x + b.w - gw;
+            w = gw;
+            y = b.y + (b.h - gh) * 0.5f;
+            h = gh;
+        }
+    }
+    At(unity::TransformOf(focusFrame), x - 8.0f, y - 8.0f, w + 16.0f, h + 16.0f);
 }
 
 void StationUi::Impl::ProgNavigate(int dir) {
@@ -1965,7 +2139,7 @@ void StationUi::Impl::ProgActivate(const PBtn& b) {
 void StationUi::Impl::ProgClicks() {
     for (int r = 0; r < static_cast<int>(pRows.size()); ++r)
         for (int c = 0; c < static_cast<int>(pRows[r].size()); ++c)
-            if (Clicked(pRows[r][c].toggle)) {
+            if (Clicked(pRows[r][c].toggle, pRows[r][c].gbi)) {
                 pRow = r;
                 pCol = c;
                 ProgFocus();
@@ -1995,6 +2169,10 @@ void StationUi::Shutdown() {
         Impl::FreeLater(p.progPill.handles);
         for (auto& P : p.dialogPills) Impl::FreeLater(P.handles);
         p.dialogPills.clear();
+        for (auto& b : p.dialogButtons) b.Forget();
+        p.dialogButtons.clear();
+        p.limitPill.gb.Forget();
+        p.progPill.gb.Forget();
         Impl::Release(p.menu);
         Impl::Release(p.menuDisplay);
         return;
