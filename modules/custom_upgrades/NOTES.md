@@ -465,8 +465,8 @@ ToggleVariant, stacking), re/audio.md (GadgetMusicPlayer, corral Music Box), re/
   emitter kind Radio (0.6x range, 80 %), plays whenever a song plays. A radio that
   leaves the world raises `dj.radios_away` (max 20); the next Night Light appearing within 6 m of the
   camera is a radio again (logged). Failed spawns go to `dj.radios_owed` (up to 5 per tick later).
-  Both colliders get a grippy, non-bouncy `PhysicsMaterial` (friction 0.9 / 1.0, Maximum combine; round 11
-  "slides so much"), linear damping >= 0.6 and angular damping >= 1.5. Round 11 froze rotation X / Z, which
+  Rounds 11-14: both colliders got a grippy, non-bouncy `PhysicsMaterial` (friction 0.9 / 1.0, Maximum combine;
+  round 11 "slides so much"), linear damping >= 0.6 and angular damping >= 1.5 (removed in round 15). Round 11 froze rotation X / Z, which
   fought the vacuum's lock joint ("disappears after vaccing for 1-2 secs"); with rotation free all the time
   `RadioHeld` only clears stale freeze bits. Logs `Slime Radio actor N held in the vacuum` / `let go`; the
   dressed line ends with `ball on (r 0.47), flat base yes, low centre of mass yes, grip yes, rolls yes`.
@@ -491,6 +491,19 @@ ToggleVariant, stacking), re/audio.md (GadgetMusicPlayer, corral Music Box), re/
   mass (about 0.37 egg radii above the egg's bottom centre) is beyond the egg's contact, so it falls onto the egg
   and lies on its side, where the base is inside the capsule and nothing catches. Dressed line: `egg r 0.29 x
   0.85 high`. Not tried in game; the numbers are from the geometry.
+  Round 15 ("after 1st touch with any wall it just stops the physics for it"): compared with the vanilla toy
+  (Night Light / Fox Toy: Rigidbody 0.5 kg, no constraints, the toy's own colliders' materials and damping) the
+  radio differed in two ways. (1) `Apply`, which runs for every record on each tick, still had the round 11
+  freeze: while not held it set FreezeRotationX | Z (16 | 64) again, so right after a throw the radio kept its
+  mid-air tilt and could not tip or roll; with the round 11 grip it stopped dead at the first contact. That
+  branch now clears stale X / Z freeze bits like `RadioHeld` (log `rotation unfrozen (constraints now N)`).
+  (2) The grip material (friction 0.9 / 1.0, Maximum combine, so it won against every surface, walls included)
+  and the raised damping (>= 0.6 / 0.8) are gone: the body keeps the toy's vanilla values and the egg takes the
+  ball's own shared material. Nothing else in the module touches the Rigidbody (the upright euler reset is only
+  at dressing). The dressed line ends with `vanilla body: kinematic no, constraints 0, asleep .., v .., mass 0.50,
+  damping .., angular damping .., sleep threshold .., at (..)`. The first 4 throws of a session are traced:
+  `Slime Radio actor N +T ms: <same state>` every 0.15 s for 2.4 s after `let go` (stops when vacuumed again).
+  If it still freezes, that trace says whether it is kinematic, constrained, asleep or just has no velocity.
 - **Fabricator** (Decorations): booth after the Scientist Desk (Newbucks x2.5, items x2), stack after the
   Boombox (x1.5), radio after the stack (x0.5), Newbucks rounded to 5. Card icons (tile + details):
   `assets/icons/dj_booth.png` / `dj_speaker.png` / `slime_radio.png` when the user has drawn them, else the
