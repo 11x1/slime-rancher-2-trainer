@@ -45,7 +45,11 @@ else `iconFrom` (a vanilla card's icon). Since round 11 no card has a script-dra
 away from AI art"): Sell-All Button the Market Link's (`sell_all`), Music Box II and Corral Radio the Music
 Box's (`music_2`, `corral_radio`), Faster Hens I / II the Deluxe Coop's (`hens_1`, `hens_2`), Sprinkler II /
 III the Sprinkler's (`growth_1`, `growth_2`), Ash Booster the Ash Trough's (`ash_boost`), Coop Air Net the
-corral Air Net's (`coop_air_net`), Silo Capacity the Storage Capacity's. The Hen Collector has the user's
+corral Air Net's (`coop_air_net`), Silo Capacity the Storage Capacity's. The Market Link icon comes from
+`LookupDirector.MarketLink`, which is null in 1.3.0 (like RefineryLink), so `MarketIcon` finds the gadget
+definition named `MarketLink` in `_gadgetDefinitions` and its member groups (round 12: the card showed the
+cloned template's Storage Capacity icon; log `using the Market Link icon '<sprite>' ... (definition from the
+gadget groups)`). The Hen Collector has the user's
 `hen_collector_source.png`. A drawing under one of those names takes over at the next build
 (`.claude/notes/custom-icons.md`).
 
@@ -275,7 +279,13 @@ GadgetItem, Fabricator categories), re/save.md (GetPersistenceId, `_reverseIndex
   the Quantum Cloud tab selected. Fallback (menu members missing, display not found): HUD notices (what it
   is, the five largest cloud amounts; `QueueText`, 1.5 s cooldown). Still a refinery input. Logs `Quantum
   Cloud menu = the drone station menu '<name>'`, `Quantum Cloud menu open (cloud tab N; view only, no
-  station)`, `did not open within 10 s`.
+  station; legend: hid ... kept ...)`, `did not open within 10 s`.
+  Round 12 ("the row shows to press [SPACE] and a magnifying glass, #watdatmean"): without a station the cloud
+  page's legend is `DroneCloudInventoryMenu._defaultLegendConfig`, the map drone panel's (map controls that
+  nothing in this menu handles). `HideCloudHints` switches its hints off (`IInputLegend.SetItemEnabled(event,
+  false)` on the `_inputLegend` component) except events named cancel / back / close / exit; the log names
+  each hint's label and event. Not seen in game: whether the station's own menu reuses that display object
+  (then those hints would stay off there too; the withdraw / send hints are re-enabled by the game).
 - **Drone source** (`0x53520110`, after Silo, every target, while a link with a drone port is built):
   `GetSources` returns hidden storages (`sr2qstore`: `SiloStorage`, 8 slots, no type group, 999 each,
   own `AmmoModel`, active in hierarchy); catcher = the link's own `SiloCatcher`. Accepted cloud types
@@ -296,6 +306,13 @@ description on the card (vanilla walks `VariantOf` to the root), our name as the
 held and, via `AddPlacedLabel` providers, when aiming at a listed placed gadget; `dressPreview` runs on the
 placeholder after `SetHeldGadget`; `icon` is the card's details picture (`_fullArt` / `_requiresFullArt`
 cleared). Helpers `TintTree` (tag ` [sr2look]`), `TintedSprite`. Log `mod gadget looks ready: ...`.
+`artTint` / `artAmount` (round 12, "The icons are so low quality on the right pane": a 128 px icon stretched
+over the details picture): the full-art reference stays; the first time the card is shown the details' loader
+puts the base's 512 px full art on the image, a frame callback (`ArtFrame`, up to 10 s; the bigger sprite
+than the icon = the art) recolours it with `TintedSprite`, keeps it for the session and clears the reference,
+so later opens show the copy at once. Used by the DJ buildables (not for a user drawing) and the Quantum
+Storage Link. Logs `'<def>' card picture = its full art '<sprite>' recoloured (after N s)` / `... stays the
+icon (<why>)`.
 
 ## Slime DJ buildables
 
@@ -335,21 +352,26 @@ ToggleVariant, stacking), re/audio.md (GadgetMusicPlayer, corral Music Box), re/
   Boombox(es) play the Slime DJ song when switched on (...)`).
 - **Slime Radio** = a vanilla Night Light toy; its card definition is a Boombox clone, never a variant or
   in the inventory: fabricating spends the cost and spawns the toy 1.8 m in front of the camera (posted,
-  at most 5 per click), id into `dj.radios`. Dressing: night light off, a small speaker stack (0.26)
-  centred on the root with its box collider (ball off), upright with rotation x / z frozen (re-applied if
-  the vacuum resets it); emitter kind Radio (0.6x range, 80 %), plays whenever a song plays. A radio that
+  at most 5 per click), id into `dj.radios`. Dressing (round 12: "a bit small tbh, use the original radio
+  hitboxes with a flattened base so they can still rroll and have collision"): night light off; the toy's
+  ball collider (r 0.47 toy units, read at runtime) stays on; its small bottom box becomes a flat base
+  (1.15 r wide, 0.14 r high, bottom = the ball's bottom); centre of mass 0.55 r below the ball's centre
+  (`Rigidbody.centerOfMass`, reset on undress) so it rolls when pushed and rights itself on the base; rotation
+  free; a speaker stack filling 82 % of the ball's height (about 0.45 size, was 0.26) stands on the base;
+  emitter kind Radio (0.6x range, 80 %), plays whenever a song plays. A radio that
   leaves the world raises `dj.radios_away` (max 20); the next Night Light appearing within 6 m of the
   camera is a radio again (logged). Failed spawns go to `dj.radios_owed` (up to 5 per tick later).
-  Round 11: the box gets a grippy, non-bouncy `PhysicsMaterial` (friction 0.9 / 1.0, Maximum combine) and
-  linear damping >= 0.6 ("slides so much"); while `Vacuumable._held` (read every frame, `DjBuildables::Frame`)
-  rotation X / Z are free and the tick does not re-freeze them; let go, it is stood up and frozen again (the
-  frozen axes fought the vacuum's lock joint and threw the radio away: "disappears after vaccing for 1-2
-  secs"). Logs `Slime Radio actor N held in the vacuum (rotation free)` / `let go (upright)`; the dressed line
-  ends with `grip yes, hold watch yes`. Hitboxes can be checked with debug_tools' Show entity hitboxes.
+  Both colliders get a grippy, non-bouncy `PhysicsMaterial` (friction 0.9 / 1.0, Maximum combine; round 11
+  "slides so much"), linear damping >= 0.6 and angular damping >= 1.5. Round 11 froze rotation X / Z, which
+  fought the vacuum's lock joint ("disappears after vaccing for 1-2 secs"); with rotation free all the time
+  `RadioHeld` only clears stale freeze bits. Logs `Slime Radio actor N held in the vacuum` / `let go`; the
+  dressed line ends with `ball on (r 0.47), flat base yes, low centre of mass yes, grip yes, rolls yes`.
+  Hitboxes can be checked with debug_tools' Show entity hitboxes.
 - **Fabricator** (Decorations): booth after the Scientist Desk (Newbucks x2.5, items x2), stack after the
   Boombox (x1.5), radio after the stack (x0.5), Newbucks rounded to 5. Card icons (tile + details):
   `assets/icons/dj_booth.png` / `dj_speaker.png` / `slime_radio.png` when the user has drawn them, else the
-  base's vanilla icon recoloured (booth pink, stack orange, radio cyan; log `<label> card icon = ...`).
+  base's vanilla icon recoloured (booth pink, stack orange, radio cyan; log `<label> card icon = ...`); the
+  details picture is the base's full art recoloured the same way once it has loaded (gadget looks `artTint`).
 - **Dressed at once**: placing (AfterPlace) and the toggle on a placed one (ChangeVariant) build the record
   right away (`DressNow`); the tick keeps it (round 11: "have to wait a second for it to be the correct
   model"). Booth / stack: vanilla decoration +
