@@ -269,6 +269,39 @@ radio channel exists), then opens the menu.
     with an error warning on top of the dialog"): without a channel the menu reads the stored playlist from
     the plot's sidecar value (`LoadRadio` into a temporary channel) and shows it greyed (the game's
     disabled grey, no hover, no row buttons), header buttons disabled, a song click shows the warning.
+- *Round 14*:
+  - Key bar at the bottom (user: "the key hints should be at the bottom, aswell as '[ESC] Close' on the left,
+    others on the right"): game buttons (game_button, x0.72, key caps). Left: ESC Close. Right: the cursor
+    row's actions for the list it is in (user: "make the songs buttons so i can have a hint of what to press to
+    queue a song up, play now, remove from queue"): Songs SPACE Queue + ENTER Play now, Playlist DEL Remove +
+    ENTER Play now (greyed when the row can't act); then R Radio, F Shuffle, C Clear (moved down from the
+    header). `LayoutBar` places them by their laid-out widths (`Button::Size`, re-placed when a label changes).
+    The rows stay our pills in the game button's colours (cloning 22 game buttons as list rows, with a time
+    column, marquee and inline buttons inside the clone's layout, was not attempted); the focused row no longer
+    shows "+ Add" / "Play" (the bar names the actions). Keys: Songs Space / pad A queue, Enter / pad X play now;
+    Playlist Space / Enter / pad A play, Delete / Backspace / pad X remove; Down past the last row goes into the
+    bar, Up from the bar back to the list.
+  - Play now (`MenuOp::kPlayNow`): the song is inserted after the playing entry and played from its start, so
+    the radio goes on with what followed.
+  - Marquee (user: "song names should scroll when they dont fit"): each row's name sits in a `RectMask2D`
+    clip; the focused row's name, when `TMP_Text.get_preferredWidth` is wider than the clip, switches to
+    overflow mode Overflow and scrolls (1 s wait, 80 px/s, 1.5 s at the end, jump back). Ellipsis otherwise.
+  - "Clear?" (user: "should go back to normal [C] once any other input is pressed"): any key but C
+    (`Keyboard.anyKey`), a mouse button pressed anywhere but on Clear, the wheel or a pad button disarms it
+    (and clears its note).
+  - Warning pill 42 high instead of 34 ("needs a bit more space (margin) on y"), list heads 10 px lower.
+  - Refusal notification is just "Slime DJ is off" (custom_upgrades shows the reason without a prefix).
+  - Off and on keeps the song (user: "song still restarts if slime radio is disabled and enabled"): switching
+    a radio off stores an Air record (`AirOf`) in the channel; switching it on catches up (`CatchUp`), as when
+    its channel comes back. The time off counts only while the game runs, so off / on inside the menu
+    (game paused) goes on exactly where it was. `AirInList` re-finds the entry if the playlist was edited
+    meanwhile (dropped if it was removed); Play at / Clear drop the record. A switched-off radio's record
+    also survives its channel going away (`airs_`). (The Slime Radio toy has no switch of its own; it always
+    plays.)
+  - Toggle spam (user: "'4 radios active, waiting for one to stop' ... when spamming R"): the menu built its
+    state right after the toggle, before the next box scan handed out the slot. Now `HandleRadio` ends with
+    `AllocateSlots()` (slot freed / taken at once), and the warning (menu and tab) shows only when four
+    other radios really hold the slots (`SlotsFull`).
 - *Input*: polled (InputSystem devices, Toggle clicks, the clones' `Selectable.IsPressed` + pointer inside),
   0.3 s grace; hover from `Selectable.get_isPointerInside` (the list box, then its rows, then the hovered
   entry's small buttons: about 16 calls per frame). The keys of round 11 still work, unprinted (see the
@@ -489,7 +522,7 @@ All prefixed `slime_dj:`; grep for these when reading `sr2mods.log`:
   music' unavailable (…)`
 - radio menu: `radio menu ready[; NOT available: ...]`, `radio menu: game buttons not available (...)`, `radio menu
   for 'Corral NNNN' (plot '...')[: no radio channel (no Music Box|corral not found yet)]`, `radio menu opened (N rows
-  per list, M song(s), font ..., header buttons the game's popup button (game_button)|own pills, rows in the game
+  per list, M song(s), font ..., key bar the game's popup button (game_button)|own pills, rows in the game
   button's colours|in the menu palette)` (first), `radio menu: game button not cloned (...) - own buttons`, `radio
   menu closed (why)`, `radio menu not opened: ...`
 - corrals / muffle / radio: `N corral(s) with a music box, M with High Walls / Air Net …`, `'Muffle behind High

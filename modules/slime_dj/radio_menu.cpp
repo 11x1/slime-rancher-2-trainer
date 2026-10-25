@@ -3,11 +3,14 @@
 // Layout (CanvasScaler reference 1920 x 1080, the panel centred, 1400 wide), round 12 ("the playlist could
 // use more slime ranchification, we dont need keybinds when we put the list items as slime rancher's
 // buttons ... remove the bottom hint, DONE PLAY UP DOWN REMOVE buttons"):
-//   title "Corral Radio"                            [R Radio: on] [F Shuffle: off] [C Clear]
+//   title "Corral Radio"
 //   the corral's name                 [ warning pill, only when the radio can't play ]
 //   Songs (N)            1-11 of N        Playlist (M)          1-11 of M
 //   [ song buttons, virtual ] |scroll|  > [ entry buttons  (^) (v) (x) ] |scroll|
 //   feedback note (green / orange, a few seconds)
+//   [ESC Close]          [SPACE Queue] [ENTER Play now]   [R Radio: on] [F Shuffle: off] [C Clear]   (round 14)
+// Round 14 moved the switches from the header to that key bar, whose middle pair follows the cursor's list
+// (Playlist: DEL Remove, ENTER Play now); see BuildBar.
 // No key hint bar and no action button row: every list row is a button in the game's button colours
 // (game_button.h: pink, DeepBlue on hover, white label), a song row adds the song, a playlist row plays
 // that entry, and each playlist row has its own small move up / move down / remove buttons. The playing
@@ -192,6 +195,7 @@ struct RadioMenu::Impl {
         int list = -1, slot = -1, item = -1;
         float over = 0.0f, t = 0.0f, x = 0.0f;
         bool running = false;
+        std::string text;  // the row's name when it started (a list refresh may change it under the cursor)
     };
     // Row colours: the game's popup button (game_button.h: pink, DeepBlue on mouse-over, white label) when
     // it is available, else the menu palette.
@@ -805,13 +809,15 @@ void RadioMenu::Impl::TickMarquee(float dt) {
         slot = item - top[list];
         if (slot < 0 || slot >= static_cast<int>(slots[list].size())) list = slot = item = -1;
     }
-    if (list != marquee.list || slot != marquee.slot || item != marquee.item) {
+    const std::string* text = list >= 0 ? &slots[list][static_cast<size_t>(slot)].nameText : nullptr;
+    if (list != marquee.list || slot != marquee.slot || item != marquee.item || (text && *text != marquee.text)) {
         StopMarquee();
         marquee.list = list;
         marquee.slot = slot;
         marquee.item = item;
         if (list < 0) return;
         Slot& s = slots[list][static_cast<size_t>(slot)];
+        marquee.text = s.nameText;
         if (!unity::IsAlive(s.name) || s.nameText.empty()) return;
         bool ok = false;
         const float pw = Unbox<float>(Call(tmpPrefW, s.name, {}, "TMP_Text.get_preferredWidth", &ok));
@@ -873,10 +879,10 @@ bool RadioMenu::Impl::BuildSmall(Il2CppObject* parentRt, Small& s, int kind, flo
         bars[1] = {4.0f, 0.0f, 12.5f, -45.0f * sgn};
     }
     for (int b = 0; b < 2; ++b) {
-        Il2CppObject* bar = NewUi("Bar", rt);
-        if (!bar) return false;
-        Centred(unity::TransformOf(bar), bars[b].x, bars[b].y, bars[b].len, t, bars[b].deg);
-        s.bar[b] = Shape(bar, style.text, t * 0.5f);
+        Il2CppObject* barGo = NewUi("Bar", rt);
+        if (!barGo) return false;
+        Centred(unity::TransformOf(barGo), bars[b].x, bars[b].y, bars[b].len, t, bars[b].deg);
+        s.bar[b] = Shape(barGo, style.text, t * 0.5f);
         SetRaycast(s.bar[b], false);
         Keep(s.bar[b]);
         if (!s.bar[b]) return false;
