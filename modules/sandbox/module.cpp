@@ -54,6 +54,7 @@
 #include "modules/minimap/ugui.h"
 #include "modules/sandbox/achievements.h"
 #include "modules/sandbox/cheated_save.h"
+#include "modules/sandbox/noclip.h"
 #include "modules/sandbox/player_extras.h"
 #include "modules/sandbox/prefab_icons.h"
 #include "modules/sandbox/upgrades.h"
@@ -382,7 +383,9 @@ private:
     void RefreshPurchaseMenus();
     void DoSlotCount(const Ctx& c, int idx, int64_t value);
     void DoPutItem(const Ctx& c, int idx, uintptr_t item, int64_t value);
-    int DoSpawn(const Ctx& c, uintptr_t item, int64_t count, int limit = kMaxSpawn);
+    // radiant: -1 the normal actor; 0 the slime's radiant form, 1 / 2 a largo radiant from its first / second base slime.
+    int DoSpawn(const Ctx& c, uintptr_t item, int64_t count, int limit = kMaxSpawn, int radiant = -1);
+    Il2CppObject* RadiantBase(Il2CppObject* slime, int radiant, std::string& why);
     void DoStow(const Ctx& c, int sel, uintptr_t item, int64_t amount, bool replace);
     void DoCraft(uintptr_t item, int64_t count);
     // custom_upgrades' buildables (buildables.h): variants in the menu, tiles of their own, the Slime Radio in the
@@ -554,6 +557,13 @@ private:
     const MethodInfo* trForward_ = nullptr;          // Transform.get_forward
     const MethodInfo* raycast_ = nullptr;            // Physics.Raycast(Vector3, Vector3, out RaycastHit, float, int, QueryTriggerInteraction) (optional)
     size_t offHitDistance_ = 0;                      // RaycastHit.m_Distance (in the unboxed struct)
+    // Radiant slimes (optional): the context menu's "Spawn: Radiant <slime>" (re/slimes.md "Radiant slimes").
+    std::string radiantWhy_;                         // "" = available
+    Il2CppClass* slimeRadiantClass_ = nullptr;       // MonomiPark.SlimeRancher.Slime.SlimeRadiant (actor component)
+    const MethodInfo* setRadiant_ = nullptr;         // SlimeRadiant.SetRadiant(SlimeDefinition)
+    size_t offSlimeRadiantBase_ = 0;                 // SlimeDefinition.RadiantBase (SlimeAppearance)
+    size_t offSlimeRadiantLargo0_ = 0;               // SlimeDefinition.RadiantLargo0 (radiant from BaseSlimes[0])
+    size_t offSlimeRadiantLargo1_ = 0;               // SlimeDefinition.RadiantLargo1 (radiant from BaseSlimes[1])
 
     // ---- crafter (optional) ----
     const MethodInfo* tryGetGadgetDir_ = nullptr;    // SceneContextUtility.TryGetGadgetDirector(out GadgetDirector)
@@ -798,6 +808,7 @@ bool Sandbox::Setup(sr2::core::ModuleContext& ctx) {
     SetupExtras(R);
     SetupUnlocks(R);
     sandbox::SetupPlayerExtras(ctx);  // optional tools on the Extras card (player_extras.cpp)
+    sandbox::SetupNoclip(ctx);        // the Noclip card (noclip.cpp)
     sandbox::SetupUpgrades(ctx, {[this](uintptr_t id) { return Lookup(recipeById_, id, gadgetDefClass_); },
                                  [this](bool rebuild) { RefreshFabricator(rebuild); },
                                  [this] { lastRecipeState_ = lastUpgState_ = lastSnap_ = 0; },
@@ -980,6 +991,25 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
         }
     }
     if (!sw.empty()) SR2_WARN("[{}] spawner unavailable: {}", kModule, sw);
+    {
+        // Optional: radiant slimes. InstantiateActor's own radiant path (AmmoMetadata.Radiant) calls
+        // SlimeRadiant.SetRadiant() with the slime itself as the base, which leaves a largo without its radiant
+        // look, so the spawner calls SetRadiant(base) itself, before the actor's Start applies the appearance.
+        std::string& rw = radiantWhy_;
+        if (!sw.empty()) rw = "the spawner is unavailable";
+        slimeRadiantClass_ = cls(kImage, "MonomiPark.SlimeRancher.Slime", "SlimeRadiant", rw);
+        setRadiant_ = method(slimeRadiantClass_, "SetRadiant", 1, rw);
+        if (!slimeDefClass_ && rw.empty()) rw = "class SlimeDefinition not found";
+        off(slimeDefClass_, "RadiantBase", offSlimeRadiantBase_, rw);
+        off(slimeDefClass_, "RadiantLargo0", offSlimeRadiantLargo0_, rw);
+        off(slimeDefClass_, "RadiantLargo1", offSlimeRadiantLargo1_, rw);
+        if (!offSlimeBases_ && rw.empty()) rw = "field SlimeDefinition.BaseSlimes not found";
+        if (rw.empty())
+            SR2_INFO("[{}] spawner: radiant slimes available (SlimeRadiant.SetRadiant, SlimeDefinition.RadiantBase / "
+                     "RadiantLargo0 / RadiantLargo1)", kModule);
+        else
+            SR2_WARN("[{}] spawner: no radiant slimes ({})", kModule, rw);
+    }
     {
         // Optional: gray out the Tarr entries while the save's game settings have Tarrs off.
         std::string tw;
@@ -1884,6 +1914,22 @@ bool Sandbox::EnsureSpawnables() {
             std::sort(names.begin(), names.end());
             if (!names.empty()) item.family = names[0];
             if (names.size() > 1) item.family2 = names[1];
+        }
+        if (radiantWhy_.empty() && (item.kind == bridge::Kind::Slime || item.kind == bridge::Kind::Largo)) {
+            // The radiant forms the game has for this slime / largo (field reads only).
+            std::string ignore;
+            if (item.kind == bridge::Kind::Slime) {
+                if (RadiantBase(o, 0, ignore)) item.radiant |= bridge::kRadiantSelf;
+            } else {
+                if (Il2CppObject* b = RadiantBase(o, 1, ignore)) {
+                    item.radiant |= bridge::kRadiantBase0;
+                    item.radiantBase = reinterpret_cast<uintptr_t>(b);
+                }
+                if (Il2CppObject* b = RadiantBase(o, 2, ignore)) {
+                    item.radiant |= bridge::kRadiantBase1;
+                    item.radiantBase2 = reinterpret_cast<uintptr_t>(b);
+                }
+            }
         }
         items->push_back(std::move(item));
     }
@@ -2957,6 +3003,7 @@ void Sandbox::TopUpEnergy() {
 
 void Sandbox::Tick(float dt) {
     GadgetMenuTick(GetTickCount64());
+    sandbox::NoclipTick(Live());  // also with Sandbox off: then it only gives collision and gravity back
     if (!Live()) {
         if (fabHint_.Exists()) DropFabricatorHint();  // Sandbox off: the key bar entry goes
         if (pinPreload_ && !sr2::core::ModuleFaulted(kModule)) PinPreloadRelease("Sandbox off");
@@ -3135,6 +3182,7 @@ void Sandbox::Handle(const bridge::Action& a) {
         case bridge::Op::Spawn:
             if (!DoSpawnMod(a.item, a.value)) DoSpawn(c, a.item, a.value, kMaxDrop);
             break;
+        case bridge::Op::SpawnRadiant: DoSpawn(c, a.item, a.value, kMaxDrop, std::clamp(a.slot, 0, 2)); break;
         case bridge::Op::StowItem: DoStow(c, a.slot, a.item, a.value, a.replace); break;
         case bridge::Op::Craft:
             if (!DoCraftMod(a.item, a.value)) DoCraft(a.item, a.value);
@@ -3522,12 +3570,41 @@ bool Sandbox::SpawnPose(const Ctx& c, Vec3& pos, Vec3& fwd) {
     return std::isfinite(pos.x) && std::isfinite(pos.y) && std::isfinite(pos.z);
 }
 
+// The base slime a radiant form of `slime` is radiant from (what SlimeRadiant.SetRadiant takes), or nullptr with
+// `why`: 0 = the slime's own radiant form (SlimeDefinition.RadiantBase; the slime is its own base), 1 / 2 = a largo
+// radiant from BaseSlimes[0] / [1] (RadiantLargo0 / RadiantLargo1, as SlimeDefinition.GetRadiantAppearance picks).
+Il2CppObject* Sandbox::RadiantBase(Il2CppObject* slime, int radiant, std::string& why) {
+    if (!slime || !slimeDefClass_ || !IsA(slime, slimeDefClass_)) {
+        why = "it is not a slime";
+        return nullptr;
+    }
+    const bool largo = offSlimeIsLargo_ && unity::Field<bool>(slime, offSlimeIsLargo_);
+    if (largo != (radiant > 0)) {
+        why = largo ? "a largo is radiant from one of its base slimes" : "only largos have per-base radiant forms";
+        return nullptr;
+    }
+    const size_t off = radiant == 0 ? offSlimeRadiantBase_ : radiant == 1 ? offSlimeRadiantLargo0_ : offSlimeRadiantLargo1_;
+    auto* look = off ? unity::Field<Il2CppObject*>(slime, off) : nullptr;
+    if (!look || !unity::IsAlive(look)) {
+        why = "the game has no radiant form for it";
+        return nullptr;
+    }
+    if (radiant == 0) return slime;
+    void* bases = offSlimeBases_ ? unity::Field<void*>(slime, offSlimeBases_) : nullptr;
+    auto* b = static_cast<Il2CppObject*>(unity::ArrayAt(bases, static_cast<size_t>(radiant - 1)));
+    if (!b || !IsA(b, slimeDefClass_) || !unity::IsAlive(b)) {
+        why = "its base slime is missing";
+        return nullptr;
+    }
+    return b;
+}
+
 // Spawns `count` of a spawn-list item in front of the player through
 // InstantiationHelpers.InstantiateActor, the same call the vacpack makes when
 // it shoots an item out (VacuumItem.Expel): the actor model is registered with
 // the game model in the current scene group, so the game saves it like any
 // other loose item. A short raycast keeps spawns in front of walls.
-int Sandbox::DoSpawn(const Ctx& c, uintptr_t item, int64_t count, int limit) {
+int Sandbox::DoSpawn(const Ctx& c, uintptr_t item, int64_t count, int limit, int radiant) {
     if (!spawnWhy_.empty()) {
         Done(false, "Spawner unavailable: " + spawnWhy_);
         return 0;
@@ -3537,7 +3614,23 @@ int Sandbox::DoSpawn(const Ctx& c, uintptr_t item, int64_t count, int limit) {
         Done(false, "Not spawned: the item is not in the spawn list (anymore)");
         return 0;
     }
-    const std::string name = ItemName(ident);
+    Il2CppObject* radiantBase = nullptr;  // the SlimeDefinition passed to SlimeRadiant.SetRadiant
+    if (radiant >= 0) {
+        std::string why;
+        if (!radiantWhy_.empty()) why = "radiant slimes are unavailable (" + radiantWhy_ + ")";
+        else radiantBase = RadiantBase(ident, radiant, why);
+        if (!radiantBase) {
+            Done(false, std::format("Radiant {} not spawned: {}", ItemName(ident), why));
+            return 0;
+        }
+        if (!Saveable(SaveIndex(), radiantBase)) {
+            Done(false, std::format("Radiant {} not spawned: the game can't save its radiant base slime", ItemName(ident)));
+            return 0;
+        }
+    }
+    const std::string name = radiant < 0    ? ItemName(ident)
+                             : radiant == 0 ? "Radiant " + ItemName(ident)
+                                            : std::format("Radiant {} (radiant {})", ItemName(ident), ItemName(radiantBase));
     if (!Saveable(SaveIndex(), ident)) {
         Done(false, std::format("{} not spawned: the game can't save it", name));
         return 0;
@@ -3607,6 +3700,17 @@ int Sandbox::DoSpawn(const Ctx& c, uintptr_t item, int64_t count, int limit) {
                                 "InstantiationHelpers.InstantiateActor", &ok);
         if (!ok || !go) break;
         ++spawned;
+        if (radiantBase) {
+            // Sets the model's RadiantBaseType; SlimeRadiant.Start (next frame) applies the radiant appearance and the
+            // save stores it (ActorDataV04.IsRadiant / RadiantTypeId). Not marked collected, so vacuuming it counts as
+            // catching one (pedia entry), and losing it adds nothing to the Lost and Found queue.
+            Il2CppObject* comp = unity::GetComponent(go, slimeRadiantClass_);
+            bool set = false;
+            if (comp) Call(setRadiant_, comp, {radiantBase}, "SlimeRadiant.SetRadiant", &set);
+            if (!set)
+                SR2_WARN("[{}] {}: spawned without its radiant form ({})", kModule, name,
+                         comp ? "SetRadiant failed" : "the actor has no SlimeRadiant component");
+        }
     }
     if (batch) spawnNext_ = base + spawned;
     if (spawned == n) Notify(ident, NoticeKind::Spawn, n, name, std::format("Spawned {} x {}", n, name));

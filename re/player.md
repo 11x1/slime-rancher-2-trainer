@@ -41,6 +41,14 @@ Stack: `SRCharacterController : KFCCharacterController` implements the KCC `ICha
 - Scroll-jump: the scroll wheel cycles slots via `VacuumItem.NextSlot/PreviousSlot` (re/vacpack.md); suppress when `InputEventData.Source == POINTER`.
 - Sprint energy: `UnitResource.set_Value` on `_currentEnergy` (+0x110).
 
+### Noclip (sandbox; IDA)
+- Player lookup: `SceneContext.player` GameObject +0x130 carries the `SRCharacterController`.
+- `KinematicCharacterMotor.SetMovementCollisionsSolvingActivation(bool)` 0x59D090 / `SetGroundSolvingActivation(bool)` 0x59D080: 16-byte setters of `_solveMovementCollisions` +0x230 / `_solveGrounding` +0x231, nothing else. `SetCapsuleCollisionsActivation(bool)` 0x59CBC0 = `Capsule.isTrigger = !active` (not used).
+- `UpdatePhase1` 0x59D490 copies `GroundingStatus` to `LastGroundingStatus` and zeroes it every tick, then probes only with `_solveGrounding`: with it off every tick takes UpdateVelocity's airborne branch. With `_solveMovementCollisions` off a pending `MoveCharacter` target is taken as is and the velocity move is a plain `transient += v * dt` (stock KCC 3.x).
+- `KFCCharacterController.HandleGravity` 0x5BC3D0 returns at once while `<BypassGravity>` (+0xAC) is set; otherwise `GravityAmount` (+0xA8) accumulates.
+- `SetPosition(Vector3, bool bypassInterpolation)` 0x59D190: `transform.position`, `_initialSimulationPosition`, `_transientPosition` (+0x110), and with bypass `InitialTickPosition` (+0x1D0).
+- Mod: modules/sandbox/noclip.cpp (no hooks); hl2_movement steps aside through `modules/common/noclip_state.h`.
+
 ## From the minimap, map_tools, quick_travel, wall_markers, collectibles notes
 
 ### TeleportablePlayer

@@ -56,7 +56,13 @@ struct Item {
     uintptr_t base = 0, base2 = 0;  // largo: its two base slimes (SlimeDefinition.BaseSlimes, ids as above)
     std::string area;       // crate: the zone it spawns in (ZoneDefinition._crates; its localized name)
     bool mod = false;       // added by the mod (custom_upgrades' Slime Radio): spawned through buildables::Grant; [M] badge
+    // Spawn list: the radiant forms the game has for it (Op::SpawnRadiant), bits of kRadiant*. A slime: its own
+    // (SlimeDefinition.RadiantBase); a largo: radiant from either base slime (RadiantLargo0 / RadiantLargo1, the
+    // first / second of SlimeDefinition.BaseSlimes, ids in radiantBase / radiantBase2). 0 = none.
+    uint8_t radiant = 0;
+    uintptr_t radiantBase = 0, radiantBase2 = 0;
 };
+inline constexpr uint8_t kRadiantSelf = 1, kRadiantBase0 = 2, kRadiantBase1 = 4;
 
 // How items relate through slime diets (SlimeDefinition.Diet), by item id. Ids
 // may name types that are in neither list; the tab skips those.
@@ -173,6 +179,8 @@ enum class Op {
                      // the item or are empty; what does not fit is dropped in front of the player
     UnlockUpgrades,  // "Max all upgrades": every player upgrade to its last level (IncrementUpgradeLevel), free
     DiscoverUpgrades,  // every upgrade the Fabricator hides until found gets its upgrade component (as if found)
+    SpawnRadiant,    // item (a slime or largo from spawnables), value = how many, slot = which radiant form: 0 the slime's
+                     // own, 1 / 2 a largo radiant from its first / second base slime (Item::radiant); in front of the player
 };
 
 struct Action {

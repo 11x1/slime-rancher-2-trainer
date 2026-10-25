@@ -23,7 +23,7 @@ are for cross-checking only. Each system file starts with a curated part; sectio
 | [shop.md](shop.md) | ProntoMart shop (categories, daily deals, purchase), plort economy (TrySell, prices), shop music |
 | [time-weather.md](time-weather.md) | TimeDirector (pause, FastForwardTo, world time), weather registry and its debug API |
 | [map.md](map.md) | map UI, projection, fog (shaders, events), zones, markers, teleporters / warp network |
-| [slimes.md](slimes.md) | slime definitions, diet and eating, emotions and hunger, Ringtail / Phosphor / feral / shadow rules, largos, chickens |
+| [slimes.md](slimes.md) | slime definitions, diet and eating, emotions and hunger, Ringtail / Phosphor / feral / shadow rules, radiant (rare) slimes, largos, chickens |
 | [audio.md](audio.md) | music and SECTR audio (buses, cues, sources), music box, Boombox (GadgetMusicPlayer), Unity AudioSource / AudioClip / AudioLowPassFilter |
 | [ui.md](ui.md) | Options menu, list menus (ListUIRoot/ListUI, details panel, alt action), popups, HUD and notifications, prompt pills / input hints, input system, UI stack and input locking, main menu, Slimepedia, D3D11 / Steam overlay host facts |
 | [save.md](save.md) | AutoSaveDirector (file naming, rotation, load), actor save, persistence ids, the mod sidecar format and rules |
