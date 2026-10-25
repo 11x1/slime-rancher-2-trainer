@@ -122,7 +122,7 @@ RE for everything below: `re/ui.md` (Options menu classes, input system, CursorM
 | HUD | Minimap, Collectibles (drawn under the minimap, needs it on), Full Map (`map_tools`), Speed Panel |
 | Ranch | General (Custom Upgrades left; Plot Upgrades, Sell Upgrades right), Slime DJ |
 | Misc | General (Quick Start, Free Placement, Debug Tools left; Instant Build, Quick Travel, Misc Tweaks right) |
-| Sandbox | General, Vacpack, Spawn & Craft, Upgrades, Weather (`Tab::sandboxPage`, `layout::SandboxPage`; sidebar icon a four-pointed sparkle) |
+| Sandbox | General, Vacpack, Spawn & Craft, Upgrades, Weather (`Tab::sandboxPage`, `layout::SandboxPage`; sidebar icon a four-pointed sparkle with round tips and curved sides in the other icons' 2..16 box, plus a small filled one; round 11. The Profiles icon's lines have round ends) |
 | Profiles, Settings | one tab each |
 
 - **Speed Panel** is `hl2_movement`'s HUD group; switch `hl2_movement.momentum_hud`, locked while Hl2 Movement is off, with a (?).

@@ -379,24 +379,48 @@ void DrawIcon(ImDrawList* dl, layout::Icon icon, ImVec2 o, ImU32 col) {
                 for (float x : {2.5f, 10.5f}) dl->AddRect(P(x, y), P(x + 5, y + 5), col, 1.5f * k, 0, th * 0.9f);
             break;
         case layout::Icon::Sandbox: {
-            // A four-pointed sparkle and a small one top right (cheats / magic).
-            auto star = [&](float cx, float cy, float r, float in) {
-                for (int i = 0; i < 8; ++i) {
-                    const float a = static_cast<float>(i) * kPi / 4 - kPi / 2, rr = i % 2 == 0 ? r : in;
-                    dl->PathLineTo(P(cx + std::cos(a) * rr, cy + std::sin(a) * rr));
+            // A four-pointed sparkle and a small filled one top right (cheats / magic), inside the
+            // same 2..16 box as the other icons. Round tips (a half circle each) and curved sides
+            // meeting them tangentially: a smooth outline, so the stroke has no mitre spikes (round 11:
+            // the straight-edged star was too big and looked sharp next to the other icons).
+            auto sparkle = [&](float cx, float cy, float r, float tip) {
+                constexpr int kCap = 8;
+                for (int i = 0; i < 4; ++i) {
+                    const float a = static_cast<float>(i) * kPi / 2 - kPi / 2;
+                    const float an = a + kPi / 2;  // the next tip
+                    const ImVec2 d(std::cos(a), std::sin(a)), dn(std::cos(an), std::sin(an));
+                    const ImVec2 q(cx + d.x * (r - tip), cy + d.y * (r - tip));  // this tip's cap centre
+                    // The cap from a - 90 to a + 90 degrees; its first point is where the last curve ended.
+                    for (int j = i == 0 ? 0 : 1; j <= kCap; ++j) {
+                        const float t = a - kPi / 2 + kPi * static_cast<float>(j) / kCap;
+                        dl->PathLineTo(P(q.x + std::cos(t) * tip, q.y + std::sin(t) * tip));
+                    }
+                    // From the cap back towards the centre and out to the next tip's cap.
+                    const float l = (r - tip) * 0.75f;
+                    const ImVec2 e(q.x + dn.x * tip, q.y + dn.y * tip);
+                    const ImVec2 sn(cx + dn.x * (r - tip) + d.x * tip, cy + dn.y * (r - tip) + d.y * tip);
+                    dl->PathBezierCubicCurveTo(P(e.x - d.x * l, e.y - d.y * l), P(sn.x - dn.x * l, sn.y - dn.y * l), P(sn.x, sn.y), 10);
                 }
+                dl->_Path.pop_back();  // the last curve ends on the first point
             };
-            star(7.5f, 10.5f, 6.5f, 2.0f);
+            sparkle(7.5f, 10.5f, 5.6f, 1.1f);
             dl->PathStroke(col, ImDrawFlags_Closed, th * 0.9f);
-            star(14.0f, 4.0f, 3.0f, 1.0f);
+            sparkle(13.6f, 4.4f, 2.7f, 0.7f);
             dl->PathFillConcave(col);
             break;
         }
-        case layout::Icon::Profiles:
-            dl->AddLine(P(3, 5), P(15, 5), col, th);
-            dl->AddLine(P(3, 9), P(15, 9), col, th);
-            dl->AddLine(P(3, 13), P(11, 13), col, th);
+        case layout::Icon::Profiles: {
+            // Three list lines with round ends (round 11).
+            auto line = [&](float x0, float x1, float y) {
+                dl->AddLine(P(x0, y), P(x1, y), col, th);
+                dl->AddCircleFilled(P(x0, y), th * 0.5f, col, 12);
+                dl->AddCircleFilled(P(x1, y), th * 0.5f, col, 12);
+            };
+            line(3.5f, 14.5f, 5);
+            line(3.5f, 14.5f, 9);
+            line(3.5f, 10.5f, 13);
             break;
+        }
         case layout::Icon::Settings:
             dl->AddCircle(P(9, 9), 2.6f * k, col, 0, th);
             for (int i = 0; i < 8; ++i) {
