@@ -530,14 +530,15 @@ void DrawCard(const Helpers& h, float w) {
         const ImVec2 top = ImGui::GetCursorScreenPos();
         ImGui::BeginGroup();
         ImGui::PushItemWidth(leftW);
-        ImGui::BeginChild("##wxleft", ImVec2(leftW, 0), ImGuiChildFlags_AutoResizeY, ImGuiWindowFlags_NoBackground);
+        ImGui::BeginChild("##wxleft", ImVec2(leftW, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_NavFlattened,
+                          ImGuiWindowFlags_NoBackground);
         NowAndForecast(*st);
         ImGui::EndChild();
         ImGui::PopItemWidth();
         ImGui::EndGroup();
         const float leftBottom = ImGui::GetItemRectMax().y;
         ImGui::SetCursorScreenPos(ImVec2(top.x + leftW + gap, top.y - ImGui::GetFrameHeightWithSpacing()));
-        ImGui::BeginChild("##wxright", ImVec2(avail - leftW - gap, 0), ImGuiChildFlags_AutoResizeY,
+        ImGui::BeginChild("##wxright", ImVec2(avail - leftW - gap, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_NavFlattened,
                           ImGuiWindowFlags_NoBackground);
         Picker(h, *st, z);
         Controls(h, *st, z);

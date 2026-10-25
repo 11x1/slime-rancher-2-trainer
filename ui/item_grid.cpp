@@ -11,6 +11,7 @@
 
 #include "imgui_internal.h"
 #include "item_icons.h"
+#include "nav.h"
 #include "theme.h"
 
 namespace sr2::ui::item_grid {
@@ -103,7 +104,7 @@ void TabRow(const std::vector<Tab>& tabs, State& st, Result& res, float s) {
     for (int i = 0; i < n; ++i) {
         ImGui::PushID(i);
         if (i > 0) ImGui::SameLine(0, sp);
-        if (ImGui::InvisibleButton("##tab", ImVec2(fh, fh), ImGuiButtonFlags_PressedOnClick) && st.tab != i)
+        if (nav::Button("##tab", ImVec2(fh, fh), ImGuiButtonFlags_PressedOnClick) && st.tab != i)
             st.tab = i, res.tabChanged = true;
         const bool hot = ImGui::IsItemHovered(), on = st.tab == i;
         const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
@@ -111,6 +112,7 @@ void TabRow(const std::vector<Tab>& tabs, State& st, Result& res, float s) {
         dl->AddRectFilled(a, b, on ? P.sel : hot ? P.frameHover : P.frame, 6.0f * s);
         if (on) dl->AddRect(a, b, Dark() ? P.grab : P.accent, 6.0f * s, 0, std::max(1.0f, 1.5f * s));
         DrawTabFace(dl, a, b, tabs[static_cast<size_t>(i)], on || hot, s);
+        nav::Ring(6.0f * s);
         if (hot) res.hoveredTab = i;
         ImGui::PopID();
     }
@@ -385,7 +387,11 @@ Result Draw(const char* id, const std::vector<Tile>& tiles, State& st, const Opt
     ImGui::PushStyleColor(ImGuiCol_ChildBg, Dark() ? Mix(P.card, IM_COL32_BLACK, 0.18f) : P.frame);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f * s, 6.0f * s));
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f * s);
-    ImGui::BeginChild("##grid", ImVec2(0, std::floor(o.height * s)), ImGuiChildFlags_AlwaysUseWindowPadding);
+    // The tiles are one Tab stop (the tile focused last, else the first); the arrows move tile by tile.
+    // Flattened, so Tab and Shift+Tab leave the grid for the items around it (nav.h).
+    nav::TabGroup tileNav("##tilenav");
+    ImGui::BeginChild("##grid", ImVec2(0, std::floor(o.height * s)),
+                      ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened);
     const float gap = 6.0f * s;
     const float avail = ImGui::GetContentRegionAvail().x;
     const int cols = std::max(1, static_cast<int>((avail + gap) / (o.tile * s + gap)));
@@ -432,10 +438,13 @@ Result Draw(const char* id, const std::vector<Tile>& tiles, State& st, const Opt
         }
         if (col > 0) ImGui::SameLine(0, gap);
         ImGui::PushID(reinterpret_cast<const void*>(t.id));
-        if (ImGui::InvisibleButton("##tile", ImVec2(tw, tw), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight)) {
+        tileNav.Item(t.id);
+        if (nav::Button("##tile", ImVec2(tw, tw), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight)) {
             if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) res.rightClicked = i;
-            else res.clicked = i;
+            else res.clicked = i;  // also Space / Enter on the focused tile
         }
+        tileNav.Done();
+        if (nav::ContextKey()) res.rightClicked = i;
         // Hover also while another item (the search box being typed in) holds the
         // active id, so the tooltip and the wheel work without clicking the grid first.
         const bool hot = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
@@ -455,6 +464,7 @@ Result Draw(const char* id, const std::vector<Tile>& tiles, State& st, const Opt
         const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
         if (ImGui::IsRectVisible(a, b))
             DrawTile(dl, a, b, t, hot || ImGui::IsItemActive(), o.selected != 0 && t.id == o.selected, s);
+        nav::Ring(a, b, 6.0f * s);
         if (o.drag && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoPreviewTooltip)) {
             ImGui::SetDragDropPayload(kDragType, &t.id, sizeof(t.id));
             ImGui::EndDragDropSource();
@@ -481,6 +491,7 @@ Result Draw(const char* id, const std::vector<Tile>& tiles, State& st, const Opt
         }
     }
     ImGui::EndChild();
+    tileNav.End();
     if (o.dropType && ImGui::BeginDragDropTarget()) {  // the child window is the last item
         if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(o.dropType)) res.dropped = p;
         ImGui::EndDragDropTarget();

@@ -74,6 +74,7 @@ Core helpers (`core/`):
 
 UI components to reuse (`ui/`; details in ui/NOTES.md):
 - `item_grid.h` searchable icon-tile grid (`Draw`, `DrawTile`, `SearchBox`); `item_icons.h` game Sprite as ImGui image (`Register` main thread, `Draw` render thread); `mod_icons.h` embedded PNGs from `assets/icons` as Unity Sprites (`Get(name, sizeLike, greyed)`, `Has`).
+- `nav.h` keyboard focus for drawn widgets: `nav::Button` instead of `InvisibleButton` for anything clickable, `nav::Ring` after drawing it, `nav::TabGroup` for a grid / list (one Tab stop, arrows inside).
 - `theme.h` palettes and fonts; `menu.h` / `menu_layout.h` the overlay window and sidebar; `settings_view.h` shared settings rendering and posted writes; `spotlight.h` Ctrl/Alt+Space search.
 - `hud.h` world-space markers (`Publish(owner, Frame)`, `Clear`); `momentum_hud.h` speed panel; `hud_edit.h` HUD edit mode and keycaps (`DrawKeycap`, `DrawKeyCombo`).
 - `game_input.h` input lock while the overlay is open; `overlay.h` `IsOpen()` (modules polling keys skip while true).

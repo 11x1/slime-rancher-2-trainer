@@ -17,6 +17,7 @@
 #include "hud_edit.h"
 #include "imgui_internal.h"  // ImGuiSelectableFlags_SpanAvailWidth
 #include "item_grid.h"
+#include "nav.h"
 #include "sandbox_upgrades_bridge.h"
 #include "theme.h"
 
@@ -257,6 +258,9 @@ void UpgradesTab(const Helpers& h, const ub::State& st) {
     uintptr_t openMenu = 0;
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const size_t n = st.upgrades.size(), rows = (n + static_cast<size_t>(cols) - 1) / static_cast<size_t>(cols);
+    // The entries are one Tab stop; the arrows move entry by entry. On the focused entry Space / Enter
+    // opens its menu and + / - change the level (the drawn - / + buttons are for the mouse only).
+    nav::TabGroup entryNav("##upgnav");
     for (size_t i = 0; i < n; ++i) {
         const ub::Upgrade& u = st.upgrades[i];
         const int level = Level(u);
@@ -266,13 +270,23 @@ void UpgradesTab(const Helpers& h, const ub::State& st) {
         const ImVec2 a(origin.x + col * (colW + gap), origin.y + row * (eh + gap)), b(a.x + colW, a.y + eh);
         ImGui::SetCursorScreenPos(a);
         ImGui::SetNextItemAllowOverlap();
-        const bool pressed = ImGui::InvisibleButton("##entry", ImVec2(colW, eh), ImGuiButtonFlags_MouseButtonRight);
+        entryNav.Item(u.id);
+        const bool pressed = nav::Button("##entry", ImVec2(colW, eh), ImGuiButtonFlags_MouseButtonRight);
+        entryNav.Done();
         const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem | ImGuiHoveredFlags_AllowWhenOverlappedByItem);
-        if (pressed) openMenu = u.id;
+        const bool focused = nav::Focused();
+        if (pressed || nav::ContextKey()) openMenu = u.id;
+        if (ImGui::IsItemFocused() && !ImGui::IsPopupOpen(kUpgradeCtx)) {
+            if (level < u.levels - 1 && (ImGui::IsKeyPressed(ImGuiKey_Equal) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd)))
+                RequestLevel(u, level + 1);
+            else if (level >= 0 && (ImGui::IsKeyPressed(ImGuiKey_Minus) || ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract)))
+                RequestLevel(u, level - 1);
+        }
         WheelLevels(u);
         // No tooltip on the entry (round 8 feedback: name and tier are on it; the controls are in the
         // right-click menu).
         dl->AddRectFilled(a, b, hovered ? P.frameHover : P.frame, U(8));
+        if (focused) nav::Ring(a, b, U(8));
         // Icon tile, dimmed while not bought.
         item_grid::Tile t;
         t.id = u.id;
@@ -301,6 +315,7 @@ void UpgradesTab(const Helpers& h, const ub::State& st) {
             if (plus) dl->AddRectFilled(ImVec2(c.x - th * 0.5f, c.y - half), ImVec2(c.x + th * 0.5f, c.y + half), col);
         };
         ImGui::SetCursorScreenPos(ImVec2(b.x - pad - 2 * btn - U(4), by));
+        ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
         ImGui::BeginDisabled(level < 0);
         if (ImGui::Button("##dn", ImVec2(btn, btn))) RequestLevel(u, level - 1);
         glyph(false);
@@ -312,6 +327,7 @@ void UpgradesTab(const Helpers& h, const ub::State& st) {
         glyph(true);
         ImGui::EndDisabled();
         HoverTip(h, "One level up, free.");
+        ImGui::PopItemFlag();
         ImGui::PopID();
     }
     ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + static_cast<float>(rows) * (eh + gap) - gap));
