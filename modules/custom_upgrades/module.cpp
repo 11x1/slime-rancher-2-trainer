@@ -82,10 +82,10 @@
 //   "hen_collector_keep" n reads as min(2, n) roosters + the rest hens), saved with the next game
 //   save like ownership, and read live by the collector (CoopRequest.keepHens / keepRoosters).
 //
-//   Auto-Feeder food lock (feeder_lock.cpp, round 15): while the owned vanilla Auto-Feeder card is
-//   selected in a corral's purchase menu, one more slider there picks the only food the feeder takes
-//   ("Feeder takes: any food" = vanilla). Per plot value "custom_upgrades.feeder_lock" in the sidecar;
-//   drones and shots of other foods are refused by that feeder only.
+//   Auto-Feeder "Leave last food item in" (feeder_lock.cpp, round 16): while the owned vanilla Auto-Feeder
+//   card is selected in a corral's purchase menu, an on/off switch there (mouse, or Submit = pad A /
+//   Enter) keeps the feeder's last food item in, so it keeps that food and drones / shots add only more of
+//   it. Per plot value "custom_upgrades.feeder_lock" in the sidecar (non-empty = on).
 //
 //   Hen Collector save safety: its storage is a LOCAL AmmoSlotManager (never linked to the
 //   plot's LandPlotModel, so never in the vanilla save; the vanilla elder slots would not
@@ -631,6 +631,8 @@ public:
     }
     void FeederCardBind(Il2CppObject* view, Il2CppObject* desc, Il2CppObject* plot, Il2CppObject* config);
     void FeederLockTick();
+    bool FeederSwitchShown() const { return sliderFeeder_.Active(); }
+    bool OnFeederSubmit();
 
     // api.h
     std::string CanSellCustom(Il2CppObject* plot, int32_t upg, std::string* brief);
@@ -745,8 +747,9 @@ private:
     std::vector<custom_upgrades::world::PropRequest> WantedProps() const;
     custom_upgrades::ui::PlotMenuSlider sliderHens_;      // Hen Collector limits, side by side (one pair
     custom_upgrades::ui::PlotMenuSlider sliderRoosters_;  // at a time; the hens slider builds the row)
-    custom_upgrades::ui::PlotMenuSlider sliderFeeder_;    // Auto-Feeder food lock (corral Feeder card)
-    custom_upgrades::feeder::FeederLock feeder_;          // Auto-Feeder food lock effect (feeder_lock.h)
+    custom_upgrades::ui::PlotMenuSlider sliderFeeder_;    // Auto-Feeder "Leave last food item in" switch
+    custom_upgrades::feeder::FeederLock feeder_;          // its effect (feeder_lock.h)
+    unsigned long long feederSubmitTick_ = ~0ull;         // frame of the last Submit the switch took
     custom_upgrades::ui::SaleNotices notices_;    // Sell-All: per-plort HUD notifications
     custom_upgrades::ui::SiloReceipt receipt_;    // Sell-All: confirmation dialog (silo_receipt.h)
     // While the receipt is open: the silo, the pressed button (both pinned; handles freed by a posted
@@ -908,6 +911,21 @@ void DetailsBindDetour(Il2CppObject* view, Il2CppObject* vm, const MethodInfo* m
     g_origDetailsBind(view, vm, mi);
     // Every list menu's details panel binds here: one flag check for the others.
     if (g_self && view && g_self->On()) g_detailsGuard.Run([&] { g_self->AfterDetailsBind(view, vm); });
+}
+
+// ListUI.Submit(InputEventData) (0x83F450) is the list menus' submit listener (pad A / Enter: `if (the list
+// has focus) onSubmitActionPerformed()`, the selected card's OnAction, which does nothing for an owned card).
+// While the Auto-Feeder's "Leave last food item in" switch is shown (only for the owned Feeder card), Submit
+// flips it and the original is not run. Every list menu shares the body: one flag check for the others.
+using ListSubmitFn = void (*)(Il2CppObject*, void*, const MethodInfo*);
+ListSubmitFn g_origListSubmit = nullptr;
+sr2::core::DetourGuard g_submitGuard{kModule, "ListUI.Submit (Auto-Feeder switch)"};
+
+void ListSubmitDetour(Il2CppObject* self, void* data, const MethodInfo* mi) {
+    bool taken = false;
+    if (g_self && self && g_self->On() && g_self->FeederSwitchShown())
+        g_submitGuard.Run([&] { taken = g_self->OnFeederSubmit(); });
+    if (!taken) g_origListSubmit(self, data, mi);
 }
 
 bool HasUpgradeDetour(Il2CppObject* plot, int32_t upg, const MethodInfo* mi) {
@@ -2989,12 +3007,13 @@ void CustomUpgrades::SliderTick(float dt) {
 
 // ---------------------------------------------------------------- auto-feeder lock --
 
-// Round 15 (user: "Give the autofeeder an option to lock 1 item in it as always in the buy menu so drones
-// can be filtered to put specific food items in them not just everything"): while the corral's OWNED
-// vanilla Auto-Feeder card is selected, a slider in the details panel (the cost row's slot, like the Hen
-// Collector limits) picks the one food the feeder takes: 0 = any food (vanilla), then the feeder's foods in
-// their group order. Mouse only (keys stay with the menu). Saved per plot in the sidecar (PlotValue
-// feeder::kLockKey = the food's asset name), applied at once (FeederLock::SetNow) and by the world tick.
+// Round 16 (user on the round 15 food picker: "No no no no no, it should be just a toggle, 'Leave last food
+// item in'"): while the corral's OWNED vanilla Auto-Feeder card is selected, an on/off switch sits in the
+// details panel (the cost row's slot, like the Hen Collector limits): a two-position PlotMenuSlider, half
+// the panel wide (off = handle left, on = handle right with the pink fill). Mouse: click / drag it; pad A /
+// Enter (the menu's Submit, which does nothing on an owned card) flips it. Saved per plot in the sidecar
+// (PlotValue feeder::kKeepKey, "1" = on, "" = off; round 15's food names read as on), applied at once
+// (FeederLock::SetNow) and by the world tick.
 void CustomUpgrades::FeederCardBind(Il2CppObject* view, Il2CppObject* desc, Il2CppObject* plot, Il2CppObject* config) {
     namespace fl = custom_upgrades::feeder;
     if (!feeder_.Ready() || !sliderFeeder_.Ready() || !VanillaOwned(plot, kUpgFeeder)) return;
@@ -3011,49 +3030,51 @@ void CustomUpgrades::FeederCardBind(Il2CppObject* view, Il2CppObject* desc, Il2C
     }
     if (!feederCard) return;
     const std::string id = PlotId(plot);
-    if (id.empty() || !EnsureLoaded()) return;
-    std::vector<fl::Food> foods;
-    if (!feeder_.Foods(plot, foods) || foods.empty()) return;
-    const std::string current = PlotValueOf(plot, fl::kLockKey);
-    int value = 0;
-    for (size_t i = 0; i < foods.size(); ++i)
-        if (foods[i].id == current) value = static_cast<int>(i) + 1;
-    auto list = std::make_shared<const std::vector<fl::Food>>(std::move(foods));
+    if (id.empty() || !EnsureLoaded() || !feeder_.HasFeeder(plot)) return;
 
     custom_upgrades::ui::SliderSpec spec;
-    spec.name = "FeederLock";
+    spec.name = "FeederKeepLast";
     spec.min = 0;
-    spec.max = static_cast<int>(list->size());
-    spec.value = value;
-    spec.keys = false;
-    spec.label = [list](int v) {
-        if (v <= 0 || v > static_cast<int>(list->size())) return std::string("Feeder takes: any food");
-        return std::format("Feeder takes only: {}", (*list)[v - 1].name);
-    };
+    spec.max = 1;
+    spec.value = PlotValueOf(plot, fl::kKeepKey).empty() ? 0 : 1;
+    spec.keys = false;  // left / right belong to the menu's grid; Submit flips it (OnFeederSubmit)
+    spec.column = 0;
+    spec.columns = 2;
+    spec.label = [](int v) { return std::string(v ? "Leave last food item in: On" : "Leave last food item in: Off"); };
     // By plot id (never a pointer into the state): the save may be reloaded while the menu is open.
-    spec.onChange = [this, id, list, game = state_.game](int v) {
+    spec.onChange = [this, id, game = state_.game](int v) {
         if (!state_.loaded || state_.game != game) return;
         bool ok = false;
         Il2CppObject* sc = Invoke(sceneCtxInstMi_, nullptr, {}, "SceneContext.Instance", &ok);
         Il2CppObject* gm = ok && offScGameModel_ && unity::IsAlive(sc) ? unity::Field<Il2CppObject*>(sc, offScGameModel_) : nullptr;
         Il2CppObject* live = gm ? LivePlot(gm, id) : nullptr;
         if (!live || PlotType(live) != kPlotCorral) return;
-        const fl::Food* f = v > 0 && v <= static_cast<int>(list->size()) ? &(*list)[v - 1] : nullptr;
-        SetPlotValueOf(live, fl::kLockKey, f ? f->id : std::string());
-        feeder_.SetNow(live, f ? f->type : nullptr, id);
+        SetPlotValueOf(live, fl::kKeepKey, v ? "1" : "");
+        feeder_.SetNow(live, v != 0, id);
     };
     sliderFeeder_.Create(view, spec);
 }
 
-// World tick part: the corrals with a locked feeder (sidecar values) -> their live plots.
+// ListUI.Submit while the switch is shown: flip it (one flip per frame; a popup keeps the key).
+bool CustomUpgrades::OnFeederSubmit() {
+    if (!main_thread::IsMainThread() || !sliderFeeder_.Active()) return false;
+    const unsigned long long tick = main_thread::TickCount();
+    if (tick == feederSubmitTick_) return true;  // the same press again
+    if (!sliderFeeder_.Flip()) return false;
+    feederSubmitTick_ = tick;
+    SR2_DEBUG("[{}] auto-feeder switch flipped by Submit (pad A / Enter): {}", kModule, sliderFeeder_.Value() ? "on" : "off");
+    return true;
+}
+
+// World tick part: the corrals with the switch on (sidecar values) -> their live plots.
 void CustomUpgrades::FeederLockTick() {
     namespace fl = custom_upgrades::feeder;
-    std::vector<fl::LockRequest> locks;
+    std::vector<fl::KeepRequest> keep;
     Il2CppObject* gm = nullptr;
     bool tried = false;
     for (const auto& [id, ps] : state_.plots) {
         if (ps.type != kPlotCorral) continue;
-        auto v = ps.values.find(fl::kLockKey);
+        auto v = ps.values.find(fl::kKeepKey);
         if (v == ps.values.end() || v->second.empty()) continue;
         if (!tried) {
             tried = true;
@@ -3063,10 +3084,10 @@ void CustomUpgrades::FeederLockTick() {
         }
         if (!gm) break;
         Il2CppObject* plot = LivePlot(gm, id);
-        if (plot && PlotType(plot) == kPlotCorral) locks.push_back({plot, id, v->second});
+        if (plot && PlotType(plot) == kPlotCorral) keep.push_back({plot, id});
         if (sr2::core::ModuleFaulted(kModule)) return;
     }
-    feeder_.Tick(locks);
+    feeder_.Tick(keep);
 }
 
 // ---------------------------------------------------------------- buying --
@@ -3924,11 +3945,25 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         if (shadow_.Setup(ctx, serr, sreport)) report += sreport;
         else SR2_WARN("[{}] shadow catcher unavailable ({}) - owning the upgrade changes nothing", kModule, serr);
     }
-    // Auto-Feeder food lock (optional: without it feeders stay vanilla and the Feeder card has no slider).
+    // Auto-Feeder "Leave last food item in" (optional: without it feeders stay vanilla and the Feeder card has
+    // no switch).
     {
         std::string ferr, freport;
         if (feeder_.Setup(ctx, ferr, freport)) report += freport;
-        else SR2_WARN("[{}] auto-feeder food lock unavailable ({}) - feeders take any food", kModule, ferr);
+        else SR2_WARN("[{}] auto-feeder 'leave last food item in' unavailable ({}) - feeders stay vanilla", kModule, ferr);
+    }
+    // Its pad / keyboard key: the menu's Submit flips the switch (optional: without it the switch is mouse only).
+    if (feeder_.Ready() && sliderFeeder_.Ready()) {
+        std::string kerr;
+        Il2CppClass* listUi = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Adapter", "ListUI", &kerr);
+        const MethodInfo* submitMi = listUi ? R.Method(listUi, "Submit", 1, &kerr) : nullptr;
+        void* sp = submitMi ? R.MethodPointer(submitMi, &kerr) : nullptr;
+        if (sp && ctx.HookAddress("ListUI.Submit", sp, reinterpret_cast<void*>(&ListSubmitDetour),
+                                  reinterpret_cast<void**>(&g_origListSubmit)))
+            report += std::format(" ListUI.Submit@0x{:X}", Resolver::Rva(sp));
+        else
+            SR2_WARN("[{}] ListUI.Submit not hooked ({}) - the auto-feeder switch is mouse only", kModule,
+                     kerr.empty() ? "hook failed" : kerr);
     }
     // Slime Launcher effect (optional; the vacpack upgrades sell it and publish its level).
     if (vacpack_.Ready()) {

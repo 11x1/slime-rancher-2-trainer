@@ -1,10 +1,9 @@
-// custom_upgrades: Auto-Feeder food lock (see feeder_lock.h). SR2 1.3.0, all lookups by name.
+// custom_upgrades: Auto-Feeder "Leave last food item in" (see feeder_lock.h). SR2 1.3.0, all lookups by name.
 
 #include "modules/custom_upgrades/feeder_lock.h"
 
 #include <windows.h>
 
-#include <algorithm>
 #include <atomic>
 #include <format>
 #include <initializer_list>
@@ -17,6 +16,7 @@
 #include "core/detour_guard.h"
 #include "core/il2cpp_api.h"
 #include "core/log.h"
+#include "core/main_thread.h"
 #include "core/module.h"
 #include "core/resolver.h"
 #include "core/unity.h"
@@ -25,6 +25,7 @@ namespace sr2::modules::custom_upgrades::feeder {
 namespace {
 
 namespace unity = sr2::core::unity;
+namespace main_thread = sr2::core::main_thread;
 using sr2::il2cpp::api;
 using sr2::il2cpp::Resolver;
 
@@ -32,28 +33,41 @@ constexpr const char* kModule = "custom_upgrades";
 constexpr const char* kImage = "Assembly-CSharp";
 constexpr const char* kCore = "UnityEngine.CoreModule";
 
-// ---- storage -> locked food (read by the detours on any thread) ----
+// ---- feeders with the toggle on (read by the detours) ----
+struct Entry {
+    Il2CppObject* storage = nullptr;  // SiloStorage (SlimeFeeder._storage)
+    Il2CppObject* feeder = nullptr;   // SlimeFeeder
+    Il2CppObject* type = nullptr;     // kept food (IdentifiableType); nullptr while empty: takes any food
+};
 SRWLOCK g_lock = SRWLOCK_INIT;
-std::vector<std::pair<Il2CppObject*, Il2CppObject*>> g_locks;  // SiloStorage -> IdentifiableType
+std::vector<Entry> g_keep;
 std::atomic<bool> g_any{false};
 
-// true = `type` may go into `storage` (not a locked feeder, or its locked food). Pointer compares only.
+// true = `type` may go into `storage` (no kept feeder, an empty one, or its kept food). Pointer compares only.
 bool Allowed(Il2CppObject* storage, Il2CppObject* type) {
     AcquireSRWLockShared(&g_lock);
     bool allowed = true;
-    for (const auto& [s, t] : g_locks)
-        if (s == storage) {
-            allowed = type == t;
+    for (const Entry& e : g_keep)
+        if (e.storage == storage) {
+            allowed = !e.type || type == e.type;
             break;
         }
     ReleaseSRWLockShared(&g_lock);
     return allowed;
 }
 
-void Publish(std::vector<std::pair<Il2CppObject*, Il2CppObject*>> locks) {
+bool Keeps(Il2CppObject* feeder) {
+    AcquireSRWLockShared(&g_lock);
+    bool keeps = false;
+    for (const Entry& e : g_keep) keeps |= e.feeder == feeder;
+    ReleaseSRWLockShared(&g_lock);
+    return keeps;
+}
+
+void Publish(std::vector<Entry> keep) {
     AcquireSRWLockExclusive(&g_lock);
-    g_locks = std::move(locks);
-    g_any.store(!g_locks.empty(), std::memory_order_release);
+    g_keep = std::move(keep);
+    g_any.store(!g_keep.empty(), std::memory_order_release);
     ReleaseSRWLockExclusive(&g_lock);
 }
 
@@ -72,6 +86,7 @@ size_t g_offIdentType = 0;  // Identifiable.identType
 
 sr2::core::DetourGuard g_canGuard{kModule, "custom_upgrades.FeederLock.CanAccept"};
 sr2::core::DetourGuard g_addGuard{kModule, "custom_upgrades.FeederLock.MaybeAdd"};
+sr2::core::DetourGuard g_feedGuard{kModule, "custom_upgrades.FeederLock.Feed"};
 
 std::set<std::string> g_refusedLogged;  // food names whose first refusal was logged (main thread only)
 
@@ -81,7 +96,7 @@ Il2CppObject* MetadataType(const void* md) { return md ? *static_cast<Il2CppObje
 void LogRefusal(Il2CppObject* type, const char* via) {
     const std::string name = type ? unity::GetName(type) : std::string("(none)");
     if (g_refusedLogged.size() < 64 && g_refusedLogged.insert(name).second)
-        SR2_INFO("[{}] locked auto-feeder refused '{}' ({}; logged once per food)", kModule, name, via);
+        SR2_INFO("[{}] auto-feeder keeping its last food refused '{}' ({}; logged once per food)", kModule, name, via);
 }
 
 bool CanSpecificDetour(Il2CppObject* self, const void* md, int32_t slot, bool overflow, const MethodInfo* mi) {
@@ -144,19 +159,14 @@ bool AddResourceDetour(Il2CppObject* self, Il2CppObject* type, int32_t slot, int
 struct Lookups {
     Il2CppClass* feederClass = nullptr;   // SlimeFeeder
     Il2CppClass* storageClass = nullptr;  // SiloStorage
-    Il2CppClass* identTypeClass = nullptr;
-    Il2CppClass* groupClass = nullptr;    // IdentifiableTypeGroup
-    Il2CppClass* slotDefClass = nullptr;  // AmmoSlotDefinition
-    Il2CppClass* lsClass = nullptr;       // UnityEngine.Localization.LocalizedString
     size_t offFeederStorage = 0;          // SlimeFeeder._storage
-    size_t offStorageDefs = 0;            // SiloStorage.AmmoSlotDefinitions
-    size_t offDefGroup = 0, offDefBlock = 0;  // AmmoSlotDefinition._slotTypeGroup / _slotBlockList
-    size_t offMembers = 0, offSubGroups = 0;  // IdentifiableTypeGroup._memberTypes / _memberGroups
-    size_t offTypeName = 0;                   // IdentifiableType.localizedName
+    size_t offFeederModel = 0;            // SlimeFeeder._model (LandPlotModel)
+    size_t offRemainingOps = 0;           // LandPlotModel.remainingFeedOperations
     const MethodInfo* compInChildren = nullptr;  // Component.GetComponentInChildren(Type, bool)
-    const MethodInfo* lsGet = nullptr;           // LocalizedString.GetLocalizedString()
-    std::map<Il2CppObject*, std::vector<Food>> foods;  // per slot group (session)
-    std::map<std::string, std::string> applied;        // plot id -> locked food (log on change)
+    const MethodInfo* foodCount = nullptr;       // SlimeFeeder.GetFoodCount()
+    const MethodInfo* foodId = nullptr;          // SlimeFeeder.GetFoodId()
+    std::map<std::string, std::string> applied;  // plot id -> kept food ("" = empty feeder; log on change)
+    std::set<Il2CppObject*> keptLogged;          // feeders whose first held-back item was logged
 };
 Lookups* g_l = nullptr;
 
@@ -185,60 +195,78 @@ Il2CppObject* Call(const MethodInfo* m, void* obj, std::initializer_list<void*> 
     return r;
 }
 
-// The storage of the corral's active feeder (Awake has set _storage), nullptr without one.
-Il2CppObject* FeederStorage(Il2CppObject* plot) {
-    if (!g_l || !unity::IsAlive(plot)) return nullptr;
+// The corral's active feeder (Awake has set _storage) and its storage; false without one.
+bool FeederOf(Il2CppObject* plot, Il2CppObject*& feeder, Il2CppObject*& storage) {
+    feeder = storage = nullptr;
+    if (!g_l || !unity::IsAlive(plot)) return false;
     bool inactive = false, ok = false;
-    Il2CppObject* feeder = Call(g_l->compInChildren, plot, {unity::TypeOf(g_l->feederClass), &inactive},
-                                "GetComponentInChildren(SlimeFeeder)", &ok);
-    if (!ok || !unity::IsAlive(feeder) || !IsA(feeder, g_l->feederClass)) return nullptr;
-    Il2CppObject* storage = unity::Field<Il2CppObject*>(feeder, g_l->offFeederStorage);
-    return unity::IsAlive(storage) && IsA(storage, g_l->storageClass) ? storage : nullptr;
+    Il2CppObject* f = Call(g_l->compInChildren, plot, {unity::TypeOf(g_l->feederClass), &inactive},
+                           "GetComponentInChildren(SlimeFeeder)", &ok);
+    if (!ok || !unity::IsAlive(f) || !IsA(f, g_l->feederClass)) return false;
+    Il2CppObject* s = unity::Field<Il2CppObject*>(f, g_l->offFeederStorage);
+    if (!unity::IsAlive(s) || !IsA(s, g_l->storageClass)) return false;
+    feeder = f;
+    storage = s;
+    return true;
 }
 
-std::string DisplayName(Il2CppObject* type) {
-    Il2CppObject* ls = unity::Field<Il2CppObject*>(type, g_l->offTypeName);
-    if (ls && g_l->lsGet && IsA(ls, g_l->lsClass)) {
-        bool ok = false;
-        Il2CppObject* s = Call(g_l->lsGet, ls, {}, "LocalizedString.GetLocalizedString", &ok);
-        std::string name = ok && s ? unity::ToUtf8(reinterpret_cast<Il2CppString*>(s)) : std::string();
-        if (!name.empty()) return name;
+// Food items in the feeder (slot 0, the one it feeds from); -1 = unknown.
+int FoodCount(Il2CppObject* feeder) {
+    bool ok = false;
+    Il2CppObject* boxed = Call(g_l->foodCount, feeder, {}, "SlimeFeeder.GetFoodCount", &ok);
+    return ok && boxed ? *reinterpret_cast<int32_t*>(reinterpret_cast<char*>(boxed) + 2 * sizeof(void*)) : -1;
+}
+
+// The kept food: the feeder's current food while it holds any, else nullptr (takes any food).
+Il2CppObject* CurrentFood(Il2CppObject* feeder) {
+    if (FoodCount(feeder) <= 0) return nullptr;
+    bool ok = false;
+    Il2CppObject* t = Call(g_l->foodId, feeder, {}, "SlimeFeeder.GetFoodId", &ok);
+    return ok && unity::IsAlive(t) ? t : nullptr;
+}
+
+// ---- feeding out (main thread) ----
+using FeedFn = void (*)(Il2CppObject*, bool, const MethodInfo*);
+using RemainingFn = int32_t (*)(Il2CppObject*, const MethodInfo*);
+FeedFn g_origFeed = nullptr;
+RemainingFn g_origRemaining = nullptr;
+
+// SlimeFeeder.ProcessFeedOperation(ejectFood): with one item (or none) left in a kept feeder, vanilla's empty
+// path only (one pending operation used up, nothing fed). FixedUpdate keeps calling it while operations are
+// pending, as for an empty feeder.
+void FeedDetour(Il2CppObject* self, bool eject, const MethodInfo* mi) {
+    if (g_any.load(std::memory_order_acquire) && self && g_l && main_thread::IsMainThread()) {
+        bool held = false;
+        g_feedGuard.Run([&] {
+            if (!Keeps(self)) return;
+            const int count = FoodCount(self);
+            if (count < 0 || count > 1) return;
+            Il2CppObject* model = unity::Field<Il2CppObject*>(self, g_l->offFeederModel);
+            if (!model) return;  // the original NREs as well; leave it to the game
+            int32_t& ops = *reinterpret_cast<int32_t*>(reinterpret_cast<char*>(model) + g_l->offRemainingOps);
+            ops = ops > 0 ? ops - 1 : 0;
+            held = true;
+            if (count == 1 && g_l->keptLogged.size() < 64 && g_l->keptLogged.insert(self).second)
+                SR2_INFO("[{}] auto-feeder kept its last food item in ({}; logged once per feeder)", kModule,
+                         eject ? "feeding" : "fast-forward");
+        });
+        if (held) return;
     }
-    return unity::GetName(type);
+    g_origFeed(self, eject, mi);
 }
 
-void Collect(Il2CppObject* group, void* blockList, int depth, std::vector<Food>& out, std::set<Il2CppObject*>& seen) {
-    if (!unity::IsAlive(group) || !IsA(group, g_l->groupClass) || depth > 4 || out.size() >= 256) return;
-    void* members = unity::Field<void*>(group, g_l->offMembers);
-    for (size_t i = 0, n = unity::ListCount(members); i < n && i < 256; ++i) {
-        auto* t = static_cast<Il2CppObject*>(unity::ListAt(members, i));
-        if (!unity::IsAlive(t) || !IsA(t, g_l->identTypeClass) || !seen.insert(t).second) continue;
-        bool blocked = false;
-        for (size_t b = 0, nb = unity::ListCount(blockList); b < nb && b < 256 && !blocked; ++b)
-            blocked = unity::ListAt(blockList, b) == t;
-        if (!blocked) out.push_back({t, unity::GetName(t), {}});  // names: Foods(), at menu time
+// SlimeFeeder.RemainingFeedOperationsFastForward(): the fast-forward's food budget, min(pending, count).
+// A kept feeder offers one item less, so the fast-forward never counts the last one as eaten.
+int32_t RemainingDetour(Il2CppObject* self, const MethodInfo* mi) {
+    int32_t r = g_origRemaining(self, mi);
+    if (g_any.load(std::memory_order_acquire) && self && g_l && r > 0 && main_thread::IsMainThread()) {
+        g_feedGuard.Run([&] {
+            if (!Keeps(self)) return;
+            const int count = FoodCount(self);
+            if (count >= 0 && r > count - 1) r = count > 1 ? count - 1 : 0;
+        });
     }
-    void* groups = unity::Field<void*>(group, g_l->offSubGroups);
-    for (size_t i = 0, n = unity::ListCount(groups); i < n && i < 64; ++i)
-        Collect(static_cast<Il2CppObject*>(unity::ListAt(groups, i)), blockList, depth + 1, out, seen);
-}
-
-const std::vector<Food>* FoodsOf(Il2CppObject* storage) {
-    void* defs = unity::Field<void*>(storage, g_l->offStorageDefs);
-    auto* def = static_cast<Il2CppObject*>(unity::ArrayAt(defs, 0));
-    if (!unity::IsAlive(def) || !IsA(def, g_l->slotDefClass)) return nullptr;
-    Il2CppObject* group = unity::Field<Il2CppObject*>(def, g_l->offDefGroup);
-    if (!unity::IsAlive(group)) return nullptr;
-    auto it = g_l->foods.find(group);
-    if (it != g_l->foods.end()) return &it->second;
-    std::vector<Food> list;
-    std::set<Il2CppObject*> seen;
-    Collect(group, unity::Field<void*>(def, g_l->offDefBlock), 0, list, seen);
-    std::string names;
-    for (const Food& f : list) names += (names.empty() ? "" : ", ") + f.id;
-    SR2_INFO("[{}] auto-feeder food lock: {} food(s) in group '{}' ({} slot definition(s)): {}", kModule, list.size(),
-             unity::GetName(group), unity::ArrayLength(defs), names);
-    return &g_l->foods.emplace(group, std::move(list)).first->second;
+    return r;
 }
 
 }  // namespace
@@ -271,36 +299,31 @@ bool FeederLock::Setup(sr2::core::ModuleContext& ctx, std::string& why, std::str
     auto* l = new Lookups();
     l->feederClass = cls(kImage, "", "SlimeFeeder");
     l->storageClass = cls(kImage, "", "SiloStorage");
-    l->identTypeClass = cls(kImage, "", "IdentifiableType");
-    l->groupClass = cls(kImage, "", "IdentifiableTypeGroup");
-    l->slotDefClass = cls(kImage, "", "AmmoSlotDefinition");
+    Il2CppClass* plotModel = cls(kImage, "", "LandPlotModel");
     Il2CppClass* ident = cls(kImage, "", "Identifiable");
     Il2CppClass* component = cls(kCore, "UnityEngine", "Component");
-    {
-        std::string err;  // optional: names fall back to the asset names
-        l->lsClass = R.Class("Unity.Localization", "UnityEngine.Localization", "LocalizedString", &err);
-        if (l->lsClass) l->lsGet = R.Method(l->lsClass, "GetLocalizedString", 0, &err);
-    }
     if (!why.empty()) {
         delete l;
         return false;
     }
     off(l->feederClass, "_storage", l->offFeederStorage);
-    off(l->storageClass, "AmmoSlotDefinitions", l->offStorageDefs);
-    off(l->slotDefClass, "_slotTypeGroup", l->offDefGroup);
-    off(l->slotDefClass, "_slotBlockList", l->offDefBlock);
-    off(l->groupClass, "_memberTypes", l->offMembers);
-    off(l->groupClass, "_memberGroups", l->offSubGroups);
-    off(l->identTypeClass, "localizedName", l->offTypeName);
+    off(l->feederClass, "_model", l->offFeederModel);
+    off(plotModel, "remainingFeedOperations", l->offRemainingOps);
     off(ident, "identType", g_offIdentType);
     l->compInChildren = byParams(component, "GetComponentInChildren", {"System.Type", "System.Boolean"});
     // No overloads: by argument count (each is the class's own body, re/hooks.md).
     std::string err;
+    l->foodCount = R.Method(l->feederClass, "GetFoodCount", 0, &err);
+    l->foodId = R.Method(l->feederClass, "GetFoodId", 0, &err);
+    const MethodInfo* feed = R.Method(l->feederClass, "ProcessFeedOperation", 1, &err);
+    const MethodInfo* remaining = R.Method(l->feederClass, "RemainingFeedOperationsFastForward", 0, &err);
     const MethodInfo* canSpecific = R.Method(l->storageClass, "CanSpecificSlotAccept", 3, &err);
     const MethodInfo* canAny = R.Method(l->storageClass, "CanAnySlotAccept", 1, &err);
     const MethodInfo* addSpecific = R.Method(l->storageClass, "MaybeAddToSpecificSlot", 3, &err);
     const MethodInfo* addAny = R.Method(l->storageClass, "MaybeAddToAnySlot", 1, &err);
     const MethodInfo* addResource = R.Method(l->storageClass, "MaybeAddAsResource", 4, &err);
+    if (why.empty() && (!l->foodCount || !l->foodId || !feed || !remaining))
+        why = "SlimeFeeder GetFoodCount / GetFoodId / ProcessFeedOperation / RemainingFeedOperationsFastForward not found";
     if (why.empty() && (!canSpecific || !canAny || !addSpecific || !addAny || !addResource))
         why = "SiloStorage CanSpecificSlotAccept / CanAnySlotAccept / MaybeAddToSpecificSlot / MaybeAddToAnySlot / "
               "MaybeAddAsResource not found";
@@ -316,6 +339,10 @@ bool FeederLock::Setup(sr2::core::ModuleContext& ctx, std::string& why, std::str
         void** orig;
     };
     const H hooks[] = {
+        {"SlimeFeeder.ProcessFeedOperation", feed, reinterpret_cast<void*>(&FeedDetour),
+         reinterpret_cast<void**>(&g_origFeed)},
+        {"SlimeFeeder.RemainingFeedOperationsFastForward", remaining, reinterpret_cast<void*>(&RemainingDetour),
+         reinterpret_cast<void**>(&g_origRemaining)},
         {"SiloStorage.CanSpecificSlotAccept", canSpecific, reinterpret_cast<void*>(&CanSpecificDetour),
          reinterpret_cast<void**>(&g_origCanSpecific)},
         {"SiloStorage.CanAnySlotAccept", canAny, reinterpret_cast<void*>(&CanAnyDetour),
@@ -340,7 +367,7 @@ bool FeederLock::Setup(sr2::core::ModuleContext& ctx, std::string& why, std::str
     }
     for (size_t i = 0; i < sizeof(hooks) / sizeof(hooks[0]); ++i) {
         if (!ctx.HookAddress(hooks[i].name, bodies[i], hooks[i].detour, hooks[i].orig)) {
-            // Hooks made so far pass through: nothing is ever locked without Ready().
+            // Hooks made so far pass through: no feeder is ever kept without Ready().
             why = std::format("hook {} failed", hooks[i].name);
             delete l;
             return false;
@@ -352,68 +379,63 @@ bool FeederLock::Setup(sr2::core::ModuleContext& ctx, std::string& why, std::str
     return true;
 }
 
-bool FeederLock::Foods(Il2CppObject* plot, std::vector<Food>& out) {
-    out.clear();
-    if (!ready_ || !g_l) return false;
-    Il2CppObject* storage = FeederStorage(plot);
-    const std::vector<Food>* list = storage ? FoodsOf(storage) : nullptr;
-    if (!list) return false;
-    out = *list;
-    for (Food& f : out) f.name = DisplayName(f.type);  // the current language
-    return true;
+bool FeederLock::HasFeeder(Il2CppObject* plot) {
+    Il2CppObject *feeder = nullptr, *storage = nullptr;
+    return ready_ && g_l && FeederOf(plot, feeder, storage);
 }
 
-void FeederLock::Tick(const std::vector<LockRequest>& locks) {
+void FeederLock::Tick(const std::vector<KeepRequest>& keep) {
     if (!ready_ || !g_l) return;
-    if (locks.empty() && !g_any.load(std::memory_order_acquire) && g_l->applied.empty()) return;
-    std::vector<std::pair<Il2CppObject*, Il2CppObject*>> table;
+    if (keep.empty() && !g_any.load(std::memory_order_acquire) && g_l->applied.empty()) return;
+    std::vector<Entry> table;
     std::map<std::string, std::string> applied;
-    for (const LockRequest& r : locks) {
-        Il2CppObject* storage = FeederStorage(r.plot);
-        const std::vector<Food>* foods = storage ? FoodsOf(storage) : nullptr;
-        if (!foods) continue;  // no feeder bought (yet): nothing to lock
-        auto f = std::find_if(foods->begin(), foods->end(), [&](const Food& x) { return x.id == r.food; });
-        if (f == foods->end()) {
-            if (g_l->applied[r.id] != "?" + r.food)
-                SR2_WARN("[{}] auto-feeder on plot '{}': locked food '{}' is not a feeder food - not locked", kModule,
-                         r.id, r.food);
-            applied[r.id] = "?" + r.food;
-            continue;
-        }
-        table.emplace_back(storage, f->type);
-        applied[r.id] = r.food;
+    for (const KeepRequest& r : keep) {
+        Il2CppObject *feeder = nullptr, *storage = nullptr;
+        if (!FeederOf(r.plot, feeder, storage)) continue;  // no feeder bought (yet): nothing to keep
+        Il2CppObject* food = CurrentFood(feeder);
+        table.push_back({storage, feeder, food});
+        applied[r.id] = food ? unity::GetName(food) : std::string();
         if (sr2::core::ModuleFaulted(kModule)) return;
     }
-    for (const auto& [id, food] : applied)
-        if (food[0] != '?' && g_l->applied[id] != food)
-            SR2_INFO("[{}] auto-feeder on plot '{}' locked to '{}' (drones bring only that food)", kModule, id, food);
+    for (const auto& [id, food] : applied) {
+        auto old = g_l->applied.find(id);
+        if (old == g_l->applied.end() || old->second != food)
+            SR2_INFO("[{}] auto-feeder on plot '{}': leave last food item in ON, {}", kModule, id,
+                     food.empty() ? std::string("empty (takes any food; the first one is kept)")
+                                  : std::format("keeps '{}' (drones and shots add only that food)", food));
+    }
     for (const auto& [id, food] : g_l->applied)
-        if (!applied.count(id) && !food.empty() && food[0] != '?')
-            SR2_INFO("[{}] auto-feeder on plot '{}' unlocked (takes any food)", kModule, id);
+        if (!applied.count(id)) SR2_INFO("[{}] auto-feeder on plot '{}': leave last food item in OFF", kModule, id);
     g_l->applied = std::move(applied);
     Publish(std::move(table));
 }
 
-void FeederLock::SetNow(Il2CppObject* plot, Il2CppObject* type, const std::string& id) {
+void FeederLock::SetNow(Il2CppObject* plot, bool on, const std::string& id) {
     if (!ready_ || !g_l) return;
-    Il2CppObject* storage = FeederStorage(plot);
-    if (!storage) return;
-    std::vector<std::pair<Il2CppObject*, Il2CppObject*>> table;
+    Il2CppObject *feeder = nullptr, *storage = nullptr;
+    if (!FeederOf(plot, feeder, storage)) return;
+    std::vector<Entry> table;
     AcquireSRWLockShared(&g_lock);
-    for (const auto& e : g_locks)
-        if (e.first != storage) table.push_back(e);
+    for (const Entry& e : g_keep)
+        if (e.feeder != feeder) table.push_back(e);
     ReleaseSRWLockShared(&g_lock);
-    if (type) table.emplace_back(storage, type);
+    Il2CppObject* food = on ? CurrentFood(feeder) : nullptr;
+    if (on) table.push_back({storage, feeder, food});
     Publish(std::move(table));
-    SR2_DEBUG("[{}] auto-feeder on plot '{}': {} (plot menu)", kModule, id,
-              type ? std::format("locked to '{}'", unity::GetName(type)) : std::string("unlocked"));
+    SR2_DEBUG("[{}] auto-feeder on plot '{}': leave last food item in {} (plot menu{})", kModule, id, on ? "on" : "off",
+              food ? std::format(", keeps '{}'", unity::GetName(food)) : std::string());
 }
 
 void FeederLock::Cleanup(const char* why) {
     const bool had = g_any.load(std::memory_order_acquire);
     Publish({});
-    if (g_l) g_l->applied.clear();
-    if (had) SR2_INFO("[{}] {}: auto-feeder locks released (feeders take any food)", kModule, why);
+    if (g_l) {
+        g_l->applied.clear();
+        g_l->keptLogged.clear();
+    }
+    if (had)
+        SR2_INFO("[{}] {}: auto-feeders feed out their last food item again (leave last food item in released)",
+                 kModule, why);
 }
 
 }  // namespace sr2::modules::custom_upgrades::feeder

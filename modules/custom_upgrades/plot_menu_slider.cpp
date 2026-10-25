@@ -1003,6 +1003,18 @@ bool PlotMenuSlider::Step(int dir) {
     return true;
 }
 
+bool PlotMenuSlider::Flip() {
+    if (!impl_ || !impl_->root || !main_thread::IsMainThread()) return false;
+    Impl& p = *impl_;
+    if (p.Faulted() || !unity::IsAlive(p.root) || !unity::IsAlive(p.slider) || !unity::ActiveInHierarchy(p.root))
+        return false;
+    if (p.InputBlocked()) return false;
+    const int v = p.value >= p.spec.max ? p.spec.min : p.spec.max;
+    p.SetSliderValue(v);
+    p.Apply(v, true);
+    return true;
+}
+
 void PlotMenuSlider::Tick(float dt) {
     if (!impl_ || !impl_->root || !main_thread::IsMainThread()) return;
     Impl& p = *impl_;
