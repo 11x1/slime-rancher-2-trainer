@@ -836,6 +836,16 @@ re/vacpack.md, re/fabricator.md (UpgradeChain, pips). Bought through the vanilla
 - **Centred row**: `Ammo Slots` widened 900 -> 1160 px; Cleanup restores it.
 - **Off / faulted**: vanilla array back for the next load; live slots reordered vanilla-first, so a save
   keeps water at index 6 (a mod-free load drops slots 8-9; contents stay in the sidecar).
+- **Module on after the player was built** (`ExtendLive`, round 17): the per-save gate turns custom upgrades on
+  only after the save has loaded, so `InitModel` ran with the hooks off and the player had 7 slots ("Extra Tank
+  doesn't give me a space anymore": `7 of 7 slots unlocked` with Extra Tank IV; broken since the gate,
+  2026-10-23, whenever the switch was off at load). The tick now extends the live vacpack: PlayerState defs
+  extended as in `ExtendSlots`, the two new `AmmoSlot`s made by the game (`AmmoModel.Reset` on a temporary
+  2-slot array: ctor, OnAmmoChanged, Definition, `Setup(tracker)`), the old slot objects kept (contents, HUD
+  holders) with the new ones before water; `AmmoSlotManager._ammoSlotDefinitions` = ours, selected index
+  shifted. Switched off and on again: VanillaOrder's layout is moved back. Then `AmmoSlotUI.Start` is invoked
+  once to rebind the HUD row (the adapter keeps the list it was bound with). Logs `live vacpack 7 -> 9 slots`,
+  `HUD slot row bound to the extended slots`.
 
 ### Drone Battery Saver
 

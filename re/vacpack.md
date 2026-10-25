@@ -59,6 +59,13 @@
 - 900 x 189, anchored bottom centre, HorizontalLayoutGroup (spacing 10, LowerCenter, no width control) over 108 px slots; Unity centres children only while total width < rect width (9 slots = 1052 px overflow right)
 - `AmmoSlotAdapter.PrefilterData` hides locked slots; `AmmoSlotViewHolder.BindInputKey(definition.Hotkey)` logs "No binding set for ammo slot!" for a null hotkey; writes `KeybindingText`
 - mod: vacpack_upgrades.cpp (row widened to 1160 px; BindInputKey detour writes our key name)
+- binding (IDA, round 17): `AmmoSlotUI.Start` 0x67EE50 = `adapter.BindDataList(PlayerState.Ammo.Slots.Cast<IListItemViewModel>().ToList(), 0)`; the adapter keeps that list (`AdapterView.unfilteredData`) and `Refresh` 0x1F29BA0 rebinds the SAME list, so a slot array swapped later never reaches the HUD until Start runs again (the mod invokes it after `ExtendLive`). `AmmoSlotAdapter.Start` 0x82F3F0 subscribes `OnSlotChanged` on each slot of `playerAmmo.Slots` once; `OnSelectionChanged` indexes `playerAmmo.Slots[sel]`
+
+### Building slots at runtime (IDA, round 17)
+- `PlayerState.InitModel` 0x87B4F0: `PlayerModel.Reset(gameModeSettings)`, `Ammo = new AmmoSlotManager(_ammoSlotDefinitions)`, `Ammo.InitModel(model.ammoModel)` (-> `SetModel`)
+- `AmmoModel.Reset(defs)` 0xA6E840: if `Slots` is null or SHORTER than defs: OnAmmoChanged unsubscribed from the old slots, a new `AmmoSlot[defs.Length]`; else the array is kept. Then per index: a null entry gets `new AmmoSlot()` + `add_OnAmmoChanged(model.OnOnAmmoChanged)`; every entry gets `Definition = defs[i]` and `Setup(model._unitPropertyTracker)`
+- `AmmoSlot.Setup` 0xA3B570: binds the unlock property (`_isUnlockedProperty`) and `_maxAmountProperty` (AmmoLimit) through `UnitPropertyTracker.DoWithProperty`, `_maxCountValue.DefaultValue = _maxAmount`, then fires `OnSlotChanged`; no OnAmmoChanged. Calling it again on a live slot would subscribe twice
+- trick (vacpack_upgrades.cpp `ExtendLive`): set `Slots` to a fresh 2-element array, `Reset(ourTwoDefs)` -> two fully set-up slots, put the old array back with them inserted; `AmmoSlotManager._ammoSlotDefinitions` (+0x28, readonly) written to the extended array
 
 ### Vacuumable
 - `Vacuumable.Hold` - held layer, `_Held` property on its renderers (toys held at the nozzle)
