@@ -1,22 +1,22 @@
 // slime_dj: the Corral Radio playlist menu (see radio_menu.h). SR2 1.3.0, all lookups by name.
 //
-// Layout (CanvasScaler reference 1920 x 1080, the panel centred, 1400 wide), round 12 ("the playlist could
-// use more slime ranchification, we dont need keybinds when we put the list items as slime rancher's
-// buttons ... remove the bottom hint, DONE PLAY UP DOWN REMOVE buttons"):
-//   title "Corral Radio"
-//   the corral's name                 [ warning pill, only when the radio can't play ]
-//   Songs (N)            1-11 of N        Playlist (M)          1-11 of M
+// Layout (CanvasScaler reference 1920 x 1080, the panel near the top of the screen, 1400 wide), round 12 ("the
+// playlist could use more slime ranchification, we dont need keybinds when we put the list items as slime
+// rancher's buttons ... remove the bottom hint, DONE PLAY UP DOWN REMOVE buttons"), round 15 layout:
+//   title "Corral Radio"  the corral's name  [ warning pill, only when the radio can't play ]
+//   Songs (N)            1-11 of N        Playlist (M)          1-11 of M      (20 px lower with the warning)
 //   [ song buttons, virtual ] |scroll|  > [ entry buttons  (^) (v) (x) ] |scroll|
 //   feedback note (green / orange, a few seconds)
-//   [ESC Close]          [SPACE Queue] [ENTER Play now]   [R Radio: on] [F Shuffle: off] [C Clear]   (round 14)
-// Round 14 moved the switches from the header to that key bar, whose middle pair follows the cursor's list
-// (Playlist: DEL Remove, ENTER Play now); see BuildBar.
+//   [R Radio: on] [F Shuffle: off]                       [SPACE Queue] / [Z Remove] [SPACE Play now]
+//   [Esc Close]                                                                     [C Clear]
+// Round 14 moved the switches from the header to a key bar; round 15 made it two 2 x 2 grids whose row action
+// follows the cursor's list (Songs: Queue; Playlist: Remove, Play now) with the game's own key icons; see Bar.
 // No key hint bar and no action button row: every list row is a button in the game's button colours
 // (game_button.h: pink, DeepBlue on hover, white label), a song row adds the song, a playlist row plays
 // that entry, and each playlist row has its own small move up / move down / remove buttons. The playing
 // entry is teal with a pink '>' left of its row. The header buttons are the game's popup button through
 // the shared modules/common/game_button (round 13: "Use game's button ... they have support to show what
-// icon to press"), with their key caps R / F / C; our own SDF pills if that fails. Round 13 also dropped
+// icon to press"), with their key icons; our own SDF pills if that fails. Round 13 also dropped
 // the status line ("Remove the top status row 'Now playing: ...'"): only a warning shows, when the radio
 // can't play (no Music Box: the stored playlist greyed, not empty). Other keys of round 11 still work
 // unprinted (radio_menu.h). The row count follows the canvas height (as the receipt): 5..11 rows of 44 px.
@@ -100,18 +100,34 @@ constexpr int kMaxRows = 11, kMinRows = 5;
 constexpr float kRowW = kColW - 22;  // a row inside its list box (scroll thumb on the right)
 constexpr float kInlD = 34.0f, kInlGap = 6.0f;  // the playlist rows' small buttons
 constexpr float kInlW = 3 * kInlD + 2 * kInlGap + 6.0f;
-constexpr float kBarH = 52.0f, kBarGap = 14.0f, kBarGroupGap = 44.0f;  // the key bar at the bottom
+constexpr float kBarH = 52.0f, kBarGap = 14.0f, kBarRowGap = 12.0f;  // the key grids at the bottom
 constexpr float kGameButtonScale = 0.72f;  // the popup button (59 high, 42 pt label), as in the receipt
 constexpr float kMarkerW = 22.0f;           // the playing entry's '>' left of its row
 // Marquee of a focused row's name that doesn't fit: wait, scroll (px per second), wait at the end, jump back.
 constexpr float kMarqueeWait = 1.0f, kMarqueeSpeed = 80.0f, kMarqueeEndWait = 1.5f;
 
-// The key bar (round 14: "the key hints should be at the bottom, aswell as '[ESC] Close' on the left, others
-// on the right"): Close on the left; the focused row's actions and the radio's switches on the right.
-enum Bar { kBarClose, kBarAct, kBarPlay, kBarRadio, kBarShuffle, kBarClear, kBarCount };
-constexpr const char* kBarNames[kBarCount] = {"Close", "Queue", "Play now", "Radio", "Shuffle", "Clear"};
-constexpr const char* kBarKeys[kBarCount] = {"ESC", "SPACE", "ENTER", "R", "F", "C"};
-constexpr float kBarMinW[kBarCount] = {0, 0, 0, 160, 180, 0};  // label widths that don't jump with on / off
+// The key area at the bottom, two 2 x 2 grids (round 15: "from left->right top->bottom: [radio, shuffle, close,
+// <empty>] on bottom left / on the right we have (same logic) [remove/queue, play now, <empty>, clear]"). Queue
+// (Songs) and Remove (Playlist) share one cell; Play now shows only for the playlist ("space and enter do the
+// same thing on left column so those can be merged"). Each button shows the game's own key icon (`kBarControls`,
+// game_button Spec.control; `kBarKeys` = the key cap text if the game has no icon for it).
+enum Bar { kBarRadio, kBarShuffle, kBarClose, kBarQueue, kBarRemove, kBarPlay, kBarClear, kBarCount };
+constexpr const char* kBarNames[kBarCount] = {"Radio", "Shuffle", "Close", "Queue", "Remove", "Play now", "Clear"};
+constexpr const char* kBarKeys[kBarCount] = {"R", "F", "Esc", "SPACE", "Z", "SPACE", "C"};
+constexpr const char* kBarControls[kBarCount] = {"<Keyboard>/r",     "<Keyboard>/f", "<Keyboard>/escape", "<Keyboard>/space",
+                                                 "<Keyboard>/z",     "<Keyboard>/space", "<Keyboard>/c"};
+constexpr float kBarMinW[kBarCount] = {160, 180, 0, 110, 110, 0, 0};  // label widths that don't jump (on / off, Queue / Remove)
+// Grid cell of each button: column 0..3 (0-1 the left grid, 2-3 the right one), row 0..1.
+constexpr int kBarCol[kBarCount] = {0, 1, 0, 2, 2, 3, 3};
+constexpr int kBarRow[kBarCount] = {0, 0, 1, 0, 0, 0, 1};
+// Header (round 15: "we have a lot of free space at the top so we can move the columns up by like 120px, when no
+// radio, move it down like 20px or so that the warning pill fits"): title, corral name and warning pill share one
+// row; the lists start right under it, 20 px lower while the warning shows. The panel sits near the top of the
+// screen (at most kPanelTop down) instead of centred.
+constexpr float kTitleY = 22.0f, kTitleH = 52.0f, kWarnH = 42.0f;
+constexpr float kBodyY = 86.0f, kWarnShift = 20.0f;  // the lists' heads (panel y), extra while the warning shows
+constexpr float kHeadToList = 38.0f;                 // head line -> first row
+constexpr float kPanelTop = 44.0f;
 // A playlist row's small buttons.
 enum Inl { kInlUp, kInlDown, kInlRemove, kInlCount };
 
@@ -154,7 +170,7 @@ struct RadioMenu::Impl {
                     *kbDown = nullptr, *kbLeft = nullptr, *kbRight = nullptr, *kbW = nullptr, *kbS = nullptr, *kbA = nullptr,
                     *kbD = nullptr, *kbTab = nullptr, *kbDelete = nullptr, *kbBackspace = nullptr, *kbR = nullptr,
                     *kbF = nullptr, *kbPgUp = nullptr, *kbPgDn = nullptr, *kbHome = nullptr, *kbEnd = nullptr,
-                    *kbShift = nullptr, *kbC = nullptr, *kbAnyKey = nullptr, *mouseLeft = nullptr, *mouseRight = nullptr;
+                    *kbShift = nullptr, *kbC = nullptr, *kbZ = nullptr, *kbAnyKey = nullptr, *mouseLeft = nullptr, *mouseRight = nullptr;
     const MethodInfo* padSouth = nullptr, *padEast = nullptr, *padWest = nullptr, *padNorth = nullptr, *padDpad = nullptr,
                     *padStick = nullptr, *padLB = nullptr, *padRB = nullptr, *padLT = nullptr, *padRT = nullptr;
     const MethodInfo* dirUp = nullptr, *dirDown = nullptr, *dirLeft = nullptr, *dirRight = nullptr;
@@ -186,7 +202,9 @@ struct RadioMenu::Impl {
         Il2CppObject* bg = nullptr, *text = nullptr;
         std::string label, key;
         Color fill = kUnset, textCol = kUnset;
-        float w = 0.0f;                      // width it was placed with (re-placed when the layout changes it)
+        float w = 0.0f;                      // laid-out width (kept while hidden: the grid's columns don't jump)
+        float px = -1.0f, py = -1.0f;        // where it was placed (re-placed when the layout moves it)
+        int shown = -1;                      // active state written last (-1 = not yet)
         bool enabled = true;
     };
     // The focused row's name scrolling when it doesn't fit (round 14: "song names should scroll when they
@@ -208,11 +226,16 @@ struct RadioMenu::Impl {
     std::vector<Il2CppGCHandle> handles;
     Il2CppObject* root = nullptr, *rootRt = nullptr, *backdropToggle = nullptr, *font = nullptr;
     Il2CppObject* warnBox = nullptr, *warnText = nullptr;  // the warning pill (inactive while there is none)
+    // Panel geometry (the lists move down kWarnShift while the warning shows; the panel grows with them).
+    Il2CppObject* panelRt = nullptr, *borderRt = nullptr, *contentRt = nullptr, *bodyRt = nullptr;
+    Il2CppObject* titleText = nullptr, *corralText = nullptr;
+    float panelTop = kPanelTop, bodyH = 0.0f, shift = -1.0f;
+    bool headerMeasured = false;
     Il2CppObject* noteText = nullptr, *head[2] = {}, *range[2] = {}, *listToggle[2] = {}, *thumb[2] = {};
     std::string warnStr, noteStr, headStr[2], rangeStr[2];
     int warnShown = -1;
     Color noteCol = kUnset, thumbCol[2] = {kUnset, kUnset};
-    float listY = 0.0f, listH = 0.0f, barY = 0.0f;
+    float listY = 0.0f, listH = 0.0f, barY = 0.0f;  // inside the body (its top = the list heads)
     std::vector<Slot> slots[2];
     BarBtn bar[kBarCount];
     Marquee marquee;
@@ -220,7 +243,7 @@ struct RadioMenu::Impl {
     int rows = kMaxRows;
     int area = 0;              // 0 = Songs, 1 = Playlist, 2 = the key bar
     int lastList = 0;          // the list the bar's row actions are for (the focused one, or the last one)
-    int cursor[2] = {0, 0}, top[2] = {0, 0}, barFocus = kBarAct;
+    int cursor[2] = {0, 0}, top[2] = {0, 0}, barFocus = kBarQueue;
     int hoverList = -1, hoverRow = -1, hoverInl = -1, hoverBar = -1;  // under the mouse (last frame)
     int repeatDir = 0;
     float repeatTimer = 0.0f;
@@ -470,9 +493,45 @@ struct RadioMenu::Impl {
         noteLeft = seconds;
     }
 
+    // The key area: which buttons show (the row actions follow the list), the cursor row's action button, the
+    // visible button in a grid cell, moving the key focus in the grids (false = no button that way).
+    bool BarVisible(int i) const {
+        if (i == kBarQueue) return lastList == 0;
+        if (i == kBarRemove || i == kBarPlay) return lastList == 1;
+        return true;
+    }
+    int ActButton() const { return lastList == 0 ? kBarQueue : kBarRemove; }
+    int BarAt(int col, int row) const {
+        for (int i = 0; i < kBarCount; ++i)
+            if (kBarCol[i] == col && kBarRow[i] == row && BarVisible(i)) return i;
+        return -1;
+    }
+    bool BarMove(int dx, int dy) {
+        const int c = kBarCol[barFocus], r = kBarRow[barFocus];
+        if (dx != 0) {
+            for (int cc = c + dx; cc >= 0 && cc < 4; cc += dx)
+                if (const int j = BarAt(cc, r); j >= 0) {
+                    barFocus = j;
+                    return true;
+                }
+            return false;
+        }
+        const int rr = r + dy;
+        if (rr < 0 || rr > 1) return false;
+        for (int d = 0; d < 4; ++d)  // the nearest button in that row (left first on a tie)
+            for (int cc : {c - d, c + d})
+                if (const int j = cc >= 0 && cc < 4 ? BarAt(cc, rr) : -1; j >= 0) {
+                    barFocus = j;
+                    return true;
+                }
+        return false;
+    }
+
     void ReadGameStyle();
     bool BuildBar(Il2CppObject* prt);
     void LayoutBar(bool force);
+    void LayoutHeader(bool measure);
+    void ApplyShift(bool warning);
     void SetNameScroll(Slot& s, float x, bool overflow);
     void StopMarquee();
     void TickMarquee(float dt);
@@ -638,6 +697,7 @@ bool RadioMenu::Setup(Resolver& R, std::string& why) {
     p->kbEnd = opt(kb, "get_endKey", 0);
     p->kbShift = opt(kb, "get_shiftKey", 0);
     p->kbC = opt(kb, "get_cKey", 0);
+    p->kbZ = opt(kb, "get_zKey", 0);
     p->kbAnyKey = opt(kb, "get_anyKey", 0);  // AnyKeyControl : ButtonControl
     p->tmpPrefW = opt(p->tmpTextClass, "get_preferredWidth", 0);
     p->rectMaskClass = R.Class(kUi, "UnityEngine.UI", "RectMask2D", &err);
@@ -686,14 +746,14 @@ bool RadioMenu::Setup(Resolver& R, std::string& why) {
 
 // ---------------------------------------------------------------- build --
 
-// The key bar (round 14: "the key hints should be at the bottom, aswell as '[ESC] Close' on the left, others on
-// the right"): the game's popup button through game_button, scaled like the receipt's, with the key cap of its
-// key. Close on the left; on the right the focused row's actions ("make the songs buttons so i can have a hint
-// of what to press to queue a song up, play now, remove from queue": Queue / Remove and Play now, for the list
-// the cursor is in) and the radio's switches (R / F / C, in the header until round 13). Our own pills if the
+// The key area (round 14: "the key hints should be at the bottom"; round 15: two 2 x 2 grids, see `Bar`): the
+// game's popup button through game_button, scaled like the receipt's, with the game's own key icon of its key
+// (Spec.control: "[SPACE]" is a wide icon in the game, not a square cap; round 14's "ESC" cap text overflowed its
+// key). Left grid: Radio, Shuffle / Close; right grid: Queue or Remove, Play now / Clear. Our own pills if the
 // game's button can't be cloned. LayoutBar places them by their laid-out widths.
 namespace {
-constexpr const char* kBarIds[kBarCount] = {"RadioClose", "RadioAct", "RadioPlay", "RadioToggle", "RadioShuffle", "RadioClear"};
+constexpr const char* kBarIds[kBarCount] = {"RadioToggle", "RadioShuffle", "RadioClose", "RadioQueue",
+                                            "RadioRemove", "RadioPlay",    "RadioClear"};
 
 std::string PillText(const std::string& key, const std::string& label) { return key.empty() ? label : key + "   " + label; }
 // Width of our own pill / a first guess for the game's button before its layout ran.
@@ -705,8 +765,8 @@ float GuessW(const std::string& key, const std::string& label, float minW, bool 
 }  // namespace
 
 bool RadioMenu::Impl::BuildBar(Il2CppObject* prt) {
-    const bool haveKey[kBarCount] = {kbEsc != nullptr, kbSpace != nullptr, kbEnter != nullptr,
-                                     kbR != nullptr,   kbF != nullptr,     kbC != nullptr};
+    const bool haveKey[kBarCount] = {kbR != nullptr, kbF != nullptr,     kbEsc != nullptr, kbSpace != nullptr,
+                                     kbZ != nullptr, kbSpace != nullptr, kbC != nullptr};
     for (int i = 0; i < kBarCount; ++i) {
         BarBtn& b = bar[i];
         b.game.Forget();
@@ -718,6 +778,7 @@ bool RadioMenu::Impl::BuildBar(Il2CppObject* prt) {
             spec.name = kBarIds[i];
             spec.label = b.label;
             spec.key = b.key;
+            if (haveKey[i]) spec.control = kBarControls[i];
             spec.scale = kGameButtonScale;
             spec.minWidth = kBarMinW[i];
             spec.module = kModule;
@@ -746,40 +807,67 @@ bool RadioMenu::Impl::BuildBar(Il2CppObject* prt) {
     return true;
 }
 
-// Places the bar's buttons by their widths (the game's button: its laid-out rect, which follows the label and
-// the key cap; a guess until the first layout). Cheap when nothing changed (one get_rect per game button).
+// Places the grids' buttons by their widths (the game's button: its laid-out rect, which follows the label and
+// the key icon; a guess until the first layout; a hidden button keeps its last width). Each grid column is as
+// wide as its widest button and its buttons start at its left edge; the left grid starts at the panel's left
+// padding, the right grid ends at the right padding. Cheap when nothing changed (one get_rect per shown game
+// button).
 void RadioMenu::Impl::LayoutBar(bool force) {
     float w[kBarCount];
-    bool changed = force;
     for (int i = 0; i < kBarCount; ++i) {
         BarBtn& b = bar[i];
         float bw = 0.0f, bh = 0.0f;
-        if (b.game.Exists()) b.game.Size(bw, bh);
-        if (!(bw > 1.0f)) bw = GuessW(b.key, b.label, kBarMinW[i], b.game.Exists());
-        w[i] = bw;
-        if (std::fabs(bw - b.w) > 0.5f) changed = true;
+        if (b.game.Exists() && b.shown != 0) b.game.Size(bw, bh);
+        if (!(bw > 1.0f)) bw = b.w > 1.0f ? b.w : GuessW(b.key, b.label, kBarMinW[i], b.game.Exists());
+        w[i] = b.w = bw;
     }
-    if (!changed) return;
-    const float cy = barY + kBarH * 0.5f;
-    auto place = [&](int i, float left) {
+    float colW[4] = {};
+    for (int i = 0; i < kBarCount; ++i) colW[kBarCol[i]] = std::max(colW[kBarCol[i]], w[i]);
+    const float colX[4] = {kPad, kPad + colW[0] + kBarGap, kPanelW - kPad - colW[3] - kBarGap - colW[2],
+                           kPanelW - kPad - colW[3]};
+    for (int i = 0; i < kBarCount; ++i) {
         BarBtn& b = bar[i];
-        b.w = w[i];
-        if (b.game.Exists()) b.game.Place(left, cy, 0.0f);
-        else if (unity::IsAlive(b.bg)) At(unity::TransformOf(unity::GameObjectOf(b.bg)), left, barY, w[i], kBarH);
+        const float x = std::round(colX[kBarCol[i]]);
+        const float rowTop = barY + static_cast<float>(kBarRow[i]) * (kBarH + kBarRowGap);
+        if (!force && std::fabs(x - b.px) < 0.5f && std::fabs(rowTop - b.py) < 0.5f) continue;
+        b.px = x;
+        b.py = rowTop;
+        if (b.game.Exists()) b.game.Place(x, rowTop + kBarH * 0.5f, 0.0f);
+        else if (unity::IsAlive(b.bg)) At(unity::TransformOf(unity::GameObjectOf(b.bg)), x, rowTop, w[i], kBarH);
+    }
+}
+
+// The header row: "Corral Radio", the corral's name right of it, the warning pill in the rest of the row. Built
+// with estimated text widths; measured again once the menu is shown (TMP_Text.get_preferredWidth, as the
+// marquee).
+void RadioMenu::Impl::LayoutHeader(bool measure) {
+    auto width = [&](Il2CppObject* tmp, float guess) {
+        if (!measure || !tmpPrefW || !unity::IsAlive(tmp)) return guess;
+        bool ok = false;
+        const float pw = Unbox<float>(Call(tmpPrefW, tmp, {}, "TMP_Text.get_preferredWidth", &ok));
+        return ok && std::isfinite(pw) && pw > 10.0f && pw < 2000.0f ? pw : guess;
     };
-    place(kBarClose, kPad);
-    float x = kPanelW - kPad;
-    for (int i : {kBarClear, kBarShuffle, kBarRadio}) {
-        x -= w[i];
-        place(i, x);
-        x -= kBarGap;
-    }
-    x -= kBarGroupGap - kBarGap;
-    for (int i : {kBarPlay, kBarAct}) {
-        x -= w[i];
-        place(i, x);
-        x -= kBarGap;
-    }
+    const float titleW = std::clamp(width(titleText, 270.0f), 120.0f, 420.0f);
+    const float cx = kPad + titleW + 22.0f;
+    const float corralGuess = 14.0f * static_cast<float>(st.title.size()) + 8.0f;
+    const float cw = std::clamp(width(corralText, corralGuess) + 4.0f, 40.0f, kPanelW - kPad - cx - 28.0f - 560.0f);
+    if (unity::IsAlive(corralText)) At(unity::TransformOf(corralText), cx, kTitleY + (kTitleH - 32.0f) * 0.5f, cw, 32.0f);
+    const float wx = cx + cw + 28.0f, ww = kPanelW - kPad - wx;
+    if (unity::IsAlive(warnBox)) At(unity::TransformOf(warnBox), wx, kTitleY + (kTitleH - kWarnH) * 0.5f, ww, kWarnH);
+    if (unity::IsAlive(warnText)) At(unity::TransformOf(warnText), 16.0f, 0.0f, ww - 32.0f, kWarnH);
+}
+
+// The lists (and everything under them) kWarnShift lower while the warning shows; the panel grows downwards.
+void RadioMenu::Impl::ApplyShift(bool warning) {
+    const float s = warning ? kWarnShift : 0.0f;
+    if (s == shift) return;
+    shift = s;
+    const float panelH = kBodyY + s + bodyH;
+    if (unity::IsAlive(bodyRt)) At(bodyRt, 0.0f, kBodyY + s, kPanelW, bodyH);
+    if (unity::IsAlive(panelRt))
+        Rect(panelRt, {0.5f, 1.0f}, {0.5f, 1.0f}, {0.5f, 1.0f}, {0.0f, -panelTop}, {kPanelW, panelH});
+    if (unity::IsAlive(borderRt)) At(borderRt, -8.0f, -8.0f, kPanelW + 16.0f, panelH + 16.0f);
+    if (unity::IsAlive(contentRt)) At(contentRt, 0.0f, 0.0f, kPanelW, panelH);
 }
 
 // ------------------------------------------------------------- marquee --
@@ -893,52 +981,74 @@ bool RadioMenu::Impl::BuildSmall(Il2CppObject* parentRt, Small& s, int kind, flo
 bool RadioMenu::Impl::Build() {
     ReadGameStyle();
     // Rows that fit the canvas (border + margin 36 px each side). Round 13: no status line any more. Round 14:
-    // the key bar under the note, the list heads 10 px lower (the taller warning pill above them).
-    listY = 166.0f;
+    // the key bar under the note. Round 15: title, corral name and warning in one row, the lists right under it
+    // (kWarnShift lower while the warning shows), the key area two rows of buttons, the panel near the top.
+    // Everything from the list heads down sits in "Body", which ApplyShift moves.
+    listY = kHeadToList;
     constexpr float kNoteGap = 12.0f, kNoteH = 30.0f, kBarTop = 8.0f, kBottom = 26.0f;
-    const float fixedH = listY + kNoteGap + kNoteH + kBarTop + kBarH + kBottom;  // everything but the rows
-    rows = std::clamp(static_cast<int>((CanvasHeight() - 72.0f - fixedH + kRowGap) / (kRowH + kRowGap)), kMinRows, kMaxRows);
+    const float keysH = 2 * kBarH + kBarRowGap;
+    const float fixedH = kBodyY + kWarnShift + listY + kNoteGap + kNoteH + kBarTop + keysH + kBottom;  // all but the rows
+    const float canvasH = CanvasHeight();
+    rows = std::clamp(static_cast<int>((canvasH - 72.0f - fixedH + kRowGap) / (kRowH + kRowGap)), kMinRows, kMaxRows);
     listH = rows * (kRowH + kRowGap) - kRowGap;
     const float noteY = listY + listH + kNoteGap;
     barY = noteY + kNoteH + kBarTop;
-    const float panelH = barY + kBarH + kBottom;
+    bodyH = barY + keysH + kBottom;
+    // Near the top of the screen: centred while that is higher (small screens), else kPanelTop down.
+    panelTop = std::max(8.0f, std::min(kPanelTop, (canvasH - (kBodyY + kWarnShift + bodyH)) * 0.5f));
+    const float panelH = kBodyY + bodyH;
 
     Il2CppObject* panel = NewUi("Panel", rootRt);
     if (!panel) return false;
     Il2CppObject* prt = unity::TransformOf(panel);
-    Rect(prt, {0.5f, 0.5f}, {0.5f, 0.5f}, {0.5f, 0.5f}, {0, 0}, {kPanelW, panelH});
-    Box(prt, "Border", -8, -8, kPanelW + 16, panelH + 16, kLavender, 34.0f);
+    panelRt = prt;
+    Rect(prt, {0.5f, 1.0f}, {0.5f, 1.0f}, {0.5f, 1.0f}, {0, -panelTop}, {kPanelW, panelH});
+    if (Il2CppObject* border = Box(prt, "Border", -8, -8, kPanelW + 16, panelH + 16, kLavender, 34.0f)) {
+        borderRt = unity::TransformOf(border);
+        Keep(border);
+    }
     Il2CppObject* contentG = nullptr;
     if (Il2CppObject* content = Box(prt, "Content", 0, 0, kPanelW, panelH, kWhite, 30.0f, &contentG)) {
+        contentRt = unity::TransformOf(content);
+        Keep(content);
         SetRaycast(contentG, true);
         Clickable(content);  // never polled: a click on the panel must not reach the backdrop (= close)
     }
-    Text(prt, "Title", kPad, 26, 560, 52, "Corral Radio", 40.0f, kNavy, kAlignLeft);
-    Text(prt, "Corral", kPad, 80, 300, 32, st.title, 24.0f, kNavyDim, kAlignLeft);
+    titleText = Text(prt, "Title", kPad, kTitleY, 420, kTitleH, "Corral Radio", 40.0f, kNavy, kAlignLeft);
+    corralText = Text(prt, "Corral", kPad + 290, kTitleY + 10, 300, 32, st.title, 24.0f, kNavyDim, kAlignLeft);
+    Keep(titleText);
+    Keep(corralText);
     // The warning pill right of the corral's name (only while the radio can't play; round 13: "make it
     // grayed out with an error warning on top of the dialog"). Round 14 ("needs a bit more space (margin) on
-    // y"): 42 high instead of 34 (the text keeps its size), and 10 px more room to the list heads below.
+    // y"): 42 high instead of 34 (the text keeps its size). LayoutHeader places it.
     {
-        constexpr float wx = kPad + 260.0f, ww = kPanelW - kPad - wx, wh = 42.0f;
-        warnBox = Box(prt, "Warning", wx, 75, ww, wh, kOrange, wh * 0.5f);
+        warnBox = Box(prt, "Warning", kPad + 640, kTitleY + 5, 600, kWarnH, kOrange, kWarnH * 0.5f);
         if (!warnBox) return false;
-        warnText = Text(unity::TransformOf(warnBox), "Text", 16, 0, ww - 32, wh, "", 21.0f, kWhite, kAlignCenter);
+        warnText = Text(unity::TransformOf(warnBox), "Text", 16, 0, 568, kWarnH, "", 21.0f, kWhite, kAlignCenter);
         Keep(warnBox);
         Keep(warnText);
         unity::SetActive(warnBox, false);
         warnShown = 0;
     }
+    headerMeasured = false;
+    LayoutHeader(false);
+    Il2CppObject* body = NewUi("Body", prt);
+    if (!body) return false;
+    bodyRt = unity::TransformOf(body);
+    Keep(body);
+    shift = -1.0f;
+    ApplyShift(false);
     for (int l = 0; l < 2; ++l) {
         const float x = kPad + l * (kColW + kColGap);
-        head[l] = Text(prt, l == 0 ? "SongsHead" : "PlaylistHead", x + 6, 128, 400, 34, "", 26.0f, kNavy, kAlignLeft);
-        range[l] = Text(prt, l == 0 ? "SongsRange" : "PlaylistRange", x + kColW - 260, 132, 240, 30, "", 19.0f, kNavyDim,
+        head[l] = Text(bodyRt, l == 0 ? "SongsHead" : "PlaylistHead", x + 6, 0, 400, 34, "", 26.0f, kNavy, kAlignLeft);
+        range[l] = Text(bodyRt, l == 0 ? "SongsRange" : "PlaylistRange", x + kColW - 260, 4, 240, 30, "", 19.0f, kNavyDim,
                         kAlignRight);
         Keep(head[l]);
         Keep(range[l]);
         // The list's area: an invisible raycast target with a Toggle (never polled for clicks) whose
         // pointer-inside state tells which list the mouse is over (wheel, hover); the rows are its children.
         Il2CppObject* listG = nullptr;
-        Il2CppObject* list = Box(prt, l == 0 ? "Songs" : "Playlist", x - 6, listY - 6, kColW + 12, listH + 12,
+        Il2CppObject* list = Box(bodyRt, l == 0 ? "Songs" : "Playlist", x - 6, listY - 6, kColW + 12, listH + 12,
                                  Color{1, 1, 1, 0.0f}, 18.0f, &listG);
         if (!list) return false;
         SetRaycast(listG, true);
@@ -997,9 +1107,9 @@ bool RadioMenu::Impl::Build() {
         Keep(thumb[l]);
     }
 
-    noteText = Text(prt, "Note", kPad, noteY, kPanelW - 2 * kPad, kNoteH, "", 21.0f, kGreen, kAlignCenter);
+    noteText = Text(bodyRt, "Note", kPad, noteY, kPanelW - 2 * kPad, kNoteH, "", 21.0f, kGreen, kAlignCenter);
     Keep(noteText);
-    if (!BuildBar(prt)) return false;
+    if (!BuildBar(bodyRt)) return false;
     return !Faulted();
 }
 
@@ -1117,21 +1227,27 @@ void RadioMenu::Impl::Redraw() {
         if (static_cast<int>(show) != warnShown) {
             warnShown = show ? 1 : 0;
             unity::SetActive(warnBox, show);
+            ApplyShift(show);
         }
         if (show) SetTextCached(warnText, st.warning, warnStr);
     }
-    // The key bar: the row actions follow the list the cursor is in (Songs: Queue / Play now; Playlist: Remove /
-    // Play now), the switches the radio; Clear needs entries ("Clear?" while armed); keys light the focus.
+    // The key grids: the row actions follow the list the cursor is in (Songs: Queue; Playlist: Remove, Play now),
+    // the switches the radio; Clear needs entries ("Clear?" while armed); keys light the focus.
     const bool have = st.available && !st.playlist.empty();
-    const bool rowOk = RowActs(lastList);
-    const bool enabled[kBarCount] = {true, rowOk, rowOk, st.available && (st.on || have), st.available, have};
+    const bool enabled[kBarCount] = {st.available && (st.on || have), st.available, true, RowActs(0), RowActs(1),
+                                     RowActs(1), have};
+    if (area == 2 && !BarVisible(barFocus)) barFocus = ActButton();
     for (int i = 0; i < kBarCount; ++i) {
         BarBtn& b = bar[i];
+        const bool visible = BarVisible(i);
+        if (static_cast<int>(visible) != b.shown) {
+            b.shown = visible ? 1 : 0;
+            if (b.game.Exists()) b.game.SetActive(visible);
+            else if (unity::IsAlive(b.bg)) unity::SetActive(unity::GameObjectOf(b.bg), visible);
+        }
+        if (!visible) continue;
         std::string label = kBarNames[i], key = b.key;
-        if (i == kBarAct) {
-            label = lastList == 0 ? "Queue" : "Remove";
-            key = lastList == 0 ? (kbSpace ? "SPACE" : "") : (kbDelete ? "DEL" : "");
-        } else if (i == kBarRadio) {
+        if (i == kBarRadio) {
             label = st.on ? "Radio: on" : "Radio: off";
         } else if (i == kBarShuffle) {
             label = st.shuffle ? "Shuffle: on" : "Shuffle: off";
@@ -1173,6 +1289,9 @@ void RadioMenu::Impl::Teardown() {
     }
     open = false;
     root = rootRt = backdropToggle = font = warnBox = warnText = noteText = nullptr;
+    panelRt = borderRt = contentRt = bodyRt = titleText = corralText = nullptr;
+    shift = -1.0f;
+    headerMeasured = false;
     warnShown = -1;
     for (int l = 0; l < 2; ++l) {
         head[l] = range[l] = listToggle[l] = thumb[l] = nullptr;
@@ -1323,6 +1442,10 @@ std::vector<MenuAction> RadioMenu::Tick(float unscaledDt) {
                     }
         }
     p.LayoutBar(false);  // the game's buttons lay themselves out over the first frames / after a label change
+    if (!p.headerMeasured) {  // the first frame shown: the header texts' real widths
+        p.headerMeasured = true;
+        p.LayoutHeader(true);
+    }
     if (p.grace > 0.0f) {
         p.grace -= dt;
         return out;
@@ -1393,14 +1516,9 @@ std::vector<MenuAction> RadioMenu::Tick(float unscaledDt) {
     auto press = [&](int b) {
         switch (b) {
             case kBarClose: out.push_back({MenuOp::kClose}); break;
-            case kBarAct:
-                if (p.lastList == 0) song(MenuOp::kAdd, p.cursor[0]);
-                else entry(MenuOp::kRemove, p.cursor[1]);
-                break;
-            case kBarPlay:
-                if (p.lastList == 0) song(MenuOp::kPlayNow, p.cursor[0]);
-                else entry(MenuOp::kPlayAt, p.cursor[1]);
-                break;
+            case kBarQueue: song(MenuOp::kAdd, p.cursor[0]); break;
+            case kBarRemove: entry(MenuOp::kRemove, p.cursor[1]); break;
+            case kBarPlay: entry(MenuOp::kPlayAt, p.cursor[1]); break;
             case kBarRadio:
                 if (p.st.available) out.push_back({MenuOp::kToggle});
                 break;
@@ -1444,11 +1562,12 @@ std::vector<MenuAction> RadioMenu::Tick(float unscaledDt) {
                       p.Pressed(pad, p.padStick, p.stickLeft);
     const bool right = p.Pressed(kb, p.kbRight) || p.Pressed(kb, p.kbD) || p.Pressed(pad, p.padDpad, p.dirRight) ||
                        p.Pressed(pad, p.padStick, p.stickRight);
-    // Space / pad A: the row's first action (queue a song, play an entry); Enter / pad X on a song: play it now.
+    // Space / Enter / pad A: queue a song, play an entry (round 15: "space and enter do the same thing on left
+    // column so those can be merged"); Z / Delete / Backspace / pad X: remove an entry ("use [Z] to remove songs").
     const bool space = p.Pressed(kb, p.kbSpace) || p.Pressed(pad, p.padSouth);
     const bool enter = p.Pressed(kb, p.kbEnter) || p.Pressed(kb, p.kbNumEnter);
     const bool padX = p.Pressed(pad, p.padWest);
-    const bool del = p.Pressed(kb, p.kbDelete) || p.Pressed(kb, p.kbBackspace);
+    const bool del = p.Pressed(kb, p.kbZ) || p.Pressed(kb, p.kbDelete) || p.Pressed(kb, p.kbBackspace);
     const bool padOther = p.Pressed(pad, p.padEast) || p.Pressed(pad, p.padNorth) || p.Pressed(pad, p.padLB) ||
                           p.Pressed(pad, p.padRB) || p.Pressed(pad, p.padLT) || p.Pressed(pad, p.padRT);
     int page = 0;
@@ -1487,7 +1606,8 @@ std::vector<MenuAction> RadioMenu::Tick(float unscaledDt) {
         return out;
     }
     if (clickBar >= 0) {
-        if (clickBar >= kBarRadio) {  // the switches take the key focus; Close / the row actions keep the row's
+        if (clickBar == kBarRadio || clickBar == kBarShuffle || clickBar == kBarClear) {
+            // the switches take the key focus; Close / the row actions keep the row's
             p.area = 2;
             p.barFocus = clickBar;
         }
@@ -1526,7 +1646,7 @@ std::vector<MenuAction> RadioMenu::Tick(float unscaledDt) {
     if (out.empty() && !clearPressed) {
         if (p.Pressed(kb, p.kbTab)) {
             p.area = (p.area + 1) % 3;
-            if (p.area == 2) p.barFocus = kBarAct;
+            if (p.area == 2) p.barFocus = p.ActButton();
             dirty = true;
         } else if (p.Pressed(kb, p.kbR) || p.Pressed(pad, p.padNorth)) {
             press(kBarRadio);
@@ -1535,11 +1655,12 @@ std::vector<MenuAction> RadioMenu::Tick(float unscaledDt) {
         } else if (p.Pressed(kb, p.kbC)) {
             press(kBarClear);
         } else if (p.area == 2) {
+            // The two grids as one 4 x 2 grid (empty cells skipped); up from the top row: back into the list.
             if (left || right) {
-                p.barFocus = std::clamp(p.barFocus + (right ? 1 : -1), 0, kBarCount - 1);
-                dirty = true;
-            } else if (step < 0) {
-                p.area = p.lastList == 1 && nList ? 1 : 0;  // up into the list the actions were for
+                dirty = p.BarMove(right ? 1 : -1, 0);
+            } else if (step != 0) {
+                if (!p.BarMove(0, step) && step < 0)
+                    p.area = p.lastList == 1 && nList ? 1 : 0;  // up into the list the actions were for
                 dirty = true;
             } else if (space || enter) {
                 press(p.barFocus);
@@ -1556,8 +1677,8 @@ std::vector<MenuAction> RadioMenu::Tick(float unscaledDt) {
                 entry(p.Pressed(pad, p.padLB) ? MenuOp::kUp : MenuOp::kDown, p.cursor[1]);
             } else if (step != 0) {
                 if (step > 0 && p.cursor[l] >= n - 1) {
-                    p.area = 2;  // past the last row: down into the key bar, on the row's first action
-                    p.barFocus = kBarAct;
+                    p.area = 2;  // past the last row: down into the key grids, on the row's action
+                    p.barFocus = p.ActButton();
                 } else {
                     p.cursor[l] = std::clamp(p.cursor[l] + step, 0, std::max(0, n - 1));
                 }
@@ -1570,8 +1691,7 @@ std::vector<MenuAction> RadioMenu::Tick(float unscaledDt) {
                 p.cursor[l] = p.Pressed(kb, p.kbHome) ? 0 : std::max(0, n - 1);
                 dirty = true;
             } else if (l == 0) {
-                if (space) song(MenuOp::kAdd, p.cursor[0]);
-                else if (enter || padX) song(MenuOp::kPlayNow, p.cursor[0]);
+                if (space || enter) song(MenuOp::kAdd, p.cursor[0]);
             } else {
                 if (del || padX) entry(MenuOp::kRemove, p.cursor[1]);
                 else if (space || enter) entry(MenuOp::kPlayAt, p.cursor[1]);
