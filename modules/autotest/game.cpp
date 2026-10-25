@@ -41,7 +41,9 @@ struct Syms {
     const MethodInfo* sessionEnded = nullptr;  // SceneContext.OnSessionEnded
     // scene loader
     Il2CppClass* loader = nullptr;
-    size_t ldCurrentGroup = 0, ldLoading = 0;
+    size_t ldCurrentGroup = 0, ldLoading = 0, ldMainMenuGroup = 0;
+    size_t sgSceneRefs = 0;  // SceneGroup._sceneReferences (AssetReference[])
+    size_t arGuid = 0;       // AssetReference.m_AssetGUID
     const MethodInfo* ldIsMainMenu = nullptr;
     const MethodInfo* ldIsGameplay = nullptr;
     const MethodInfo* ldLoadMainMenu = nullptr;
@@ -426,6 +428,9 @@ void Resolve(std::string& report) {
     s.loader = Cls(kImage, "MonomiPark.SlimeRancher.SceneManagement", "SceneLoader");
     s.ldCurrentGroup = Off(s.loader, "_currentSceneGroup");
     s.ldLoading = Off(s.loader, "<IsSceneLoadInProgress>k__BackingField");
+    s.ldMainMenuGroup = Off(s.loader, "_mainMenuSceneGroup");
+    s.sgSceneRefs = Off(Cls(kImage, "MonomiPark.SlimeRancher.SceneManagement", "SceneGroup"), "_sceneReferences");
+    s.arGuid = Off(Cls("Unity.Addressables", "UnityEngine.AddressableAssets", "AssetReference"), "m_AssetGUID");
     s.ldIsMainMenu = Meth(s.loader, "IsCurrentSceneGroupMainMenu", 0);
     s.ldIsGameplay = Meth(s.loader, "IsCurrentSceneGroupGameplay", 0);
     s.ldLoadMainMenu = Meth(s.loader, "LoadMainMenuSceneGroup", 1);
@@ -542,10 +547,61 @@ bool Loading() {
     return !l || (g_s.ldLoading && unity::Field<bool>(l, g_s.ldLoading));
 }
 
+namespace {
+// The scene GUIDs of a SceneGroup (its _sceneReferences' m_AssetGUID), empty ones left out.
+std::vector<std::string> SceneGuids(Il2CppObject* group) {
+    std::vector<std::string> out;
+    void* arr = group && g_s.sgSceneRefs && g_s.arGuid ? unity::Field<void*>(group, g_s.sgSceneRefs) : nullptr;
+    const size_t n = arr ? unity::ArrayLength(arr) : 0;
+    for (size_t i = 0; i < n; ++i) {
+        auto* ref = static_cast<Il2CppObject*>(unity::ArrayAt(arr, i));
+        std::string g = ref ? Utf8(unity::Field<Il2CppString*>(ref, g_s.arGuid)) : std::string();
+        if (!g.empty()) out.push_back(std::move(g));
+    }
+    return out;
+}
+
+// Whether a non-gameplay scene group shows the main menu. SceneLoader.IsCurrentSceneGroupMainMenu only
+// compares with _mainMenuSceneGroup ("MainMenu", loaded by a quit to the title); the menu after launch is
+// another group ("MainMenuFromBoot", PlatformEngagementPrompt.SceneGroupToLoad). A group counts as the menu
+// when it loads every scene the main menu group loads (by Addressables GUID); a name starting with
+// "MainMenu" is the last resort when that check fails. Decided once per group and logged.
+bool IsMenuGroup(Il2CppObject* loader, Il2CppObject* group) {
+    static Il2CppObject* lastGroup = nullptr;
+    static bool lastResult = false;
+    if (group == lastGroup) return lastResult;
+    Il2CppObject* menu = g_s.ldMainMenuGroup ? Alive(unity::Field<Il2CppObject*>(loader, g_s.ldMainMenuGroup)) : nullptr;
+    const std::vector<std::string> want = SceneGuids(menu), have = SceneGuids(group);
+    const std::string name = unity::GetName(group);
+    const bool byName = name.rfind("MainMenu", 0) == 0;
+    bool result = false;
+    std::string how;
+    if (!want.empty() && !have.empty()) {
+        result = std::all_of(want.begin(), want.end(),
+                             [&](const std::string& g) { return std::find(have.begin(), have.end(), g) != have.end(); });
+        how = std::format("{} the main menu group's {} scene(s) ({} in this group)", result ? "has all of" : "lacks some of",
+                          want.size(), have.size());
+    } else {
+        how = std::format("no scene GUIDs (main menu group {}, this group {})", want.size(), have.size());
+    }
+    if (!result && byName) {
+        result = true;
+        how += "; accepted by its name";
+    }
+    SR2_INFO("[{}] scene group '{}': {} the title screen; {}", kModule, name, result ? "is" : "is not", how);
+    lastGroup = group;
+    lastResult = result;
+    return result;
+}
+}  // namespace
+
 bool AtTitle() {
     Il2CppObject* l = SceneLoader();
     if (!l || Loading() || !g_s.ldIsMainMenu) return false;
-    return CallValue<bool>(g_s.ldIsMainMenu, l, {}, "SceneLoader.IsCurrentSceneGroupMainMenu");
+    if (CallValue<bool>(g_s.ldIsMainMenu, l, {}, "SceneLoader.IsCurrentSceneGroupMainMenu")) return true;
+    if (g_s.ldIsGameplay && CallValue<bool>(g_s.ldIsGameplay, l, {}, "SceneLoader.IsCurrentSceneGroupGameplay")) return false;
+    Il2CppObject* g = g_s.ldCurrentGroup ? Alive(unity::Field<Il2CppObject*>(l, g_s.ldCurrentGroup)) : nullptr;
+    return g && IsMenuGroup(l, g);
 }
 
 bool InGame() {
