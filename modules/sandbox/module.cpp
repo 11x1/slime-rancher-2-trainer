@@ -386,6 +386,7 @@ private:
     // radiant: -1 the normal actor; 0 the slime's radiant form, 1 / 2 a largo radiant from its first / second base slime.
     int DoSpawn(const Ctx& c, uintptr_t item, int64_t count, int limit = kMaxSpawn, int radiant = -1);
     Il2CppObject* RadiantBase(Il2CppObject* slime, int radiant, std::string& why);
+    uint32_t RadiantIcon(Il2CppObject* slime, int radiant);
     void DoStow(const Ctx& c, int sel, uintptr_t item, int64_t amount, bool replace);
     void DoCraft(uintptr_t item, int64_t count);
     // custom_upgrades' buildables (buildables.h): variants in the menu, tiles of their own, the Slime Radio in the
@@ -564,6 +565,7 @@ private:
     size_t offSlimeRadiantBase_ = 0;                 // SlimeDefinition.RadiantBase (SlimeAppearance)
     size_t offSlimeRadiantLargo0_ = 0;               // SlimeDefinition.RadiantLargo0 (radiant from BaseSlimes[0])
     size_t offSlimeRadiantLargo1_ = 0;               // SlimeDefinition.RadiantLargo1 (radiant from BaseSlimes[1])
+    size_t offAppearanceIcon_ = 0;                   // SlimeAppearance._icon (a radiant look's: the Slimepedia's radiant icon)
 
     // ---- crafter (optional) ----
     const MethodInfo* tryGetGadgetDir_ = nullptr;    // SceneContextUtility.TryGetGadgetDirector(out GadgetDirector)
@@ -1004,6 +1006,11 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
         off(slimeDefClass_, "RadiantLargo0", offSlimeRadiantLargo0_, rw);
         off(slimeDefClass_, "RadiantLargo1", offSlimeRadiantLargo1_, rw);
         if (!offSlimeBases_ && rw.empty()) rw = "field SlimeDefinition.BaseSlimes not found";
+        // The radiant entries' icons: RadiantSlimePediaEntry.get_Icon returns GetRadiantAppearance(def)._icon (IDA),
+        // so the radiant look's own icon is the Slimepedia's radiant icon. Optional (else the item's icon).
+        std::string iw;
+        off(cls(kImage, "", "SlimeAppearance", iw), "_icon", offAppearanceIcon_, iw);
+        if (!iw.empty()) SR2_WARN("[{}] spawner: radiant entries use the plain icons ({})", kModule, iw);
         if (rw.empty())
             SR2_INFO("[{}] spawner: radiant slimes available (SlimeRadiant.SetRadiant, SlimeDefinition.RadiantBase / "
                      "RadiantLargo0 / RadiantLargo1)", kModule);
@@ -1873,7 +1880,7 @@ bool Sandbox::EnsureSpawnables() {
     auto items = std::make_shared<std::vector<bridge::Item>>();
     std::vector<std::string> leftOut, notActor;
     Il2CppObject* tarrs = TarrGroup();
-    size_t scanned = 0;
+    size_t scanned = 0, radiantIcons = 0;
     for (Il2CppObject* o : unity::FindObjectsOfTypeAll(identClass_)) {
         if (sr2::core::ModuleFaulted(kModule)) break;
         if (!IsA(o, identClass_) || !unity::IsAlive(o)) continue;
@@ -1919,17 +1926,27 @@ bool Sandbox::EnsureSpawnables() {
             // The radiant forms the game has for this slime / largo (field reads only).
             std::string ignore;
             if (item.kind == bridge::Kind::Slime) {
-                if (RadiantBase(o, 0, ignore)) item.radiant |= bridge::kRadiantSelf;
+                if (RadiantBase(o, 0, ignore)) {
+                    item.radiant |= bridge::kRadiantSelf;
+                    item.radiantIcon[0] = RadiantIcon(o, 0);
+                }
             } else {
                 if (Il2CppObject* b = RadiantBase(o, 1, ignore)) {
                     item.radiant |= bridge::kRadiantBase0;
                     item.radiantBase = reinterpret_cast<uintptr_t>(b);
+                    item.radiantIcon[1] = RadiantIcon(o, 1);
+                    // The largo's radiant look may carry its plain icon: then the base slime's radiant icon.
+                    if (!item.radiantIcon[1] || item.radiantIcon[1] == item.icon) item.radiantIcon[1] = RadiantIcon(b, 0);
                 }
                 if (Il2CppObject* b = RadiantBase(o, 2, ignore)) {
                     item.radiant |= bridge::kRadiantBase1;
                     item.radiantBase2 = reinterpret_cast<uintptr_t>(b);
+                    item.radiantIcon[2] = RadiantIcon(o, 2);
+                    // The largo's radiant look may carry its plain icon: then the base slime's radiant icon.
+                    if (!item.radiantIcon[2] || item.radiantIcon[2] == item.icon) item.radiantIcon[2] = RadiantIcon(b, 0);
                 }
             }
+            if (item.radiantIcon[0] || item.radiantIcon[1] || item.radiantIcon[2]) ++radiantIcons;
         }
         items->push_back(std::move(item));
     }
@@ -1943,6 +1960,14 @@ bool Sandbox::EnsureSpawnables() {
     SR2_INFO("[{}] spawn list: {} of {} identifiable types are actors ({} ms)", kModule, spawnables_->size(), scanned,
              GetTickCount64() - t0);
     LogLeftOut("spawn list", leftOut);
+    {
+        // Which slimes the list has (round 13: "werent there 3 special slimes?"), and how many radiant icons.
+        std::string slimes;
+        for (const auto& it : *spawnables_)
+            if (it.kind == bridge::Kind::Slime) slimes += (slimes.empty() ? "" : ", ") + it.name + (it.tarr ? " (Tarr)" : "");
+        SR2_INFO("[{}] spawn list slimes: {}; {} slime(s) / largo(s) with a Slimepedia radiant icon", kModule, slimes,
+                 radiantIcons);
+    }
     if (!notActor.empty()) {
         std::string names;
         for (const std::string& n : notActor) names += (names.empty() ? "" : ", ") + n;
@@ -3568,6 +3593,16 @@ bool Sandbox::SpawnPose(const Ctx& c, Vec3& pos, Vec3& fwd) {
         fwd.x /= len, fwd.z /= len;
     }
     return std::isfinite(pos.x) && std::isfinite(pos.y) && std::isfinite(pos.z);
+}
+
+// The icon of a radiant look of `slime` (0 = RadiantBase, 1 / 2 = RadiantLargo0 / 1): SlimeAppearance._icon, the
+// icon the Slimepedia's radiant page shows (RadiantSlimePediaEntry.get_Icon). 0 if it has none.
+uint32_t Sandbox::RadiantIcon(Il2CppObject* slime, int radiant) {
+    if (!offAppearanceIcon_ || !slime || !IsA(slime, slimeDefClass_)) return 0;
+    const size_t off = radiant == 0 ? offSlimeRadiantBase_ : radiant == 1 ? offSlimeRadiantLargo0_ : offSlimeRadiantLargo1_;
+    auto* look = off ? unity::Field<Il2CppObject*>(slime, off) : nullptr;
+    if (!look || !unity::IsAlive(look)) return 0;
+    return SpriteIcon(unity::Field<Il2CppObject*>(look, offAppearanceIcon_));
 }
 
 // The base slime a radiant form of `slime` is radiant from (what SlimeRadiant.SetRadiant takes), or nullptr with

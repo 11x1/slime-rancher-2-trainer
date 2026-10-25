@@ -36,6 +36,7 @@ struct Tile {
     int amount = 0;                     // amount chosen for this tile, bottom right ("x5"); <= 0: none
     int section = 0;                    // index into Options::sections; tiles must be ordered by section
     bool mod = false;                   // added by the mod (not the game): a small "M" badge top left
+    bool noDrag = false;                // not a drag source even with Options::drag (e.g. shown but not holdable)
 };
 
 inline constexpr int kGlyphOther = -1;  // Tab::glyph: three dots ("everything else")
@@ -83,6 +84,8 @@ struct Options {
 struct Result {
     int clicked = -1;       // index into `tiles` clicked this frame
     int rightClicked = -1;  // index right-clicked this frame (open a context menu)
+    ImVec2 menuAt;          // where that menu belongs: the mouse, or (context key) the tile's bottom left; inside the
+                            // grid's visible area, also for a tile scrolled half out of it
     int hovered = -1;       // index of the hovered tile
     float wheel = 0;        // Shift / Ctrl + mouse wheel over the hovered tile (notches; + = up); the grid does not scroll then
     int wheelStep = 0;      // that wheel as an amount step: +-1 with Shift, +-10 with Ctrl (0: no wheel). Plain wheel scrolls
