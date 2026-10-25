@@ -701,6 +701,11 @@ private:
     void MergeStorageCards(Il2CppObject* plot, MenuInjection& inj, const std::vector<std::pair<Il2CppObject*, int32_t>>& cards);
     void RefreshAvailability(Il2CppObject* plot, const MenuInjection& inj);
     void ReportStorageCards(Il2CppObject* plot, MenuInjection& inj);
+    void NoteVanillaIcon(Il2CppObject* item);
+    void ApplyVanillaIcons();
+    void RestoreVanillaIcons(const char* why);
+    Il2CppObject* ItemIcon(Il2CppObject* item);
+    void GameSpriteIcons(MenuInjection& inj);
     bool Shown(Il2CppObject* plot, const UpgradeDef& d);
     Il2CppObject* MarketIcon();
     Il2CppObject* FindGadgetByName(Il2CppObject* lookup, std::string_view name);
@@ -714,6 +719,14 @@ private:
     std::atomic<bool> enabled_{false};
     std::atomic<bool> resync_{false};  // (re-)enabled: state must be re-read for the loaded save
     bool cleaned_ = false;
+    // Vanilla plot menu cards showing one of the user's drawings while the module is on (VanillaIconName):
+    // item (GC handle held) -> its own vanilla _icon sprite, put back by Cleanup.
+    std::unordered_map<Il2CppObject*, Il2CppObject*> vanillaIcons_;
+    // Cards showing a game sprite found by name (GameSpriteIcons): Sprite class (optional), scans so far.
+    Il2CppClass* spriteClass_ = nullptr;
+    int spriteScans_ = 0;
+    unsigned long long lastSpriteScan_ = 0;
+    std::unordered_map<int32_t, Il2CppObject*> spriteIcons_;  // our id -> the sprite set (GC handle held)
     // gate (main thread)
     float gateAccum_ = 0.0f;
     bool locked_ = false;                 // "enabled" pinned on (settings::Lock) for the loaded save
@@ -1807,6 +1820,107 @@ const char* ModIconName(int32_t id) {
     }
     return sr2::ui::mod_icons::Has(name) ? name : nullptr;
 }
+
+// The user's drawing for a VANILLA plot upgrade card (the game's own item), or nullptr. Shown only while
+// the module is on (ApplyVanillaIcons from the menu pre-hook, Cleanup puts the vanilla sprite back), so a
+// vanilla setup keeps vanilla looks. Our tiers that borrow that card's icon (iconFrom) still get the
+// vanilla sprite (ItemIcon). Add a line here and a drawing assets/icons/<name>.png for another card.
+const char* VanillaIconName(int32_t upgrade) {
+    const char* name = nullptr;
+    switch (upgrade) {
+        case kUpgSprinkler: name = "sprinkler_1"; break;  // Sprinkler (garden T1; T2 = growth_1, T3 vanilla)
+        case kUpgMusicBox: name = "music_1"; break;       // Music Box (corral T1; Music Box II stays vanilla)
+        default: return nullptr;
+    }
+    return sr2::ui::mod_icons::Has(name) ? name : nullptr;
+}
+
+// A vanilla card of an injected menu that has a drawing: remembered with its own sprite (once per item).
+void CustomUpgrades::NoteVanillaIcon(Il2CppObject* item) {
+    if (vanillaIcons_.count(item) || !VanillaIconName(unity::Field<int32_t>(item, offItemUpgrade_))) return;
+    Il2CppObject* icon = unity::Field<Il2CppObject*>(item, offItemIcon_);
+    if (!unity::IsAlive(icon) || !unity::NewGCHandle(item)) return;  // item pinned (a few, never freed)
+    vanillaIcons_.emplace(item, icon);
+}
+
+// The drawings onto their vanilla cards (main thread, module on). Cheap when already set.
+void CustomUpgrades::ApplyVanillaIcons() {
+    for (const auto& [item, vanilla] : vanillaIcons_) {
+        if (!unity::IsAlive(item)) continue;
+        const char* name = VanillaIconName(unity::Field<int32_t>(item, offItemUpgrade_));
+        Il2CppObject* mine = name ? sr2::ui::mod_icons::Get(name, vanilla) : nullptr;
+        if (!mine || unity::Field<Il2CppObject*>(item, offItemIcon_) == mine) continue;
+        SetRef(item, offItemIcon_, mine);
+        SR2_INFO("[{}] vanilla card '{}' shows the drawing '{}' (vanilla icon '{}')", kModule, unity::GetName(item), name,
+                 unity::IsAlive(vanilla) ? unity::GetName(vanilla) : std::string("?"));
+    }
+}
+
+// The vanilla sprites back (Cleanup; a field write, also after a fault).
+void CustomUpgrades::RestoreVanillaIcons(const char* why) {
+    int restored = 0;
+    for (const auto& [item, vanilla] : vanillaIcons_) {
+        if (!unity::IsAlive(item) || unity::Field<Il2CppObject*>(item, offItemIcon_) == vanilla) continue;
+        SetRef(item, offItemIcon_, vanilla);
+        ++restored;
+    }
+    if (restored) SR2_INFO("[{}] {}: {} vanilla card icon(s) back to the game's", kModule, why, restored);
+}
+
+// A game sprite (by asset name) for one of our cards, the user's pick, when no drawing is embedded under
+// the card's ModIconName: the Corral Radio shows the Slimepedia's music player icon. Until it is found
+// the card keeps its iconFrom icon (the Music Box's). Only sprites loaded at that moment are found (the
+// Slimepedia's may load later), so up to 3 Resources.FindObjectsOfTypeAll(Sprite) scans per session, at
+// least 20 s apart, from the plot menu pre-hook (menu opens / rebuilds, never per frame).
+const char* GameSpriteName(int32_t id) {
+    switch (id) {
+        case CORRAL_RADIO: return "iconPediaHomeMusicPlayer";
+        default: return nullptr;
+    }
+}
+
+void CustomUpgrades::GameSpriteIcons(MenuInjection& inj) {
+    std::vector<Injected*> want;
+    for (Injected& in : inj.items)
+        if (GameSpriteName(in.def->id) && !ModIconName(in.def->id) && !spriteIcons_.count(in.def->id) &&
+            unity::IsAlive(in.item))
+            want.push_back(&in);
+    if (want.empty() || !spriteClass_ || spriteScans_ >= 3) return;
+    const unsigned long long now = GetTickCount64();
+    if (spriteScans_ > 0 && now - lastSpriteScan_ < 20000) return;
+    ++spriteScans_;
+    lastSpriteScan_ = now;
+    std::unordered_map<std::string, Il2CppObject*> byName;
+    for (Injected* in : want) byName.emplace(GameSpriteName(in->def->id), nullptr);
+    size_t seen = 0;
+    for (Il2CppObject* spr : unity::FindObjectsOfTypeAll(spriteClass_)) {
+        if (!unity::IsAlive(spr) || !IsA(spr, spriteClass_)) continue;
+        ++seen;
+        auto it = byName.find(unity::GetName(spr));
+        if (it != byName.end() && !it->second) it->second = spr;
+    }
+    for (Injected* in : want) {
+        const char* name = GameSpriteName(in->def->id);
+        Il2CppObject* spr = byName[name];
+        if (!spr || !unity::NewGCHandle(spr)) {
+            SR2_INFO("[{}] {}: game sprite '{}' not loaded (scan {} of 3, {} sprites) - keeps the icon '{}'", kModule,
+                     in->def->title, name, spriteScans_, seen,
+                     unity::GetName(unity::Field<Il2CppObject*>(in->item, offItemIcon_)));
+            continue;
+        }
+        KeepLoaded(spr);  // a Slimepedia sprite must outlive the pedia's assets (Resources.UnloadUnusedAssets)
+        SetRef(in->item, offItemIcon_, spr);
+        spriteIcons_.emplace(in->def->id, spr);
+        SR2_INFO("[{}] {}: card icon = the game sprite '{}' (scan {})", kModule, in->def->title, name, spriteScans_);
+    }
+}
+
+// A menu item's icon, the vanilla sprite for a card that shows a drawing right now.
+Il2CppObject* CustomUpgrades::ItemIcon(Il2CppObject* item) {
+    auto it = vanillaIcons_.find(item);
+    return it != vanillaIcons_.end() ? it->second : unity::Field<Il2CppObject*>(item, offItemIcon_);
+}
+
 Il2CppObject* CustomUpgrades::CloneItem(Il2CppObject* tpl, const UpgradeDef& d, Il2CppObject* iconSrc,
                                         Il2CppObject*& costEntry) {
     costEntry = nullptr;
@@ -1849,7 +1963,7 @@ Il2CppObject* CustomUpgrades::CloneItem(Il2CppObject* tpl, const UpgradeDef& d, 
     // "checkmark" sprite, which GenericViewHolder.BindData shows as an overlay image on top of the
     // (tinted) list icon when the item is unavailable (= owned). So owned custom items keep that
     // checkmark: the template's (= iconSrc's, same shared sprite) reference, copied by Instantiate.
-    Il2CppObject* icon = iconSrc ? unity::Field<Il2CppObject*>(iconSrc, offItemIcon_) : nullptr;
+    Il2CppObject* icon = iconSrc ? ItemIcon(iconSrc) : nullptr;  // vanilla, not the card's drawing
     Il2CppObject* check = iconSrc ? unity::Field<Il2CppObject*>(iconSrc, offItemUnavailIcon_) : nullptr;
     if (!unity::IsAlive(check)) check = unity::Field<Il2CppObject*>(tpl, offItemUnavailIcon_);
     if (!unity::IsAlive(icon)) icon = MarketIcon();
@@ -1909,7 +2023,10 @@ bool CustomUpgrades::BuildInjection(MenuInjection& inj, int32_t plotType) {
             if (!IsA(item, upgItemClass_) || !unity::IsAlive(item)) continue;
             const int32_t u = unity::Field<int32_t>(item, offItemUpgrade_);
             if (custom_upgrades::IsCustomUpgrade(u)) continue;
-            if (vanilla.emplace(u, item).second) KeepLoaded(item);
+            if (vanilla.emplace(u, item).second) {
+                KeepLoaded(item);
+                NoteVanillaIcon(item);
+            }
             void* costs = unity::Field<void*>(item, offItemCosts_);
             const size_t nc = unity::ListCount(costs);
             int score = (nc == 1 ? 2 : nc > 1 ? 1 : 0) + (u == kUpgStorageCapacity ? 4 : 0);
@@ -2047,6 +2164,10 @@ void CustomUpgrades::BeforeMenuUpdate(Il2CppObject* root) {
     // place this plot's cards. Cards that take over a vanilla card first (same list length, so the
     // recorded indices are vanilla ones), then the rest (right after their anchor, else at the end).
     RestoreVanilla(*inj);
+    if (sink) {
+        ApplyVanillaIcons();    // the user's drawings on vanilla cards (Sprinkler, Music Box)
+        GameSpriteIcons(*inj);  // game sprites picked by the user (Corral Radio)
+    }
     // Silo "Additional Storage" cards with their VANILLA indices (the list is vanilla right now).
     std::vector<std::pair<Il2CppObject*, int32_t>> storageCards;
     if (type == kPlotSilo && sink)
@@ -2274,6 +2395,7 @@ void CustomUpgrades::Cleanup(const char* why) {
         for (Il2CppObject* title : inj->storageTitles) text_override::Remove(title);  // vanilla titles again
         inj->storageTitles.clear();
     }
+    RestoreVanillaIcons(why);  // vanilla cards with a drawing (the Sprinkler) show the game's icon again
     if (removed || restored)
         SR2_INFO("[{}] {}: {} custom menu item(s) removed, {} vanilla item(s) put back", kModule, why, removed,
                  restored);
@@ -3557,6 +3679,7 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
     if (!why.empty()) return ctx.Fail(why);
     autoSaveClass_ = autoSave;
     linkedSiloClass_ = R.Class(kImage, "", "LinkedSiloStorage");  // optional (filter only)
+    spriteClass_ = R.Class(kCore, "UnityEngine", "Sprite");        // optional (GameSpriteIcons)
 
     size_t offCostField = 0, offCurrencyList = 0;
     off(plotClass_, "TypeId", offPlotTypeId_);

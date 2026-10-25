@@ -51,8 +51,23 @@ corral Air Net's (`coop_air_net`), Silo Capacity the Storage Capacity's. The Mar
 definition named `MarketLink` in `_gadgetDefinitions` and its member groups (round 12: the card showed the
 cloned template's Storage Capacity icon; log `using the Market Link icon '<sprite>' ... (definition from the
 gadget groups)`). The Hen Collector has the user's
-`hen_collector_source.png`. A drawing under one of those names takes over at the next build
-(`.claude/notes/custom-icons.md`).
+`hen_collector_source.png`, Sprinkler II the user's `growth_1.png`. A drawing under one of those names takes
+over at the next build (`.claude/notes/custom-icons.md`).
+Vanilla cards with a drawing (`VanillaIconName`: Sprinkler `sprinkler_1`, Music Box `music_1`): the game's own
+menu item gets the drawing in its `_icon` while the module is on. `BuildInjection` remembers each such item
+with its vanilla sprite (`NoteVanillaIcon`, item pinned), the menu pre-hook sets the drawing
+(`ApplyVanillaIcons`, only with the text sink, i.e. when our cards show; log `vanilla card '<item>' shows the
+drawing '<name>'`), `Cleanup` writes the vanilla sprite back (`RestoreVanillaIcons`, also after a fault: a
+field write). The item is a shared asset, so the swap shows on every plot of that type. Our tiers that borrow
+that card's icon (`iconFrom`: Sprinkler III, Music Box II, Corral Radio) read the vanilla sprite through
+`ItemIcon`, not the drawing.
+Game sprites by name for our cards (`GameSpriteName`, the user's pick; a drawing under `ModIconName` wins):
+the Corral Radio shows the Slimepedia's `iconPediaHomeMusicPlayer`. `GameSpriteIcons` (menu pre-hook, text
+sink on) scans `Resources.FindObjectsOfTypeAll(Sprite)` while one is missing, at most 3 times per session and
+20 s apart (only loaded sprites are found); found: `_icon` of the clone set, the sprite pinned and flagged
+`DontUnloadUnusedAsset` (`KeepLoaded`), log `Corral Radio: card icon = the game sprite '...'`; not found: the
+card keeps the Music Box icon (log `game sprite '...' not loaded (scan n of 3 ...)`). Game art is never
+embedded (`assets/icons/game/` is gitignored).
 
 Per-plot values: `hen_collector`, `hen_collector_keep_hens` / `_roosters` (plus other modules':
 sell_upgrades' Ash Trough fill, `slime_dj.radio`). Per-save values: `custom_upgrades.on` (gate mark),
