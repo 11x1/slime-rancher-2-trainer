@@ -368,8 +368,25 @@ Round 13 ("pixelated asf on the right pane", "blurry" even with the 512 px DJ Bo
 so it samples mip 0 only. Ours had bias 0 (mod_icons) or no mips (TintedSprite); now both match the game.
 `ArtFrame` also waits past the loader's 160 px `iconEmpty` placeholder (round 12's Slime Radio picture was that
 placeholder recoloured): only a sprite of 256 px or more, not named `iconEmpty`, counts as the loaded art.
-Each card logs once `'<def>' details picture shown = '<sprite>' (WxH px of a TWxTH texture)` (with a warning
-note when it is under 256 px).
+Round 14 ("still pixelated", the bias did not help): at the user's 1920 x 1080 (registry) the CanvasScaler
+factor is 1, so the 512 px picture lands in the 440 px box at 0.86x. Mip bias -1 means plain bilinear on mip 0
+at 0.86x: it skips texels (thin outlines go uneven: "pixelated"); bias 0 blended mip 1 in ("blurry"). The
+vanilla full art is set up the same (re/unity.md) but is soft painted art where that shows less. Now
+`ShowPicture` draws every details picture of ours from a copy at its exact on-screen size (`ScreenSized`: GPU
+read-back, Lanczos-3 in linear light on premultiplied alpha, no mips, point filter when no parent between the
+image and the root canvas is scaled, else bilinear; cached per sprite and size). On-screen size = the Image's
+RectTransform rect x the root canvas's `scaleFactor`, sprite fitted (preserveAspect). Logs per card (again
+when it changes): `'<def>' details picture shown = '<sprite>' WxH px of a TWxTH texture (format, mips, filter,
+bias); on screen W x H px (box, canvas scale, parent scale, root canvas name / mode / pixel perfect, screen
+size, material / shader); drawn from a WxH copy (...)`, plus `sprite '<x>' resampled A -> B`. Twice per session
+a vanilla gadget card logs the same for the game's own full art (`a vanilla card's details picture = ...`, 1 s
+after shown). If the next round is still bad, those lines say whether the size or the canvas is off.
+Round 13 bug (log: `'QuantumStorageLink' details picture shown = 'sr2mods_icon_dj_booth_large (sr2 tint)'`):
+the image still showed the DJ Booth card's drawing (set by us) and `ArtFrame` took it for the loaded full art.
+Now, before the original SetItem of a card whose art is pending, the image gets our icon and the details'
+`UIImageDynamicLoader._iconSource` is cleared (SetFullArtSource skips an unchanged source with a valid
+handle, re/fabricator.md), and `ArtFrame` never accepts a sprite of ours (`IsOurs`: made here, registered,
+or named `sr2mods_icon_*`).
 
 ## Slime DJ buildables
 
