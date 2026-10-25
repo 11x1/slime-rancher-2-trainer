@@ -272,6 +272,7 @@ struct Impl {
     Il2CppObject* cloudFx = nullptr;  // drone station: cloud withdraw FX prefab
     Il2CppObject* glowSrc = nullptr;  // teleporter active FX
     Il2CppObject* icon = nullptr;     // our purple copy of the Refinery Link's icon (nullptr: not made)
+    Il2CppObject* squareIcon = nullptr;  // the same on a square canvas: the drone source icon
     bool defFailed = false, slotDefTried = false, fxTried = false;
     std::string baseRefId;
 
@@ -1379,6 +1380,11 @@ void Impl::MakeLook() {
     if (icon) {
         SetRef(ours, offIcon, icon);
         SR2_INFO("[{}] quantum link: icon = a purple copy of the Refinery Link's", module);
+        // The drone station's source list stretches each icon to a square box; the Refinery Link sprite is
+        // taller than wide, so the source got its own square copy (round 11: "is wider than normally").
+        std::string whySq;
+        squareIcon = gadget_look::TintedSprite(baseIcon, {kPurple.r, kPurple.g, kPurple.b}, 0.85f, whySq, true);
+        if (!squareIcon) SR2_INFO("[{}] quantum link: no square drone source icon ({}) - the card icon is used", module, whySq);
     } else {
         SR2_INFO("[{}] quantum link: no purple icon ({}) - the Refinery Link's icon is used", module, why);
     }
@@ -2185,6 +2191,7 @@ bool IsOurs(Il2CppObject* def) { return def && def == g_ours.load(std::memory_or
 
 Il2CppObject* SourceIcon() {
     if (!g || !g->base) return nullptr;
+    if (g->squareIcon && unity::IsAlive(g->squareIcon)) return g->squareIcon;  // our purple copy, square
     if (g->icon && unity::IsAlive(g->icon)) return g->icon;  // our purple copy
     Il2CppObject* icon = unity::Field<Il2CppObject*>(g->base, g->offIcon);
     return unity::IsAlive(icon) ? icon : nullptr;
