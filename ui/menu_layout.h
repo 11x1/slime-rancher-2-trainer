@@ -47,7 +47,8 @@ struct CardSection {
 struct Tab {
     std::string title;
     TabKind kind = TabKind::Module;
-    std::string module;                     // Module, Sandbox, SlimeDj
+    std::string module;                     // Module, Sandbox, SlimeDj; Cards: the tab's own module (also in
+                                            //   columns), its switch in the tab bar, only its sections shown
     std::vector<std::string> onlyGroups;    // Module: only these groups ("" = ungrouped); empty = all
     std::vector<std::string> skipGroups;    // Module: groups shown on another tab
     std::vector<std::string> nested;        // Module: modules drawn below as sections with their own switch

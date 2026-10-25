@@ -1082,6 +1082,15 @@ CardSections PrepareCardSections(const ModuleView& card, const std::vector<layou
     return cs;
 }
 
+bool GroupShown(const ModuleView& card, const GroupView& g, const CardSections& cs) {
+    return std::any_of(g.defs.begin(), g.defs.end(), [&](const settings::Def& d) { return RowShown(card, d, cs.n, {}); });
+}
+
+bool AnyUnplacedGroup(const ModuleView& card, const CardSections& cs) {
+    return std::any_of(cs.all.begin(), cs.all.end(),
+                       [&](const GroupView* g) { return !cs.named.count(g->name) && GroupShown(card, *g, cs); });
+}
+
 void DrawUnplacedGroups(const Host& h, const ModuleView& card, bool cardOn, const CardSections& cs) {
     ImGui::BeginDisabled(!cardOn);
     for (const auto* g : cs.all)
@@ -1089,77 +1098,104 @@ void DrawUnplacedGroups(const Host& h, const ModuleView& card, bool cardOn, cons
     ImGui::EndDisabled();
 }
 
-void DrawSectionCards(const Host& h, const Tab& tab, const ModuleView& card, bool cardOn,
-                      const std::vector<layout::CardSection>& secs, const CardSections& cs,
-                      const std::vector<ModuleView>& views, float w) {
+// One section card, then the gap under it; nothing when it has nothing to show.
+void DrawSectionCard(const Host& h, const Tab& tab, const ModuleView& card, bool cardOn, const layout::CardSection& sec,
+                     const CardSections& cs, const std::vector<ModuleView>& views, float w) {
     const Palette& P = theme::Colors();
-    auto anyShown = [&](const GroupView& g) {
-        return std::any_of(g.defs.begin(), g.defs.end(), [&](const settings::Def& d) { return RowShown(card, d, cs.n, {}); });
-    };
-    for (const auto& sec : secs) {
-        std::vector<const GroupView*> groups;
-        for (const auto& name : sec.groups)
-            for (const auto* g : cs.all)
-                if (g->name == name && anyShown(*g)) groups.push_back(g);
-        std::vector<const ModuleView*> mods;
-        for (const auto& m : sec.modules)
-            if (const ModuleView* mv = FindView(views, m)) mods.push_back(mv);
-        if (groups.empty() && mods.empty()) continue;
-        BeginCard(("section/" + sec.title).c_str(), w);
-        CardHeading(sec.title.c_str(), P.head);
-        if (!sec.note.empty()) {
-            FontScope f(theme::Body(), theme::kSmallSize);
+    std::vector<const GroupView*> groups;
+    for (const auto& name : sec.groups)
+        for (const auto* g : cs.all)
+            if (g->name == name && GroupShown(card, *g, cs)) groups.push_back(g);
+    std::vector<const ModuleView*> mods;
+    for (const auto& m : sec.modules)
+        if (const ModuleView* mv = FindView(views, m)) mods.push_back(mv);
+    if (groups.empty() && mods.empty()) return;
+    BeginCard(("section/" + sec.title).c_str(), w);
+    CardHeading(sec.title.c_str(), P.head);
+    if (!sec.note.empty()) {
+        FontScope f(theme::Body(), theme::kSmallSize);
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, P.dim);
+        ImGui::TextUnformatted(sec.note.c_str());
+        ImGui::PopStyleColor();
+        ImGui::PopTextWrapPos();
+    }
+    ImGui::BeginDisabled(!cardOn);
+    for (const auto* g : groups) DrawGroupRows(h, card, *g, cs.n, {}, {});
+    ImGui::EndDisabled();
+    for (const ModuleView* mv : mods) {
+        const bool needsCard = std::find(sec.needCard.begin(), sec.needCard.end(), mv->module) != sec.needCard.end();
+        ImGui::PushID(mv->module.c_str());
+        ImGui::BeginDisabled(needsCard && !cardOn);
+        if (mv->hasEnabled) {
+            settings::Def d = mv->enabled;
+            const auto label = tab.switchLabel.find(mv->module);
+            const auto help = tab.cardHelp.find(mv->module);
+            const std::string lock = settings::LockReason(mv->module, "enabled");  // pinned by the module
+            if (help != tab.cardHelp.end()) d.tooltip = help->second;
+            if (!lock.empty()) d.tooltip = lock;
+            ImGui::BeginDisabled(!lock.empty());
+            DrawRow(h, d, label != tab.switchLabel.end() ? label->second : mv->title, false);
+            ImGui::EndDisabled();
+        }
+        bool failed = false;
+        const std::string status = ModuleStatus(mv->module, &failed);
+        if (failed) {
             ImGui::PushTextWrapPos(0.0f);
-            ImGui::PushStyleColor(ImGuiCol_Text, P.dim);
-            ImGui::TextUnformatted(sec.note.c_str());
-            ImGui::PopStyleColor();
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.err), "%s failed: %s", mv->title.c_str(), status.c_str());
             ImGui::PopTextWrapPos();
         }
-        ImGui::BeginDisabled(!cardOn);
-        for (const auto* g : groups) DrawGroupRows(h, card, *g, cs.n, {}, {});
+        std::vector<const GroupView*> own;
+        for (const auto& g : mv->groups) own.push_back(&g);
+        const Nesting ownNest = BuildNesting(own, {});
+        ImGui::BeginDisabled(!ModuleOn(*mv));
+        for (const auto* g : own) DrawGroupRows(h, *mv, *g, ownNest, {}, {});
         ImGui::EndDisabled();
-        for (const ModuleView* mv : mods) {
-            const bool needsCard = std::find(sec.needCard.begin(), sec.needCard.end(), mv->module) != sec.needCard.end();
-            ImGui::PushID(mv->module.c_str());
-            ImGui::BeginDisabled(needsCard && !cardOn);
-            if (mv->hasEnabled) {
-                settings::Def d = mv->enabled;
-                const auto label = tab.switchLabel.find(mv->module);
-                const auto help = tab.cardHelp.find(mv->module);
-                const std::string lock = settings::LockReason(mv->module, "enabled");  // pinned by the module
-                if (help != tab.cardHelp.end()) d.tooltip = help->second;
-                if (!lock.empty()) d.tooltip = lock;
-                ImGui::BeginDisabled(!lock.empty());
-                DrawRow(h, d, label != tab.switchLabel.end() ? label->second : mv->title, false);
-                ImGui::EndDisabled();
-            }
-            bool failed = false;
-            const std::string status = ModuleStatus(mv->module, &failed);
-            if (failed) {
-                ImGui::PushTextWrapPos(0.0f);
-                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.err), "%s failed: %s", mv->title.c_str(), status.c_str());
-                ImGui::PopTextWrapPos();
-            }
-            std::vector<const GroupView*> own;
-            for (const auto& g : mv->groups) own.push_back(&g);
-            const Nesting ownNest = BuildNesting(own, {});
-            ImGui::BeginDisabled(!ModuleOn(*mv));
-            for (const auto* g : own) DrawGroupRows(h, *mv, *g, ownNest, {}, {});
-            ImGui::EndDisabled();
-            ImGui::EndDisabled();
-            ImGui::PopID();
-        }
+        ImGui::EndDisabled();
+        ImGui::PopID();
+    }
+    EndCard();
+    ImGui::Dummy(ImVec2(0, U(kGap) - ImGui::GetStyle().ItemSpacing.y));
+}
+
+// Ranch > Upgrades: a Cards tab whose own module (Tab::module, Custom Upgrades) has its switch in the tab bar
+// (round 15: "make the custom upgrades toggle show on the top right where the menu close button is, its supposed
+// to be a subtab switch, plot upgrades group on the left refinery on the right"). No card of its own: its
+// section cards side by side, the first in the left column, the second in the right, and so on.
+void DrawTabModuleSections(const Host& h, const Tab& tab, const ModuleView& mv, const std::vector<ModuleView>& views) {
+    const float w = ColumnWidth();
+    const bool on = ModuleOn(mv);
+    FailedBanner(mv);
+    const auto secs = tab.sections.find(mv.module);
+    if (secs == tab.sections.end()) return;
+    const CardSections cs = PrepareCardSections(mv, secs->second);
+    if (AnyUnplacedGroup(mv, cs)) {  // its groups no section names: a full-width card above the columns
+        BeginCard("unplaced", ImGui::GetContentRegionAvail().x);
+        DrawUnplacedGroups(h, mv, on, cs);
         EndCard();
         ImGui::Dummy(ImVec2(0, U(kGap) - ImGui::GetStyle().ItemSpacing.y));
+    }
+    for (int c = 0; c < 2; ++c) {
+        if (c > 0) ImGui::SameLine(0, U(kGap));
+        ImGui::BeginGroup();
+        for (size_t i = static_cast<size_t>(c); i < secs->second.size(); i += 2)
+            DrawSectionCard(h, tab, mv, on, secs->second[i], cs, views, w);
+        ImGui::Dummy(ImVec2(w, 0));  // the column keeps its width without a card
+        ImGui::EndGroup();
     }
 }
 
 // Misc > General, Ranch > Upgrades: one card per module, the module's switch in the card header, in two
 // columns. A stacked tab has its first column full width and the next two side by side under it (unused since
-// round 12). A card with Tab::sections has them as cards of their own under it (DrawSectionCards).
+// round 12). A card with Tab::sections has them as cards of their own under it (DrawSectionCard); the tab's own
+// module (Tab::module) has no card, and the tab shows just its sections: DrawTabModuleSections.
 void DrawCardsPage(const Host& h, const Tab& tab, const std::vector<ModuleView>& views) {
     const Palette& P = theme::Colors();
     const float w = ColumnWidth();
+    if (!tab.module.empty()) {
+        if (const ModuleView* mv = FindView(views, tab.module)) DrawTabModuleSections(h, tab, *mv, views);
+        return;
+    }
     const size_t first = tab.stacked ? 1 : 0;  // the first of the two side-by-side columns
     const size_t end = std::min(tab.columns.size(), first + 2);
     for (size_t c = 0; c < end; ++c) {
@@ -1215,7 +1251,8 @@ void DrawCardsPage(const Host& h, const Tab& tab, const std::vector<ModuleView>&
             }
             EndCard();
             ImGui::Dummy(ImVec2(0, U(kGap) - ImGui::GetStyle().ItemSpacing.y));
-            if (cs) DrawSectionCards(h, tab, *mv, on, secs->second, *cs, views, cw);
+            if (cs)
+                for (const auto& sec : secs->second) DrawSectionCard(h, tab, *mv, on, sec, *cs, views, cw);
             ImGui::PopID();
         }
         ImGui::EndGroup();
@@ -1479,6 +1516,7 @@ SbxGrid g_ctxGrid = SbxGrid::Vacpack;
 int g_ctxSlot = -1;  // the vacpack slot the menu was opened on (its Fill / Empty entries); -1: a grid tile
 ImVec2 g_ctxAt;      // where the menu opens (the right-click; item_grid::Result::menuAt for a grid tile)
 ImVec2 g_ctxSize;    // the menu's size as its last frame laid it out (what the next frame places it by)
+int g_ctxFrames = 0;  // frames the menu was drawn since it opened (the second, its first shown, is logged)
 constexpr const char* kSbxCtx = "##sbx_item_ctx";
 constexpr const char* kCraftCtx = "##sbx_craft_ctx";  // the crafter's right-click menu (variants)
 uintptr_t g_craftCtx = 0;                             // the recipe it was opened on
@@ -2299,6 +2337,15 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                                 ImGuiCond_Always);
     }
     if (ImGui::BeginPopup(kSbxCtx)) {
+        if (++g_ctxFrames == 2) {
+            // The first frame shown: where it went, by which size, against the size it has (round 15: a menu opened
+            // upward was reported above the cursor; this line shows whether the two sizes differ).
+            const ImGuiViewport* vp = ImGui::GetMainViewport();
+            const ImVec2 pos = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize();
+            SR2_INFO("[sandbox] item menu: at ({:.0f}, {:.0f}), placed ({:.0f}, {:.0f}) by size {:.0f} x {:.0f}, window {:.0f} x "
+                     "{:.0f}, screen {:.0f} x {:.0f}",
+                     g_ctxAt.x, g_ctxAt.y, pos.x, pos.y, g_ctxSize.x, g_ctxSize.y, sz.x, sz.y, vp->WorkSize.x, vp->WorkSize.y);
+        }
         FloatingSurface(true);
         const sbx::Item* self = FindItem(s, g_ctxItem);
         const sbx::Relation* r = FindRelation(s, g_ctxItem);
@@ -2566,7 +2613,9 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                     ImGui::EndMenu();
                 }
             }
-            if (gives.empty() && largos.empty() && self->kind != sbx::Kind::Largo) {
+            // Not for a food (round 15: "for food. when no favourites, dont show" it): the menu is just its name then.
+            if (gives.empty() && largos.empty() && self->kind != sbx::Kind::Largo && self->kind != sbx::Kind::Food &&
+                self->kind != sbx::Kind::Animal) {
                 // Wrapped at the row width, not at the window's edge: the hidden first frame lays out at width 0,
                 // where a wrapped line is as tall as its words (see the placement above).
                 FontScope f(theme::Body(), theme::kSmallSize);
@@ -2579,11 +2628,10 @@ void ItemContextMenu(const sbx::Snapshot& s) {
         }
         if (PopupCancelled()) ImGui::CloseCurrentPopup();
         {
-            // This frame's layout, which ImGui's auto-fit sizes the window by next frame: the next frame's placement.
-            const ImGuiWindow* w = ImGui::GetCurrentWindow();
-            const ImVec2 pad = ImGui::GetStyle().WindowPadding;
-            g_ctxSize = ImVec2(std::max(w->DC.CursorMaxPos.x, w->DC.IdealMaxPos.x) - w->DC.CursorStartPos.x + pad.x * 2.0f,
-                               std::max(w->DC.CursorMaxPos.y, w->DC.IdealMaxPos.y) - w->DC.CursorStartPos.y + pad.y * 2.0f);
+            // The size ImGui's auto-fit gives the window next frame, from this frame's layout: the next frame's
+            // placement. ImGui's own calculation (round 15), not content + padding: that missed the clamps (minimum
+            // size, at most the screen less its safe area, a scrollbar) and a menu opened upward sat above the cursor.
+            g_ctxSize = ImGui::CalcWindowNextAutoFitSize(ImGui::GetCurrentWindow());
         }
         ImGui::EndPopup();
     }
@@ -2594,6 +2642,7 @@ void ItemContextMenu(const sbx::Snapshot& s) {
 void OpenItemContext(uintptr_t id, SbxGrid grid, int slot = -1, const ImVec2* at = nullptr) {
     g_ctxAt = at ? *at : ImGui::IsMousePosValid() ? ImGui::GetMousePos() : ImGui::GetItemRectMin();
     g_ctxSize = ImVec2(0, 0);  // measured on the menu's first (hidden) frame
+    g_ctxFrames = 0;
     g_ctxItem = id;
     g_ctxGrid = grid;
     g_ctxSlot = slot;
@@ -4643,7 +4692,9 @@ struct TabState {
 
 TabState StateOf(const Tab& t, const std::vector<ModuleView>& views) {
     TabState s;
-    if (t.kind != TabKind::Module && t.kind != TabKind::Sandbox && t.kind != TabKind::SlimeDj) return s;
+    if (t.kind != TabKind::Module && t.kind != TabKind::Sandbox && t.kind != TabKind::SlimeDj &&
+        !(t.kind == TabKind::Cards && !t.module.empty()))  // Ranch > Upgrades: Custom Upgrades
+        return s;
     const ModuleView* mv = FindView(views, t.module);
     if (!mv) return s;
     const bool moduleOn = ModuleOn(*mv);
