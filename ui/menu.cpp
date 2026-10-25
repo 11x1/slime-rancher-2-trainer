@@ -28,6 +28,7 @@
 #include "imgui_internal.h"
 #include "menu_layout.h"
 #include "item_grid.h"
+#include "nav.h"
 #include "sandbox_bridge.h"
 #include "sandbox_extras_bridge.h"
 #include "sandbox_upgrades.h"
@@ -266,9 +267,11 @@ bool HasConsoleName(const std::string& text) {
     return false;
 }
 
-// Minimum tooltip widths (design px): plain text tips, and the Sandbox item / rich tips, which
-// are as wide as their key rows when they have some and were narrow without (a name and a tag).
-constexpr float kTipMinW = 160, kRichTipMinW = 230;
+// Minimum tooltip widths (design px): plain text tips, and the Sandbox item / rich tips. Those with
+// favourite rows come out about 260-300 px wide; the ones with only a name, a tag and the click rows
+// (an empty or locked slot, an item with no favourites) were 230 and still looked squeezed next to
+// them (round 11), so the minimum is about the width of a tip with favourite rows.
+constexpr float kTipMinW = 160, kRichTipMinW = 280;
 
 void Tooltip(const std::string& text) {
     if (text.empty()) return;
@@ -376,24 +379,48 @@ void DrawIcon(ImDrawList* dl, layout::Icon icon, ImVec2 o, ImU32 col) {
                 for (float x : {2.5f, 10.5f}) dl->AddRect(P(x, y), P(x + 5, y + 5), col, 1.5f * k, 0, th * 0.9f);
             break;
         case layout::Icon::Sandbox: {
-            // A four-pointed sparkle and a small one top right (cheats / magic).
-            auto star = [&](float cx, float cy, float r, float in) {
-                for (int i = 0; i < 8; ++i) {
-                    const float a = static_cast<float>(i) * kPi / 4 - kPi / 2, rr = i % 2 == 0 ? r : in;
-                    dl->PathLineTo(P(cx + std::cos(a) * rr, cy + std::sin(a) * rr));
+            // A four-pointed sparkle and a small filled one top right (cheats / magic), inside the
+            // same 2..16 box as the other icons. Round tips (a half circle each) and curved sides
+            // meeting them tangentially: a smooth outline, so the stroke has no mitre spikes (round 11:
+            // the straight-edged star was too big and looked sharp next to the other icons).
+            auto sparkle = [&](float cx, float cy, float r, float tip) {
+                constexpr int kCap = 8;
+                for (int i = 0; i < 4; ++i) {
+                    const float a = static_cast<float>(i) * kPi / 2 - kPi / 2;
+                    const float an = a + kPi / 2;  // the next tip
+                    const ImVec2 d(std::cos(a), std::sin(a)), dn(std::cos(an), std::sin(an));
+                    const ImVec2 q(cx + d.x * (r - tip), cy + d.y * (r - tip));  // this tip's cap centre
+                    // The cap from a - 90 to a + 90 degrees; its first point is where the last curve ended.
+                    for (int j = i == 0 ? 0 : 1; j <= kCap; ++j) {
+                        const float t = a - kPi / 2 + kPi * static_cast<float>(j) / kCap;
+                        dl->PathLineTo(P(q.x + std::cos(t) * tip, q.y + std::sin(t) * tip));
+                    }
+                    // From the cap back towards the centre and out to the next tip's cap.
+                    const float l = (r - tip) * 0.75f;
+                    const ImVec2 e(q.x + dn.x * tip, q.y + dn.y * tip);
+                    const ImVec2 sn(cx + dn.x * (r - tip) + d.x * tip, cy + dn.y * (r - tip) + d.y * tip);
+                    dl->PathBezierCubicCurveTo(P(e.x - d.x * l, e.y - d.y * l), P(sn.x - dn.x * l, sn.y - dn.y * l), P(sn.x, sn.y), 10);
                 }
+                dl->_Path.pop_back();  // the last curve ends on the first point
             };
-            star(7.5f, 10.5f, 6.5f, 2.0f);
+            sparkle(7.5f, 10.5f, 5.6f, 1.1f);
             dl->PathStroke(col, ImDrawFlags_Closed, th * 0.9f);
-            star(14.0f, 4.0f, 3.0f, 1.0f);
+            sparkle(13.6f, 4.4f, 2.7f, 0.7f);
             dl->PathFillConcave(col);
             break;
         }
-        case layout::Icon::Profiles:
-            dl->AddLine(P(3, 5), P(15, 5), col, th);
-            dl->AddLine(P(3, 9), P(15, 9), col, th);
-            dl->AddLine(P(3, 13), P(11, 13), col, th);
+        case layout::Icon::Profiles: {
+            // Three list lines with round ends (round 11).
+            auto line = [&](float x0, float x1, float y) {
+                dl->AddLine(P(x0, y), P(x1, y), col, th);
+                dl->AddCircleFilled(P(x0, y), th * 0.5f, col, 12);
+                dl->AddCircleFilled(P(x1, y), th * 0.5f, col, 12);
+            };
+            line(3.5f, 14.5f, 5);
+            line(3.5f, 14.5f, 9);
+            line(3.5f, 10.5f, 13);
             break;
+        }
         case layout::Icon::Settings:
             dl->AddCircle(P(9, 9), 2.6f * k, col, 0, th);
             for (int i = 0; i < 8; ++i) {
@@ -466,8 +493,8 @@ void DrawSlimeFallback(ImDrawList* dl, ImVec2 min, ImVec2 max) {
 // whole-pixel position with its ink (not its line box) centred.
 void HelpMarker(const char* id, float size, const std::string& tip) {
     const Palette& P = theme::Colors();
-    ImGui::InvisibleButton(id, ImVec2(size, size));
-    const bool hov = ImGui::IsItemHovered() || ImGui::IsItemFocused();
+    nav::Button(id, ImVec2(size, size));
+    const bool hov = ImGui::IsItemHovered() || nav::Focused();
     const ImVec2 a = ImGui::GetItemRectMin();
     const ImVec2 c(std::floor(a.x + size * 0.5f) + 0.5f, std::floor(a.y + size * 0.5f) + 0.5f);
     const float r = std::floor(size * 0.5f) - 0.5f;
@@ -481,6 +508,7 @@ void HelpMarker(const char* id, float size, const std::string& tip) {
     ImVec2 qp = g ? ImVec2(c.x - (g->X0 + g->X1) * 0.5f, c.y - (g->Y0 + g->Y1) * 0.5f) : c;
     qp = ImVec2(std::round(qp.x), std::round(qp.y));
     dl->AddText(qf, qs, qp, ImGui::GetColorU32(hov ? P.text : P.soft), "?");
+    nav::Ring(size * 0.5f);
     if (hov) Tooltip(tip);
 }
 
@@ -490,7 +518,7 @@ bool Switch(const char* id, bool on) {
     const ImVec2 size(U(kSwitchW), U(kSwitchH));
     const ImVec2 cur = ImGui::GetCursorScreenPos();
     ImGui::SetCursorScreenPos(ImVec2(cur.x, cur.y + (ImGui::GetFrameHeight() - size.y) * 0.5f));
-    const bool clicked = ImGui::InvisibleButton(id, size);
+    const bool clicked = nav::Button(id, size);  // takes Tab focus (Space toggles)
     const bool hovered = ImGui::IsItemHovered();
     float* t = ImGui::GetStateStorage()->GetFloatRef(ImGui::GetItemID(), on ? 1.0f : 0.0f);
     *t = Approach(*t, on ? 1.0f : 0.0f, 9.0f);
@@ -502,6 +530,7 @@ bool Switch(const char* id, bool on) {
     dl->AddRectFilled(a, b, ImGui::GetColorU32(bg), size.y * 0.5f);
     const float r = U(8), x = a.x + U(4) + r + Smooth(*t) * (size.x - U(8) - 2 * r);
     dl->AddCircleFilled(ImVec2(x, (a.y + b.y) * 0.5f), r, ImGui::GetColorU32(Mix(P.dim, IM_COL32_WHITE, Smooth(*t))));
+    nav::Ring(size.y * 0.5f);
     return clicked;
 }
 
@@ -1147,11 +1176,12 @@ void DrawProfilesPage(const Host& h) {
         ImGui::PushID(i.name.c_str());
         const bool isSel = sel && SameName(i.name, sel->name);
         const ImVec2 size(ImGui::GetContentRegionAvail().x, U(38));
-        if (ImGui::InvisibleButton("##p", size)) g_profSel = i.name;
+        if (nav::Button("##p", size)) g_profSel = i.name;
         const bool hovered = ImGui::IsItemHovered();
         if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && i.valid) profiles::Load(i.name);
         const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
         if (isSel || hovered) dl->AddRectFilled(a, b, isSel ? P.sel : P.hover, U(10));
+        nav::Ring(U(10));
         Text(dl, theme::Body(), theme::kBodySize, ImVec2(a.x + U(12), (a.y + b.y) * 0.5f - ImGui::GetFontSize() * 0.5f),
              i.valid ? P.text : P.err, i.name.c_str());
         const ImVec2 rc(b.x - U(10), (a.y + b.y) * 0.5f);
@@ -1932,7 +1962,7 @@ void SubTabs(const char* id, const std::vector<std::string>& labels, int& sel) {
         const float tw = ts.x + 2 * padX;
         ImGui::SetCursorScreenPos(ImVec2(x, cy - tabH * 0.5f));
         ImGui::PushID(static_cast<int>(i));
-        if (ImGui::InvisibleButton("##sub", ImVec2(tw, tabH), ImGuiButtonFlags_PressedOnClick)) sel = static_cast<int>(i);
+        if (nav::Button("##sub", ImVec2(tw, tabH), ImGuiButtonFlags_PressedOnClick)) sel = static_cast<int>(i);
         const bool hovered = ImGui::IsItemHovered();
         ImGui::PopID();
         const bool on = sel == static_cast<int>(i);
@@ -1942,6 +1972,7 @@ void SubTabs(const char* id, const std::vector<std::string>& labels, int& sel) {
         const ImVec2 a(x, cy - tabH * 0.5f);
         if (bg) dl->AddRectFilled(a, ImVec2(a.x + tw, a.y + tabH), bg, U(8));
         Text(dl, f, kFont, ImVec2(a.x + padX, std::round(cy - ts.y * 0.5f)), ink, labels[i].c_str());
+        nav::Ring(U(8));
         x += tw + sp;
     }
     ImGui::SetCursorScreenPos(o);
@@ -2374,14 +2405,17 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     const float e = std::max(U(24), std::floor(std::min(U(92), (avail - gap * static_cast<float>(n - 1)) / static_cast<float>(n))));
     uintptr_t slotMenu = 0;  // right-clicked slot's item: its give menu opens after the loop (popup id outside the slot's id)
     int slotMenuIdx = -1;    // that slot
+    nav::TabGroup slotNav("##slotnav");  // the slots are one Tab stop, the arrows move between them
     for (int i = 0; i < n; ++i) {
         const sbx::Slot& sl = s.slots[static_cast<size_t>(i)];
         const int count = SlotCount(sl, i);
         ImGui::PushID(i);
         if (i > 0) ImGui::SameLine(0, gap);
+        slotNav.Item(static_cast<uint64_t>(i));
         const bool pressed =
-            ImGui::InvisibleButton("##slot", ImVec2(e, e), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
-        const bool right = pressed && ImGui::IsMouseReleased(ImGuiMouseButton_Right);
+            nav::Button("##slot", ImVec2(e, e), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+        slotNav.Done();
+        const bool right = (pressed && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) || nav::ContextKey();
         const bool clicked = pressed && !right;
         const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
         const bool hot = hovered && (sl.unlocked || sl.unlockable);
@@ -2442,6 +2476,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
         t.accent = sl.item ? KindAccent(sl.kind) : 0;
         t.dimmed = !sl.unlocked;
         item_grid::DrawTile(dl, a, b, t, hot, sl.unlocked && i == g_sbxSlot, g_scale);
+        nav::Ring(a, b, U(6));
         const float fs = theme::kSmallSize;
         Text(dl, body, fs, ImVec2(a.x + U(6), a.y + U(4)), P.dim, std::to_string(i + 1).c_str());
         if (!sl.unlocked) {
@@ -3442,11 +3477,12 @@ bool ContainsCi(const std::string& hay, const std::string& needle) {
 template <class F>
 bool DjIconButton(const char* id, float size, const char* tip, F&& draw) {
     const Palette& P = theme::Colors();
-    const bool clicked = ImGui::InvisibleButton(id, ImVec2(size, size));
+    const bool clicked = nav::Button(id, ImVec2(size, size));
     const bool hov = ImGui::IsItemHovered();
     const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     if (hov) dl->AddRectFilled(a, b, ImGui::GetColorU32(P.frameHover), U(6));
+    nav::Ring(U(6));
     draw(ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), ImGui::GetColorU32(hov ? P.text : P.soft));
     HoverTip(tip);
     return clicked;
@@ -3471,11 +3507,12 @@ void DrawArrow(ImDrawList* dl, ImVec2 c, ImU32 col, bool up) {
 bool DjRow(const char* id, const std::string& text, const std::string& right, bool current, bool bad, float buttonsW) {
     const Palette& P = theme::Colors();
     const float w = ImGui::GetContentRegionAvail().x - buttonsW, h = U(30);
-    const bool clicked = ImGui::InvisibleButton(id, ImVec2(std::max(1.0f, w), h));
+    const bool clicked = nav::Button(id, ImVec2(std::max(1.0f, w), h));
     const bool hov = ImGui::IsItemHovered();
     const ImVec2 a = ImGui::GetItemRectMin(), b(a.x + w + buttonsW, a.y + h);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     if (current || hov) dl->AddRectFilled(a, b, ImGui::GetColorU32(current ? P.sel : P.hover), U(8));
+    nav::Ring(U(8));
     ImFont* body = theme::Body();
     const float fs = theme::kBodySize;
     const ImVec2 rs = TextSize(body, theme::kSmallSize, right.c_str());
@@ -3526,7 +3563,9 @@ void DjSongs(const djb::Snapshot& s, float w, float listH) {
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(4), U(2)));
-    ImGui::BeginChild("##djsonglist", ImVec2(0, listH), ImGuiChildFlags_None);
+    // One Tab stop for the list (the song focused last), the arrows move between rows and their + (nav.h).
+    nav::TabGroup songNav("##djsongnav");
+    ImGui::BeginChild("##djsonglist", ImVec2(0, listH), ImGuiChildFlags_NavFlattened);
     if (!s.songs) {
         DimText(s.scanning ? "Reading the music folder..." : "The music folder has not been read yet.");
     } else if (s.songs->empty()) {
@@ -3541,12 +3580,15 @@ void DjSongs(const djb::Snapshot& s, float w, float listH) {
             const bool bad = !song.error.empty();
             const bool current = s.hasSong && s.song == song.id;
             const float rowY = ImGui::GetCursorPosY();
+            songNav.Item(song.id);
             if (DjRow("##row", song.name, song.seconds > 0 ? Clock(song.seconds) : std::string(), current, bad, bs + U(4)) && !bad)
                 DjRequest(djb::Op::Play, song.id);
+            songNav.Done();
             HoverTip(bad ? song.file + "\nNot playable: " + song.error : song.file + "\nClick to play now.");
             ImGui::SameLine(0, U(4));
             ImGui::SetCursorPosY(rowY + (U(30) - bs) * 0.5f);
             ImGui::BeginDisabled(bad);
+            nav::PushNoTabStop();
             if (DjIconButton("##add", bs, addTip.c_str(), [](ImVec2 c, ImU32 col) { DrawPlus(ImGui::GetWindowDrawList(), c, col); })) {
                 if (target) {
                     djb::Action a;
@@ -3558,6 +3600,7 @@ void DjSongs(const djb::Snapshot& s, float w, float listH) {
                     DjRequest(djb::Op::Enqueue, song.id);
                 }
             }
+            nav::PopNoTabStop();
             ImGui::EndDisabled();
             // Back to the row's bottom; the Dummy is the item that ends the line (moving the cursor
             // past the content without one trips ImGui's "submit an item" check at EndChild).
@@ -3568,6 +3611,7 @@ void DjSongs(const djb::Snapshot& s, float w, float listH) {
         if (shown == 0) DimText("No song matches the search.");
     }
     ImGui::EndChild();
+    songNav.End();
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();
     if (s.scanning && s.songs) DimText("Reading the music folder...");
@@ -3684,7 +3728,8 @@ void DjQueue(const djb::Snapshot& s, float w, float listH) {
     ImGui::EndDisabled();
     ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(2), U(2)));
-    ImGui::BeginChild("##djqueue", ImVec2(0, listH), ImGuiChildFlags_None);
+    nav::TabGroup queueNav("##djqueuenav");
+    ImGui::BeginChild("##djqueue", ImVec2(0, listH), ImGuiChildFlags_NavFlattened);
     if (s.queue.empty()) {
         DimText(s.shuffle ? "Empty: random songs play next (Shuffle is on). Use + on a song to queue it."
                           : "Empty: playback stops after this song. Use + on a song to queue it.");
@@ -3694,8 +3739,11 @@ void DjQueue(const djb::Snapshot& s, float w, float listH) {
         const djb::QueueEntry& q = s.queue[i];
         ImGui::PushID(static_cast<int>(q.uid));
         const float rowY = ImGui::GetCursorPosY();
+        queueNav.Item(q.uid);
         DjRow("##row", std::format("{}. {}", i + 1, q.name), q.seconds > 0 ? Clock(q.seconds) : std::string(), false, false,
               3 * (bs + U(2)) + U(2));
+        queueNav.Done();
+        nav::PushNoTabStop();
         ImGui::SameLine(0, U(2));
         ImGui::SetCursorPosY(rowY + (U(30) - bs) * 0.5f);
         ImGui::BeginDisabled(i == 0);
@@ -3710,11 +3758,13 @@ void DjQueue(const djb::Snapshot& s, float w, float listH) {
         ImGui::SameLine(0, U(2));
         if (DjIconButton("##rm", bs, "Remove from the queue", [](ImVec2 c, ImU32 col) { DrawCross(ImGui::GetWindowDrawList(), c, col); }))
             DjRequest(djb::Op::Remove, 0, q.uid);
+        nav::PopNoTabStop();
         ImGui::SetCursorPosY(rowY + U(30));
         ImGui::Dummy(ImVec2(0, 0));  // see DjSongs
         ImGui::PopID();
     }
     ImGui::EndChild();
+    queueNav.End();
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();
     EndCard();
@@ -3807,18 +3857,22 @@ void DjRadios(const djb::Snapshot& s, float w) {
             const float listH = std::min(static_cast<float>(r.playlist.size()), 5.0f) * rowH;
             ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(2), U(2)));
-            ImGui::BeginChild("##pl", ImVec2(0, listH), ImGuiChildFlags_None);
+            nav::TabGroup plNav("##plnav");
+            ImGui::BeginChild("##pl", ImVec2(0, listH), ImGuiChildFlags_NavFlattened);
             for (size_t i = 0; i < r.playlist.size(); ++i) {
                 const djb::RadioEntry& e = r.playlist[i];
                 const int idx = static_cast<int>(i);
                 ImGui::PushID(idx);
                 const float rowY = ImGui::GetCursorPosY();
                 const bool current = r.hasSong && idx == r.index;
+                plNav.Item(static_cast<uint64_t>(i));
                 if (DjRow("##row", std::format("{}. {}", i + 1, e.name), e.seconds > 0 ? Clock(e.seconds) : std::string(), current,
                           e.missing, 3 * (bs + U(2)) + U(2)) &&
                     !e.missing)
                     DjRadioRequest(djb::Op::RadioPlayAt, r.key, idx);
+                plNav.Done();
                 HoverTip(e.missing ? e.file + "\nNot in the music folder (or not playable): skipped." : e.file + "\nClick to play it now.");
+                nav::PushNoTabStop();
                 ImGui::SameLine(0, U(2));
                 ImGui::SetCursorPosY(rowY + (U(30) - bs) * 0.5f);
                 ImGui::BeginDisabled(i == 0);
@@ -3833,11 +3887,13 @@ void DjRadios(const djb::Snapshot& s, float w) {
                 ImGui::SameLine(0, U(2));
                 if (DjIconButton("##rm", bs, "Remove from the playlist", [](ImVec2 c, ImU32 col) { DrawCross(ImGui::GetWindowDrawList(), c, col); }))
                     DjRadioRequest(djb::Op::RadioRemove, r.key, idx);
+                nav::PopNoTabStop();
                 ImGui::SetCursorPosY(rowY + U(30));
                 ImGui::Dummy(ImVec2(0, 0));  // see DjSongs
                 ImGui::PopID();
             }
             ImGui::EndChild();
+            plNav.End();
             ImGui::PopStyleVar();
             ImGui::PopStyleColor();
         }
@@ -4100,11 +4156,12 @@ void SetTheme(const ModuleView* ui, theme::Mode m) {
 bool NavItem(const Category& c, float w) {
     const Palette& P = theme::Colors();
     const bool selected = g_cat == c.id;
-    const bool clicked = ImGui::InvisibleButton(c.id.c_str(), ImVec2(w, U(kNavH)));
+    const bool clicked = nav::Button(c.id.c_str(), ImVec2(w, U(kNavH)));
     const bool hovered = ImGui::IsItemHovered();
     const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     if (selected || hovered) dl->AddRectFilled(a, b, selected ? P.accent : P.hover, U(12));
+    nav::Ring(U(12));
     const ImU32 col = selected ? P.accentInk : (hovered ? P.text : P.soft);
     DrawIcon(dl, c.icon, ImVec2(a.x + U(12), (a.y + b.y) * 0.5f - U(9)), col);
     ImFont* f = theme::Display();
@@ -4125,12 +4182,13 @@ void ThemeTabs(const ModuleView* ui, float w) {
         const ImVec2 p(a.x + U(3) + static_cast<float>(i) * (half + U(3)), a.y + U(3));
         ImGui::SetCursorScreenPos(p);
         ImGui::PushID(i);
-        if (ImGui::InvisibleButton("##theme", ImVec2(half, U(30)))) SetTheme(ui, m);
+        if (nav::Button("##theme", ImVec2(half, U(30)))) SetTheme(ui, m);
         const bool hovered = ImGui::IsItemHovered();
-        ImGui::PopID();
         const bool sel = cur == m;
         const ImU32 bg = sel ? P.tabSel : P.frame;
         if (sel) dl->AddRectFilled(p, ImVec2(p.x + half, p.y + U(30)), bg, U(9));
+        nav::Ring(U(9));
+        ImGui::PopID();
         const ImU32 col = sel ? P.tabInk : (hovered ? P.text : P.soft);
         const char* label = i == 0 ? "Dark" : "Light";
         ImFont* f = theme::Display();
@@ -4237,12 +4295,13 @@ void DrawSidebar(const Host& h, const std::vector<Category>& cats, const ModuleV
         // handler); without a commit, the ISO build time. "copied!" shows ~1.5 s.
         static unsigned long long copiedUntil = 0;
         ImGui::SetCursorScreenPos(ImVec2(x0, sp.y - U(8)));
-        if (ImGui::InvisibleButton("##buildstamp", ImVec2(lineW, U(16)))) {
+        if (nav::Button("##buildstamp", ImVec2(lineW, U(16)))) {
             const char* full = ::sr2::core::build_info::Commit();
             ImGui::SetClipboardText(*full ? full : ::sr2::core::build_info::TimeIso());
             copiedUntil = h.nowMs + 1500;
         }
         const bool hovered = ImGui::IsItemHovered();
+        nav::Ring(U(4));
         if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         // After "copied!" the normal text follows at once while the stamp stays
         // hovered: HoverTip's hover delay restarts after the click, which closed the
@@ -4265,10 +4324,11 @@ void DrawSidebar(const Host& h, const std::vector<Category>& cats, const ModuleV
 
 // --------------------------------------------------------------- top bar ----
 bool IconButton(const char* id, float size) {
-    const bool clicked = ImGui::InvisibleButton(id, ImVec2(size, size));
+    const bool clicked = nav::Button(id, ImVec2(size, size));
     if (ImGui::IsItemHovered())
         ImGui::GetWindowDrawList()->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), theme::Colors().frameHover,
                                                   U(10));
+    nav::Ring(U(10));
     return clicked;
 }
 
@@ -4335,7 +4395,7 @@ bool DrawTopBar(const Category& cat, int& ti, const std::vector<ModuleView>& vie
         const float tw = TextSize(f, 15, t.title.c_str()).x + U(26);
         ImGui::SetCursorScreenPos(ImVec2(x, cy - tabH * 0.5f));
         ImGui::PushID(i);
-        if (ImGui::InvisibleButton("##tab", ImVec2(tw, tabH))) ti = i;
+        if (nav::Button("##tab", ImVec2(tw, tabH))) ti = i;
         const bool hovered = ImGui::IsItemHovered();
         ImGui::PopID();
         const bool sel = i == ti;
@@ -4348,6 +4408,7 @@ bool DrawTopBar(const Category& cat, int& ti, const std::vector<ModuleView>& vie
         if (bg) dl->AddRectFilled(a, ImVec2(a.x + tw, a.y + tabH), bg, U(10));
         const ImVec2 ts = TextSize(f, 15, t.title.c_str());
         Text(dl, f, 15, ImVec2(a.x + U(13), cy - ts.y * 0.5f), ink, t.title.c_str());
+        nav::Ring(U(10));
         x += tw + U(4);
     }
 
@@ -4428,7 +4489,8 @@ void KeepPageScroll(const std::string& page) {
     const bool userScroll =
         (io.MouseWheel != 0.0f && !io.KeyCtrl && !io.KeyShift &&
          ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) ||
-        (ImGui::IsMouseDown(ImGuiMouseButton_Left) && overScrollbar && maxY > 0.0f);
+        (ImGui::IsMouseDown(ImGuiMouseButton_Left) && overScrollbar && maxY > 0.0f) ||
+        GImGui->NavJustMovedToId != 0;  // Tab / arrows moved the focus (and scrolled it into view)
     if (userScroll) ps.pending = false;
     if (ps.pending) {
         if (std::fabs(y - ps.want) <= 0.5f || now - ps.since > 10.0) {
