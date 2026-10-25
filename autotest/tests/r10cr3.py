@@ -108,6 +108,10 @@ def run(t):
     pos = cs[0].get("pos")
     if pos:
         t.teleport(pos=[pos[0] + 6, pos[1] + 1, pos[2] + 6])
+    t.showcase("corral_radio_test", "Corral Radio", "A corral playing its own playlist; the walls dance to the beat.",
+               "slime_dj", hide_hud=True)  # only with run.py --showcase
+    t.showcase("slime_dj_radios", "Slime DJ: corral radios", "Each radio corral's playlist, from the mod menu.",
+               "slime_dj", menu={"cat": "ranch", "tab": "Slime DJ"})
     t.confirm("Do you hear the radio's song at this corral (and only near it when you walk away)?")
 
     t.step(4, "global queue song: other corrals play it, the radio corral keeps its own")

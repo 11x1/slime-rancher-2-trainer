@@ -95,5 +95,16 @@ bool Newbucks(int& out);
 std::string ZoneName();                           // current zone asset name ("" = none)
 std::vector<std::string> OpenMenus();             // active UI roots the mod knows (cached ~1 s)
 
+// Screenshots (showcase): the game HUD (the Canvas on HudUI's GameObject, Behaviour.enabled) and the
+// minimap (its root GameObject; the collectibles tracker is a child of it) hidden for a few frames.
+// GC handles keep what was hidden; RestoreUi puts back only what HideUi changed and frees them.
+struct HiddenUi {
+    Il2CppGCHandle hudCanvas = nullptr;
+    Il2CppGCHandle minimapRoot = nullptr;
+    std::string what;  // for the log: "HUD, minimap" ("" = nothing was showing)
+};
+HiddenUi HideUi(bool hud, bool minimap);  // hud: the HUD and the minimap
+void RestoreUi(HiddenUi& h);
+
 }  // namespace game
 }  // namespace sr2::modules::autotest

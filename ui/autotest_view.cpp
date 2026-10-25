@@ -31,7 +31,14 @@ std::atomic<bool> g_pointer{false}, g_typing{false};
 std::mutex g_shotTurn;
 int g_shotPhase = 0;                     // 0 none, 1 before the overlay, 2 after (guarded by g_mutex)
 std::atomic<int> g_shotWanted{0};        // copy of g_shotPhase for the render thread's cheap check
+std::atomic<bool> g_shotHide{false};     // the pending shot wants the frame without the tag / panel / edges
+std::atomic<bool> g_frameHidden{false};  // render thread: this frame's Draw left them out
 std::optional<Shot> g_shot;              // guarded by g_mutex
+
+// Mod menu page requests (RequestPage); guarded by g_mutex.
+std::optional<PageRequest> g_pageReq;
+uint64_t g_pageNext = 0;
+std::map<uint64_t, std::pair<int, std::string>> g_pageDone;  // id -> (1 / -1, detail)
 
 void Finish(uint64_t id, Answer a) {
     a.id = id;
@@ -90,15 +97,17 @@ bool WaitAnswer(uint64_t id, long long timeoutMs, Answer& out, const std::atomic
 
 bool QuestionOpen() { return g_hasQuestion.load(); }
 
-Shot TakeShot(bool withOverlay, long long timeoutMs) {
+Shot TakeShot(bool withOverlay, long long timeoutMs, bool hideHarness) {
     std::lock_guard turn(g_shotTurn);
     std::unique_lock lk(g_mutex);
     g_shot.reset();
     g_shotPhase = withOverlay ? 2 : 1;
+    g_shotHide = withOverlay && hideHarness;
     g_shotWanted = g_shotPhase;
     const bool got = g_cv.wait_for(lk, std::chrono::milliseconds(timeoutMs), [] { return g_shot.has_value(); });
     g_shotPhase = 0;
     g_shotWanted = 0;
+    g_shotHide = false;
     if (!got) {
         Shot s;
         s.error = "no frame was presented in time (minimised, or the overlay is unavailable)";
@@ -117,7 +126,44 @@ bool WantsGameInputLock() { return g_hasQuestion.load() && (g_pointer.load() || 
 
 bool ShotWanted(bool afterOverlay) {
     const int w = g_shotWanted.load(std::memory_order_relaxed);
-    return w == (afterOverlay ? 2 : 1);
+    if (w != (afterOverlay ? 2 : 1)) return false;
+    // Without the harness bits: only a frame whose Draw left them out (or that had none to draw). A shot
+    // asked for between Draw and this check waits for the next frame.
+    return !afterOverlay || !g_shotHide.load() || g_frameHidden.load() || !HasContent();
+}
+
+uint64_t RequestPage(const std::string& cat, const std::string& tab) {
+    std::lock_guard lk(g_mutex);
+    PageRequest r;
+    r.id = ++g_pageNext;
+    r.cat = cat;
+    r.tab = tab;
+    g_pageReq = r;  // replaces an older one not applied yet
+    return r.id;
+}
+
+int PageResult(uint64_t id, std::string& detail) {
+    std::lock_guard lk(g_mutex);
+    auto it = g_pageDone.find(id);
+    if (it == g_pageDone.end()) return 0;
+    detail = it->second.second;
+    const int r = it->second.first;
+    g_pageDone.erase(it);
+    return r;
+}
+
+bool TakePageRequest(PageRequest& out) {
+    std::lock_guard lk(g_mutex);
+    if (!g_pageReq) return false;
+    out = std::move(*g_pageReq);
+    g_pageReq.reset();
+    return true;
+}
+
+void PageDone(uint64_t id, bool ok, const std::string& detail) {
+    std::lock_guard lk(g_mutex);
+    g_pageDone[id] = {ok ? 1 : -1, detail};
+    if (g_pageDone.size() > 16) g_pageDone.erase(g_pageDone.begin());  // never asked for (caller gone)
 }
 
 void DeliverShot(Shot shot) {
@@ -277,6 +323,10 @@ void DrawQuestion(const Question& q, float s, bool foreground, bool overlayTypin
 
 void Draw(float scale, bool foreground, bool overlayTyping) {
     const float s = scale > 0 ? scale : 1.0f;
+    // A screenshot with the overlay but without the harness bits is pending: leave them out this frame.
+    const bool hide = g_shotWanted.load() == 2 && g_shotHide.load();
+    g_frameHidden = hide;
+    if (hide) return;
     std::optional<Question> q;
     {
         std::lock_guard lk(g_mutex);

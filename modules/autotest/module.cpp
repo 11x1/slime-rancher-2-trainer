@@ -877,9 +877,97 @@ std::string SafeName(std::string s) {
     return s.empty() ? "shot" : s;
 }
 
-Value Screenshot(const Value& args, double timeoutS) {
-    view::Shot shot = view::TakeShot(args["overlay"].asBool(false), static_cast<long long>(std::min(timeoutS, 30.0) * 1000));
+// Waits on the command thread for the settings window to show a page (autotest_view.h RequestPage). The
+// overlay must be open. Returns "<cat> / <tab>".
+std::string ShowPage(const Value& cat, const Value& tab, Clock::time_point deadline, const std::atomic<bool>& cancel) {
+    const std::string tabText = tab.isNumber() ? std::to_string(tab.asInt()) : tab.asString();
+    const uint64_t id = view::RequestPage(cat.asString(), tabText);
+    for (;;) {
+        std::string detail;
+        const int r = view::PageResult(id, detail);
+        if (r > 0) return detail;
+        if (r < 0) throw Error(detail);
+        if (cancel.load()) throw Error("cancelled (the client left or the harness stopped)");
+        if (Clock::now() >= deadline) throw Error("timeout (the mod menu did not draw: overlay unavailable?)");
+        Sleep(30);
+    }
+}
+
+void Settle(long long ms, const std::atomic<bool>& cancel) {
+    for (long long t = 0; t < ms && !cancel.load(); t += 25) Sleep(25);
+}
+
+// `overlay`+: opens or closes the mod menu, optionally at a page (for screenshots of the menu).
+Value OverlayCmd(const Value& args, Clock::time_point deadline, const std::atomic<bool>& cancel) {
+    Value r = Obj();
+    if (!args["open"].asBool(true)) {
+        sr2::ui::overlay::SetOpen(false);
+        r.set("open", Bool(false));
+        return r;
+    }
+    sr2::ui::overlay::SetOpen(true);
+    if (!args["cat"].isNull() || !args["tab"].isNull()) r.set("page", Str(ShowPage(args["cat"], args["tab"], deadline, cancel)));
+    r.set("open", Bool(sr2::ui::overlay::IsOpen()));
+    return r;
+}
+
+// Puts back what a screenshot changed (scope exit, also on errors). The UI goes back on the main thread
+// without waiting (jobs run in order, so before the next command's).
+struct ShotRestore {
+    std::shared_ptr<game::HiddenUi> ui;
+    bool closeMenu = false;
+    ShotRestore() = default;
+    ShotRestore(const ShotRestore&) = delete;
+    ShotRestore& operator=(const ShotRestore&) = delete;
+    ~ShotRestore() {
+        if (closeMenu) sr2::ui::overlay::SetOpen(false);
+        if (!ui || (!ui->hudCanvas && !ui->minimapRoot)) return;
+        main_thread::Post([ui = ui] {
+            std::string why;
+            if (!sr2::core::Try(
+                    [&] {
+                        try {
+                            game::RestoreUi(*ui);
+                        } catch (const Error& e) {
+                            SR2_WARN("[{}] screenshot: could not show the UI again: {}", kModule, e.what());
+                        }
+                    },
+                    &why))
+                sr2::core::MarkModuleFaulted(kModule, "native fault restoring the UI after a screenshot: " + why);
+        });
+    }
+};
+
+Value Screenshot(const Value& args, double timeoutS, Clock::time_point deadline, const std::atomic<bool>& cancel) {
+    const bool hideHud = args["hide_hud"].asBool(false);
+    const bool hideMinimap = args["hide_minimap"].asBool(false);
+    const bool hideHarness = args["hide_harness"].asBool(false);
+    const Value& menu = args["menu"];
+    const bool withMenu = menu.isObject();
+    const bool overlay = args["overlay"].asBool(false) || withMenu;
+    ShotRestore restore;
+    std::string changed;
+    if (withMenu) {
+        restore.closeMenu = !sr2::ui::overlay::IsOpen();
+        sr2::ui::overlay::SetOpen(true);
+        changed = "menu " + ShowPage(menu["cat"], menu["tab"], deadline, cancel);
+    }
+    if (hideHud || hideMinimap) {
+        auto hidden = std::make_shared<game::HiddenUi>();
+        restore.ui = hidden;
+        OnMain(
+            [hidden, hideHud, hideMinimap] {
+                *hidden = game::HideUi(hideHud, hideMinimap);
+                return Value();
+            },
+            deadline, cancel);
+        if (!hidden->what.empty()) changed += (changed.empty() ? "hid " : ", hid ") + hidden->what;
+    }
+    // Hidden / opened things show up (or vanish) a frame or two later: wait a little before the frame.
+    Settle(static_cast<long long>(args["settle_ms"].asNumber(changed.empty() ? 0 : 300)), cancel);
+    view::Shot shot = view::TakeShot(overlay, static_cast<long long>(std::min(timeoutS, 30.0) * 1000), hideHarness);
     if (!shot.ok) throw Error("screenshot failed: " + shot.error);
+    if (!changed.empty()) SR2_INFO("[{}] screenshot '{}': {}", kModule, args["name"].asString(), changed);
     SYSTEMTIME st;
     GetLocalTime(&st);
     const std::string file = std::format("{}_{:04}{:02}{:02}-{:02}{:02}{:02}-{:03}.png", SafeName(args["name"].asString()), st.wYear,
@@ -1027,7 +1115,7 @@ Value SettingsSet(const Value& args) {
 const char* const kCommands[] = {"ping",         "state",       "log_mark",  "settings_get", "settings_set", "saves_list",
                                  "load_slot",    "load_save",   "new_game",  "save",         "quit_to_title", "quit_game",
                                  "delete_slot",  "teleport",    "find",      "probe",        "exec",         "input",
-                                 "screenshot",   "ask",         "cancel_ask", "subscribe_log", "list_names"};
+                                 "screenshot",   "ask",         "cancel_ask", "subscribe_log", "list_names",   "overlay"};
 
 double DefaultTimeout(const std::string& cmd) {
     if (cmd == "load_slot" || cmd == "load_save") return 120;
@@ -1157,7 +1245,8 @@ Value Handle(const std::string& cmd, const Value& args, const std::atomic<bool>&
     if (cmd == "probe") return NamedCall(true, args, deadline, cancel);
     if (cmd == "exec") return NamedCall(false, args, deadline, cancel);
     if (cmd == "input") return Input(args, deadline, cancel);
-    if (cmd == "screenshot") return Screenshot(args, timeoutS);
+    if (cmd == "screenshot") return Screenshot(args, timeoutS, deadline, cancel);
+    if (cmd == "overlay") return OverlayCmd(args, deadline, cancel);
     if (cmd == "ask") return Ask(args, cancel);
     throw Error("unknown command '" + cmd + "'");
 }

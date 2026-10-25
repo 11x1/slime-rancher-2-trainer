@@ -202,6 +202,11 @@ threads open / cancel questions and wait for answers and screenshots, the render
 - Screenshots: `OnPresentImpl` copies the back buffer through a staging texture (resolved when multisampled) before
   `RenderFrame` (or after it for `overlay: true`) and converts R8G8B8A8 / B8G8R8A8 / R10G10B10A2 / R16G16B16A16F to
   RGBA8; the PNG is encoded on the pipe thread.
+- Showcase shots (`hide_harness`): while an overlay shot without the harness bits is pending, `Draw` returns
+  before drawing anything and marks the frame; `ShotWanted(true)` takes only a marked frame.
+- Mod menu pages for shots: `RequestPage(cat, tab)` from the pipe thread; `menu::Draw` takes it first thing
+  (`TakePageRequest`, `ApplyPageRequest` in menu.cpp: category by id or title, tab by title or index) and answers
+  with `PageDone` (the page, or the list of pages when there is no such one).
 
 ## HUD edit mode (`hud_edit.cpp`)
 

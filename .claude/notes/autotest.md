@@ -83,6 +83,9 @@ r11qs2, r11qs3, r11qs4, r12pg4, r15sl5, r12nc2, r7sb8, r9wx3, r9wx4, r12lp4, r11
 4. Clean up slots 5 and 6 when the user says so.
 
 ## C. Showcase screenshots (`feature/autotest-showcase`)
+**Done** (not run in game yet): `autotest/showcase.py`, `autotest/showcase/`, `autotest/build_gallery.py`,
+`run.py --showcase`; harness: `screenshot` hide options + `menu`, the `overlay` command. Docs in autotest/README.md
+("Showcase screenshots") and modules/autotest/NOTES.md. Most shot places are saved by hand on the first run.
 The user: "also during testing, make another tool to take screenshots for a showcase, would go in a new release artifact once im happy with this run".
 - `autotest/showcase.py` plus a `showcase` folder of shot definitions: each shot has an id, a title, a caption, the feature it shows, and its setup through the harness (slot 5 or 6 only, teleport or a saved place, time of day, open a menu or the overlay page, spawn things). It takes the screenshot and writes `autotest/showcase_out/<date>_<time>/<id>.png` and `manifest.json` (title, caption, feature, build sha, settings used). The output folder is gitignored; screenshots are never committed.
 - During test runs: `t.showcase(id, title, caption)` in a test grabs a shot when the test reaches a state worth showing. `run.py --showcase` turns these on, and they are off by default.
