@@ -29,8 +29,7 @@ Skipped: r18cf1, r18cf2 (config cases; see D).
 ## D. Startup hint: no "All features start off" line (`fix/startup-hint-r19`)
 - r18cf1 (skipped): "remove the popup for "All features start off" when this gets tested". Remove the second hint line, "All features start off; enable what you want", and keep the plain "Press F8 for mod settings" hint. The stripped defaults themselves stay.
 
-## E. Frame hitches (`fix/hitches-r19`)
-In the round 18 session the log has 210 `frame hitch` lines. Grouped by the top module: frame:sandbox 29 times (40-75 ms), frame:collectibles 8 (~38 ms), custom_upgrades 6, spawn_scaling 3, drone_price_limit 3. Find what each one does in those frames and spread the work out or cache it:
-- sandbox: probably the round 17 / 18 work (reopen refresh, upgrade cost and description cache, `EnsureNamedSprites` for iconNewBuck, CostOf).
-- collectibles: the repeated "extra scan" for the ghost drone sprite (`game sprites by name (extra scan, ~1500 sprites)` 4 times; the ghost icon gets unloaded and preloaded again).
-Use the perf counters, add finer `SR2_PERF_DETAIL` scopes where needed, and report before/after numbers from the log.
+## E. Frame hitches: re-measure first (`fix/hitches-r19`, only if they persist)
+In the round 18 session the log has 210 `frame hitch` lines: frame:sandbox 29 times (40-75 ms), frame:collectibles 8 (~38 ms), custom_upgrades 6, spawn_scaling 3, drone_price_limit 3. That session ran alongside heavy builds (the history rewrite's clean build check ran 01:13-01:20; the hitches cluster from 01:16). The user: "the hitches couldve been because a build step was running". So:
+- First read the perf lines from the next test session, with no build running (`git config --unset sr2mods.parallelbuilds` while the user plays). Only spawn this task if the hitches persist there.
+- One finding is real regardless: collectibles repeats its ~1500-sprite "extra scan" for the ghost drone sprite (4 times; the sprite gets unloaded and preloaded again). Keeping the sprite referenced once found would stop that. It can go to the collectibles owner, or to wave 2's world agent, if E isn't spawned.
