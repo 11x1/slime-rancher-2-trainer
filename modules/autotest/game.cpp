@@ -48,6 +48,7 @@ struct Syms {
     // saves
     Il2CppClass* autoSave = nullptr;
     size_t asMeta = 0;  // Nullable<GameMetadata>: hasValue at +0, the struct at +8
+    size_t asStorage = 0;  // _storageProvider (FileStorageProvider on Steam: savePath)
     size_t metaName = 0, metaDisplay = 0, metaNumber = 0, metaSlot = 0;  // struct-relative
     const MethodInfo* availableGames = nullptr;
     const MethodInfo* beginLoad = nullptr;
@@ -123,8 +124,11 @@ void Need(const void* p, const char* what) {
 Il2CppObject* Alive(Il2CppObject* o) { return o && unity::IsAlive(o) ? o : nullptr; }
 
 // Every game's summaries: AvailableGamesByGameName() is a Dictionary<string, List<Summary>> built fresh
-// per call. Its corefx layout: _entries (Entry { uint hashCode; int next; string key; List value }) and
-// _count; a free entry has next < -1 (none in a fresh dictionary, checked anyway).
+// per call. Its corefx layout (il2cpp-types.h of the dump): _buckets, _entries (Entry { int hashCode;
+// int next; string key; List value } = 24 bytes) and _count; a free entry has next < -1 (none in a fresh
+// dictionary, checked anyway). The stride check asks il2cpp_class_array_element_size for the ELEMENT class
+// (il2cpp_class_get_element_class of the array's class): given the array class itself it answers
+// sizeof(void*) for any SZARRAY, which was the "unexpected Dictionary entry size 8" of the first live run.
 template <class F>
 void ForEachSummary(F&& fn) {
     Il2CppObject* asd = AutoSave();
@@ -140,9 +144,12 @@ void ForEachSummary(F&& fn) {
     const size_t len = unity::ArrayLength(entries);
     constexpr size_t kEntry = 24;
     using SizeFn = int (*)(Il2CppClass*);
+    using ElemFn = Il2CppClass* (*)(Il2CppClass*);
     static auto elemSize = reinterpret_cast<SizeFn>(GetProcAddress(api().module, "il2cpp_class_array_element_size"));
-    if (entries && elemSize) {
-        const int es = elemSize(api().il2cpp_object_get_class(static_cast<Il2CppObject*>(entries)));
+    static auto elemClass = reinterpret_cast<ElemFn>(GetProcAddress(api().module, "il2cpp_class_get_element_class"));
+    if (entries && elemSize && elemClass) {
+        Il2CppClass* entry = elemClass(api().il2cpp_object_get_class(static_cast<Il2CppObject*>(entries)));
+        const int es = entry ? elemSize(entry) : 0;
         if (es != static_cast<int>(kEntry)) throw Error(std::format("unexpected Dictionary entry size {}", es));
     }
     auto* base = unity::ArrayData<unsigned char>(entries);
@@ -186,7 +193,139 @@ SaveInfo Info(Il2CppObject* sm) {
             s.timeLocal = FormatTime(s.unixUtc + offMin * 60LL);  // the save's own UTC offset
         }
     }
+    s.hasSummary = true;
     return s;
+}
+
+// ---- the save folder (the source of truth for which games and saves exist) ----
+// FileStorageProvider.savePath = persistentDataPath\Steam\<steam id> (re/save.md); a save file is
+// "<GameName>_<i>.sav" with GameName = "<yyyyMMddHHmmss>_<slot>" (StartNewGame adds "_<k>" only when that
+// name already has data), so the rotation index is after the last '_' and the slot after the first.
+std::wstring g_saveFolder;      // main thread only; found once
+std::string g_saveFolderFrom;
+
+bool AllDigits(std::string_view s) {
+    return !s.empty() && std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; });
+}
+
+// "<yyyyMMddHHmmss>_<slot>[_<k>...]_<i>" -> game name and slot (1-based); false for any other file.
+bool ParseSaveName(const std::string& stem, std::string& gameName, int& slot) {
+    const size_t last = stem.rfind('_');
+    if (last == std::string::npos || !AllDigits(std::string_view(stem).substr(last + 1))) return false;
+    gameName = stem.substr(0, last);
+    if (gameName.size() < 16 || gameName[14] != '_' || !AllDigits(std::string_view(gameName).substr(0, 14))) return false;
+    std::string_view rest = std::string_view(gameName).substr(15);
+    const size_t us = rest.find('_');
+    const std::string_view slotText = rest.substr(0, us);
+    if (!AllDigits(slotText) || slotText.size() > 3) return false;
+    for (std::string_view more = us == std::string_view::npos ? std::string_view() : rest.substr(us + 1); !more.empty();) {
+        const size_t n = more.find('_');
+        if (!AllDigits(more.substr(0, n))) return false;
+        more = n == std::string_view::npos ? std::string_view() : more.substr(n + 1);
+    }
+    slot = std::stoi(std::string(slotText));
+    return slot >= 1;
+}
+
+std::wstring Wide(const std::string& s) {
+    if (s.empty()) return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
+    return w;
+}
+
+std::string Narrow(const std::wstring& w) {
+    if (w.empty()) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    std::string s(static_cast<size_t>(n), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+bool IsDir(const std::wstring& p) {
+    const DWORD a = GetFileAttributesW(p.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// The folder: AutoSaveDirector._storageProvider.savePath when it is a FileStorageProvider, else the one
+// account folder under %USERPROFILE%\AppData\LocalLow\MonomiPark\SlimeRancher2\Steam.
+const std::wstring& SaveFolder() {
+    if (!g_saveFolder.empty()) return g_saveFolder;
+    if (Il2CppObject* asd = AutoSave(); asd && g_s.asStorage) {
+        Il2CppObject* sp = unity::Field<Il2CppObject*>(asd, g_s.asStorage);
+        const size_t off = sp ? FieldOffset(api().il2cpp_object_get_class(sp), "savePath") : 0;
+        const std::wstring p = off ? Wide(Utf8(unity::Field<Il2CppString*>(sp, off))) : std::wstring();
+        if (!p.empty() && IsDir(p)) {
+            g_saveFolder = p;
+            g_saveFolderFrom = "storage provider";
+        }
+    }
+    if (g_saveFolder.empty()) {
+        wchar_t profile[MAX_PATH] = {};
+        if (GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH)) {
+            const std::wstring steam = std::wstring(profile) + L"\\AppData\\LocalLow\\MonomiPark\\SlimeRancher2\\Steam";
+            std::vector<std::wstring> accounts;
+            WIN32_FIND_DATAW fd;
+            HANDLE h = FindFirstFileW((steam + L"\\*").c_str(), &fd);
+            if (h != INVALID_HANDLE_VALUE) {
+                do {
+                    if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != L'.') accounts.push_back(fd.cFileName);
+                } while (FindNextFileW(h, &fd));
+                FindClose(h);
+            }
+            if (accounts.size() == 1) {
+                g_saveFolder = steam + L"\\" + accounts.front();
+                g_saveFolderFrom = "LocalLow";
+            } else if (accounts.size() > 1) {
+                SR2_WARN("[{}] save folder: {} Steam account folders under LocalLow and no FileStorageProvider: not guessing",
+                         kModule, accounts.size());
+            }
+        }
+    }
+    if (!g_saveFolder.empty()) SR2_INFO("[{}] save folder ({}): {}", kModule, g_saveFolderFrom, Narrow(g_saveFolder));
+    return g_saveFolder;
+}
+
+long long UnixOf(const FILETIME& ft) {
+    const unsigned long long t = (static_cast<unsigned long long>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    constexpr unsigned long long kUnixEpochFileTime = 116444736000000000ULL;  // 1970-01-01 in 100 ns since 1601
+    return t > kUnixEpochFileTime ? static_cast<long long>((t - kUnixEpochFileTime) / 10000000ULL) : 0;
+}
+
+std::string FormatLocal(long long unix) {
+    std::tm tm{};
+    const std::time_t t = static_cast<std::time_t>(unix);
+    if (localtime_s(&tm, &t)) return {};
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+    return buf;
+}
+
+std::vector<SaveInfo> SaveFiles(const std::wstring& folder) {
+    std::vector<SaveInfo> out;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((folder + L"\\*.sav").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return out;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        const std::string file = Narrow(fd.cFileName);
+        if (file.size() <= 4 || file.compare(file.size() - 4, 4, ".sav") != 0) continue;  // not "*.save" etc.
+        SaveInfo s;
+        int slot = 0;
+        s.saveName = file.substr(0, file.size() - 4);
+        if (!ParseSaveName(s.saveName, s.gameName, slot)) continue;  // profile, settings, anything else
+        s.slotIndex = slot - 1;
+        s.fileName = file;
+        s.fileUnixUtc = UnixOf(fd.ftLastWriteTime);
+        s.unixUtc = s.fileUnixUtc;
+        s.timeUtc = FormatTime(s.unixUtc);
+        s.timeLocal = s.fileTimeLocal = FormatLocal(s.unixUtc);
+        s.displayName = std::to_string(slot);  // what StartNewGame names it; a summary may say otherwise
+        out.push_back(std::move(s));
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return out;
 }
 
 }  // namespace
@@ -293,6 +432,7 @@ void Resolve(std::string& report) {
 
     s.autoSave = Cls(kImage, "MonomiPark.SlimeRancher", "AutoSaveDirector");
     s.asMeta = Off(s.autoSave, "_currentGameMetadata");
+    s.asStorage = Off(s.autoSave, "_storageProvider");
     if (Il2CppClass* meta = Cls(kImage, "MonomiPark.SlimeRancher", "GameMetadata")) {
         auto rel = [&](const char* f) {
             const size_t o = Off(meta, f);
@@ -452,30 +592,73 @@ Metadata MetadataOf(Il2CppObject* asd) {
 
 Metadata CurrentMetadata() { return MetadataOf(AutoSave()); }
 
-std::vector<SaveInfo> Saves() {
-    std::vector<SaveInfo> all;
-    ForEachSummary([&](Il2CppObject* sm) { all.push_back(Info(sm)); });
-    std::stable_sort(all.begin(), all.end(), [](const SaveInfo& a, const SaveInfo& b) {
+bool NewerThan(const SaveInfo& a, const SaveInfo& b) {
+    if (a.saveNumber && b.saveNumber && a.saveNumber != b.saveNumber) return a.saveNumber > b.saveNumber;
+    const long long ta = a.fileUnixUtc ? a.fileUnixUtc : a.unixUtc, tb = b.fileUnixUtc ? b.fileUnixUtc : b.unixUtc;
+    return ta > tb;
+}
+
+SaveList ListSaves() {
+    SaveList r;
+    const std::wstring& folder = SaveFolder();
+    r.folder = Narrow(folder);
+    r.folderFrom = g_saveFolderFrom;
+    if (!folder.empty()) r.saves = SaveFiles(folder);
+    // The summaries: extra details for the files (matched by save name). Without the folder they are the list.
+    std::vector<SaveInfo> summaries;
+    try {
+        ForEachSummary([&](Il2CppObject* sm) { summaries.push_back(Info(sm)); });
+    } catch (const Error& e) {
+        r.summaryError = e.what();
+    }
+    for (SaveInfo& sm : summaries) {
+        auto it = std::find_if(r.saves.begin(), r.saves.end(), [&](const SaveInfo& f) { return f.saveName == sm.saveName; });
+        if (it == r.saves.end()) {
+            if (folder.empty()) r.saves.push_back(std::move(sm));
+            continue;  // a summary without a file: the file is the truth
+        }
+        if (sm.gameName != it->gameName || sm.slotIndex != it->slotIndex)
+            SR2_WARN("[{}] save '{}': its summary says game '{}' slot {}, the file name game '{}' slot {} (file name used)",
+                     kModule, it->saveName, sm.gameName, sm.slotIndex + 1, it->gameName, it->slotIndex + 1);
+        it->displayName = sm.displayName;
+        it->saveNumber = sm.saveNumber;
+        it->invalid = sm.invalid;
+        it->gameOver = sm.gameOver;
+        if (sm.unixUtc) {
+            it->unixUtc = sm.unixUtc;
+            it->timeUtc = sm.timeUtc;
+            it->timeLocal = sm.timeLocal;
+        }
+        it->hasSummary = true;
+    }
+    std::stable_sort(r.saves.begin(), r.saves.end(), [](const SaveInfo& a, const SaveInfo& b) {
         if (a.slotIndex != b.slotIndex) return a.slotIndex < b.slotIndex;
         if (a.gameName != b.gameName) return a.gameName < b.gameName;
-        return a.saveNumber > b.saveNumber;
+        return NewerThan(a, b);
     });
-    return all;
+    if (folder.empty() && !r.summaryError.empty())
+        throw Error("no save list: the save folder was not found and the summaries failed: " + r.summaryError);
+    return r;
 }
+
+std::vector<SaveInfo> Saves() { return ListSaves().saves; }
 
 void BeginLoad(const SaveInfo& want) {
     Need(g_s.beginLoad, "AutoSaveDirector.BeginLoad");
-    Need(g_s.smIdentifier, "Summary.SaveIdentifier");
-    Il2CppObject* target = nullptr;
-    ForEachSummary([&](Il2CppObject* sm) {
-        if (target) return;
-        SaveInfo s = Info(sm);
-        if (s.gameName == want.gameName && s.saveName == want.saveName) target = sm;
-    });
-    if (!target) throw Error("that save is gone: " + want.saveName);
-    Il2CppObject* id = Call(g_s.smIdentifier, target, {}, "Summary.get_SaveIdentifier");
-    if (!id) throw Error("Summary.SaveIdentifier returned nothing");
-    Call(g_s.beginLoad, AutoSave(), {reinterpret_cast<char*>(id) + kHeader, nullptr}, "AutoSaveDirector.BeginLoad");
+    Il2CppObject* asd = AutoSave();
+    if (!asd) throw Error("no AutoSaveDirector");
+    if (want.gameName.empty() || want.saveName.empty()) throw Error("load: no game / save name");
+    if (!g_saveFolder.empty() && !want.fileName.empty() &&
+        GetFileAttributesW((g_saveFolder + L"\\" + Wide(want.fileName)).c_str()) == INVALID_FILE_ATTRIBUTES)
+        throw Error("that save is gone: " + want.fileName);
+    // GameSaveIdentifier { string GameName; string SaveName } (16 bytes, passed by reference). BeginLoad copies
+    // it into its closure / coroutine at once; the strings stay reachable from this stack frame until then.
+    struct Identifier {
+        Il2CppString* gameName;
+        Il2CppString* saveName;
+    } id{unity::NewString(want.gameName), unity::NewString(want.saveName)};
+    if (!id.gameName || !id.saveName) throw Error("il2cpp_string_new failed");
+    Call(g_s.beginLoad, asd, {&id, nullptr}, "AutoSaveDirector.BeginLoad");
 }
 
 void DeleteGame(const std::string& gameName) {
