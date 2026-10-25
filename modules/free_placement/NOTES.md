@@ -2,38 +2,17 @@
 
 Lifts gadget-mode placement limits. Off by default; card on Misc > General.
 
-## Placement path (1.3.0, IDA)
+## Placement path
 
-All in `MonomiPark.SlimeRancher.Player.PlayerItems.GadgetItem`:
+RE: `re/fabricator.md` (GadgetItem placement path, IsPlacementValid, footprint rules, gadget-mode blockers,
+GadgetModel rotation save, teleporter rotation chain), `re/unity.md` (folded `RaycastHit.get_normal`).
 
-- `Update` (0xA494D0) -> `UpdateFootprint` (0xA48050) each frame while a footprint exists.
-  `PlaceGadgetEvent` (0xA45410) calls `UpdateFootprint` once more, then reads the fields it wrote, in this order:
-  `_isFootprintVisible` (silently return), `IsLinkedGadgetInRange` (NotInRange toast),
-  `_isGrounded` (player grounded, via `IPlayerController`; GroundedCheck toast),
-  `_isPlacementBlocked` (BlockedPlacement toast), `_isPlacementValid` (InvalidPlacement toast).
-  All pass -> `SpendableDirector.HasSpendables` / spend, `GadgetDirector.InstantiateGadget(prefab,
-  RegionRegistry.CurrentSceneGroup, placeholder pos, placeholder rot, true, false)`, `Gadget.OnPlaced`,
-  `AddStackedGadget` when `_baseGadget` is set.
-- Footprint visible: ray (length `PlacementFootprintVisibleDist`, mask -1610662149) hits something farther than
-  `MinPlacementFootprintVisibleDist`, on layer 0 (or a stackable base gadget), with normal.y >
-  sin(`FootprintVisibleSlopeThreshold`).
-- `IsPlacementValid(Ray, RaycastHit)` (0xA439F0): distance <= `MaxValidPlacementDist`; stacking onto a stackable
-  gadget only if the placeholder `CanStackOnStackableGadgets`; sin(`MaxValidPlacementSlope`) <= normal.y;
-  placeholder `Gadget.IsCompletelyGrounded(GroundedCheckAdjustment, GroundedRaycastDistance)`.
-- `_isPlacementBlocked` = `Gadget.IsOverlapping(OverlapPlacementFloorTolerance, GadgetOverlapLayers, false)`.
-  The same overload is also called by `ShouldHideGadgetBasedOnPlayerCollision` (inside UpdateFootprint) and by
-  `DefaultDynamicObjectSpawner*.InstantiateGadgetModel`.
-- `IsInLinkedGadgetRange(Vector3)` (0xA43770): only for gadgets with `LinkedDefinition` and `LinkedGadgetRange > 0`:
-  the first placed partner must be within range.
-- Final colour: `SetGadgetPlacementValidity(!blocked && valid && grounded && linked)` (only reached with a held
-  gadget and a visible footprint; otherwise `true`).
-- Rotation: `_rotatingClockwise/_rotatingCounterClockwise` (set by the rotate input callbacks) ->
-  placeholder `Transform.Rotate(up, ±GadgetRotationSpeed * dt, World)`. The placeholder is a child of the
-  footprint, so its yaw accumulates; the footprint rigidbody itself is re-aligned to the surface every frame.
-- No zone/site ownership: a placed gadget is a `GadgetModel` with scene group + position, saved like any other.
-  The only "zone" limits are on entering gadget mode: `PlayerItemController.ToggleItem` refuses inside the ranch
-  house (`_isInRanchHouse`), when dead, while fast-forwarding, or when `_gadgetModeBlocker` (a
-  `DisableGadgetModeTrigger` volume, set by `BlockGadgetMode`, cleared by `UnblockGadgetMode`) is set.
+In short: `GadgetItem.UpdateFootprint` (every frame, and once more in `PlaceGadgetEvent`) writes
+`_isFootprintVisible`, `_isGrounded` (the player), `_isPlacementBlocked` (`Gadget.IsOverlapping`) and
+`_isPlacementValid` (`IsPlacementValid`: distance, stacking, slope, `IsCompletelyGrounded`);
+`PlaceGadgetEvent` reads them plus `IsLinkedGadgetInRange`, then spends and calls the game's
+`InstantiateGadget`. Gadget mode itself is refused in the ranch house and in `DisableGadgetModeTrigger`
+volumes (`PlayerItemController.BlockGadgetMode` / `ToggleItem`). No zone ownership on placed gadgets.
 
 ## What the module does
 

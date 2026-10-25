@@ -1,1491 +1,577 @@
 # custom_upgrades notes
 
-Design and research: `re/custom-upgrades.md` (framework, sidecar, menu, world objects). Code
-comments in `module.cpp`, `coop_world.cpp`, `plot_menu_slider.h` have the details. This file keeps
-findings from in-game tests that are easy to get wrong again.
+What the module does now and what an agent needs to work on it. Framework (ids, sidecar, gate, menu
+injection, world objects): `re/custom-upgrades.md`. Game facts (classes, RVAs, prefab data): the
+per-system `re/*.md` files linked below. Each `.cpp` header comment has the file's details.
 
-## Hen Collector
+## Files
 
-### Placement (fix after the test of build 4d16e38c)
+| file | what |
+|---|---|
+| `module.cpp` | upgrade table `kDefs`, menu injection, HasUpgrade / AddUpgrade, sidecar, gate, tiers, Sell-All sale, silo capacity, demolish, Activate detour |
+| `api.h` | for other modules: `Owns`, `Multiplier`, `CanSell` / `Remove`, `ChainSellTarget`, per-plot / per-save values, `PlotKey`, `HiddenMenuItem`, `IsModGadget` |
+| `coop_world.cpp` | Coop Air Net, Hen Collector (clone, vacuum, Activate, ranch drone linking) |
+| `plot_menu_slider.cpp` | reusable uGUI slider for the plot menu details panel (also used by drone_price_limit) |
+| `silo_world.cpp`, `silo_receipt.cpp`, `sale_notify.cpp` | Sell-All world button, receipt dialog, HUD notices |
+| `plot_props.cpp` | decorative props for owned tiers |
+| `drone_source.cpp`, `drone_programs.cpp`, `drone_battery.cpp` | drone sources, several programs per station, Battery Saver effect |
+| `quantum_link.cpp`, `variant_ext.h` | Quantum Storage Link; owns the gadget-variant hooks the DJ buildables plug into |
+| `dj_buildables.cpp`, `radio_shop.cpp` | DJ Booth, DJ Speaker Stack, Slime Radio; the radio in the shop |
+| `gadget_look.cpp`, `buildables.cpp` | UI looks of mod gadget definitions; `buildables.h` API for the Sandbox |
+| `vacpack_upgrades.cpp`, `fabricator_levels.cpp`, `shadow_catcher.cpp` | Fabricator vacpack upgrades, extra level circles, Shadow Catcher effect |
 
-- The coop prefab's `Deluxe` container (`DeluxeCoopUpgrader.DeluxeStuff`) is **not** identity: its
-  localRotation is (0, -0.707, 0, 0.707), -90 degrees about Y. Its children are laid out in a
-  (+x, -z) frame, so the vanilla elder collector ends up in the plot's **(+x, +z)** corner.
-- Coop corners (plot-local, from the prefab): plot menu `techActivator` (-5.54, -5.54) = (-x, -z);
-  vitamizer `Vitamizer/objCoopVitamizer` (-4.75, 4.75) = (-x, +z); elder collector
-  `Deluxe/ElderCollector/Collector Unit/CollectionPoint` = (+x, +z). **(+x, -z) is free.**
-- 4d16e38c set the clone root to -90 degrees, thinking the container was identity. That is the
-  vanilla transform, so in a deluxe coop the Hen Collector stood exactly inside the vanilla elder
-  collector (same meshes, same place) and could not be seen. The log showed it: renderers enabled
-  and visible to a camera, bounds centre (-4.97, 1.89, -4.95) relative to the plot in world axes.
-  The conservatory coops are turned 180 degrees, so that is plot-local (+x, +z).
-- Now `PickCorner` reads the three occupied corners from the live plot's children (by path,
-  `InverseTransformPoint` into plot space; the prefab layout is the fallback) and turns the clone
-  by a multiple of 90 degrees into the first free corner, (+x, -z) first. Log: `hen collector
-  corner on plot '...': collector turned 0 deg into the (+x, -z) corner ...`. The placement lines
-  now also give the plot-local centre and `vanilla deluxe parts built / not built`.
-- The clone's renderers (prefab data): `plortCollector`, `_funnel`, `_emmit` (the vac tower),
-  2 x techDepositor (frame, inputOutput, Body), 2 x techDisplay1x1, plus the `FX Vac Dust` /
-  `FX Vac Rings` particle systems (inactive between bursts, they make the huge "built" bounds).
+## Plot upgrades (ids, keys)
 
-### Vacuum
+Ids `0x5352xxxx` (`api.h kIdBase`); the key is stored per plot in the sidecar. Never reuse a retired id or
+key: `0x0002 silo_sell_all_now`, `0x0010 corral_collector_2`, `0x0011 corral_collector_3`,
+`0x0012 corral_feeder_2` (a sidecar that still lists one loads fine; ignored and logged).
 
-- `PlortCollector.FixedUpdate` does the whole suction once a joint exists: reel in (maxDistance
-  -5 m/s), store through `_storage.MaybeAddToAnySlot`, `CollectFX` puff, `DestroyActor`, cyclone
-  Animator bool, vac audio. Its only `_model` use is `HasReached(_model.collectorNextTime)` before
-  its own `DoCollection`. A null `_model`, `_region`, `_storage` or `_vacAudio` throws an NRE
-  every physics frame.
-- So the clone's collector runs with a private `LandPlotModel` (collectorNextTime = 1e300, never
-  registered) and the tick builds `DoCollection`'s joints for the chosen chickens only (see the
-  comment in `coop_world.cpp`). `JointReference` is a private nested class, found with
-  `il2cpp_class_get_nested_types`. `Identifiable.get_AmmoMetadata` is virtual, so it is looked up on
-  the chicken's own class (runtime_invoke does not dispatch).
-- Joints are released (`JointReference.Destroy`) before a clone is removed (sold, not owned,
-  module off), so no chicken stays captive on a destroyed joint.
+| id | key | plot | needs | price | what |
+|---|---|---|---|---|---|
+| 0x0001 | `silo_sell_all` | silo | - | 10000 | Sell-All world button + receipt |
+| 0x0060..63 | `silo_capacity_2..5` | silo | Storage Capacity / previous | 3000 / 4500 / 6500 / 9000 | 300 / 400 / 500 / 600 per slot |
+| 0x0013 | `corral_music_2` | corral | Music Box | 2000 | Music Box II, 2x calming |
+| 0x0014 | `corral_radio` | corral | Music Box | 1500 | Corral Radio (slime_dj plays the corral's own playlist) |
+| 0x0020 / 21 | `coop_hens_1` / `_2` | coop | - / I | 2000 / 4000 | hens lay 1.5x / 2x |
+| 0x0030 / 31 | `garden_growth_1` / `_2` | garden | Sprinkler / II | 2000 / 4000 | Sprinkler II / III, crops 1.5x / 2x (keys from the old name Fast Growth) |
+| 0x0040 | `incinerator_ash_boost` | incinerator | Ash Trough | 1500 | 2x ash |
+| 0x0050 | `coop_air_net` | coop | - | 425 | corral Air Net on the coop |
+| 0x0051 | `coop_hen_collector` | coop | - | 1000 | Hen Collector |
 
-### Limits
+Tier effects are applied by plot_upgrades through `Multiplier(obj, family)`. One card per chain
+(`Shown`); a chain that starts on a vanilla upgrade shows on that upgrade's card (`ChainVanillaRoot`).
+Icons: `ModIconName` uses `assets/icons/<name>.png` when embedded (`mod_icons::Has`), else `iconFrom` (a
+vanilla card's icon): Sprinkler II / III the Sprinkler's, Coop Air Net the corral Air Net's, Silo Capacity
+the Storage Capacity's, the Hen Collector `hen_collector_source.png`, the Corral Radio the Music Box's until
+a `corral_radio.png` exists. `growth_1` / `growth_2` stay embedded, unused.
 
-- Two keep-limits per coop: hens 0..58 (default 18), roosters 0..20 (default 2). Chicks never
-  count. Sidecar `hen_collector_keep_hens` / `hen_collector_keep_roosters`; an old
-  `hen_collector_keep` n reads as min(2, n) roosters and the rest hens.
-- The coop menu shows two `PlotMenuSlider`s in one row (`SliderSpec.columns`, `Create(..., rowOf)`).
-- **Mouse only** (feedback round 5: "remove the icons and arrow key functionality for now, will deal
-  with gamepads later"). The sliders take mouse clicks / drags only (`SliderSpec.keys = false`: no pad
-  / keyboard polling, `Step()` refuses); the arrows / d-pad / stick navigate the menu as usual, Submit
-  and Cancel do what they do in vanilla. Removed with it: the select-to-step mode of round 4 (label
-  `< Keep hens: 18 >`, a slider selected by a mouse press or Submit) and its hooks `ListUI.Submit`
-  (0x83F450) and `BaseUI.OnCancelPressed` (0x683490), the `INavigationHandler.TryHandleAsNavigation`
-  (0x79C940) detour (see "Slider keys" below), and the "Pad: d-pad hens, right stick roostros." hint
-  in the card text. `PlotMenuSlider` keeps its pad / key support (`keys = true`, the default) for
-  drone_price_limit, which drives it through `SetPolling` / `Step` from its own navigation.
+Per-plot values: `hen_collector`, `hen_collector_keep_hens` / `_roosters` (plus other modules':
+sell_upgrades' Ash Trough fill, `slime_dj.radio`). Per-save values: `custom_upgrades.on` (gate mark),
+`custom_upgrades.vacpack.*`, `drone_*_source.stations`, `drone_programs.station.<id>`, `quantum_link.*`,
+`dj.*`, `buildables.unlock.<id>`; formats in the sections below.
 
-### Activate button (checklist hc3)
+## Hooks owned here
 
-- The clone keeps the vanilla elder collector's press button (`PlortCollectorActivator` +
-  `TechUIInteractable`, inside the collector branch, so it stands next to the collector in the
-  turned corner) with its `Collector` set to null. The module's `PlortCollectorActivator.Activate`
-  detour never runs the original for a null Collector (vanilla would `StartCollection` = a
-  DoCollection of every adult) and hands the press to `CoopWorld::Activate`: the tick's excess-only
-  vacuum at once (no warm-up, no period wait; the 6 h period restarts). Button animation, press cue
-  and 0.4 s rate limit through `SiloButtons::Press`; a short text above the button ("Collecting N
-  chickens", "Nothing to collect (keeps H hens / R roosters)", "The Hen Collector is full",
-  "Already collecting"). Log: `hen collector on plot '...' (Activate button): ...`.
-- The button is kept only while that detour is installed (`CoopWorld::KeepHenButton`); the build line
-  says `Activate button kept` / `no Activate button`.
+MinHook allows one hook per address; other modules must not hook these:
+- module.cpp: `PlortCollectorActivator.Activate` (null Collector -> never the original; Sell-All buttons,
+  Hen Collector Activate), `LandPlot.HasUpgrade` / `AddUpgrade`, `LandPlotLocation.Replace`, the menu
+  update / `RebuildUI` hooks.
+- quantum_link.cpp (DJ buildables via `variant_ext.h`): `SaveReferenceTranslation.GetPersistenceId`,
+  `GadgetDirector.HasBlueprint` / `GetItemCount`, `GadgetDirectorHelper.HasBlueprint`,
+  `GadgetFabricateCategoryRuntime..ctor`, `GadgetFabricatableItem.get_ShouldShowPlaceholder` /
+  `FabricateAndSpendCost`, `GadgetItem.PlaceGadgetEvent` / `PickupGadget`, `Gadget.ChangeVariant`,
+  `StorageMetadata.Decrement`, `UIActivator.OnInteract`, `UIDisplayInteractable.OnInteract`.
+- gadget_look.cpp: `GadgetDefinition.get_LocalizedDescription`, `GadgetDirector.GetTargetGadgetInfo`,
+  `GadgetItem.SetHeldGadget`, `FabricatorItemDetails.SetItem`.
+- dj_buildables.cpp: `GadgetMusicPlayer.OnInteract` / `ShowDeactivatePrompt`.
+- drone_source.cpp: `RanchDrone.GatherSourceTask` / `GatherSourceTasks`,
+  `RanchDroneSourceProgramElderCollector.GetSources`, `DroneUIDefinitionSource.FindSourceDefinition`,
+  `DroneStationGadgetModel.Pull` (drone_programs asks it through `SaveFilter`).
+- vacpack_upgrades.cpp: `UpgradeModel.Pull` / `SetUpgradeLevel`, `AmmoModel.Pull` / `Push`,
+  `PlayerState.InitModel` / `Reset`, `PlayerUpgradeFabricateCategoryRuntime..ctor`,
+  `VacuumItem.SelectSlot(InputEventData)`, `AmmoSlotViewHolder.BindInputKey`; fabricator_levels.cpp:
+  `UpgradeChain.Show`, `FabricatorItemButton.ConfigurePips`.
+- shadow_catcher.cpp: `AmmoSlotDefinition.IsAllowed`, `ShadowSlimeScatter` (ScatterIfPlayerNear,
+  Relevancy, DoAlert, Action), `ProducePlortsOnHit.ProducePlort`.
+- radio_shop.cpp: `ShopCategoryRuntime.GetRuntimeItems`, `ShopRuntimeItem.get_Asset` / `get_Description` /
+  `TryPurchase`, `ShopDirector.SpawnNextItem`.
 
-### Slider keys (fix after the test of build 506a4f60; hook removed in round 5, sliders mouse only)
+Elsewhere: `FocusManager.NavigateInDirection` and the drone station menu (drone_price_limit), plot menu
+popups and Sell buttons (sell_upgrades).
 
-Kept for when gamepad support comes back:
+## Plot menu
 
-- The arrows still moved the menu selection: `FocusManager.NavigateInDirection` hands a move to every
-  `IMoveHandler` between the focused card and the spatial target through
-  `INavigationHandler.TryHandleAsNavigation` (0x79C940), and the focused card's own Selectable comes
-  first, so the old `UniformGridView.OnNavigate` detour never ran (no "taken from the menu's grid
-  navigation" line in the log). The detour is now on `TryHandleAsNavigation`; right after each call
-  NavigateInDirection checks the event's `used` flag (used -> no SetFocus). `NavigateInDirection`
-  itself is hooked by drone_price_limit (one hook per address).
+RE: re/plots.md (LandPlotUIRoot, PlotUpgradePurchaseItemModel), re/ui.md (PopupPrompt,
+TextButton_NoneSelectable).
 
-### Ranch drones (user report: "no option to select chicken output as a source")
+- **Availability**: greyed icon, checkmark and Purchase button come from the item's `IsAvailable` Func,
+  set only by `UpdateAvailability(plot)` on a menu open; `RebuildUI` (buy / sell with the menu open) does
+  not call it and a fresh clone says "available". `RefreshAvailability` calls `UpdateAvailability` /
+  `UpdateHidden` for every list item at the end of `BeforeMenuUpdate`. Clones copy the checkmark sprite.
+- **Texts** are registered in the pre hook too (a card swapped in there showed its template's text).
+- **Sell / Purchase buttons** (sell_upgrades `PlaceButtons`): only pivots / positions are set (the prefab
+  lays itself out). Owned card: Sell in PURCHASED's place; tier card: Sell left, Purchase right, 16 px
+  gap. The Sell clone's `InputEventButton` is off (it confirmed the purchase popup in the same click); its
+  key icon shows `ListUI.altSubmit`. A purchase in a sale's frame or the next is refused (log `purchase of
+  ... right after a sale refused`).
+- **Popup order** (sell_upgrades): upgrade, plot purchase and map expansion popups show Cancel left,
+  Purchase right (one log line each).
+- **Sell matching** (sell_upgrades): details matched by `_infoButtonLabel` with an owned state that fits;
+  a vanilla item a tier card stands in for comes from `HiddenMenuItem`; a tier card on a vanilla upgrade
+  (Music Box II, Sprinkler II, Ash Booster) sells that upgrade whenever owned; a vanilla card showing
+  Purchase although owned offers Sell. Logs `no Sell button: ...` (why, once per reason), `sell offer:
+  card '...' (...) sells X on plot '...' for +N`.
 
-- The drone program's source **Coop** already has two parts (`RanchDrone.GatherSourceTask(COOP)`):
-  `RanchDroneSourceProgramCoop` (live chickens above the task config's minimums) and
-  `RanchDroneSourceProgramElderCollector` (a silo-storage source over
-  `RanchMetadata.Plots[].elderCollectors`). The UI offers a source when all its programs accept the
-  target; the elder-collector part accepts every target, so Coop shows for meat / hen / rooster
-  targets as before.
-- `RanchMetadata.Register(LandPlot)` fills a coop's `elderCollectors` only from its own
-  `DeluxeCoopUpgrader.DeluxeStuff` storage, one `StorageMetadata(slot, storage, SiloCatcher with that
-  SlotIdx)` per slot. The ~1 Hz tick appends the Hen Collector's two slots the same way
-  (`LinkDrones`: new array = live old entries + ours). Every `ApplyUpgrades` / `OnUpgradesChanged`
-  builds a new entry without them, so the next tick adds them again (log `linked to the ranch
-  drones`). Sold / not owned / module off: `RanchMetadata.OnUpgradesChanged(plot)` rebuilds the
-  vanilla entry (log `unlinked from the ranch drones`).
-- So a program with the source **Coop**, a target such as Meat or a hen / rooster type and any
-  destination (silo, corral feeder, ...) now also takes the chickens out of the Hen Collector, through
-  its two output ports, like the deluxe coop's elder collector. Fast-forward (sleep) uses the same
-  entries. The contents the drones take leave the sidecar copy with the next tick.
-- Separate "Hen Collector" / "Elder Collector" sources: see the next section.
-- Known edge: turning custom upgrades off while a drone flies to a Hen Collector port that still
-  holds chickens leaves that drone with a destroyed port (vanilla has the same case when a deluxe coop
-  is demolished). Selling is refused while it holds chickens, so selling can't cause it.
+## Demolish clears the plot
 
-Not checked in game yet: a drone with Coop -> Silo (target Meat, or Hen) emptying the Hen Collector,
-the log lines, no errors after buying another coop upgrade (re-link) or selling the Hen Collector.
+Plots are keyed by `LandPlotLocation._id`, which survives a demolish. The `LandPlotLocation.Replace` detour
+drops the id's whole entry after the original (tiers, world upgrades, Hen Collector contents and limits,
+other modules' per-plot values); props, Sell-All button and Hen Collector die with the old plot. Written
+with the next game save, so a reload without saving restores both. Log `plot '...' demolished / replaced
+(old type T, stored type T): dropped owned [...], values [...]`.
 
-### Drone sources "Hen Collector" and "Elder Collector" (user requests, on top of the Coop linking; `drone_source.cpp`)
+## Coop: Hen Collector and Air Net
 
-- Two real sources in the program's source picker, right after Coop (Coop, Hen Collector, Elder
-  Collector), while custom upgrades are on. Hen Collector takes only from the Hen Collector ports;
-  Elder Collector (round 4: "elder hens show up as Hen Collector, should be Elder Collector ... using
-  the game's own coop upgrade") takes only from the deluxe coop's vanilla elder collector. Neither
-  takes live chickens. Coop still covers everything (live chickens, elder collector, Hen Collector).
-- **Which source for which target.** The vanilla elder-collector part accepts every target, so Coop
-  is offered for meats, elders and single hens / roosters / elders. Before round 4 the Hen Collector
-  was inserted whenever Coop was, so it also showed for an elder target (empty: the Hen Collector
-  never holds elders). Now a source is inserted only when the target's predicate
-  (`DroneTaskTarget.<Predicate>k__BackingField`) wants a type the kind holds: Hen Collector =
-  task config `MeatTypeGroup` minus `ElderGroup` minus UnstableMeat (the Hen Collector's slot rule);
-  Elder Collector = `ElderGroup` members (found once per session by name with one
-  FindObjectsOfTypeAll; log `elder types for Elder Collector: ...`). And only when a storage of that
-  kind exists: Hen Collector = the coop tick's Hen Collector storages, Elder Collector = any other
-  storage in `RanchMetadata.plots[].elderCollectors` (that is the vanilla elder collector of a deluxe
-  coop; the RanchMetadata comes from the drones seen).
-- In memory a program carries our `DroneTaskSourceType` value `0x53520101` (Hen) / `0x53520102`
-  (Elder). Hooks: `RanchDrone.GatherSourceTask` (our type -> `DroneTaskSource` with one new
-  `RanchDroneSourceProgramElderCollector`; an unknown type would throw in vanilla),
-  `RanchDrone.GatherSourceTasks` (insert after Coop, see above), `RanchDroneSourceProgramElderCollector.GetSources`
-  (for a station whose program has our type: only that kind's slots, as a `StorageMetadata[]`),
-  `DroneUIDefinitionSource.FindSourceDefinition` (a runtime copy of the Coop definition: name through
-  text_override, sort index Coop + 1 for both; `GatherSourceOptions` keeps the list order).
-- **Icons** (round 4: "remove the plot icon from the collector and replace it with chicken/elder"): the
-  plain sprites, no composing. Hen Collector = the task config's `HenType.icon`; Elder Collector = the
-  `ElderGroup` member whose name has "Hen" (the elder hen). Until known, Coop's icon. The composed
-  Plort Collector + Hen icon (`drone_icon.cpp`) is gone.
-  Later the user drew a Hen Collector icon (the Plort Collector with a hen coming out of its opening):
-  `assets/icons/hen_collector_source.png` (embedded mod icon) is now the Hen Collector source's icon
-  (picker, applied program, Drone List: all use the one definition) and also the Hen Collector plot
-  upgrade card's icon (it replaced the old drawn `hen_collector.png`, deleted). The Elder Collector
-  source uses `elder_collector_source.png` when that file was in `assets/icons` at build time
-  (`mod_icons::Has`), else the elder hen. `SetIcon` prefers the mod icon over the chicken sprite and
-  replaces one already set; the chicken sprite (or, before it is known, Coop's icon) is the size
-  reference. The card and the source share one cached sprite, so whichever asks first sets its
-  pixels-per-unit (both views show it in a fixed frame). Log: `drone source: Hen Collector icon = the
-  mod icon 'hen_collector_source'`.
-- **Save (user decision: "save it as coop, the sidecar says the true source").**
-  `DroneStationGadgetModel.Pull` gives the save a copy of the program data that says COOP (PullGadget
-  turns it into the saved `DroneTaskV01` right away); the live data keeps ours. If the copy can't be
-  made the live data becomes Coop (logged). The sidecar values `drone_hen_source.stations` /
-  `drone_elder_source.stations` list the station actor ids (`PlacedGadgetV07.ActorId`, stable across
-  loads) per kind. A ranch drone station has one program, so the station id is the key.
-- **Load:** the first ~1 Hz tick that sees a listed station whose saved program is Coop switches it
-  back (`DroneStation.AssignRanchTask` when its drone exists, else the program data; `RanchDrone.Init`
-  then builds our source). Until then (about a second) the drone runs as Coop. An Elder Collector
-  station waits until the ranch is known (a drone seen).
-- **Migration:** a Hen Collector program whose target is elders (ELDERS, or SINGLE with an elder; made
-  before round 4) becomes Elder Collector (log `... now Elder Collector` / `elder target: Elder
-  Collector holds the elders`), or Coop when no coop has an elder collector.
-- **Stale entries:** a listed station whose program is now something else (changed by the player,
-  or not Coop in the save) is dropped; listed ids that no station has any more (picked up and placed
-  again = a new actor id, demolished) are dropped with a log line - a re-placed station has a Coop
-  program. No storage of the kind left (Hen Collector sold, deluxe coop gone) -> the program falls
-  back to Coop (logged) and the entry goes.
-- **Custom upgrades off / faulted:** `OnDisable` writes Coop into every program that had ours (plain
-  field writes, before the hooks go off, so a later save can't see our value); `Cleanup` (main thread)
-  re-programs those drones with Coop. When it is on again the sidecar's stations are mapped back.
-- **Without the mod:** the save only ever holds Coop programs; it loads and runs as Coop (the drone
-  takes live chickens and the elder collector; the Hen Collector itself is gone without the mod).
+RE: re/plots.md (patchCoop corners, PlortCollector, PlortCollectorActivator, CoopRegion),
+re/custom-upgrades.md 2.1 / 2.4.
 
-Checked in game (round 3): Hen Collector source works. Not checked yet: the new icons (the user's Hen
-Collector drawing on the source and on the coop card; the Elder Collector still the elder hen), Elder Collector
-in the picker (only for elder targets, only with a deluxe coop), a drone emptying only the elder
-collector, Hen Collector no longer offered for an elder target, save + reload of both (log `restored
-from the sidecar`), the migration of an elder-target Hen Collector program.
+- **Air Net**: the corral's `Base Air Net` cloned under the coop (`sr2mods_CoopAirNet#<gen>`), fitted every
+  tick to the top and footprint of the active CoopRegion (High Walls lift it).
+- **Hen Collector clone**: `Deluxe` cloned under the coop, TV removed, both slots one session clone of the
+  elder slot definition (100 each, group MeatGroup, block list ElderGroup + UnstableMeat), local storage
+  with its own `AmmoModel`, never linked to the plot model. Contents in the sidecar (`hen_collector`:
+  `[{type, count}]` per slot), copied every tick and before every save. Selling refused while it holds
+  chickens.
+- **Placement**: the prefab's `Deluxe` container is turned -90 deg, so the vanilla elder collector sits in
+  (+x, +z). `PickCorner` reads the occupied corners from the live plot and turns the clone by a multiple of
+  90 deg into the first free one, (+x, -z) first. Log `hen collector corner on plot '...': ...`; placement
+  lines give the plot-local centre and `vanilla deluxe parts built / not built`.
+- **Vacuum**: the clone's `PlortCollector` runs with a private `LandPlotModel` (collectorNextTime 1e300,
+  never registered); the ~1 Hz tick counts adults in the region (MeatGroup - ElderGroup - UnstableMeat, not
+  held; chicks never) and, when the 6 game hour period is due, builds DoCollection's joints for the excess
+  only; the vanilla FixedUpdate reels them in. Joints are released before a clone is removed. Fallback
+  without those parts: direct store + puff.
+- **Limits**: hens 0..58 (default 18), roosters 0..20 (default 2) per coop; `hen_collector_keep_hens` /
+  `_roosters` (an old `hen_collector_keep` n = min(2, n) roosters, rest hens). Two `PlotMenuSlider`s in one
+  row (`SliderSpec.columns`, `Create(..., rowOf)`), **mouse only** (`keys = false`, gamepad later);
+  `PlotMenuSlider` keeps pad / key support for drone_price_limit.
+- **Activate button**: the vanilla collector button is kept (Collector null) while the Activate detour is
+  installed (`CoopWorld::KeepHenButton`; build line `Activate button kept` / `no Activate button`). A press
+  runs the excess-only vacuum at once (the 6 h period restarts) with animation, cue and 0.4 s rate limit
+  (`SiloButtons::Press`) and a short world text ("Collecting N chickens", "Nothing to collect (keeps H hens /
+  R roosters)", "The Hen Collector is full", "Already collecting").
+- **Ranch drones (Coop)**: the tick appends the Hen Collector's two slots to the coop's
+  `RanchMetadata ... elderCollectors` (`LinkDrones`, log `linked to the ranch drones`); every Register
+  replaces the entry, so the next tick adds them again. Sold / not owned / off:
+  `RanchMetadata.OnUpgradesChanged(plot)` (`unlinked from the ranch drones`). Coop with a meat / hen /
+  rooster target thus also empties the Hen Collector, fast-forward included. Edge: turning the module off
+  while a drone flies to a port that still holds chickens leaves it a destroyed port (as vanilla on a
+  deluxe coop demolish). RE: re/drones.md (RanchMetadata).
 
-### Several programs per drone (idea "Several programs per automation bee"; `drone_programs.cpp`)
+## Drone sources Hen Collector / Elder Collector
 
-- Up to 3 programs per ranch drone station. The game has one: `DroneStationGadgetModel._taskData`
-  (target type + ident, source, destination). The others wait in the mod; switching is the game's own
-  `DroneStation.AssignRanchTask` (new task data + `RanchDrone.AssignTask` -> `DroneBehaviorPlexer.OnTaskChanged`
-  rebuilds the drone's programs), the same call as Start Program.
-- **When.** "When idle" (default): the drone has nothing to do with the current program = its current
-  behaviour (`DroneBehaviorPlexer._currBehaviour`) is `RanchDroneBehaviourRest`, its ammo
-  (`RanchDrone._ammo.IsEmpty()`) is empty and the game's own query `DroneBehaviorPlexer.MaybeHasNextGatherBehavior()`
-  (any source program's `Relevancy(readOnly)`) says no, for 2 ticks (~2 s). `RanchDroneBehaviourIdle` (the
-  at-station flourish) neither counts nor resets: `PickNextBehavior` tries it BEFORE the programs whenever
-  the drone is at its station and a flourish is due, with work or without (until round 9 it counted as idle,
-  so a freshly switched program could be left before the drone started it). "After each delivery": also when
-  the ammo went from full to empty (a load was put somewhere). Never while the drone holds something: the
-  next program's destination may not take it and `RanchDroneBehaviourDumpAmmo` would destroy the cargo. A
-  program runs at least 5 s; after a whole round of idle programs the next try waits 20 s. No switching
-  without battery (`GetCurrentEnergy() <= 0`, the drone rests anyway) and while the station menu is open
-  (any tab; the UI calls `NoteMenuOpen`). Log: `drone programs: station N: program 1 -> 2 (nothing to
-  do)`, at most one line per station per 30 s (`[+N switch(es) not logged]`).
-- **Stuck programs.** A program whose drone works (not resting) but holds no cargo for 90 s counts as
-  "found nothing it could pick up" and the next program runs; always logged with what the drone was doing:
-  `program 1 (target 5 source 8 sink 4) held no cargo for 90 s while working, the drone was
-  RanchDroneSourceProgramOutsidePlots (<GetProgramStateStr>) - program 2 runs`. The case (round 9): a
-  dynamic source (Outside Plots / Free Range, `RanchDroneSourceProgramDynamic`) picks an item from the
-  cells (`GetSources`: predicate, not inside a plot, no parent), flies there, and cone-scans for it
-  (`ConeFindTarget`: `Physics.SphereCastNonAlloc` with layers Actor + ActorIgnorePlayer, same
-  IdentifiableType, in the cone). Nothing found -> the gather completes empty and the next pick flies to
-  the same item again: the drone "keeps scanning" and never rests, so the idle rule never fired.
-- **Round 9 finding** (`sr2mods.log` 00:44-01:07, sidecar `5:None:8:4|2:None:9:6`): program 1 = Meats,
-  Outside Plots -> Incinerator, program 2 = Plorts, Free Range -> Refinery. The rotation did switch (lines
-  `program 1 -> 2` every ~40 s) and the plort program worked; the meat program is the one that never got
-  anything: the drone ran it (its scanning is the Outside Plots source's scan) but never picked up a
-  chicken. `AssignRanchTask` itself is complete: it writes a new `DroneTaskData` and `RanchDrone.AssignTask`
-  -> `OnTaskChanged` deselects the current behaviour and builds a new `RanchDroneProgramPlexer` from fresh
-  source / sink programs (GatherSourceTask / GatherSinkTask), exactly what Start Program does. Chickens
-  outside plots with Outside Plots: live chickens walk away from the spot the drone flies to, which looks
-  like the scan miss above (not verified in game). Chickens in a coop need the source Coop (it keeps the
-  coop's minimum hens / roosters). The Incinerator takes items only while its ash trough has room
-  (`Incinerate.GetAshSpace() > 0`).
-- **Editing.** The page always shows the running program. Changing it there and pressing Start Program
-  changes that program (the tick sees the station's task data differ from the stored one: `program N
-  changed (...)`); so does the game falling back (e.g. Hen Collector -> Coop when no Hen Collector is
-  left).
-- **Save (vanilla-safe).** The vanilla save always holds program 1: drone_source's `Pull` detour asks
-  `SaveFilter` (any thread, mutex) and hands the save a copy of program 1 with its source mapped to
-  Coop / Silo when it is one of ours, whatever runs at that moment. The sidecar keeps all of them with
-  the true sources: `drone_programs.station.<actor id>` = `v1;idle|delivery;<t>:<ident asset name or
-  ->:<source>:<sink>|...`. Ident names resolve through one `FindObjectsOfTypeAll(IdentifiableType)` per
-  session. Only stations with 2+ programs have an entry.
-- **Load.** First tick that sees the station: its entry is read and program 1 is compared with the
-  save's program (target, ident, destination, source modulo the vanilla mapping). Same -> restored,
-  program 1 runs with its true source (`station N: 3 programs restored from the sidecar`); different
-  (changed without the mod) or unreadable -> the extra programs are dropped (logged). A station that is
-  gone drops its entry.
-- **Drone source lists.** Stations with an entry are skipped by the Hen / Elder Collector and Quantum
-  Storage Link lists (`ManagedFilter`): rotating to and from such a source would add and drop list
-  entries every few seconds, and program 1's true source comes back from this sidecar. The "no storage
-  left -> vanilla source" fallback still runs for them.
-- **Custom upgrades off / faulted.** Every station gets program 1 back, its source already vanilla
-  (field writes first, `AssignProgram` on the main thread in `Cleanup`); the sidecar stays, so switching
-  on again restores the programs. Without the mod the save has program 1 only.
-- **Known limits.** Fast-forward (sleeping / away) runs only the program that is current then. A drone
-  holding plorts back because of drone_price_limit keeps its cargo and so stays on its program.
-- **UI** lives in `modules/drone_price_limit/station_dialog.cpp` (owns the station menu hooks): a
-  `[P] Programs` / `[P] Program 2/3` pill right of the target's Change pill, and the programs dialog
-  (see that module's NOTES). It shows only while custom upgrades are on. When the station's program
-  changes while its menu is open, the page follows it (no "discard" prompt for changes the player never
-  made; drone_price_limit NOTES).
+`drone_source.cpp`. RE: re/drones.md (GatherSourceTask(s), source picker, DroneStationGadgetModel.Pull).
 
-Not checked in game yet: everything in this section (see the test list in the drone_price_limit NOTES).
+- Two sources right after Coop. Hen Collector takes only from Hen Collector ports, Elder Collector only
+  from the deluxe coop's vanilla elder collector; neither takes live chickens; Coop takes everything.
+- **Offered** when the target's predicate wants a type the kind holds (Hen: `MeatTypeGroup` - `ElderGroup` -
+  UnstableMeat; Elder: `ElderGroup`, found once per session, log `elder types for Elder Collector: ...`) and
+  a storage of the kind exists.
+- In memory the program has `0x53520101` / `0x53520102`. `GatherSourceTask(ours)` = one new
+  `RanchDroneSourceProgramElderCollector` whose `GetSources` returns only that kind's slots;
+  `FindSourceDefinition(ours)` = a copy of Coop's definition (sort index Coop + 1).
+- **Icons**: `hen_collector_source.png` / `elder_collector_source.png` when embedded (both are in
+  `assets/icons`), else `HenType.icon` / the elder hen; the card and the source share one cached sprite.
+- **Save**: the `Pull` detour gives the save a copy saying COOP (no copy possible -> the live data becomes
+  Coop, logged). Sidecar `drone_hen_source.stations` / `drone_elder_source.stations` = station actor ids.
+- **Load**: the first tick that sees a listed station with a Coop program switches it back
+  (`AssignRanchTask`, else the data); Elder Collector waits until a drone was seen. Log `restored from the
+  sidecar`.
+- **Stale / migration**: listed stations whose program changed, or ids no station has (re-placed = new
+  id), are dropped; no storage of the kind left -> Coop (logged); a Hen Collector program with an elder
+  target becomes Elder Collector (or Coop).
+- **Off / faulted**: `OnDisable` writes Coop into our programs (field writes, before the hooks go off),
+  `Cleanup` re-programs the drones; on again they are mapped back. Without the mod: Coop programs.
 
-## Quantum Storage Link (user request: "drones take items out of a quantum storage link and put them into acceptable inputs")
+## Several programs per drone
 
-`quantum_link.cpp` (gadget, visuals, cloud mirror; its gadget hooks also carry the Slime DJ buildables through
-`variant_ext.h`) and `drone_source.cpp` (the source; shares the Hen /
-Elder Collector hooks). Findings with RVAs are in the header comments of both files.
+`drone_programs.cpp`; UI (`[P] Programs` pill and dialog) in drone_price_limit `station_dialog.cpp`, only
+while custom upgrades are on. RE: re/drones.md (AssignRanchTask, DroneBehaviorPlexer,
+RanchDroneSourceProgramDynamic).
 
-- **"Quantum storage" = the Quantum Cloud** (`DroneDirector.GetCloudModel()` -> `DroneCloudModel._amounts`,
-  `Dictionary<IdentifiableType, int>`, one key per storable type; saved as `DroneCloudV01`). Explorer drones upload
-  into it, the drone station's cloud menu withdraws. Not the refinery, not the warp depots.
-- **The gadget is a variant of the Refinery Link.** A runtime clone of `LookupDirector.RefineryLink`
-  (`Object.Instantiate`, name `QuantumStorageLink`, ReferenceId `GadgetDefinition.QuantumStorageLink`), `VariantOf` =
-  Refinery Link, the SAME prefab, variant gradient purple -> cyan, own name / description (text_override).
-  - A placed gadget's model type comes from the prefab (`GadgetDirector.InstantiateGadget`: `TryGetId(prefab)`), so a
-    placed Quantum Storage Link is a vanilla Refinery Link model and is saved as one. Variants share their base's
-    inventory (`GetItemCount` -> `BaseGadget`, placing spends `{BaseGadget, 1}`), so our definition never enters
-    `GadgetsModel._itemCounts` / blueprints (their `Pull` would throw on an unknown or duplicate id).
-  - The sidecar lists the quantum actor ids (`quantum_link.actors`) and the unplaced Quantum Storage Links
-    (`quantum_link.kits`).
-  - Registered in the live `GadgetDirector._gadgetVariantMap` (in the Refinery Link's list, plus a key of its own with
-    no variants: every variant lookup is `get_Item` without a fallback). Checked every tick (a new scene has a new
-    director).
-  - Favourite slots can hold the variant (`OnGadgetVariantToggled` -> `SetFavorite`) and ARE saved. Two guards: the
-    save index `_reverseIndex` gets our ReferenceId -> the Refinery Link's persistence id (data only, re-added every
-    tick; the save's id table `_primaryIndex` is separate, so nothing new is written), and a
-    `SaveReferenceTranslation.GetPersistenceId(IdentifiableType)` detour maps our definition to the Refinery Link.
-    Cleanup (module off / faulted) also puts the Refinery Link into those slots. After a load the slot shows the
-    Refinery Link (toggle the variant again).
-- **Fabricator**: its own card right after the Refinery Link (Warp Tech; `GadgetFabricateCategoryRuntime..ctor`
-  detour, see "Mod buildables" below: the old `GetItems` detour never ran). Cost =
-  the Refinery Link's with 3x the Newbucks and 2x the items (log `Fabricator cost ...`). Fabricating it never runs the
-  vanilla body (it would `AddItem` our type): the card's own `CheckCanFabricate`, `SpendableDirector.Spend(our cost)`,
-  `AddItem(Refinery Link, n)`, kits += n. The card is unlocked with the Refinery Link blueprint unless the sidecar
-  overrides it (helper `HasBlueprint` detour); its owned count is `min(kits, Refinery Links)` (`GetItemCount` detour).
-- **Placing**: hold a Refinery Link, press the toggle-variant key -> Quantum Storage Link (offered while a kit is left:
-  `GadgetDirector.HasBlueprint(ours)` = kits > 0 and the card unlocked), place. `PlaceGadgetEvent` detour: the
-  new gadget's actor id is listed and a kit used (log `Quantum Storage Link placed`). No kit left: the held gadget
-  becomes the Refinery Link first (a plain one is placed, logged).
-- **Picking up** a quantum link (`PickupGadget` detour) gives its kit back and holds the variant, so placing it again
-  keeps it quantum. Removed any other way (stored): the tick gives the kit back. **Toggle-variant on a placed Refinery
-  Link** (`Gadget.ChangeVariant(ours)` detour) flips it quantum <-> plain in place (kit used / back), never the
-  original (that destroys and re-places the gadget: new actor id). The toggle is only offered while a kit is left.
-- **Look** (tick, every loaded listed link): its renderers' materials are instanced and tinted: every colour property
-  (`Material.GetPropertyNames(Vector)`, names with color / tint / albedo) 60 % towards purple, emission properties
-  (emiss / glow) cyan (HDR x1.5..6); instances are tagged ` [sr2q]` and the originals put back when the link stops
-  being quantum. Holder `sr2qlink#<gen>`: a script-free clone of a teleporter gadget's `TeleporterNode._activeFX`
-  (tinted, 0.3 size since round 9, 1 m up) - the glow; plus the drone storage. The drone station's cloud-withdraw FX
-  (`DroneStationCloudExtractionController._spawnFX`, pooled `FXHelpers.SpawnAndPlayFX`) pulses every ~7 s and at
-  every drone take. The log names the shaders and properties it tinted (`shader '...' (link): N colour / M emission`).
-- **Drone source "Quantum Storage Link"** (`kQuantumSourceType` 0x53520110, listed after Silo for every target while
-  a link is built): a `RanchDroneSourceProgramElderCollector` whose `GetSources` returns `StorageMetadata` of the
-  links' hidden storages (`sr2qstore`: a `SiloStorage` added to our holder, 8 slots of a session `AmmoSlotDefinition`
-  copy without type group and 999 per slot, its own `AmmoModel`; active in the hierarchy, else the drone cancels).
-  The catcher (where the drone flies) is the link's own `SiloCatcher` (its refinery input). The cloud types with an
-  amount that the program's predicate accepts (cached 1 s per program, at most 4) get a slot; every link's slot
-  mirrors `min(cloud amount, 999)`. Every take goes through `StorageMetadata.Decrement` (its only callers: the
-  silo-storage source's `OnAction` and fast-forward): its detour lowers the cloud amount by the count taken
-  (`GetAmount` + `SetAmount`, never below 0) and every mirror follows. The tick re-syncs with the cloud (uploads,
-  station menu withdrawals) and frees slots unused for 30 s. Destinations are the vanilla sinks (silo, corral,
-  feeder, incinerator, market, refinery, caretaker shop); the Silo sink stays offered (vanilla drops it only for the
-  Silo source).
-- **Save of the program**: like the Hen Collector, but saved as **Silo** (the vanilla source that accepts every
-  target); sidecar `drone_quantum_source.stations`; restored at the first tick that sees the station. The option is
-  offered while a link is built (loaded, with a drone port); saved programs are kept while the save lists any link
-  (also with the ranch not loaded: the drone then just finds nothing); no link left in the save -> back to Silo
-  (logged).
-- **Without the mod**: every Quantum Storage Link loads as a plain Refinery Link where it stood; unplaced Quantum
-  Storage Links are gone, but the Refinery Links fabricated with them stay in the inventory; drone programs run as
-  Silo -> same destination (a Silo -> Silo program just moves items between silos); a favourite slot that held the
-  variant holds the Refinery Link. Nothing else of ours is in the save (viewed-blueprint hashes are plain ints).
-- Known limits: drones need a path to the link (place it on the ranch); the variant (toggle key) is offered only while
-  a kit is left, so a placed quantum link without a spare kit turns plain only by picking it up; a player withdrawing from the cloud in the station
-  menu while a drone takes the same type can give at most the items in flight twice (the tick re-syncs every second).
+- Up to 3 programs per station; the game keeps one (`_taskData`); switching = `DroneStation.AssignRanchTask`
+  (what Start Program does).
+- **When idle** (default): behaviour Rest, ammo empty, `MaybeHasNextGatherBehavior()` false for 2 ticks.
+  The at-station flourish neither counts nor resets. **After each delivery**: also when the ammo went full
+  -> empty. Never with cargo (DumpAmmo would destroy it), without battery, or with the station menu open
+  (`NoteMenuOpen`). Each program runs >= 5 s; after a whole idle round the next try waits 20 s.
+- **Stuck**: working with no cargo for 90 s (`kStuckMs`) = nothing to do; logged with the behaviour class
+  and `GetProgramStateStr`.
+- Log `drone programs: station N: program 1 -> 2 (nothing to do)`, at most one per station per 30 s.
+- **Editing**: the page shows the running program; Start Program changes that one (`program N changed`),
+  as does a game fallback (Hen Collector -> Coop).
+- **Save**: the vanilla save holds program 1 (source mapped to Coop / Silo when ours). Sidecar
+  `drone_programs.station.<actor id>` = `v1;idle|delivery;<t>:<ident asset name or ->:<source>:<sink>|...`,
+  only for stations with 2+ programs.
+- **Load**: program 1 vs the save's program (source modulo the mapping): same -> restored (`N programs
+  restored from the sidecar`), else extra programs dropped (logged).
+- Stations with an entry are skipped by the source lists (`ManagedFilter`).
+- **Off / faulted**: program 1 back everywhere; the sidecar stays.
+- Limits: fast-forward runs only the current program; a drone holding plorts back for drone_price_limit
+  stays on its program.
 
-Not checked in game yet: the Fabricator card (position, cost, unlock), fabricating (kits log), the variant toggle
-while holding a Refinery Link (name, gradient), placing / picking up / toggling a placed link (logs), the tint and the
-glow (log lines name what was found), the source in the drone menu (after Silo, icon = the Refinery Link icon), a
-drone taking from the cloud to a silo / feeder / refinery (cloud amount going down in the station's cloud menu), save
-+ reload (links rebuilt, program restored), turning custom upgrades off (links plain, favourites back), a mod-free
-load of such a save.
+## Quantum Storage Link
 
-### Round 9 (user: "portal effect is too big ... glitch out and come back", "pressing Use on it shows the refinery still", card "icon same as refinery ... uses the refinery link's description", "needs a different icon (make it purpler) in drone menu source", placement "use the default label and the preview is also default")
+`quantum_link.cpp` (+ source in `drone_source.cpp`). RE: re/fabricator.md (GadgetDirector variants,
+GadgetItem, Fabricator categories), re/save.md (GetPersistenceId, `_reverseIndex`), re/drones.md
+(Quantum Cloud, StorageMetadata).
 
-- **Why the card showed the Refinery Link's text**: `GadgetDefinition.get_LocalizedDescription` (0x51B440) walks
-  `VariantOf` to the root and returns ITS `_localizedDescription`, so our own (text_override) instance was never asked.
-  The title is fine (`localizedName` is read directly). Fixed in `gadget_look` (below): a registered definition answers
-  with its own description.
-- **Icon**: `quantum_link` makes a purple copy of the Refinery Link's sprite at the first tick
-  (`gadget_look::TintedSprite`: Graphics.Blit of the sprite's texture into an sRGB RenderTexture, ReadPixels of its
-  textureRect, pixels towards purple by brightness, Sprite.Create with the same pivot / pixels per unit) and puts it
-  into our definition's `icon` (`GadgetDefinition.get_Icon` returns its own icon when set: Fabricator grid tile, hotbar)
-  and `quantum::SourceIcon()` (the drone menu source). The card's details picture is the definition's full art
-  (an addressable sprite, `UIImageDynamicLoader`): `gadget_look` clears our clone's `_fullArt` / `_requiresFullArt` and
-  sets the details image to our icon after `FabricatorItemDetails.SetItem`. Log `quantum link: icon = a purple copy of
-  the Refinery Link's` / `gadget look: sprite 'iconRefineryLink...' recoloured (...)`.
-- **Glow**: 0.3 size (was 0.5), 1 m up. **Glitch**: every 3.5-8 s the glow stutters for ~0.5 s (on / off every
-  30-80 ms, jittered in place and size), then comes back (`QuantumLink::Frame`, per frame, field reads between
-  glitches). The ghost drones' look: `ComponentAcquisitionDroneController` (the "GhostDrone") keeps its renderers'
-  material instances and fades the shader float `_PhaseValue` 0 -> 1 in `Update` after arriving (`_phaseTimer`); that
-  is a property of their own shader, it can't be put on the teleporter FX, so the stutter imitates it.
-- **Use**: a placed link's `BaseUIInteractable`s are listed (log `Use component '<class>' on '<object>'` once per
-  class). `UIActivator.OnInteract` (0x6ACB60) and `UIDisplayInteractable.OnInteract` (0x6B0AD0) are hooked (pointer set
-  lookup for everything else): for a link they show one burst of HUD notices instead of the refinery screen - what the
-  link is for, then the five largest Quantum Cloud amounts (type icon, localized name, count) or "The Quantum Cloud is
-  empty" (free-text notices, `SaleNotices::QueueText`, 1.5 s cooldown). Chosen over a new screen: the drones take from
-  the cloud, so the cloud's contents are what the player wants to see; managing it stays in the drone station's cloud
-  menu. If no notice can be shown (no HUD list / text sink) the refinery screen opens as before. The link is still a
-  working refinery input (vacuuming into it still goes to the refinery). Not changed: the hover prompt (a shared
-  prompt prefab). If the log says `- not hooked`, the Refinery Link uses another interactable class and Use is vanilla.
-- **Placement**: held, the gadget-mode label says "Quantum Storage Link" and the preview is tinted purple; aimed at a
-  placed quantum link, the label says "Quantum Storage Link" too (see "Mod gadget looks").
+- **Quantum storage = the Quantum Cloud** (`DroneCloudModel._amounts`).
+- **Gadget**: runtime clone of the Refinery Link definition (`QuantumStorageLink`), `VariantOf` = Refinery
+  Link, same prefab, gradient purple -> cyan, own texts. A placed one IS a vanilla Refinery Link; variants
+  share the base's inventory, so ours never enters `_itemCounts` / blueprints. Registered every tick in the
+  live `_gadgetVariantMap`. If `LookupDirector.RefineryLink` is null: the `RefineryLink` definition from
+  the gadget groups (logged; WARN after 30 ticks).
+- **Sidecar**: `quantum_link.actors` (quantum actor ids), `quantum_link.kits` (unplaced).
+- **Favourites** hold the variant and are saved: `_reverseIndex` alias to the Refinery Link's persistence
+  id (every tick) + `GetPersistenceId` detour; Cleanup puts the Refinery Link back; after a load the slot
+  shows the Refinery Link.
+- **Fabricator**: card after the Refinery Link (Warp Tech), cost = Refinery Link's with 3x Newbucks, 2x
+  items. Fabricating: `CheckCanFabricate`, `Spend`, `AddItem(Refinery Link, n)`, kits += n (never the
+  vanilla body). Owned count `min(kits, Refinery Links)`.
+- **Placing**: hold a Refinery Link, toggle-variant (offered while a kit is left and the card unlocked),
+  place: id listed, kit used (`Quantum Storage Link placed`); no kit -> plain (logged). Pick-up gives the
+  kit back and holds the variant; removed otherwise, the tick gives it back. Toggle on a placed one flips
+  quantum <-> plain in place.
+- **Look** (tick): materials instanced, colours 60 % purple, emission cyan, tagged ` [sr2q]` (originals
+  back when plain). Holder `sr2qlink#<gen>`: a teleporter `_activeFX` clone (0.3 size, 1 m up) that
+  glitches every 3.5-8 s for ~0.5 s (`QuantumLink::Frame`); the cloud-withdraw FX pulses every ~7 s and at
+  every take. Icon: a purple copy of the Refinery Link sprite (`TintedSprite`) in `icon` and
+  `quantum::SourceIcon()`.
+- **Use**: HUD notices (what it is, then the five largest cloud amounts or "The Quantum Cloud is empty";
+  `QueueText`, 1.5 s cooldown) instead of the refinery screen (fallback without a HUD list). Still a
+  refinery input. Log `Use component '<class>' on '<object>'`; `- not hooked` = Use stays vanilla.
+- **Drone source** (`0x53520110`, after Silo, every target, while a link with a drone port is built):
+  `GetSources` returns hidden storages (`sr2qstore`: `SiloStorage`, 8 slots, no type group, 999 each,
+  own `AmmoModel`, active in hierarchy); catcher = the link's own `SiloCatcher`. Accepted cloud types
+  (cached 1 s, at most 4) mirror `min(cloud, 999)`; the `Decrement` detour lowers the cloud (never below 0);
+  the tick re-syncs and frees slots unused 30 s. All vanilla sinks offered. Saved as **Silo**, sidecar
+  `drone_quantum_source.stations`; no link left in the save -> Silo (logged).
+- **Without the mod**: plain Refinery Links; unplaced kits gone (their Refinery Links stay); programs run
+  as Silo; favourites hold the Refinery Link.
+- Limits: drones need a path; a placed link without a spare kit turns plain only by pick-up; a cloud
+  withdrawal in the station menu during a take can double the items in flight; hover prompt unchanged.
 
-## Mod gadget looks (`gadget_look.h`, round 9)
+## Mod gadget looks
 
-Shared by the Quantum Storage Link and the Slime DJ buildables. Owns four hooks (nobody else may hook them):
-`GadgetDefinition.get_LocalizedDescription` (registered definitions answer with their own description),
-`GadgetDirector.GetTargetGadgetInfo` (0x868E80; the gadget-mode label: `DisplayName` = the def's `_pediaLink` title,
-shared with the base; held: our def -> our name; aimed at a placed gadget: `AddPlacedLabel` providers, asked only
-when the label is not the held gadget's - `_isTargetingPlaceholder` and `SelectedSlottedGadget` - and the def is the
-targeted gadget's `IdentTypeAsDefinition`), `GadgetItem.SetHeldGadget` (0xA46810; after it built
-`_gadgetPlaceholderInstance` from the base prefab, the registered `dressPreview` runs on it) and
-`FabricatorItemDetails.SetItem` (the card picture). Helpers: `TintTree` (instanced materials tinted, tagged
-` [sr2look]`; preview instances go with the preview) and `TintedSprite`. API: `Register(def, Look{name, description,
-icon, dressPreview})`. Log `mod gadget looks ready: ...` / `gadget look: <what>: shader '...': N colour / M emission
-propert(ies) tinted`.
+`gadget_look.h` (owns four hooks, above). RE: re/fabricator.md (GadgetDefinition, GetTargetGadgetInfo,
+SetHeldGadget, FabricatorItemDetails). `Register(def, Look{name, description, icon, dressPreview})`: own
+description on the card (vanilla walks `VariantOf` to the root), our name as the gadget-mode label while
+held and, via `AddPlacedLabel` providers, when aiming at a listed placed gadget; `dressPreview` runs on the
+placeholder after `SetHeldGadget`; `icon` is the card's details picture (`_fullArt` / `_requiresFullArt`
+cleared). Helpers `TintTree` (tag ` [sr2look]`), `TintedSprite`. Log `mod gadget looks ready: ...`.
 
-Not checked in game yet (round 9): the purple icon (card tile, details picture, hotbar, drone menu source), the card
-description, the held label and purple preview, the label when aiming at a placed link, the glow size and glitch,
-Use on a link (notices; or the `- not hooked` log line).
+## Slime DJ buildables
 
-## Slime DJ buildables (user requests: "a slime DJ booth with speakers", "a speaker buildable ... rotated variants, stackable", "a radio toy that plays slime pen music")
+`dj_buildables.cpp`. Uses the quantum hooks through `variant_ext.h` (nothing without the Quantum Storage
+Link's Setup); songs through `slime_dj/api.h` emitters. RE: re/fabricator.md (decoration / toy prefabs,
+ToggleVariant, stacking), re/audio.md (GadgetMusicPlayer, corral Music Box), re/slimes.md (SlimeAttachPoint).
 
-`dj_buildables.cpp` (prefab data and RVAs in its header). The Quantum Storage Link's save scheme, on its hooks:
-`variant_ext.h` is an extension interface the quantum detours ask first for definitions it owns (MinHook allows one
-hook per address, so the DJ code never hooks those methods itself). Without the Quantum Storage Link's Setup nothing
-of it is offered. Slime DJ plays the song through `slime_dj/api.h` emitters.
+- **DJ Booth** = Scientist Desk variant. Faces +z, DJ behind (-z). Clutter and its sound off; a boombox
+  face up in the middle (deck); two small ones on the front corners (x +-0.8, z 0.3, 0.4 size); two big
+  ones on the floor at x +-1.75 (emitters, kind Booth); behind (z -1.8) the Boombox's bench with the
+  Flower Pillow's mesh, colliders and `SlimeAttachmentPoint` with its scripts (largos: `_allowLargo` before
+  Awake, trigger 1.5x). Other clones script-free. E: a `GadgetMusicPlayer` then a `GadgetUIInteractable`
+  (copied from the Boombox) on the desk root; undress destroys both (`DestroyImmediate`).
+- **DJ Speaker Stack** (`SlimeDJSpeaker`) = Boombox variant: bench, `model_boombox`, `Collision` off; two
+  boombox clones stacked (1.3, 0.85 on top at 1 m), one `BoxCollider` 1.2 x 1.7 x 0.9 on layer 27, base =
+  emitter (kind Speaker). `AllowGadgetStackingOnTop = true` on placed ones. Old saved kinds 1 / 2 load as the
+  stack. On a placed one the toggle cycles plain <-> stack (the detour picks the kind; offered while a kit
+  is left or when aiming at a listed one).
+- **On / off with E** (booth, stack, plain Boombox; hooks answer only for our records), sidecar `dj.on`,
+  default off. `Apply` (every tick):
+  - off: silent, no dance, a running vanilla track stopped;
+  - on + a song loaded (booth: and a slime on the pillow): the song; boomboxes dance (`_gadgetActive`) and
+    show `FX_MusicalNotes`; the seat spins (`SlimeAttachPoint._rotationSpeed`, 0 otherwise);
+  - on otherwise: booth -> the corral Music Box tune (`sr2dj_standby`, a copy of its `SECTR_AudioSource`,
+    loop; fallback the Boombox track); stack / Boombox -> the Boombox track via the original `OnInteract`.
+    One gadget track at a time: when the game stops ours, the record switches off.
+  Logs `dj buildables: <label> actor N switched on|off (interact)`, `... plays the Slime DJ song|the
+  Boombox's own track (...)|nothing`, `standby tune = the corral music box's '<cue>'`, `DJ Booth actor N: a
+  slime sits behind the desk|nobody behind the desk any more`.
+- **Plain Boomboxes** (up to 40): emitter on `model_boombox`, same E / dance rules (log `N plain
+  Boombox(es) play the Slime DJ song when switched on (...)`).
+- **Slime Radio** = a vanilla Night Light toy; its card definition is a Boombox clone, never a variant or
+  in the inventory: fabricating spends the cost and spawns the toy 1.8 m in front of the camera (posted,
+  at most 5 per click), id into `dj.radios`. Dressing: night light off, a small speaker stack (0.26)
+  centred on the root with its box collider (ball off), upright with rotation x / z frozen (re-applied if
+  the vacuum resets it); emitter kind Radio (0.6x range, 80 %), plays whenever a song plays. A radio that
+  leaves the world raises `dj.radios_away` (max 20); the next Night Light appearing within 6 m of the
+  camera is a radio again (logged). Failed spawns go to `dj.radios_owed` (up to 5 per tick later).
+- **Fabricator** (Decorations): booth after the Scientist Desk (Newbucks x2.5, items x2), stack after the
+  Boombox (x1.5), radio after the stack (x0.5), Newbucks rounded to 5. Booth / stack: vanilla decoration +
+  one kit (`dj.booth_kits` / `dj.speaker_kits`); placing uses a kit (none: plain, logged), pick-up gives it
+  back, removed otherwise the tick gives it back.
+- **Gadget mode**: booth and stack registered with gadget_look; `dressPreview` builds the dressed look
+  script- and collider-free on layer 26 (logs `gadget looks registered for N definition(s)`, `<label>
+  placement preview dressed (N part(s))`).
+- **Sidecar**: `dj.booths`, `dj.speakers` (`id:kind`), `dj.radios`, `dj.booth_kits`, `dj.speaker_kits`,
+  `dj.on`, `dj.radios_away`, `dj.radios_owed`, `dj.shop_radios_pending`, `dj.shop_radio_bought`.
+- **Save** as the Quantum Storage Link (alias + `GetPersistenceId` for favourites). Per tick: no scene
+  searches (`identifiablesByIdent`, cached keys). Without the mod: plain desks (clutter back), upright
+  Boomboxes (stacks stay), Night Lights; unused kits gone.
+- **Sandbox**: the Sandbox's own crafter / blueprint paths skip our definitions (`IsModGadget`: crafting one
+  would write a duplicate persistence id); it lists and grants them through `buildables.h`.
 
-- **DJ Booth** = a variant of the **Scientist Desk** decoration (same prefab). It faces +z (where the big speakers
-  look); the DJ sits behind it (-z). Dressing on the placed desk: the lab clutter (glass, vials, beaker, clipboard,
-  pens, wrench, bubble scroll, `scientistDesk_misc01` = the tubes between the flasks, the light above the glass) and
-  its bubbling sound switched off; on the desk a boombox lying face up in the middle as the **deck** (its two speaker
-  cones read as turntables; `AxisY(180) * AxisX(-90)`, lifted by its half depth) and two small boomboxes on the
-  **front corners** (x +-0.8, z 0.3, 0.4 size) facing the audience like the big ones; two big boomboxes on the floor
-  at x = +-1.75 (both emitters, kind Booth); behind the desk (z -1.8) the Boombox's **bench** (colliders kept) with
-  the **Flower Pillow**'s mesh, colliders and its `SlimeAttachmentPoint` subtree **with its scripts** on top, so the
-  slime sits about 0.7 m higher than on the floor and shows over the desk. **Largos**: `_allowLargo` is set on the
-  cloned attach point before its Awake (`OnTriggerEnter` drops largos without it), its trigger sphere is 1.5x, and the
-  seat moved back from z -1.55 to -1.8 so a largo does not clip into the desk. Every other clone is script-free.
-- **E on the booth**: a `GadgetMusicPlayer` (gadgetMusic, onInteractCue, cooldown copied from the Boombox prefab) and a
-  `GadgetUIInteractable` (prompt prefabs, input event, gadget-mode block copied) are added to the desk root, the player
-  first (the interactable's Awake takes `GetComponentInParent<IGadgetInteractor>`). `UIDetector` sphere-casts and
-  takes the interactables of the hit collider and its parents, so the desk's own box collider (layer 27, as the
-  Boombox's) brings up the prompt. Undress destroys both (`DestroyImmediate`, so a new dressing in the same tick can
-  add them again).
-- **DJ Speaker Stack** (since round 10 one variant; before: DJ Speaker / tilted / facing up) = a variant of the **Boombox**
-  decoration. Round 8 ("only see 1 speaker"): the bench, the vanilla `model_boombox` and its `Collision` ball are
-  switched off; a **stack** of two boombox clones stands in their place (1.3 size on the floor, 0.85 on top at 1 m),
-  the variant tilts the top one back 0 / 30 / 80 degrees (lifted so its back does not sink into the base), and one
-  `BoxCollider` (1.2 x 1.7 x 0.9, layer 27) covers the stack. The base is the emitter (kind Speaker). Yaw is the
-  game's own rotate keys. A placed gadget has no Rigidbody (prefab), so a DJ Speaker can't roll; the rolling "pill"
-  was the Slime Radio (see below). **Stacking**: placed speakers get `Gadget.AllowGadgetStackingOnTop = true`
-  (instance field; the prefab says false), the Boombox prefab already has `CanStackOnStackableGadgets`, so speakers
-  (and any decoration that may stack) go on top of speakers with the game's own rule; the stack relation is the
-  vanilla `_stackedGadgetsIds`. Toggle-variant while holding cycles Boombox -> Speaker -> tilted -> up; on a placed
-  one it cycles plain -> Speaker (a kit) -> tilted -> up -> plain (kit back). The game always asks for the first
-  variant there (`ToggleVariant` indexes from the vanilla definition), so the detour picks the next kind itself; the
-  variants are offered on a placed one while a kit is left or while you aim at a listed one
-  (`GadgetDirector.TargetedGadget`).
-- **On / off with E** (round 8: "activated = off, deactivated -> on, always shows the music icons"; "only play music
-  if we have a slime behind the desk, otherwise the default speaker music"). Before, every DJ speaker / plain Boombox
-  played the song all the time and E started the vanilla track, which muted our emitter. Now
-  `GadgetMusicPlayer.OnInteract` and `.ShowDeactivatePrompt` are hooked (nothing else hooks them; `dj.` hook names)
-  and answer only for the player of one of our records (booth: the added one; speaker / plain Boombox: the vanilla
-  one); everything else runs the original. E flips the record's state (sidecar `dj.on`, actor ids; default off, as a
-  vanilla Boombox) and `Apply` (also every tick) picks what plays:
-  - off: nothing (emitter volume 0, no dance, no notes; a running vanilla track is stopped);
-  - on and a Slime DJ song loaded (booth: and a slime sits on the pillow, `SlimeAttachPoint._isJointActive` with a
-    live `_slime`): the song from the record's emitters (volume 1); the boomboxes dance and show their notes while
-    the song plays;
-  - on otherwise: the Boombox's own track (`BoomboxMusic`) as filler, started / stopped through the original
-    `OnInteract` (trampoline, cooldown field cleared first). The game plays one gadget track at a time
-    (`GadgetDirector.CurrentGadgetMusicPlayer`); when it stops ours (another Boombox switched on, louder music), the
-    record switches itself off instead of fighting for it.
-  The prompt says "deactivate" while a record is on. Logs: `dj buildables: <label> actor N switched on|off
-  (interact)`, `... plays the Slime DJ song|the Boombox's own track (no slime behind the desk|no Slime DJ song
-  loaded)|nothing`, `DJ Booth actor N: a slime sits behind the desk|nobody behind the desk any more`.
-- **Dance**: the Boombox's own animator bool (`GadgetMusicPlayer._gadgetActive`, a static hash read once a Boombox
-  exists) and `FX_MusicalNotes`, only while the record plays (the old "notes on whenever a song plays anywhere" is
-  gone).
-- **Plain Boomboxes play too** (round 7: "boomboxes have no music sadly"). The scan already lists every Boombox gadget
-  (`identifiablesByIdent[Boombox]`); each loaded one that is not a DJ Speaker gets a plain record (no holder, nothing
-  changed on it): an emitter on its `model_boombox` (kind Speaker) and the same E / dance rules (switched on: the
-  song, or the vanilla track without a song). Up to 40; dropped when it is picked up / unloaded or becomes a DJ
-  Speaker (then dressed as one, its on state kept: same actor id). Log: `dj buildables: N plain Boombox(es) play the
-  Slime DJ song when switched on (A added, R emitter(s) registered; D dropped)`. Needs custom upgrades on.
-- **Slime Radio** = a vanilla **Night Light** toy actor. Fabricator card (after the DJ Speaker's) whose definition is a
-  Boombox clone that is never a variant and never enters the inventory: fabricating spends its cost and spawns the toy
-  1.8 m in front of the camera (`InstantiationHelpers.InstantiateActor`, as the sandbox spawner; posted out of the
-  Fabricator call), at most 5 per click; its actor id goes into `dj.radios`. Dressing: `model_nightlight` (mesh,
-  handle, light) off, a boombox model at 0.6 size instead, an emitter (kind Radio, 0.6x range, 80 % volume; it plays
-  whenever a song plays, no E: it is a toy). Round 8 ("rolls over, feels like a pill hitbox"): the toy's root collider
-  is a ball (r 0.47, Rigidbody 0.5 kg, no constraints), so it rolled. Now it is stood up (euler x / z = 0), its
-  rotation about x / z is frozen (`RigidbodyConstraints` 16 | 64, put back each tick if the vacuum reset it), the
-  ball collider is off and its small bottom box collider is resized to the boombox (centre y -0.27, 0.62 x 0.46 x
-  0.4 toy units); all restored on undress. Slimes play with it like with any toy. It is also sold in the shop's
-  Daily Deals next to the daily toy (see "Slime Radio in the shop" below).
-- **Fabricator** (Decorations): DJ Booth after the Scientist Desk (cost: the desk's Newbucks x2.5, items x2), DJ
-  Speaker after the Boombox (x1.5 / x1.5), Slime Radio after the DJ Speaker (x0.5 / x0.5); Newbucks rounded to 5.
-  Unlocked with the base's blueprint (radio: the Boombox's) unless the sidecar overrides it (see "Mod buildables"). Owned count: kits (booth / speaker), radios in the save.
-  Fabricating a booth / speaker adds the vanilla decoration and one kit (`dj.booth_kits` / `dj.speaker_kits`),
-  never our definition. Placing the variant uses a kit (no kit: a plain decoration is placed, logged), picking one up
-  gives it back and holds the variant again; removed any other way (stored, picked up with a stack) the tick gives the
-  kit back.
-- **Sidecar**: `dj.booths` (actor ids), `dj.speakers` (`id:kind`), `dj.radios`, `dj.booth_kits`, `dj.speaker_kits`,
-  `dj.on` (actor ids switched on with E; an id leaves it when its actor is picked up / gone), `dj.shop_radios_pending`
-  (radios bought at the shop and not dispensed yet).
-- **Save**: like the Quantum Storage Link (ReferenceId alias in `_reverseIndex`, `GetPersistenceId` detour mapping
-  our definitions to the vanilla one for the favourite slots; Cleanup puts the vanilla gadget into those slots).
-- **Per-tick cost** (world tick, 1 Hz; reviewed in the Slime DJ perf round): no scene searches. Actors come from
-  `identifiablesByIdent` lists, records are kept, `Apply` per record is field reads plus at most a
-  `Rigidbody.get_constraints` for radios (upright re-apply only when the vacuum reset it), and emitters re-register
-  only when their volume changes. The save alias check used to build each definition's key with `get_name` +
-  `std::format` and look the `_reverseIndex` offset up by name every tick; both are cached now.
-- **Without the mod**: DJ Booths load as plain Scientist Desks (clutter back), DJ Speakers as plain upright Boomboxes
-  (stacked decorations stay stacked: vanilla data), Slime Radios as Night Light toys. Unused kits are gone; the desks
-  / boomboxes fabricated with them stay in the inventory. A favourite slot that held a DJ variant holds the vanilla
-  decoration.
-- **Sandbox**: our clones (and the Quantum Storage Link) are left out of the Sandbox crafter / blueprint manager
-  (`custom_upgrades::IsModGadget` in `Sandbox::Saveable`): crafting one there would put our definition into the
-  saved inventory next to its vanilla twin (`GadgetsModel.Pull` -> duplicate persistence id -> the save fails). The
-  Sandbox spawner can spawn Night Lights, but they are not radios. (Since round 9 the Sandbox lists them through
-  `buildables.h` and gives them with `Grant`, see "Mod buildables" below.)
+## Mod buildables: Fabricator cards, unlock, API
 
-Not checked in game yet: the three cards (position, names, cost, icons = the vanilla ones), fabricating (kits log),
-the variants while holding a Scientist Desk / Boombox (names, gradients), placing / picking up / toggling (logs),
-the booth look (clutter gone, mixer and speaker positions, which side is "behind": the pillow is on the desk's -z
-side), a slime sitting on the pillow, the speaker tilt direction (front up, not down) and size, stacking speakers on
-speakers, the dance and notes while a song plays (log `boombox dance animator parameter hash ...`), the radio spawn
-(in front of you, not inside the Fabricator) and its look, slimes playing with the radio, the emitters playing,
-save + reload (rebuilt from the sidecar), turning custom upgrades off (plain again, favourites back), a mod-free load.
+RE: re/fabricator.md (GadgetFabricateCategoryRuntime..ctor, FabricateCategoryRuntime, FabricatorItemGrid).
 
-Seen in game (round 8, 2026-10-24): booth placed and dressed, big speakers face the right way, a slime sat behind it
-(hidden by the desk), the song played; a largo could not sit; leftover flask tubes; DJ Speakers placed / dressed;
-the radio rolled; E on a DJ speaker inverted the state and the notes always showed. Round-8 changes (above) not
-checked yet: the deck / corner speaker / bench positions (all estimated from prefab numbers: the deck's lift and the
-stack heights may need a nudge), E prompt on the booth, filler vs song switching with a slime, a largo on the seat,
-the speaker stack and its collider (stacking on it), the radio staying upright.
-
-### Round 9 feedback (round 10 changes)
-
-User: "dj booth isnt playing standby music when no slime & activated (the same one playing in ranch plots)",
-"ALMOST perfect look, slime keeps dancing when music is turned off", DJ Speaker "not in preview, remove the tilted
-variants and correct the name, also change the preview to match the stacked speakers", "slime radio just disappears
-when vacced (also isnt stacked speakers)", "custom buildables (mod ones) use the default label and the preview is
-also default".
-
-- **Booth standby tune.** Switched on without a slime on the seat (or without a song) the booth plays the corral
-  Music Box's own tune instead of the Boombox's track (which the round-9 log shows as started but the user did not
-  hear). Source: `LookupDirector.GetPlotPrefab(CORRAL)` -> `Music Box/techCorralMusicBox/MusicBox` -> its
-  `SECTR_AudioSource` (abstract; the concrete class's `Play()` / `Stop(bool)` / `get_IsPlaying` are resolved on it).
-  Each booth gets a GameObject `sr2dj_standby` above the desk with a component of that class added (Cue, volume,
-  pitch copied; Loop on, PlayOnStart off). Mode `kModeStandby`: Play when it should and is not playing, Stop on any
-  other mode / undress. The boomboxes dance meanwhile. Without the source (lookup failed, logged once) the old
-  Boombox-track filler is used. Logs `standby tune = the corral music box's '<cue>' (...)`, `DJ Booth actor N plays
-  the corral music box tune (no slime behind the desk)`.
-- **Seat spin.** The "dance" is `SlimeAttachPoint._rotationSpeed` (FixedUpdate rotates the joint bodies by it while a
-  slime is attached; checked in IDA, 0x752700). Read at the dressing (`spin N` in the dressed log line); the record
-  writes it while music plays from the booth, 0 otherwise.
-- **One DJ Speaker Stack.** The tilted / facing-up variants and their definitions are gone; the one variant (still
-  `SlimeDJSpeaker`, same save alias) is called "DJ Speaker Stack". Saved kinds 1 / 2 load as the stack (the kind is
-  clamped to the variant count).
-- **Slime Radio = a small speaker stack** (`BuildStack` at 0.26, toy units), centred on the toy's root (where the
-  night light was). Toys are held by the vacuum (`Vacuumable.Hold`: held layer, `_Held` property on its renderers);
-  the old boombox hung 0.4-0.9 m under the root, i.e. under the nozzle and out of view - likely the "disappears".
-  The box collider is the stack's (centre at the root). In case the vacuum does take it out of the world (actor
-  destroyed: the save had no such case in the logs): a seen radio that leaves the world raises `dj.radios_away`
-  (max 20) and the next Night Light actor that appears within 6 m of the camera (not there at the last scan) is
-  listed as a radio again. Logs `Slime Radio actor N left the world (vacuumed up?) ...`, `Night Light actor N appeared
-  next to you - a Slime Radio again`.
-- **Owed radios.** The round-9 log: a shop radio bought without a dispenser was paid and never spawned (`paid but not
-  spawned (no scene group / camera / toy prefab)`). A failed spawn now goes to `dj.radios_owed` and the tick spawns
-  them (5 at most per tick) as soon as a scene group and a camera exist.
-- **Gadget mode** through `gadget_look` (previous section): booth and speaker definitions are registered with their
-  name (label while held), their own description (Fabricator card) and `dressPreview` = the dressed look built into
-  the placeholder (`sr2look` child: booth clutter hidden, deck, monitors, floor speakers, bench, pillow mesh; speaker:
-  bench / boombox hidden, the stack), every clone stripped of scripts / colliders and put on layer 26 (the overlay
-  layer the game puts the placeholder on). `AddPlacedLabel`: an aimed-at listed booth / stack shows our name. Logs
-  `gadget looks registered for N definition(s)`, `<label> placement preview dressed (N part(s))`.
-
-Not checked in game yet (round 10): the standby tune (audible, positional, stops on off / when a slime sits), the seat
-spin stopping when off, the stack name and preview ghost (ghost look on layer 26), the held / aimed-at labels, the
-radio stack look and size, holding a radio with the vacuum (visible at the nozzle), the away / re-adopt path, owed
-radios after a shop purchase.
-
-## Mod buildables: Fabricator cards, unlock, API (round 7 fix)
-
-Round 7: "no DJ booth in fabricator", "cant unlock the booth / speakers", "Slime Radio: where can I craft that?",
-"Quantum Storage Link: can't see it in Warp tech". None of the four cards was ever in the Fabricator.
-
-- **Why.** The cards were inserted by a `GadgetFabricateCategory.GetItems` detour. In 1.3.0 nothing calls `GetItems`
-  natively (its only references are metadata tables): `GadgetFabricateCategoryRuntime..ctor(category, helper,
-  recipeFactory)` (0x8287D0) has the same LINQ code inlined (`_gadgetSubGroup.GetAllMembers().Cast<GadgetDefinition>()
-  .Select(new GadgetFabricatableItem(...)).ToList()`) and passes the list to `FabricateCategoryRuntime<T>..ctor`
-  (0x20F5F80: `Category` @0x10, `_categoryCount` = `category.TotalCount()` @0x18, `_itemList` @0x20).
-  `FabricatorCategoryList.FindCategoriesToShow` builds one runtime per category each time the Fabricator opens
-  (also the Sandbox's rebuild). The same holds for `PlayerUpgradeFabricateCategory.GetItems` (0x82C000, no native
-  caller): see "Drone Battery Saver" > "Card in the Fabricator" for the vacpack card's fix.
-- **Fix.** The quantum hook is now on that constructor: after the original, `quantum::InsertItem` and the DJ
-  extension's `InsertCards` insert into the runtime's `_itemList` (same anchors: Refinery Link in `GadgetWarpGroup`,
-  Scientist Desk and Boombox in `GadgetDecorGroup`, 241 members; checked with UnityPy on
-  `identifiabletypegroups_assets_*.bundle`). `FabricatorItemGrid.SetCategory` (0x80A170) sizes its pages from
-  `TotalCount` (ceil(TotalCount / 36 or 16)) while the page contents come from `Items`, so `_categoryCount` is raised
-  to the item count (since round 8 always; the title's total then counts our cards). Log
-  `Fabricator category '...': entry count raised ...`.
-- **Locked look.** `GadgetFabricatableItem.get_IsMissingBlueprint` = recipe has items and `!helper.HasBlueprint(def)`
-  (our helper detour), so a card whose rule says locked looks like a vanilla locked card. `get_ShouldShowPlaceholder`
-  (0x828470) = the definition's pedia entry is not unlocked; our clones share the base's pedia link, so a player who
-  never met a Boombox would see a "?" tile. A new detour (pointer compares only) returns false for our cards: they
-  always show name and icon, and the description ends with what unlocks them ("Needs the Boombox
-  blueprint.").
-- **Unlock rule.** Card unlocked = the base gadget's blueprint (Refinery Link, Scientist Desk, Boombox; the radio
-  follows the Boombox), unless the sidecar has `buildables.unlock.<id>` = `1` (unlocked) / `0` (locked). The variant
-  (toggle-variant) is offered while the card is unlocked and a kit is left. Nothing of it is in the vanilla save.
-- **Log** (when the state changes, at each Fabricator opening): `quantum link: Fabricator card added after the
-  Refinery Link (Warp Tech, position N): LOCKED (unlocked with the Refinery Link blueprint; Refinery Link blueprint
-  not owned), 0 kit(s)`, `dj buildables: Fabricator card 'DJ Booth' added after 'ScientistDesk' (position N): ...`;
-  `Fabricator opened before the definition(s) were built ...` when the Fabricator is opened before the first tick of
-  a loaded save.
-- **API** (`buildables.h`, for the Sandbox crafter and blueprint manager): `buildables::List()` (id, name, base
-  display / asset name, hint, our card definition, the vanilla definition, icon sprite, unlocked, base blueprint owned,
-  override, owned kits / radios), `Grant(id, n, result)` (save-safe: n vanilla base gadgets + n kits, as fabricating
-  without the cost; radio: n spawned toys, at most 5 per call), `SetUnlock(id, Unlock, result)` (sidecar override,
-  `kFollowBase` clears it). Ids `quantum_link`, `dj_booth`, `dj_speaker`, `slime_radio`. Never `AddItem` /
-  `AddBlueprint` our definitions (the save would get a duplicate / unknown persistence id).
-- **Sandbox**: the Upgrades & Blueprints card has a "Mod buildables" tab; since round 9 the four are also tiles of
-  their own in the Sandbox crafter (after their base gadget) and the Slime Radio is in the spawner, all given through
-  `Grant`, with icons rendered from the dressed prefabs and an [M] badge (`modules/sandbox/NOTES.md`, "Mod buildables").
-
-**Round 8** ("there is a 41st blueprint after grey labyrinth portal but cant see what it is"; Quantum Storage Link
-still missing). The user's log: `quantum link: Fabricator opened before the definition was built` 11 minutes after
-the load, and never `definition ... built` nor a failure: `LookupDirector.get_RefineryLink()` returned null (or a
-non-definition) at every tick, which `EnsureDefinition` treated as "not ready yet" forever. Now it falls back to the
-`GadgetDefinition` named `RefineryLink` in `LookupDirector._gadgetDefinitions` and its member groups (it is member 13
-of `GadgetWarpGroup`), logged `quantum link: LookupDirector.RefineryLink is null - using 'RefineryLink' from the gadget
-groups`; still nothing after 30 ticks -> one WARN. Warp Tech has 41 vanilla members (UnityPy: TeleporterHome x4,
-TeleporterZone x4, TeleporterSanctuary x4, MarketLink, RefineryLink, Teleporter x10, WarpDepot x10, LinkedCannon x7);
-the Sandbox crafter shows 40 of them because Teleporter Sanctuary Blue has no crafting cost. The 41st entry the user
-saw is vanilla (no mod card was inserted that session). `FixPageCount` now always raises `_categoryCount` to the
-item count when mod cards were added (was: only when the 36 / 16 page count changed), so the card always has a page
-whatever the grid size, and logs `Fabricator category '...': entry count raised for N mod card(s) (41 -> 42 entries)`
-once per change. Card texts rewritten (round 8: "i dont understand the description"): what it is, "To place one:
-fabricate it, hold a <base> in gadget mode, press the Variant key until it shows <name>, then place it.", "Needs the
-<base> blueprint." (also the `hint` the Sandbox shows).
-
-Not checked in game yet: the four cards appearing (position, locked look with name / icon, the hint in the details
-panel), unlocking with the base blueprint (buy / find a Boombox blueprint), the Sandbox override, the Warp Tech card
-after the Refinery Link (42 entries), Decorations (244 entries).
+- **Cards** are inserted in the `GadgetFabricateCategoryRuntime..ctor` detour (`GetItems` is never called):
+  `quantum::InsertItem` and the DJ `InsertCards` insert into `_itemList`; `FixPageCount` raises
+  `_categoryCount` (log `Fabricator category '...': entry count raised for N mod card(s) (41 -> 42
+  entries)`). Warp Tech has 41 vanilla entries, Decorations 241.
+- **Locked look**: `get_IsMissingBlueprint` follows our helper `HasBlueprint`; `get_ShouldShowPlaceholder`
+  is false for our cards (name and icon always). Card text ends with how to place it and "Needs the <base>
+  blueprint." (also the Sandbox `hint`).
+- **Unlock rule**: the base gadget's blueprint (radio: the Boombox's), unless the sidecar has
+  `buildables.unlock.<id>` = `1` / `0`.
+- **Log** at a Fabricator opening when the state changes: `quantum link: Fabricator card added after the
+  Refinery Link (Warp Tech, position N): LOCKED (...)`, `dj buildables: Fabricator card 'DJ Booth' added
+  ...`; `Fabricator opened before the definition(s) were built` before the first tick of a loaded save.
+- **API** (`buildables.h`): `List()`, `Grant(id, n, result)` (n base gadgets + n kits; radio: n toys, max 5),
+  `SetUnlock(id, Unlock, result)` (`kFollowBase` clears). Ids `quantum_link`, `dj_booth`, `dj_speaker`,
+  `slime_radio`. Never `AddItem` / `AddBlueprint` our definitions. Sandbox side: `modules/sandbox/NOTES.md`
+  "Mod buildables".
 
 ## Slime Radio in the shop
 
-User report: "shop had punk and gray boombox, but not new upgrade". `radio_shop.cpp` (header comment for the RVAs).
+`radio_shop.cpp`. RE: re/shop.md (Daily Deals data, ShopCategoryRuntime, ShopRuntimeItem, ShopDataModel).
 
-- **The shop (research).** There is no separate toy shop code: `ToyShopUI` / `ToyShopUIActivator` are empty shells and
-  the ranch shop is the generic shop system (`ShopDirector`, `ShopRuntime` per kiosk, `ShopCategoryRuntime` per
-  category, `ShopRuntimeItem` per entry, UI `ShopContentPage` / `ShopItemButton` / `ShopPurchasePopup`). Toys are in
-  the **Daily Deals** category (analytics name `DailyDeals`): rule set `DailyDeals_BaseToysRuleSet` (one toy per
-  restock) over `DailyDeals_BaseToysTable` (UnityPy on `scriptableobjectlookupdata_assets_all_*.bundle`: 22 toys,
-  500..2000 Newbucks, each limited to 1; the Night Light is GUID `6b6134bfd2a4907479a87c894d40324c`, id
-  `ToyDefinition.NightLight`, 500 Newbucks, filter flags TOY | SINGLE_ITEM). The boomboxes the user saw are presumably
-  Boombox variants from the gadget sources of the same category (not checked).
-- **Purchase path.** `ShopContentPage`'s popup calls `ShopRuntimeItem.TryPurchase(count, page._spawnHandlerId, ui
-  session)`: `CanAcquireIgnoringCosts`, `CanAfford`, `Acquire_SpawnOrStore(asset)` whose callback queues the
-  IdentifiableType at `ShopDataModel.QueueToSpawnItem(spawnHandlerId)` (= `ShopDirector.QueueToSpawnItem`), then the
-  transactor's `Purchase` = `SpendableDirector.Spend` + `ShopDirector.TrackItemPurchased` (purchase count by category
-  and unique id, saved). The kiosk's `ShopItemSpawner` dispenses the queue every few seconds through
-  `ShopDirector.SpawnNextItem` (dequeue, `InstantiateActor` at the spawner). `ShopDataModel` saves the purchase counts
-  and the pending queues (IdentifiableTypes).
-- **Display path.** Every UI read goes through `ShopRuntimeItem.get_Asset` (the loaded Addressables handle's result):
-  title / icon / picture (the asset as `IUIDisplayData` / `IFullArtAndIconSource`), item type and counts (the runtime
-  helper with the asset), the description (`get_Description` = the helper's `GetDescription(asset)`, the pedia
-  entry's text). `ToyShopItemHelper.GetPediaEntry` casts the asset to `ToyDefinition` (throws otherwise).
-- **What the mod does.** After `ShopCategoryRuntime.GetRuntimeItems` (it returns the category's `_cachedItemList`) the
-  Daily Deals list gets our `ShopRuntimeItem` after its last toy (at the end when no toy is in stock): a
-  `MemberwiseClone` of a toy entry of that list (owning category, transactor, provider) with our own
-  `ShopCategoryItemEntry`: the Night Light's asset reference (own `AssetInterface` / `AssetReference` objects of its
-  GUID, since `ReleaseResources` releases the AssetReference; reference / unique id `ToyDefinition.NightLight`),
-  **1000 Newbucks** (vanilla toys 500..2000, the Boombox fabricates for 1000 + materials), no count limit;
-  `ToyShopItemHelper.Instance`, no category updater, a cleared load handle (the UI loads it like any entry). Offered
-  while the radio card is unlocked (Boombox blueprint or the Sandbox override) and the text sink is live; taken out
-  of the list when that ends or custom upgrades go off. `get_Asset` / `get_Description` return, for our item only,
-  a runtime `ToyDefinition` clone of the Night Light named "Slime Radio" (Boombox icon, the Boombox's full-art
-  picture through its own AssetReference) and our description. Pointer compares only.
-- **Buying.** `TryPurchase` for our item: `CanAfford`, `SpendableDirector.Spend(our cost, count)`,
-  `ShopDirector.QueueToSpawnItem(spawnHandlerId, Night Light, count)`, sidecar `dj.shop_radios_pending` += count.
-  Nothing goes to the shop's purchase records (neither our id nor the Night Light's). Without a spawner id the radios
-  spawn in front of the player (`dj::Grant`, as the Fabricator). After `SpawnNextItem`, a Night Light while radios
-  are pending is listed in `dj.radios` (`dj::ListRadio`) and dressed at the next DJ tick; the count goes down. The
-  tick lowers the count to the Night Lights still in the shop's queues (plain reads of
-  `ShopDataModel._itemsPendingSpawn`), e.g. after Night Lights were dispensed while custom upgrades were off.
-- **Save.** The vanilla save sees spent Newbucks, Night Lights in the shop's pending queue and Night Light actors.
-  Without the mod: Night Lights come out of the shop instead of radios, dispensed radios are Night Lights. Should the
-  module fault while our item is in the list, the detours pass through and it is a plain Night Light at our price
-  (vanilla purchase, tracked under the Night Light's id) until the next restock clears the list.
-- **Log.** `radio shop: shop category 'DailyDeals' (N item(s)): the toy category, ...` (each category name once),
-  `shop entry look built`, `Slime Radio shop entry made (copied from a toy entry; 1000 Newbucks ...)`, `Slime Radio
-  added to the shop's toy category (position P of N)`, `Slime Radio offered in / no longer offered in the shop (why)`,
-  `N Slime Radio(s) bought for X Newbucks, queued at the shop's dispenser '<id>' as Night Light(s) (K radio(s)
-  pending)`, `the shop dispensed a Slime Radio (actor N; K still pending)` + `dj buildables: Slime Radio actor N
-  listed`, `... pending set to N`.
+- **Daily Deals only** (by analytics name; never Range Exchange / Coo-Coo Corner): at one restock in four
+  (`kOdds`) the radio takes the daily toy's place in the list the UI reads. Restock key = FNV of
+  `_lastSeedUsed` and the toy's asset GUID (stable across reloads). The vanilla entry is only taken out of
+  `_cachedItemList` (pinned, put back later). Offered while the radio card is unlocked and the text sink
+  is live.
+- **Item**: `MemberwiseClone` of the toy entry with our own `ShopCategoryItemEntry` (the Night Light's
+  asset reference in own AssetReference objects), 1000 Newbucks, the toy's sort index. `get_Asset` /
+  `get_Description` return, for our item only, a `ToyDefinition` clone of the Night Light named "Slime
+  Radio" (Boombox icon and full art, with `m_SubObjectName` / `m_SubObjectType`) and our text.
+- **Buying**: `Spend`, `QueueToSpawnItem(spawnHandlerId, Night Light, count)`, `dj.shop_radios_pending` +=
+  count; one per restock (`dj.shop_radio_bought` = key, `_isSoldOut`); not in the shop's purchase records.
+  A null spawner id spawns in front of the player (retried via `dj.radios_owed`).
+- **Dispensing**: after `SpawnNextItem`, a Night Light while radios are pending is listed in `dj.radios`;
+  the tick lowers the pending count to the Night Lights still queued.
+- Without the mod (or with the module faulted): Night Lights. Logs `daily toy restock XXXXXXXX: the Slime
+  Radio is the daily toy | a vanilla toy (...)`, `Slime Radio stands in for the daily toy (position P of
+  N)`, `N Slime Radio(s) bought for X Newbucks, queued at ...`, `the shop dispensed a Slime Radio (actor N;
+  K still pending)`.
 
-Not checked in game yet: the entry in Daily Deals (position next to the toy, name, icon, picture in the details /
-popup, description, price 1000), buying 1 and several (Newbucks, the dispenser drops Night Lights that turn into
-radios within a second), save + reload with radios still queued, the entry hidden without the Boombox blueprint,
-custom upgrades off (entry gone, dispensed Night Lights stay Night Lights), a mod-free load.
+## Silo Sell-All: button and receipt
 
-### Round 9 feedback (round 10 changes)
+`silo_world.cpp`, `silo_receipt.cpp`, `sale_notify.cpp`. RE: re/plots.md (corral techActivator),
+re/ui.md (PopupPrompt, TextButton_NoneSelectable, Selectable, UIInputLocker, HUD notifications),
+re/unity.md (RanchTech01, HDRP/Lit), re/custom-upgrades.md 2.2.
 
-User: "shows up in coocoo corner for 1000 bucks, no preview though, same in normal shop (no preview), coocoo corner
-should respect how it works regarding mod items". The round-9 log: the radio was added to `DailyDeals` (6 items) and to
-`RangeExchange` (158 items, it has toy entries too: the old "any toy entry" fallback), bought once without a spawner
-id, and that radio was never spawned.
-
-- **Daily Deals only, as one of its daily toys.** The category is recognised by its analytics name only. The Daily
-  Deals offer one random toy per restock; at one restock in four the Slime Radio takes that toy's place in the list
-  the UI reads (`kOdds`). Restock key = FNV of `ShopCategoryRuntime._lastSeedUsed` (the seed of its random restock)
-  and the toy's asset GUID (`get_AssetGuid`), so a reload gives the same answer. The vanilla toy entry is removed from
-  `_cachedItemList` (pinned while out, put back at our place when the radio stops being offered); its data and
-  purchase records are untouched. Our item uses the toy's sort index. One per restock: buying sets
-  `dj.shop_radio_bought` = the key and `_isSoldOut`; sold out until the key changes. Logs `daily toy restock XXXXXXXX:
-  the Slime Radio is the daily toy | a vanilla toy (...)`, `Slime Radio stands in for the daily toy (position P of N)`,
-  `Slime Radio taken out of the daily toys (why)`.
-- **Picture.** The display clone's full-art `AssetReference` (built from the Boombox's GUID) now also carries the
-  Boombox reference's `m_SubObjectName` / `m_SubObjectType` (a sprite inside a texture is addressed by both), and
-  `_requiresFullArt` is the Boombox's own (false: the shop shows the icon as the picture). The look log line names
-  the reference.
-- **Queueing.** Vanilla's spawn callback queues under the page's spawner id whatever it is (`ShopDataModel.
-  QueueToSpawnItem`, checked in IDA); ours does the same when the id is not null (an empty id included). Only a null
-  id spawns in front of the player, and that is retried until it works (`dj.radios_owed`).
-
-Not checked in game yet (round 10): the radio as the daily toy (wait for restocks or reload around one), its picture,
-sold out after one purchase, a Coo-Coo Corner purchase arriving (dispenser or in front of you), the Range Exchange
-without the radio.
-
-## Demolish clears the plot (user report round 4)
-
-"Sold the silo plot, capacity stayed at full upgrade" / "bought corral, Music Box II, sold plot, bought
-Music Box -> Music Box II already bought". The sidecar keys plots by `LandPlotLocation._id`, which
-stays the same when a plot is demolished and rebuilt; only a rebuild as another type dropped the entry.
-Now a detour on `LandPlotLocation.Replace` (the one plot swap path: buying on an empty plot and the
-demolish closure, both through `LandPlotUIRoot.BuyPlot`) drops the id's whole entry after the
-original: tiers, world upgrades, Hen Collector contents and limits, other modules' per-plot values
-(sell_upgrades' Ash Trough fill). Props, the Sell-All button and the Hen Collector clone are children of
-the old plot and die with it. Vanilla upgrades need nothing: the new plot gets a new LandPlotModel.
-Not written to the sidecar at once (it belongs to the loaded .sav; the next game save writes it), so a
-reload without saving restores the plot and its upgrades together. Log: `plot '...' demolished /
-replaced (old type T, stored type T): dropped owned [...], values [...]`.
-
-## Buy menu cards (fixes after the test of build 506a4f60)
-
-- **Purchase / Sell overlap.** The buttons size themselves: the prefab `TextButton_NoneSelectable`
-  (UnityPy, `duplicateassetisolation_assets__54b00e46...bundle`) has the game's own layout
-  (`LayoutManager`, `HorizontalLayout`, `EncapsulateChildren` -> `SetSizeWithCurrentAnchors` in
-  LateUpdate; the label has `ResizeToPreferred`), so the old half-width split was overwritten and the
-  buttons grew back to full width. Now (sell_upgrades `PlaceButtons`) only pivots / positions are
-  set: owned card -> PURCHASED hidden, Sell alone in its place; tier card -> Sell pivot x 1 left
-  of the old centre, Purchase pivot x 0 right of it (16 px gap; swapped in plot-polish-7, user request
-  "switch sell and buy button positions"), re-centred for a few ticks once the layout has given them
-  their widths. Applies to every plot menu.
-- **Sell also bought the next tier.** The prefab's `InputEventButton` performs the menu's submit on
-  pointer down / up (before the Button click reaches the Press detour): on a tier card that opened
-  the purchase prompt of the shown tier and the same click confirmed it (log: "sold Music Box" and
-  "bought Music Box II" 4 ms apart). Disabled on our clone; its submit-key icon (`InputEventDisplay`
-  under "Icon Background") now shows the alt-action key instead (`SetInputEvent(ListUI.altSubmit)`,
-  the key that sells, user feedback "sell should have a key"), hidden when the button is disabled. The popup-confirm guard from feature/plot-props-2 stays as a
-  backstop.
-- **Stale card label** ("High Walls" on the Music Box card). The clones' texts were registered only
-  in the post hook of `UpdateMenuItemAvailabilityAndHidden` / `RebuildUI`. With the menu open,
-  RebuildUI's original rebinds the cards, so a card placed by the pre hook for the first time this
-  session (Music Box II taking over the Music Box card right after its purchase) ran
-  `LocalizeStringEvent.UpdateString` with no override yet and showed its template's text (the corral
-  clones' template is `Walls Upgrade`). Texts are now registered in the pre hook too.
-
-- **Maxed tier showed Purchase and no checkmark** (user report after round 4: "upgrade tier II doesn't put
-  it as checked and shows the buy button"; "a checkbox on the icon if upgrades are on max tier"). A card's
-  greyed icon + checkmark and its Purchase button come from the item's `IsAvailable` Func (`() =>
-  !plot.HasUpgrade(_upgrade)`), which only `PlotUpgradePurchaseItemModel.UpdateAvailability(plot)` sets -
-  called by `UpdateMenuItemAvailabilityAndHidden` for the items in the list on a menu OPEN. A purchase or
-  sale with the menu open goes through `RebuildUI`, which does not call it. A clone is a fresh
-  ScriptableObject whose constructor Func says "available", so a tier card we swap in there (Faster Hens II
-  after buying I, Silo Capacity V after IV, the next Additional Storage section) showed Purchase and no
-  checkmark until the menu was opened again (or used the Func of the last plot it was bound for). Now
-  `RefreshAvailability` calls `UpdateAvailability` / `UpdateHidden` with the plot for every item in the
-  list at the end of `BeforeMenuUpdate`, before the original rebinds the views (on a menu open the
-  original does it once more). The checkmark itself is the game's: `GenericViewHolder.BindData`
-  (0x83C900) enables its `unavailableIcon` image with the item's `_unavailableIcon` sprite while
-  IsAvailable is false; our clones copy that sprite from their icon source / template.
-- **Purchase popup order** (round 7: "not on confirmation buttons when buying with space"). Buying opens
-  the game's PopupPrompt (`ListUIRoot.OpenPopupPrompt` from PromptForUpgrade, the same for Space / A /
-  the Purchase button). Its prefab (gamecore_scenes, UnityPy): `Panel/BodyContent/ButtonPanel`, a game
-  `HorizontalLayout` (`_reverseChildren` 0, centred, spacing 16) with `TextButton_NoneSelectable (Accept)`
-  first, `(Cancel)` second, so the positive button is on the left. sell_upgrades now detours
-  OpenPopupPrompt (shared generic body, LandPlotUIRoot only) and moves `_positiveActionButton` to the last
-  sibling: Cancel left, Purchase right, still centred, like the card's Sell / Purchase pair. Only the order
-  changes (keys, actions, labels are the game's). The layout re-lays out on OnTransformChildrenChanged.
-  Log once: `purchase popup: buttons reordered (Cancel left, Purchase right) under 'ButtonPanel'`.
-- **Plot purchase popup order** (round 8: "same for plot buying, not just upgrades"). Buying a plot on an
-  empty plot does not go through OpenPopupPrompt: `LandPlotUIRoot.PromptForPlot` (0x6E77D0) calls
-  `UITemplates.CreatePopupPrompt(body, misc, positive, negative, expiration)` (0x6B1910) directly (IDA).
-  sell_upgrades now also detours PromptForPlot (marks the call) and CreatePopupPrompt (reorders the popup it
-  returns while marked; every other popup untouched). Log once: `plot purchase popup: buttons reordered`.
-- **Sell button matching** (round 8: "i cant sell music box I now, shows on e.g., hen upgrades"). The cause was
-  not found for sure in the log (no line said why a card had no Sell button). Changes: the details are matched
-  to every menu item with the same `_infoButtonLabel` (the owned state has to fit the view: PURCHASED = owned,
-  Purchase = not owned; more than one match is logged as a warning), a vanilla item a tier card stands in for is
-  found too (custom_upgrades `HiddenMenuItem`), and a tier card on a vanilla upgrade (Music Box II, Sprinkler II,
-  Ash Booster) sells that upgrade whenever it is owned (the "stands in at this moment" condition is gone).
-  Every card without a working Sell button now logs why, once per reason: `no Sell button: card 'Music Box II':
-  no tier to sell (...)`, `no Sell button: Music Box: Sell 'Music Box II' first ...`, `... could not be placed
-  next to Purchase`.
-- **Sell button, round 9 FAIL** ("sold music box II, still doesnt show a sell button, even when reopening upgrade
-  menu"). The log of that test (01:01, a corral bought in the same session: Music Box bought, Music Box II
-  bought, Music Box II sold) has no `no Sell button` line at all after the sale, while the same steps on an
-  older corral at 00:42 sold Music Box I right after Music Box II. So that bind left `AfterMoreBind` through an
-  exit that was silent: no info label, no plot, details matched to no menu item, a vanilla card in its Purchase
-  variant (ChainSellTarget is for tier cards only), or prefab / parent / Instantiate missing. Root cause not
-  proven offline. Round 10: each of those exits now logs (`no Sell button: a Purchase card on plot '...': its
-  details match no upgrade item of the menu`, `... has no info label`, ...), every Sell button shown logs once
-  per card / target (`sell offer: card 'sr2mods_corral_music_2' (Purchase) sells Music Box on plot '...' for
-  +175`), and a vanilla card that shows Purchase although its upgrade is owned (availability bound for another
-  plot) now offers Sell for it (`... is owned but shows Purchase - Sell offered for it`).
-- **Expansion purchase popup order** (round 10: "not on map expansions"): see sell_upgrades' header. Ranch
-  expansions go through `AccessDoorUI.PromptForExpansion` -> a `ConfirmPopup` whose prompts are sorted by
-  `<>c.<UpdateShowData>b__27_0` (`b.PromptType - a.PromptType`, SUBMIT first) into its InputLegend. Detours:
-  PromptForExpansion (remembers the item's `_title`), ConfirmPopup.UpdateShowData (flags the call when the
-  setup's Title is that LocalizedString), the comparison (reversed while flagged). Log once: `expansion purchase
-  popup: prompts reordered (Cancel left, Purchase right)`.
-- **Sprinkler II / III icon** (round 10: "use the default sprinkler upgrade icon"): no mod icon any more, the
-  vanilla Sprinkler card's icon (`iconFrom`); `growth_1` / `growth_2` stay embedded, unused.
-- **Coop Air Net icon**: the corral's own Air Net upgrade icon (`iconFrom` = Air Net, found in the corral
-  menu's items by `GlobalUpgradeItem`), no mod icon any more (user: "use the air net icon from corrals").
-
-Not checked in game yet: all of the above (layout and centring, the hidden icon, that selling no longer
-buys, the label, the Activate button's position, prompt and
-animation), and from plot-polish-7: Sell left / Purchase right, buying the last tier with the menu open
-showing the checkmark and no Purchase button at once, the Coop Air Net icon.
-
-## Sell-All receipt
-
-Pressing the silo's Sell-All button no longer sells at once: it opens a receipt (`silo_receipt.cpp`).
-One row per sellable plort type (icon, name, "x count", unit price, line total + coin), the grand
-total, Cancel and Sell. Market closed / unreachable or no plorts: the dialog opens all the same (round
-10: "when no plorts to sell still open the dialog"), empty, with a note ("There are no plorts in this
-silo.", "The Plort Market is closed ...") and Sell disabled (`SiloReceipt::Open(quote, note)`).
-
-- **No text over the button** (round 10: "remove the ingame overlay on the button please (the rendered one,
-  the non-game one)"): the silo button no longer draws the ImGui world text (`SiloButtons::Message` via
-  `ui::hud`) for any outcome (no button upgrade, nothing to sell, sold, nothing sold). The sale shows through
-  the HUD notices and the currency popup; the outcomes are in the log. The Hen Collector's Activate button
-  keeps its short text ("Collecting N ...").
-
-- **Fits the screen** (feedback round 4: it ran off-screen on a smaller resolution). The panel height
-  is capped at the canvas height (Screen size through the CanvasScaler formula, ScaleWithScreenSize
-  1920 x 1080 match 0.5 -> 16:9 is 1080 units high, ultrawide less) minus 36 px each side. Rows shrink
-  from 56 to 40 px, then the row list scrolls: a uGUI `ScrollRect` (Clamped) on a `RectMask2D`
-  viewport with a thin `Scrollbar` in the right margin (draggable, hidden when not needed). Its own
-  wheel handling is off (sensitivity 0); the mouse wheel (`Mouse.scroll.y`, one row per notch whatever
-  the delta units), Up / Down, W / S, d-pad and left stick up / down step one row. Without these
-  classes the rows only shrink (to 34 px) as before.
-- **Game buttons.** Cancel and Sell are clones of the game's own confirm-popup buttons:
-  `GameContext.UITemplates.popupPrompt` (prefab `PopupPrompt`, gamecore_scenes bundle, read with
-  UnityPy) -> `PopupPrompt._negativeActionButton` / `_positiveActionButton`, both
-  `TextButton_NoneSelectable` (the Purchase button's prefab: Button, ButtonAnimator, EventTrigger,
-  DetailsMoreButtonView, InputEventButton, EncapsulateChildren, the key icon `InputEventDisplay`
-  under "Icon Background" bound to the popup's positive / negative InputEvent). On the clone the
-  InputEventButton is disabled (it would perform that InputEvent on pointer down / up), the label's
-  LocalizeStringEvent is disabled and the TMP text set to "Cancel" / "Sell"; a polled Toggle on its
-  root was meant to take the click (Button.onClick is empty in the prefab). (The teal / pink focus ring
-  of round 4 is gone, see "Buttons like the popup's" below.) Disabled Sell = `Selectable.interactable`
-  false (the prefab's disabled colours).
-  Fallback when any piece is missing: our own SDF buttons with "(C / B)" / "(Enter / A)" in the
-  label. Log: `silo receipt: buttons cloned from the game's popup, rows fit|scroll (N px, canvas H high)`.
-- **Regression after feature/polish-4 ("Sell menu didn't show up").** The receipt never opened: log
-  `silo receipt: not opened: panel failed`, then `the receipt could not be opened - selling at once`;
-  Player.log `Can't add 'Toggle' to Cancel because a 'Button' is already added to the game object!`.
-  `Selectable` is `[DisallowMultipleComponent]` (inherited), so a Toggle can't go on the cloned button
-  and the build stopped. Now the game button's click is polled from its own Button:
-  `Selectable.IsPressed()` (protected) true last frame, false now, `get_isPointerInside` (private) true.
-  IsPressed is false while the Selectable is not interactable, so a disabled Sell can't be clicked. The
-  button keeps its hover animation (no overlay on top). If a build still fails, the failing step is
-  logged (`panel build failed at: ...`) and the panel is built again with our own buttons (game buttons
-  off for the rest of the session, `retrying with our own buttons`); a failed clone logs `game button
-  not cloned (...)` once.
-
-- **Input lock = the game's own.** The dialog root carries the game's `UIInputLocker` component, as
-  menu prefabs do: `OnEnable` -> `TimeDirector.Pause` (timeScale 0, ref-counted) ->
-  `InputDirector.OnPausedChanged` disables the player action map and enables the UI map (no movement,
-  no look, no interact), `CursorLockHandler` frees the cursor while paused, non-UI sound pauses.
-  Closing deactivates the root first (`OnDisable` -> `Unpause` at once), then destroys it. Every close
-  path (cancel, sell, load, module off, fault, scene change) goes through that, so the game cannot
-  stay paused because of the dialog.
-- **Buttons like the popup's** (feedback round 4: "buttons ugly, very big, no padding on the right,
-  cancel on C, the keys aren't on the left side of the buttons like the game has them"). Popup prefab
-  (UnityPy, `gamecore_scenes`, `PopupPrompt`): Panel 960 wide with `LayoutManager` + `EncapsulateChildren`,
-  ButtonPanel 64 px in from each side, Accept (positive) on the LEFT at x -169, Cancel on the right at
-  +169, each `TextButton_NoneSelectable` 321.5 x 58.6: `Label Background` (SDF pill, label 42 pt at x 30)
-  and `Icon Background` (the `InputEventDisplay` key glyph, 64 px icons) laid out by the button's
-  `HorizontalLayout` / `EncapsulateChildren` / `ResizeToPreferred`. Those are the game's own layout
-  behaviours (`MonomiPark.SlimeRancher.UI.Framework.Layout`); only a `LayoutManager` above them runs them
-  (`OnEnable` / `LateUpdate` -> `ApplyLayout`). Our clones had none, so they were never laid out: the
-  prefab size and the glyph left over the label. Now each clone gets its own `LayoutManager` (the glyph
-  on the left inside the pill, as in the game), sits in a zero-size slot scaled 0.72 (the receipt's 40 pt
-  title vs the popup's 55 pt; on the slot, not the button, whose ButtonAnimator may animate its scale),
-  and hangs off its outer edge: Cancel's left edge at the left padding, Sell's right edge at the right
-  padding (pivot 0 / 1, re-placed for 30 frames). Cancel left, Sell right (plot-polish-7, user request "switch
-  sell and cancel button locations"; the game's popup has the positive button on the left). Not focusable
-  (TextButton_**NoneSelectable**): no focus ring any more. Log once: `Sell button laid out W x H (x0.72 on
-  screen)` and the key line below. Fallback (no LayoutManager class): prefab layout, unscaled.
-- **Keys** (polled, nothing hooked). Sell: the popup's positive `InputEvent` (`PopupPrompt._positiveInput`,
-  read through its `PollValue` Func, the bound action's value: the key its glyph shows), Enter, pad A.
-  Cancel: **C** (user request), Esc, pad B and the popup's negative InputEvent. Cancel's glyph shows the
-  negative event's binding; while it shows a keyboard key its key text is set to "C" (its
-  LocalizeStringEvent off, extra icons of the group hidden); a gamepad glyph stays (B). A key still held
-  when the dialog opens is not a press (edge from the open state). Own-button fallback: Left / Right, A /
-  D, Tab, d-pad, stick move the focus, Enter / Space / pad A press it. Mouse: the two buttons, a click on
-  the dimmed backdrop cancels. Input is ignored for 0.3 s after opening or refreshing, so the press that
-  opened it never confirms.
-- **What is sold.** Sell quotes the silo again. Only an identical quote (same types, counts and
-  prices, market still open) is sold, with the quote as the plan: at most the shown count per type
-  (`Summarize(..., plan)`). Anything else refreshes the receipt with an orange note ("Prices or
-  contents changed - this is the new receipt", "The Plort Market just closed") and sells nothing; Sell
-  is disabled while nothing can be sold. Time is paused while it is open, so a change is unlikely.
-- **After the sale** the dialog is already closed; the per-plort HUD notices are queued as before
-  (shown once the HUD takes them), the text fallback above the button stays for a missing HUD list.
-  `SaleNotices` (`sale_notify.cpp`) also takes a notice kind: `Notice::kCollected`
-  (`AddResourceCollected`, the drones' cloud-upload notice, "... sent to the Quantum Cloud"). The
-  sandbox used it for its spawns and crafts at first; since 2026-10-24 it queues its own free-text
-  notices instead (`QueueText`, "Spawned 5 Pink Plort"). The Sell-All keeps `kPlortSold`, unchanged.
-- **Gold Sell-All button** (plot-polish-7, user: "modify the sell button model colors so I can see it's not
-  the menu-open one"). The clone of the corral collector button looks like the plot menu terminal's, so its
-  cap (renderers whose GameObject name has `button_button`) is tinted towards gold (60 %); without a cap
-  the whole button 30 %. Done one tick after the build, after the prefab's `ApplyPalette.Start` has swapped
-  in the palette's materials: `Renderer.get_materials` (instanced copies), every Color property of each
-  shader (`Shader.GetPropertyCount` / `GetPropertyType` / `GetPropertyNameId`, `Material.GetColor` /
-  `SetColor`), HDR intensity kept, alpha kept. Shader-agnostic because the tech shaders' property names
-  are unknown. Log once: `silo sell button on plot '...' tinted gold (cap): N colour(s) on <renderer> (k),
-  ...` - if it says `no cap found` or 0 colours, the renderer names / shader need a look. A later palette
-  change leaves our instanced materials alone (they are in no palette map).
-- **Gold button, round 8** (test: "button is NOT gold", log had `tinted gold (cap): 24 colour(s) on
-  button_button (24)`). The cap's material is the palette shader `RanchTech01` (24 slots `_Color00` ..
-  `_Color72` picked per vertex by a UV2 mask; corral prefab via UnityPy), so the 24 writes were the right
-  ones; ApplyPalette / ColorPaletteApplicator (IDA: SetupForTarget only maps shared materials, keeps unknown
-  ones; Apply only recolours mapped materials) cannot undo them. No StaticColorizer on the button. The
-  cause was not found for sure; two weak spots are fixed: the tint ran once per button, keyed by the raw
-  GameObject pointer (no GC handle, so a rebuilt button could look "already tinted"), and nothing would
-  notice a later material swap or a MaterialPropertyBlock (wins over material values; StaticColorizer /
-  ColorPalette.SetColors(Renderer) write them). Now the instanced materials are named `sr2mods_gold`, every
-  tick checks the cap's shared material name and tints again when it is not ours (log `materials were
-  replaced (was '...') - tinted again`), the same colours also go into a MaterialPropertyBlock on each
-  tinted renderer, and the tint is stronger: cap 85 %, base (`button_base`) 35 % (no cap: everything
-  40 %). First log line now: `tinted gold (cap + base): N colour(s) on button_button (24 at 85 %),
-  button_base (.. at 35 %); property block on K renderer(s)`.
-- **Gold button, round 9** (test: "not gold" again, log as above). Writing the palette slots evidently does
-  not reach the screen (the Animator of `techActivator` can animate `button_button`'s material properties, and
-  animated properties win over material values and property blocks; palette code works through the same
-  `_ColorNN` names). The cap now gets a material of our own on another shader: `HDRP/Lit` (Shader.Find, else
-  one FindObjectsOfTypeAll(Shader) by name), `_BaseColor` (1, 0.74, 0.16), metallic 0.6, smoothness 0.75,
-  named `sr2mods_gold (HDRP/Lit)`, one per session (DontUnloadUnusedAsset). No RanchTech01 property exists on
-  it. The base keeps the 35 % palette tint. Each tick checks every tinted renderer's material name (not only
-  the first). The first build dumps every renderer of the button once (GameObject, class, material, shader,
-  its Color / Texture properties, property block yes / no): `renderers before the gold: ...`; then `gold
-  material made on 'HDRP/Lit'` and `made gold (cap + base): ... button_button (gold HDRP/Lit material)`. If
-  HDRP/Lit is missing: `shader 'HDRP/Lit' not found` and the old palette tint.
-- Log: `silo receipt ready`, `sell all (plot '...'): receipt shown, N plort(s) in T type(s) for V`,
-  `receipt cancelled, nothing sold`, `receipt changed before the sale (...) - refreshed`, then the
-  usual `sell all (receipt, plot '...'): sold ...`. Without the dialog parts (setup failed) the button
-  sells at once as before (`sell-all receipt unavailable`).
-
-Not checked in game yet: the look (font taken from a HUD text, sizes at other resolutions), that the
-locker really freezes movement / camera and shows the cursor here, that Esc / Start do not open the
-pause menu as well (they should not: `PauseMenuDirector.TogglePause` (0xAEFF20) only calls `PauseGame`
-while `Time.timeScale > 0`, and the locker sets it to 0), mouse clicks (needs the scene's
-EventSystem), pad A / B and the d-pad / stick.
+- **Button**: clone of the corral collector's `techActivator` at the silo's (+x, -z) corner (5.58, 1.20,
+  -5.58), 135 deg (`sr2mods_SiloSellButton#<gen>`), Collector null. No world text over it; the sale
+  shows through HUD notices and the currency popup.
+- **Gold**: the cap (`button_button`) gets our own `HDRP/Lit` material (`_BaseColor` (1, 0.74, 0.16),
+  metallic 0.6, smoothness 0.75, `sr2mods_gold (HDRP/Lit)`, one per session); the base keeps a 35 %
+  palette tint (instanced materials + property block). Each tick re-tints a renderer whose material was
+  replaced. Logs `renderers before the gold: ...` (once), `made gold (cap + base): ...`; without HDRP/Lit
+  `shader 'HDRP/Lit' not found` and the palette tint.
+- **Receipt**: rows per sellable plort type (icon, name, count, unit price, total), grand total, Cancel
+  left, Sell right. No plorts / market closed: opens empty with a note, Sell disabled. Height capped at
+  the canvas minus 36 px each side: rows 56 -> 40 px, then a ScrollRect (wheel, Up / Down, W / S, d-pad,
+  stick step one row).
+- **Buttons**: clones of the popup's `TextButton_NoneSelectable` (InputEventButton and label LSE off, own
+  `LayoutManager`, slot scaled 0.72, placed by the outer edge for 30 frames). Click polled from the Button
+  (`IsPressed` last frame, not now, pointer inside; a Toggle can't be added). A failed build logs `panel
+  build failed at: ...` and retries with our own SDF buttons.
+- **Keys** (polled): Sell = the popup's positive InputEvent, Enter, pad A; Cancel = C, Esc, pad B (glyph
+  shows "C" for keyboard). A key held at open is no press; input ignored 0.3 s after open / refresh; a
+  backdrop click cancels.
+- **Input lock**: the game's `UIInputLocker` on the root; every close path deactivates the root first.
+- **What is sold**: Sell re-quotes; only an identical quote is sold (at most the shown count per type),
+  else the receipt refreshes with an orange note.
+- Logs: `silo receipt: buttons cloned from the game's popup, rows fit|scroll (...)`, `sell all (plot
+  '...'): receipt shown, ...`, `receipt cancelled, nothing sold`, `receipt changed before the sale (...) -
+  refreshed`, `sell all (receipt, plot '...'): sold ...`; `sell-all receipt unavailable` -> sells at once.
+- `SaleNotices`: `Notice::kPlortSold` (Sell-All), `kCollected`, and `QueueText` free-text notices (used by
+  the sandbox and the Quantum Storage Link).
 
 ## Silo capacity tiers
 
-Storage per silo slot: 100 -> 200 (vanilla) -> 300 -> 400 -> 500 -> 600 (ours).
+RE: re/plots.md (patchSilo, Additional Storage cards), re/custom-upgrades.md 2.2b.
 
-- **Vanilla** (prefab `patchSilo` read with UnityPy, disassembly): one `SiloStorage` with 12 slot
-  definitions, all `SiloNonSlimes` (`_maxAmount` 100). STORAGE2 / 3 / 4 (500 / 575 / 650) only swap
-  slot GameObjects (`StorageUpgrader.StorageAdd*` / `StorageOnly*`); the single capacity upgrade
-  STORAGE_CAPACITY_INCREASE ("Storage Capacity Upgrade", 1800, in the
-  `scriptableobjectlookupdata_assets_all_*` bundle) runs `AmmoSlotManager.UpdateMaxCount(
-  StorageCapacityUpgradeAmount = 200)` (`StorageUpgrader.Apply` 0x996E30) and shows the four
-  `CapacityUpgrade1..4` parts. So vanilla has one capacity tier, 100 -> 200.
-- **Ours:** Silo Capacity II / III / IV / V (`0x53520060..63`, keys `silo_capacity_2..5`), 300 / 400 /
-  500 / 600 per slot, **3000 / 4500 / 6500 / 9000** (V added in round 4: "add tier V, 600"). A tier
-  chain on the vanilla Storage Capacity card: once that is owned the card shows Silo Capacity II, then
-  III, IV, V (greyed with the checkmark when all are owned); `ChainVanillaRoot` gives every tier of a chain that starts on a vanilla upgrade that
-  upgrade's card (before, only the first tier took it over). Icon = the vanilla Storage Capacity icon
-  (no own sprite).
-- **Prices:** vanilla pays 1800 for +100 per slot (12 slots = +1200 items, 1.5 Newbucks per slot
-  item). Each of ours adds +100 per slot as well and costs more than the last (x ~1.5, like the
-  vanilla storage units climb), so IV is the most expensive plot upgrade after the Sell-All Button
-  (10,000): 14,000 for the three, 15,800 with the vanilla one.
-- **Applying it:** the max count is runtime only (`AmmoDataV02` saves id, count, emotions,
-  appearance, radiant; no max) and vanilla `ApplyUpgrades` writes 200 again on load and after every
-  purchase on that plot. So the ~1 Hz world tick sets the owned tier's value on every silo plot
-  (`UpdateMaxCount`, only when `GetSlotMaxCount(0)` differs; log `silo capacity on plot '...': 200 ->
-  500 per slot`). Ownership is in the sidecar like every custom upgrade, so it survives save / reload.
-- **Never deletes items:** load restores counts without clamping (`AmmoModel.Push` -> `AmmoSlot.
-  set_Count`), `ValidateAndAdjustSlots` never trims counts, and `UpdateMaxCount` only sets the max. A
-  lower max (between a load and the next tick, module off / faulted, or a mod-free load) leaves the
-  contents above it in the silo; it just takes nothing more until they are below (logged as a warning
-  with the count over the limit when we lower it).
-- **One "Additional Storage" card** (round 4: "merge additional storage to 1 buy menu option, I don't
-  want to scroll to upgrade it"). Vanilla lists three cards with the same title and icon, `Storage2 /
-  3 / 4 Upgrade` (STORAGE2 / 3 / 4 = upgrades 3 / 4 / 5, one more storage section and port each;
-  STORAGE3 / 4 hidden until the one before is owned, owned ones stay greyed). `MergeStorageCards`
-  keeps one of them in the silo's list, the first section not owned yet (STORAGE4 greyed once all
-  are owned), the others go out as hidden vanilla cards at their vanilla index (back for other plots /
-  module off, like a tier card's vanilla card). The capacity side was already one card (Storage
-  Capacity -> II -> ... -> V). So the silo menu has two storage cards: Additional Storage (more
-  sections) and Storage Capacity (more per slot); they are different upgrades with different
-  purchases, so they stay two cards.
-- **Tier labels** (plot-polish-7, user: "add additional storage tier labels"): the three vanilla cards'
-  titles read "Additional Storage II / III / IV" (STORAGE2 / 3 / 4, the section each one adds), like
-  our tier cards; a text_override on each vanilla item's own `_title` (pinned items), removed in Cleanup.
-  Log once per menu: `silo: 3 Additional Storage card(s) labelled with their section (II / III / IV)`.
-- **Round 8: "silo additional storage is separate upgrades again..."** No code path was found that undoes the
-  merge: since round 6 (when the one card was confirmed) only the II / III / IV labels and `RefreshAvailability`
-  touched the menu, and the round-8 log shows the merge ran (`3 Additional Storage card(s) labelled`). After
-  every menu update the silo's list is now checked and logged when it changes: `silo menu: Additional Storage 1
-  card(s): STORAGE3 at 4; 2 vanilla card(s) out of the list`, or a warning `Additional Storage NOT merged after the
-  game's update - ...` with the cards found. The next test log tells whether the list or the view is wrong.
-- **Not sellable**, like the vanilla silo storage upgrades: `CanSell` gives the same permanent reason
-  ("silo storage"), so sell_upgrades shows no Sell button and no alt-action prompt.
-
-- **Visuals** (feedback round 5: "I don't see any visual upgrades for tiers II, III and IV"). The
-  vanilla capacity upgrade shows one `techSiloCapacity` tank per owned storage section, high on the
-  silo's diagonals (`Capacity Addon 0..3`, plot-local about (-1.6, 3.3, -1.8) for section 0, each next
-  section turned 90 degrees and ~0.8 m higher). Our tiers add the same tank (0.8 size) standing on the
-  ground on a diagonal at (+-2.9, +-2.9): II (+x, +z), III also (-x, +z), IV also (+x, -z), V also
-  (-x, -z), each turned like the vanilla tank on that diagonal (19.6 + k * 90 degrees). Every diagonal
-  has the same low pipes (each section's Addition is section 0's layout turned 90 degrees), the plot
-  menu terminal of the (-x, -z) corner stands outside the fence, 3.7 m from tank V.
-- **Collision** (round 4: "the silo tank props need collision"). The tank props keep the prefab's
-  colliders (`SolidKind` in plot_props: the `collider` child's MeshCollider and the foot plate's
-  MeshCollider), on their prefab layer, Default, the layer of the vanilla tanks and pipes; game
-  scripts, joints and rigidbodies are still stripped, so they are static colliders. The player walks
-  around them; the vac and drones treat them like the vanilla tank (which they already pass). Build
-  log: `SiloTankII props built on plot '...' (1 of 1 piece(s), colliders kept)`. Clearances: silo wall r 2.1, vanilla pipe elbows /
-  caps r <= 3.05 (>= 1.37 m from a tank centre), depositors in the middle of each side, corner posts at
-  4.75, the Sell-All button outside the (+x, -z) corner. Built by `plot_props` (holders
-  `sr2props_SiloTankII..IV#<gen>`), gone when the tier is not owned / the module is off, rebuilt
-  after a load from the sidecar. The tank's `ApplyPalette` is stripped, so it keeps the prefab's
-  default colours, not the silo's palette.
-
-Not checked in game yet: the tanks (position on the ground, no overlap with the silo, pipes or
-depositors at every storage level, colours), the card chain (vanilla card -> II -> III -> IV), the slot displays showing
-the new maximum, drones / silo input filling to 500, and the log lines after a load (200 -> 500 within
-a second).
+- 100 -> 200 (vanilla Storage Capacity) -> 300 / 400 / 500 / 600 per slot, a chain on that card. Vanilla
+  pays 1800 for +100; ours climb ~1.5x each (23,000 for II-V).
+- **Applying**: the max is runtime only and vanilla `ApplyUpgrades` writes 200 on load and every purchase,
+  so the ~1 Hz tick sets the owned tier (`UpdateMaxCount` when `GetSlotMaxCount(0)` differs; log `silo
+  capacity on plot '...': 200 -> 500 per slot`).
+- **Never deletes items**: a lower max leaves the contents; the silo takes nothing more until below (WARN
+  when we lower it).
+- **Not sellable** (reason "silo storage", like vanilla silo storage).
+- **One Additional Storage card**: `MergeStorageCards` keeps the first not-owned of the three vanilla
+  `Storage2 / 3 / 4` cards (STORAGE4 greyed once all owned); the others are hidden vanilla cards at their
+  index. Titles "Additional Storage II / III / IV" (text_override, removed in Cleanup). After every menu
+  update the list is checked: `silo menu: Additional Storage 1 card(s): ...` or WARN `Additional Storage
+  NOT merged after the game's update - ...`.
 
 ## Selling with gamepad / keyboard
 
-The plot menu's alt action (the Info / Pedia button) sells the selected card's sellable upgrade:
-the same target as the mouse Sell button (`ChainSellTarget` on tier cards, the owned item
-otherwise) and the same `CanSell` checks, one sale per press, no popup, no Pedia for that press.
-The prompt is a copy of the game's own alt-action hint (`category.altDetailsButton`: key / button
-icon + label) relabelled "Sell +N"; it is only shown while the upgrade can be sold now (a passing
-reason such as "holds food" shows no prompt, the mouse Sell button shows the reason). Code and
-findings: sell_upgrades header (`alt-action sell`), `re/custom-upgrades.md` 2b.1b.
+The plot menu's alt action (Info) sells the selected card's sellable upgrade (same target and checks as the
+mouse Sell button), no popup, no Pedia; the prompt is the category's `altDetailsButton` relabelled "Sell +N",
+shown only while it can be sold now. Code in sell_upgrades; RE: re/custom-upgrades.md 2b.1b.
 
-Not checked in game yet: that the plot categories have an `altDetailsButton`, that the prompt's
-label is set (log `alt-action sell: prefab ... label via ...`), and the keyboard key of the
-altSubmit event (the prompt shows it).
+## Tier props
 
-## Tier props (checklist u5, u6, u9, u11, uv1-uv4)
-
-`plot_props.cpp` puts a visible prop on a plot while a tier is owned; it goes when the tier is
-sold or the module is turned off. No assets of ours: every piece is a child of a vanilla prefab,
-cloned under an inactive holder `sr2props_<Kind>#<generation>` (prefix not `sr2mods_`, which
-coop_world's scan would destroy), stripped of colliders, joints, rigidbodies and game scripts
-(MonoBehaviours outside `UnityEngine.*`), then activated. Lookups are cached and pinned.
+`plot_props.cpp`: a prop per owned tier, gone when sold / off. Clones of vanilla prefab children under an
+inactive holder `sr2props_<Kind>#<gen>` (not `sr2mods_`: coop_world's scan destroys those), stripped of
+colliders (except silo tanks), joints, rigidbodies, game scripts, then activated. A missing model logs
+`plot props: model '...' not found` once. RE: re/plots.md (plot prefabs), re/fabricator.md (decoration /
+toy prefabs).
 
 | tier | prop | source |
 |---|---|---|
-| Faster Hens I or II (u5) | two small hay bales (scale 0.5) and three grass tufts, scattered | decoration `decorHayBales`: `hayBale_2`, `hayBale_0 (1)`; coop prefab `Deco/decoFieldsGrass01 _Green`, `Deco/decoFieldsGrass02_Green` |
-| Faster Hens II (u6) | two nests, a stuffed chicken upright in the (-x, -z) corner, a flower pillow and two more grass tufts, scattered | coop prefab `Deco/nestPlain01` (the vanilla nest), toy `toyStuffedChicken`: `model_stuffedChicken`, decoration `decorFlowerPillowSmall`: `mesh`, coop grass as above |
-| Sprinkler II or III (u9; were Fast Growth I / II; since round 9 tiers of the vanilla Sprinkler card) | a third sprinkler head in the middle of the +x side, spraying inwards | garden prefab `Sprinkler/SprinklerBase` (vanilla heads are on the -z / +z sides) |
-| Sprinkler III | a fourth head in the middle of the -x side, turned 180 degrees | same |
-| Music Box II | a second speaker on the (-x, -z) corner post (above the plot menu terminal), leaning inwards | corral prefab `Music Box/techCorralMusicBox/MusicBox/Music` (the vanilla speaker sits on the (-x, +z) post) |
-| Ash Booster (u11) | glow + embers in the fire, embers rising out of the opening, and three ember emitters on the ash around the incinerator (following the ash height) | incinerator prefab `.../meshIncinerator/FireTest/Glow` and `/Embers` (inactive in vanilla, switched on), decoration `decorFireFlower`: `FX Fireflower` |
-| Silo Capacity II / III / IV / V | one capacity tank per tier standing on the ground beside the silo: II (+x, +z), III adds (-x, +z), IV adds (+x, -z), V adds (-x, -z); solid (colliders kept) | silo prefab `Silo Upgrade 0/Addition 0/Capacity Addon 0/techSiloCapacity` (the vanilla Storage Capacity Upgrade's tank, with its pipe-connector foot) at 0.8 size |
+| Faster Hens I or II | two hay bales (0.5), three grass tufts, scattered | `decorHayBales`; coop `Deco/decoFieldsGrass0*` |
+| Faster Hens II | two nests, flower pillow, two tufts (scattered); plush hen upright in the (-x, -z) corner | coop `Deco/nestPlain01`, `decorFlowerPillowSmall`, `toyStuffedChicken` |
+| Sprinkler II or III | third head mid +x side; III: fourth mid -x (turned 180) | garden `Sprinkler/SprinklerBase` |
+| Music Box II | second speaker on the (-x, -z) post, 2.5 m up, leaning in; a Slime DJ emitter (in sync) | corral `Music Box/techCorralMusicBox/MusicBox/Music` |
+| Ash Booster | glow + embers in the fire, embers out of the opening, three `sr2ash` emitters on the ash at r ~3.3 following `AshTrough/Ash Level` (`FollowAsh`) | incinerator `FireTest/Glow`, `/Embers`; `decorFireFlower` |
+| Silo Capacity II-V | one tank per tier on the ground at (+-2.9, +-2.9): II (+x, +z), III (-x, +z), IV (+x, -z), V (-x, -z); 0.8 size; colliders kept; prefab colours | silo `.../Capacity Addon 0/techSiloCapacity` |
 
-Gadget / toy prefabs are found by prefab name in `LookupDirector._gadgetDefinitions` /
-`_toyDefinitions` (member types, then sub-groups). A missing model is logged once
-(`plot props: model '...' not found`) and that piece is left out.
+- **Coop layout** (`CoopLayout`): 10 slots seeded by FNV-1a of the plot id, stable across loads; within
+  +-3.7 m, out of the corner squares, ~1.2 m off the vanilla nest; the two nests never in one line through
+  it; up to 256 draws, then a fixed spot. Build line `CoopNests props built ...; nests at (x, z) and (x, z),
+  the plush hen upright in the (-x, -z) corner`.
+- **Plush hen**: (-3.45, 0.53, -3.45), size 1.1, yaw 65 deg (front assumed +z; facing the wall -> 245). In
+  a nest its low bulbs looked like eggs.
 
-Coop scatter: one layout of 10 slots per coop (`CoopLayout`), seeded by FNV-1a of the plot id
-(splitmix64), so it is stable across loads and the Hens II slots do not move when Hens I changes.
-Slots stay within +-3.7 m, out of the corner squares (|x| and |z| both > 2.5), about 1.2 m off the
-vanilla nest and clear of each other (radius per slot); 64 draws, then a fixed fallback spot (a
-simulation over 2000 ids never needed it).
+## Corral Radio
 
-Round 7 feedback, coop: "hen one nest eggs are unnaturally lined up". No prop has eggs: the nest mesh
-(`nestChicken01`, 482 vertices: bowl, floor disc, straw planks) and the pillow (5 petals) have none, and
-SR2 has no egg model besides the giant eggs. The "eggs" are the stuffed chicken's own bulbs: its mesh
-(`stuffedChicken`, origin at the body centre, radius 0.44) has a row of round bulbs low on its front and
-sides (toes, wing tips, y -0.48 .. +0.05). At the old height (+0.1 in the nest) their tops stood just above
-the nest floor (~0.09; rim ~0.40) in a neat row. The hen now sits at -0.06 (every bulb below the floor,
-inside the straw wall; body and head still ~0.2 m over the rim) with a 6 degree lean. If the user still
-sees eggs, ask for a screenshot.
-
-Round 8 feedback, coop: "what stuffed chicken" / "the 3 eggs in hen upgrade in one nest is singular asset, should
-be sideways probably, also the nests are not random again". The "3 eggs" are the sunk plush hen: upright, its head
-bulb and two wing bulbs were all that rose over the straw. It now lies on its side (rolled 90 degrees about its
-forward axis), size 1.0 instead of 1.33, centre 0.30 above the nest root, so the body shows. The layout was random
-already (for the test coop `plot1996802419` the nests stood at (3.6, 0.5) and (-0.4, -3.2)); now the second nest is
-also never in one line with the first through the vanilla nest in the middle (55..135 degrees around from the
-first, seen from the middle), up to 256 draws (no fallback over 2000 simulated ids), and the build line names the
-nest positions: `CoopNests props built ...; nests at (x, z) and (x, z), the plush hen lying in the second`. The
-layout of existing coops changes once. If the user still sees nests in a row, ask which objects (the deluxe coop has
-vanilla parts of its own).
-
-Round 10 feedback, coop: "put it in a corner upright, a bit angled yaw". The plush hen is no longer in a nest: it
-sits upright on the floor at plot-local (-3.45, 0.53, -3.45), size 1.1 (centre 0.48 x 1.1 above the floor), yaw
-65 degrees (facing the middle, 45 from that corner, turned 20 aside; front assumed +z). That corner square is never
-used by the layout slots; the other inner corners hold the elder collector (+x, +z), the Hen Collector (+x, -z)
-and the Vitamizer (-x, +z), the plot menu terminal is outside the fence. Build line: `... the plush hen upright in
-the (-x, -z) corner`. If it faces the wall, the model's front is -z: yaw 245 instead.
-
-Round 7 feedback, incinerator: "embers should come from ash aswell". Three more clones of the vanilla
-inactive `FireTest/Embers` emitter (turned -90 degrees about x, so it emits upwards), smaller, at r ~3.3
-around the incinerator: (3.1, 1.2), (-1.9, 2.7), (-1.0, -3.2). They are named `sr2ash` and follow the
-live `AshTrough/Ash Level` transform (FillableAshSource moves it between MinYPos and MaxYPos with the ash;
-prefab y 0.75 = full) 5 cm above it, checked on every ~1 Hz tick (`FollowAsh`, writes only on a change).
-Not checked: that the ash plane really covers those spots (Ash Level mesh bounds not read) and whether the
-emitter looks right at that size.
-
-Corral corners: plot menu terminal (-x, -z) outside the post at ground height, vanilla speaker
-(-x, +z), plort collector (+x, +z), auto-feeder distributor (+x, -z) at 2.5 m. The second speaker
-shares the terminal's corner, 2.5 m up. It has no sound of its own (the strip removes the game's
-audio scripts with the rest), so `Create` registers the cloned `Music` model as a Slime DJ emitter
-(`modules/slime_dj/api.h`): it plays the Slime DJ song in sync with the vanilla speaker. Slime DJ
-drops the registration by itself when the holder is destroyed.
-
-Test 2 "sprinkler left behind after selling Fast Growth" was not a props bug: the log shows every
-sale of Fast Growth I (and of Music Box / Ash Trough) from its tier card followed 2-12 ms later by
-`bought Fast Growth II` (Music Box II, Ash Booster), so the plot still owned a tier and the prop
-stayed correctly. `LandPlotUIRoot.Upgrade` has one caller, `<PromptForUpgrade>b__0`, and
-`PromptForUpgrade` always opens the popup, so a purchase popup was confirmed in the click of the
-sale. sell_upgrades now refuses that confirm in the sale's frame and the next (log `purchase of
-... right after a sale refused`). Removal itself (CoopNests, IncineratorGlow) logged fine.
-
-Feedback round 5, Ash Trough sold part-filled and bought back: "I see nothing visually added". The
-trough model is vanilla (`patchIncinerator/AshTrough`: floor, four low walls, child `Ash Level` =
-FillableAshSource); the sale hides it, vanilla `AshTroughUpgrader.Apply` (0x983930: `SetActive(true)`
-for ASH_TROUGH) shows it again on the purchase (`LandPlot.AddUpgrade` -> `ApplyUpgrades`), and on
-load. The log of that test had `Ash Trough bought back ...: trough not found, vanilla fill kept`:
-sell_upgrades looked for the FillableAshSource on `AshTrough` itself, so the remembered ash was never
-restored (the trough came back full, as vanilla). Fixed in sell_upgrades (GetComponentInChildren);
-after every Ash Trough purchase it now also checks the trough model and switches it on if it is still
-hidden (log `trough model shown` / `was still hidden - shown now`), so the next test tells which case it
-was.
-
-Not checked in game yet: the Music Box II speaker (its Animator runs without the game's music box
-script; it may stand still or play its idle), the scattered coop layout, the -x sprinkler head,
-and whether the phantom purchase is gone. Also not checked yet: sizes and heights (hay bales, nests, pillow), whether the incinerator's
-`Glow` / `Embers` play on their own once active (they may be sub-emitters of `FireTest`) and look
-right, and that nothing of the stripped clones still logs errors.
-
-## Corral Radio (round 4 idea: "a Radio upgrade for slimes to make a playlist from music")
-
-Corral upgrade `corral_radio` (id 0x53520014 = `api.h kCorralRadio`, price 1500, needs the vanilla Music
-Box, own card at the end of the corral list, icon = the vanilla Music Box icon until an
-`assets/icons/corral_radio.png` is added: `ModIconName` picks it up through `mod_icons::Has`). It does
-nothing in this module: slime_dj asks `custom_upgrades::Owns(plot, kCorralRadio)` at every box scan and
-plays the corral's own playlist, which it keeps as the per-plot value `slime_dj.radio` (`PlotKey` gives
-the key the per-plot values use, for the radio's name). Selling the Music Box is refused while the radio is
-owned (`VanillaDependent`, via `needs`); selling the radio keeps its playlist value, so buying it back
-restores the playlist. Details: `modules/slime_dj/NOTES.md` "Channels".
+`corral_radio` (`api.h kCorralRadio`). No effect here: slime_dj asks `Owns(plot, kCorralRadio)` and plays
+the corral's own playlist (per-plot `slime_dj.radio`, key from `PlotKey`). Selling the Music Box is refused
+while the radio is owned; selling the radio keeps its playlist. Details: `modules/slime_dj/NOTES.md`
+"Channels".
 
 ## Vacpack upgrades (Fabricator)
 
-`vacpack_upgrades.cpp`, `fabricator_levels.cpp`. Bought through the vanilla flow (recipe panel, cost check,
-`SpendableDirector.Spend`, `UpgradeModel.IncrementUpgradeLevel`; the game's own modifier code applies the effect).
+RE: re/upgrades.md (UpgradeDefinition, UpgradeModel, vanilla data, PlayerUpgradeFabricateCategoryRuntime),
+re/vacpack.md, re/fabricator.md (UpgradeChain, pips). Bought through the vanilla flow.
 
 | upgrade | levels | effect | where |
 |---|---|---|---|
-| Tank Booster IX-XII | 4 | 125 / 150 / 175 / 200 items per slot (absolute, like every vanilla level) | levels 9-12 of the vanilla Tank Booster card |
-| Extra Tank III-IV | 2 | a 7th / 8th vacpack slot, placed before the water slot | levels 3-4 of the vanilla Extra Tank card |
-| Drone Battery Saver I-IV (id `0x53520103`) | 4 | every drone station's drone uses 1/1.25, 1/1.5, 1/1.75, 1/2 of the battery (80 / 67 / 57 / 50 %) | own card, once the Drone Station blueprint is owned |
-| Shadow Catcher (id `0x53520104`) | 1 | the vacpack holds shadow slimes; they don't notice you; on the ranch they stay and eat (`shadow_catcher.cpp`) | own card, always shown |
+| Tank Booster IX-XII | 4 | 125 / 150 / 175 / 200 per slot | levels 9-12 of the vanilla card |
+| Extra Tank III-IV | 2 | 7th / 8th slot, before water | levels 3-4 of the vanilla card |
+| Drone Battery Saver I-IV (`0x53520103`) | 4 | drones use 80 / 67 / 57 / 50 % battery | own card, needs the Drone Station blueprint |
+| Shadow Catcher (`0x53520104`) | 1 | vacpack holds shadow slimes; they stay and eat on the ranch | own card, always shown |
 
-**Merged into the vanilla cards** (feedback round after build 1aacffc: "Tank Booster IX is upgradeable before the
-previous tank booster ... base tank is 50, bought IX -> now 75"; "merge ... so they have more tiers and ours isn't a
-separate upgrade"). Before, Tank Booster IX-XII and Extra Tank III-IV were separate cards (cloned definitions with
-their own ids) whose ADD modifier stacked with the vanilla one (+25 on whatever Tank Booster level was owned), and the
-card could be bought with Tank Booster III. Now:
+### Tiers on the vanilla cards
 
-- **Where the levels live.** `UpgradeDefinition._levels` is a `List<UpgradeLevelDefinition>` (Effects, `_costs`,
-  Title, Description); `LevelCount` is its Count everywhere (Fabricator card, details panel, `SetUpgradeLevel`'s range
-  check, `IncrementUpgradeLevel` / `UpgradeLevelExist`, `ActorUpgradeHandler.ApplyUpgrade`). The tick appends our level
-  objects to the vanilla `AmmoCapacity` / `AmmoSlots` definitions (looked up by id in the player's list every tick, so
-  a reloaded asset gets them again; log `'AmmoCapacity' now has 12 levels (8 vanilla + 4)`). The level objects are the
-  deep copies from `Object.Instantiate(AmmoCapacity)` (checked), with our values, costs and texts. So a tier can only
-  be bought after the vanilla max, the vanilla card shows the next level's title / costs / "fully upgraded", and the
-  level circles continue.
-- **Absolute values.** Vanilla levels replace each other, so each tier's modifier is the vanilla max level's value plus
-  ours: Tank Booster ADD 80 + 25 / 50 / 75 / 100 on `AmmoLimit` (default 20) = 125 / 150 / 175 / 200; Extra Tank ADD 2 +
-  1 / 2 on `AmmoSlotsAvailable` (default 4) = 7 / 8 slots.
-- **Keeping the vanilla save clean.** `UpgradeModel.Pull` hands the save a new dictionary copy; its post-detour clamps
-  ids 20 / 40 to the vanilla max (7 = VIII, 1 = II). The real level is a per-save sidecar value
-  (`custom_upgrades.vacpack.tank_booster_level` / `.extra_tank_level`, absolute 0-based level, only written past the
-  vanilla max) set by the `SetUpgradeLevel` detour on a purchase (and by Sandbox's unlock-all, which goes through the
-  same call); a level at or below the vanilla max clears it (at exactly the max since the Sandbox upgrades
-  manager can lower levels: Tank Booster X -> VIII kept the old value, which the tick would have put back after a load). `UpgradeModel.Push` writes saved levels straight into the
-  dictionary (no `SetUpgradeLevel`), so a load gives VIII / II; the tick then sets the sidecar level (`'AmmoCapacity'
-  level 8 -> 10 (Tank Booster X, from the sidecar)`) - only when the save holds exactly the vanilla max (a save that
-  disagrees wins). A mod-free load sees a valid vanilla value (a level past `LevelCount` would throw in
-  `UpgradeDefinition.GetUpgradeLevel`). Module off / faulted: `Cleanup` sets the live level back to the vanilla max and
-  removes our levels from the definitions, so a later save without our hooks is vanilla too.
-- **Older builds' cards.** Their sidecar values `custom_upgrades.vacpack.tank_booster` / `.extra_tank` (level of the
-  separate card) carry over to the vanilla card when the vanilla upgrade is maxed in the save (log `... carried over to
-  the vanilla card`); otherwise (bought out of order) they stay pending and are checked again after each load. Their
-  ids were never in a save (removed by the old Pull detour).
-- **Level circles** (`fabricator_levels.cpp`). The Fabricator prefabs have 8 circles: the details panel's
-  `UpgradeChain` (42 x 22, every 52 px, absolute positions) and each grid button's `FabricatorItemButtonPips` (22 x 11,
-  two rows of four). `UpgradeChain.Show` moves its highlight onto `_levels[current + 1]`, which throws at Tank Booster
-  VIII with 12 levels. Pre-hooks on `UpgradeChain.Show` (0x82ED90) and `FabricatorItemButton.ConfigurePips` (0x806CE0,
-  `Configure` inlined) clone the last circle / pip (same parent) and install a longer array, then lay them out for the
-  count shown: more than 8 -> narrower and closer in the prefab's width (chain: 12 circles 27.8 px wide every 34.4 px,
-  highlight 39.8 px; pips: two rows of six, 14 px wide), else the prefab's own positions. Without the chain hook Tank
-  Booster keeps its 8 levels (logged). Log: `fabricator levels: details panel shows 12 level circles ...`.
-
-**Costs (our choice).** Each level copies the refinery items of a late vanilla level, in the vanilla style:
-Tank Booster IX-XII use V-VIII's items with the amounts doubled (+2 for the rare ones vanilla asks 1-3 of) and
-60,000 / 75,000 / 90,000 / 120,000 Newbucks (vanilla VIII: 50,000). Extra Tank III / IV use VII / VIII's items
-unchanged and 25,000 / 50,000 Newbucks (vanilla Extra Tank II: 5,000; a slot this late is worth more than +25 per
-slot). No upgrade component: vanilla consumes one Tank Booster / Extra Tank component per level (counted items from
-treasure pods / the shop) and the world may hold no more than vanilla needs, so ours would be unbuyable; the cloned
-component list is cleared. The log lists every level's exact cost (`vacpack: TankBoosterTiers ready ...`).
-
-**Vanilla data** (UnityPy on `duplicateassetisolation_assets__54b00e46...bundle` and `corescenes_scenes_...bundle`,
-names from the English string table):
-
-- `AmmoCapacity` (`_uniqueId` 20) = Tank Booster I-VIII: one ADD modifier per level on `AmmoLimit` (default 20):
-  +10 ... +80, so 30 ... 100 per slot (levels replace each other, they do not add up). 450 / 1000 / 3000 / 10000 /
-  15000 / 20000 / 30000 / 50000 Newbucks plus refinery items (V: 50 Sloomber plorts, 20 Stable plorts, 20 Black
-  Indigonium, 1 Royal Jelly; VI: 60 Twin, 25 Stable, 20 Dream Bubble, 3 Sun Sap; VII: 70 Hyper, 50 Sloomber,
-  20 Magma Comb, 3 Royal Jelly; VIII: 80 Ringtail, 50 Twin, 30 Aqua Glass, 3 Royal Jelly). II+ also need the
-  `TankBoosterComponent`.
-- `AmmoSlots` (40) = Extra Tank I-II: ADD +1 / +2 on `AmmoSlotsAvailable` (default 4). 1500 / 5000 Newbucks + items,
-  II also the `ExtraTankComponent`. `LiquidSlot` (80) = Water Tank.
-- Player slot definitions (`PlayerState._ammoSlotDefinitions`): `AmmoSlot1-4`, `ExpansionAmmoSlot 1` / `2`
-  (`AmmoSlotsAvailable` >= 5 / 6), `LiquidAmmoSlot` (`LiquidSlotEnabled` >= 1). Vanilla uses all of them:
-  6 regular slots + water.
+- The tick appends our level objects (deep copies from `Object.Instantiate(AmmoCapacity)`) to the vanilla
+  `AmmoCapacity` / `AmmoSlots` definitions, found by id every tick (log `'AmmoCapacity' now has 12 levels
+  (8 vanilla + 4)`). Values are absolute: ADD 80 + 25..100 on `AmmoLimit`, ADD 2 + 1 / 2 on
+  `AmmoSlotsAvailable`.
+- **Save**: `UpgradeModel.Pull` post clamps ids 20 / 40 to VIII / II. Real level in
+  `custom_upgrades.vacpack.tank_booster_level` / `.extra_tank_level` (absolute 0-based, only past the
+  vanilla max), set by the `SetUpgradeLevel` detour (also Sandbox); at or below the max clears it. After a
+  load the tick restores it only when the save holds exactly the vanilla max (log `'AmmoCapacity' level 8
+  -> 10 (Tank Booster X, from the sidecar)`). Off: live level back to the max, our levels removed. Older
+  builds' `.tank_booster` / `.extra_tank` carry over when the vanilla upgrade is maxed.
+- **Circles** (`fabricator_levels.cpp`): pre-hooks clone the last circle / pip and lay out more than 8
+  narrower (chain 12 x 27.8 px every 34.4 px; pips two rows of six). Without the chain hook Tank Booster
+  keeps 8 levels (logged).
+- **Costs**: IX-XII = V-VIII's items doubled (+2 for the rare ones), 60,000 / 75,000 / 90,000 / 120,000;
+  Extra Tank III / IV = VII / VIII's items, 25,000 / 50,000. No upgrade component (the world has no spares).
+  Log `vacpack: TankBoosterTiers ready ...`.
 
 ### Extra slots
 
-Feedback: "they aren't selectable with buttons; would be amazing if they are; also they're after the water tank and
-the inventory slots aren't centered."
-
-- **Order.** `PlayerState.InitModel` / `Reset` (pre) insert two clones of `ExpansionAmmoSlot 2` (thresholds 7 / 8) right
-  after it, before `LiquidAmmoSlot`, while the module is on: slots 1-6, Extra Tank III, IV, water. The HUD binds one
-  view per slot in index order (locked ones hidden by `AmmoSlotAdapter.PrefilterData`), so they show before the water
-  tank, and next / previous slot walk them in that order.
-- **Save.** A load copies the saved slots **by index** into the player's slots (`InitModel` -> `AmmoModel.Reset(defs)`
-  first, then `PlayerModel.Push` -> `AmmoModel.Push` 0xA6E530), and `ValidateAndAdjustSlots` clears ids a slot's
-  definition does not allow - so the saved water (index 6) would land in Extra Tank III's slot and be lost. Now:
-  `AmmoModel.Pull` (post, the player's model only) hands the save the 7 vanilla slots in the vanilla order (water back
-  at index 6) and writes the extra slots to `custom_upgrades.vacpack.extra_slot_items` (`k=referenceId*count;...`, k =
-  0 / 1); `AmmoModel.Push` (pre, the player's model only: its slot 6 has our definition) spreads a 7-slot array into the
-  9-slot layout, our two positions taking their own empty live slots (Push copies them onto themselves). Log `loaded
-  vacpack spread into the extended layout (saved slot 7 = water -> slot 9)`. The tick refills the extra slots from the
-  sidecar (`MaybeAddResource` with overflow); an older build's `custom_upgrades.vacpack.extra_slots` (indices 7 / 8)
-  is read once and converted. Slimes in those slots lose their emotions / radiant look (only type and count kept).
-- **Number keys.** The game has one `selectSlot` InputEvent for `MainGame/Slot1..Slot7`; `VacuumItem.SelectSlot(
-  InputEventData)` (0xA69640) selects slot `round(value)` (0..6, `Optional<float>` at +4 of the data). No Slot8 / 9
-  actions exist and an action asset can't be added at runtime without managed code, so:
-  - two Key settings (custom upgrades, group "Vacpack": "Extra Tank III slot key" = 7, "Extra Tank IV slot key" = 8),
-    polled every frame (`GetAsyncKeyState` edge, game window in front, overlay closed, cursor locked and time running,
-    `VacuumItem` active = not gadget mode); a press calls the game's own `VacuumItem.SelectSlot(int)` (sound, vac
-    animation; a locked slot is refused by `SetSelectedSlot`). Log `number key 7 selects vacpack slot 7 (Extra Tank
-    III)` once.
-  - Defaults (round 4, user: "R selects water, not 7, so it's offset; 7 is missing as a key slot"): the game binds
-    Slot1..Slot6 to 1-6 and Slot7 (the water slot) to R, so 7 / 8 are free; the first builds used 8 / 9. A key still on
-    its old default (saved 8 for III, 9 for IV) moves once to the new one (marker `extra_slot_keys_v2` in sr2mods.json,
-    log `slot keys moved to the new defaults`); the HUD labels follow the setting.
-  - The water slot keeps the game's key (R): a `VacuumItem.SelectSlot(InputEventData)` detour maps a vanilla index at or
-    after our slots to its index in our layout.
-  - HUD key label: `AmmoSlotViewHolder.BindInputKey(definition.Hotkey)` with our null hotkey logged "No binding set for
-    ammo slot!"; its detour now writes our key's name into `KeybindingText` (localized text off) for our slots and keeps
-    the key box shown (hidden when the key is set to none). The label follows a changed key the next time the game
-    rebinds labels (device / keys changed, reload).
-- **Centred row.** HUD `Ammo Slots` is 900 x 189 with a `HorizontalLayoutGroup` (spacing 10, LowerCenter, no width
-  control) over 108 px slots. Unity centres the children only while they fit (`GetTotalPreferredSize < size`); 9 slots
-  are 1052 px, so the row started at the rect's left edge and overflowed to the right. The tick widens the rect to 900 +
-  2 x 118 + 24 = 1160 px once the vacpack is extended (log `HUD slot row 900 -> 1160 px wide ...`); `Cleanup` puts the
-  width back.
-- **Module off / faulted:** `PlayerState` gets the vanilla array back for the next load, and the live slots are put back
-  in the vanilla order with ours last, so a save made without our hooks keeps the water slot at index 6 (a mod-free load
-  then drops slots 8-9 with the game's warning; their contents stay in the sidecar).
-
-**The real slot limit.** No hard limit in code: the slot list is an array of any length (`AmmoModel.Reset`;
-`ValidateAndAdjustSlots` pads / trims by index with a warning), the HUD binds one view per slot, the save is a list.
-Practical limits: number keys (ours are polled), the save layout (handled above) and the HUD width (widened).
+- `PlayerState.InitModel` / `Reset` (pre) insert two clones of `ExpansionAmmoSlot 2` (thresholds 7 / 8)
+  before `LiquidAmmoSlot`: slots 1-6, Extra Tank III, IV, water.
+- **Save**: `AmmoModel.Pull` (player only) gives the save the 7 vanilla slots in vanilla order and writes
+  the extra slots to `custom_upgrades.vacpack.extra_slot_items` (`k=referenceId*count;...`, k = 0 / 1);
+  `AmmoModel.Push` (pre) spreads 7 slots into 9 (log `loaded vacpack spread into the extended layout
+  ...`); the tick refills the extra slots from the sidecar. Old `.extra_slots` is converted once. Slimes
+  there lose emotions / radiant look.
+- **Keys**: settings "Extra Tank III slot key" = 7, "Extra Tank IV slot key" = 8 (group "Vacpack"), polled
+  (`GetAsyncKeyState` edge; game in front, overlay closed, cursor locked, time running, vacpack out) ->
+  `VacuumItem.SelectSlot(int)`. Old defaults 8 / 9 moved once (marker `extra_slot_keys_v2`). R still
+  selects water (`SelectSlot(InputEventData)` remap). HUD labels via the `BindInputKey` detour.
+- **Centred row**: `Ammo Slots` widened 900 -> 1160 px; Cleanup restores it.
+- **Off / faulted**: vanilla array back for the next load; live slots reordered vanilla-first, so a save
+  keeps water at index 6 (a mod-free load drops slots 8-9; contents stay in the sidecar).
 
 ### Drone Battery Saver
 
-First built as per-station tiers bought from a `[B] Battery` pill in the drone station menu; moved here after
-user feedback ("they should be refinery upgrades, not in a separate panel"). Now one global upgrade, its own card.
-
-- **Card.** A clone of `AmmoCapacity` with an empty effect list (round 9; `ApplyUpgrade` walks an empty list). It
-  kept the cloned modifier as ADD 0 on AmmoLimit before, so every level change of it re-evaluated the vacpack
-  capacity, threw with it in the user's round-8 session ("bee drone upgrade errored") and left stray Tank Booster
-  modifiers behind (x1880 slots; `modules/sandbox/NOTES.md`, "Round 9"). If the list can't be emptied, no vacpack
-  upgrade is set up (logged). The `SetUpgradeLevel` detour now writes the sidecar *before* the original call (for a
-  level in -1 .. LevelCount - 1, which the game stores before raising `OnUpgradeChanged`): a throwing subscriber
-  unwound past the old post-call code, the sidecar kept IV and the tick set IV again every second (`DroneBatterySaver
-  level 0 -> 4 (from the sidecar) FAILED` repeated in that log). Icon and pedia entry: the Drone Station gadget's (`DroneDirector.
-  _droneStationType`, a `GadgetDefinition`: `icon`, `_pediaLink`), set by the tick once the scene has it (log
-  `Drone Battery Saver card uses the '...' icon`); until then / if missing, Tank Booster's. Listed at the end of
-  the category (no vanilla parent). Its id is registered in `UpgradeModel.upgradeLevels` (-1) before the definition goes
-  into the player's list (`ActorUpgradeHandler.SetModifiersFromModel` asks every listed definition for its level), is
-  removed from the save's copy by the Pull detour and is not counted for TinkerTailorSlimes.
-- **Prerequisite: the Drone Station blueprint** (`GadgetDirector.HasBlueprint`, checked when the Fabricator
-  builds its items). An owned level always shows the card; an unknown answer (lookup failed) shows it too.
-- **Card in the Fabricator (fix, round 4).** The card was inserted by a `PlayerUpgradeFabricateCategory.GetItems`
-  (0x82C000) detour, but nothing calls `GetItems` natively in 1.3.0 (IDA: only metadata references).
-  `PlayerUpgradeFabricateCategoryRuntime..ctor(category, recipeFactory)` (0x82BE90, called by
-  `FabricatorCategoryList.FindCategoriesToShow` each time the Fabricator opens, also the Sandbox's rebuild) has the
-  same LINQ code inlined (`_upgradeDefinitions.Select(new PlayerUpgradeFabricatableItem(...)).Cast().ToList()`) and
-  passes the list to `FabricateCategoryRuntime<T>..ctor` (0x20F5F80): `_categoryCount` = `TotalCount()` =
-  `Count(_upgradeDefinitions)` @0x18, `_itemList` @0x20. The detour is now on that ctor: pre, our card goes at the end
-  of the definition list of the category that holds Tank Booster (id 20; the vanilla code then makes its item); post,
-  it leaves the runtime's `_itemList` while locked (or no player / module off) and `_categoryCount` drops by as many
-  (so the title's total and the page count stay vanilla). Log, when the state changes: `vacpack: Fabricator category
-  '<name>': DroneBatterySaver: card shown (position N of M)` / `card hidden (locked: Drone Station blueprint not
-  owned)` / `card removed (no player state yet | custom upgrades off)`, plus `N upgrade(s) added to the Fabricator
-  category '<name>' list` the first time. The tiers need nothing here (they are levels of the vanilla cards).
-  Earlier logs show Battery Saver IV owned, so the card was visible before the fix somehow - probably the player's
-  `UpgradeModel.upgradeDefinitions` (where the tick inserts the card) is the same asset as the category's list; if so,
-  the locked filter never ran before and the card showed without the Drone Station blueprint. Unverified.
-  Every other hook was checked in IDA for the same problem (a target with no code reference): the rest are either
-  called directly or are virtual / interface / delegate targets (`PlayerState.InitModel`, `LandPlotUIRoot` virtuals,
-  `DroneUIDefinitionSource.FindSourceDefinition`, `GadgetFabricatableItem` interface methods, event handlers).
-- **Prices: 7,500 / 10,000 / 15,000 / 25,000 Newbucks (57,500 for IV) plus half of Tank Booster V-VIII's refinery
-  items** (rounded up, at least 1).
-- **Effect** (`drone_battery.cpp`): every ~2 s each station gets back what it drained beyond the level's share since the
-  last look, through the game's own `AddEnergy`; the saved battery stays a vanilla value. Level = the per-save value
-  `custom_upgrades.vacpack.drone_battery` (0-based).
-- **Verified by reading the code again** (user: "idk check logs"; the log of that test had only the `... active (battery
-  drain x0.50)` lines, nothing about refunds). The drain is pure world time: `_energyDepleteTime` is written only by
-  `AddEnergy` (one caller, `DroneFuelDepositor.OnTriggerEnter`), the station's init / `Push`; `SetEnergy` has no caller,
-  so `energy = (depleteTime - now) / 3600 x EnergyDepletedPerHour` falls steadily and the refund `dt x (1 - 1/factor)`
-  is right. Fixed: a refund below 0.01 energy was dropped and its time window forgotten (t0 moved on); now t0 stays
-  until the accumulated refund is worth adding. New log lines: `station <id>: first refund +X energy for N world s
-  (battery A -> B of 1000)` per station and level, then once a minute `Drone Battery Saver IV gave back X energy to N
-  station(s) in the last 60 s: <id> +x (battery y), ...`.
-- **Checked in the log (round 4, user: "check urself pls").** Refunds happen. Battery Saver IV, 3 stations: first refund
-  +0.02 energy for 164 world s each, then +0.4 energy per station per real minute (1.1-1.3 in total; 0.0 / 0.9 in minutes
-  the game was paused / in menus). Battery Saver II on one station: +0.1-0.2 a minute. Numbers: 1 real s = 60 world s, so
-  a real minute is a game hour; +0.4 at x0.50 means the vanilla drain (`EnergyDepletedPerHour`) is about 0.8 energy per
-  game hour and the station now loses about 0.4 (log: 321.8 -> 318 in 12 minutes). The refund is right, it is just small
-  in absolute terms because the vanilla drain is slow (`ENERGY_OVERCHARGE_THRESH` 100, max 1000). The `active` line now also
-  prints the drain per game hour (with and without the saver).
-- **Migration.** Old sidecars hold `drone_battery.station.<actor id>` = 1..4. On the first tick after a load the
-  highest tier of any station becomes the global level (if higher than an owned one), all those keys are erased
-  and one line is logged.
-
-**Not verified in game yet:** the 12 circles / 12 pips (positions, the highlight), buying IX-XII and III-IV on the
-vanilla cards, the capacity values, save + reload (`... from the sidecar` lines), a mod-free load of such a save, the
-extra slots before the water slot, the number keys (7 / 8) and their HUD labels, R still selecting water, the centred row,
-the battery saver's refund lines. Known rough edges: the save's "viewed upgrades" set (`ViewedItemsV02`) may get the
-Battery Saver id (harmless for a mod-free load); pinning the Battery Saver as the recipe was not checked for a mod-free
-load.
+- **Card**: `AmmoCapacity` clone with an empty effect list (else no vacpack upgrade is set up, logged); id
+  registered in `upgradeLevels` (-1) before the definition enters the player's list; out of the save's
+  copy; not counted for TinkerTailorSlimes. `SetUpgradeLevel` detour writes the sidecar **before** the
+  original (a throwing subscriber skips post-call code). Icon / pedia from the Drone Station gadget, else
+  Tank Booster's.
+- **Fabricator**: `PlayerUpgradeFabricateCategoryRuntime..ctor` detour: pre appends the card to the
+  category holding id 20, post removes it while locked / no player / off and lowers `_categoryCount`. Log
+  `vacpack: Fabricator category '<name>': DroneBatterySaver: card shown|hidden|removed (...)`.
+- **Prices**: 7,500 / 10,000 / 15,000 / 25,000 + half of Tank Booster V-VIII's items.
+- **Effect** (`drone_battery.cpp`): every ~2 s each station gets back what it drained beyond the level's
+  share via `AddEnergy`; the saved battery stays vanilla; refunds below 0.01 accumulate. Level
+  `custom_upgrades.vacpack.drone_battery` (0-based). Logs `... active (battery drain x0.50, ...)`, `station
+  <id>: first refund ...`, once a minute `Drone Battery Saver IV gave back X energy to N station(s) ...`
+  (checked: +0.4 per station per real minute at IV). Old `drone_battery.station.<id>` keys migrate to the
+  global level.
+- Rough edges: `ViewedItemsV02` may get its id (harmless); pinning it as a recipe unchecked for a mod-free
+  load.
 
 ### Shadow Catcher
 
-Idea from `.claude/notes/ideas.md`: "a vacuum upgrade to collect shadow slimes, no despawn on your own ranch, and
-eating food". Research, RVAs and the save question: `re/shadow-slimes.md` (section 6). Card in
-`vacpack_upgrades.cpp` (kind `kShadowCatcher`), effect in `shadow_catcher.cpp`.
+Card in `vacpack_upgrades.cpp` (`kShadowCatcher`), effect in `shadow_catcher.cpp`. RE: re/slimes.md
+(ShadowSlimeScatter, ProducePlortsOnHit, SlimeEat / hunger, DestroyOutsideHoursOfDay), re/world.md
+(IsOnRanch, CaveTrigger), re/slimes.md.
 
-- **Card.** Own card like the Battery Saver (clone of `AmmoCapacity`, empty effect list, id `0x53520104`, per-save
-  value `custom_upgrades.vacpack.shadow_catcher`, out of the save's upgrade copy, not counted for TinkerTailorSlimes),
-  always shown, at the end of the vacpack category. Cost (our choice): 40,000 Newbucks + Tank Booster VII's refinery
-  items with the first one (70 Hyper plorts) swapped for **25 Shadow plorts** once the Shadow slime is found (log
-  `vacpack: Shadow Catcher costs ...`); icon = the Shadow slime's (log `Shadow Catcher card uses ...`).
-- **Owned flag.** The vacpack tick publishes `shadow::SetOwned` and the player's regular slot definitions (the ones with
-  AmmoSlot1's `_slotTypeGroup`: six vanilla slots + Extra Tank III / IV) every second, before anything puts shadow
-  slimes back into the vacpack (after a load the previous save's flag holds for up to a second).
-- **Vac.** `AmmoSlotDefinition.IsAllowed` detour: Shadow on a published player slot -> true (pointer compares first;
-  silos, drones, feeders, the water slot keep vanilla rules). The capture path has no other check. Shooting one out
-  is vanilla `Expel` (a fresh shadow slime).
-- **Calm.** Owned: `ShadowSlimeScatter.ScatterIfPlayerNear` skipped and `Relevancy` 0 while not alerted, so shadow
-  slimes no longer flee from the player walking up (vanilla: alert at 10 m, gone 10-15 s later). Hitting one still
-  alerts it and its neighbours (vanilla `StartFleeing`), so labyrinth plort farming is unchanged.
-- **Ranch.** Shadow slimes are tracked when one of their scatter hooks runs (GC handle; the tick frees dead ones).
-  The ~1 Hz tick asks `CellDirector.IsOnRanch(scatter._member)` (the game's own test, also used by the feral
-  lifetime). Kept: `DoAlert` and `Action` skipped, an old alert cleared, `Relevancy` 0, and the
-  `ProducePlortsOnHit.ProducePlort` detour skips hit plorts on the ranch (below), so the "despawn after 10 plorts"
-  never fires.
-  They save natively (actor type Shadow has a persistence id; only the player is in `ignoreOnLoad`). Logs:
-  `shadow catcher: shadow slime '...' is on the ranch: kept ...` / `left the ranch ...`, and `N shadow slime(s) loaded
-  nearby, K kept on the ranch` when the numbers change.
-- **Eating.** Shadow's diet is empty and its hunger never rises. While owned, copies of the **Pink** slime's food
-  entries (fruit, veggies, meat; no plorts / largo transformations) producing the Shadow plort go into the Shadow
-  diet's `EatMap` (log `N food entries for the Shadow diet ...`; re-added if `RefreshDefinitions` rebuilds the list);
-  each kept slime's `SlimeEat` gets `_keepEatingWhenFull` and `InitFood`. Not kept any more / not owned: flag off;
-  not owned / module off: our entries removed. Wild shadow slimes get the entries too (global diet) but never eat
-  unless feral (no hunger, no keep-eating flag).
-- **Plorts: the Ringtail rule.** Ringtails eat without end but make a plort only while hungry. Their prefab has the
-  `KeepEatingWhenFull` component, which only sets `SlimeEat._keepEatingWhenFull` and (with `_showMischievousFace`)
-  sets the face's `_isMischievous` while `!IsHungryForNonPlorts`. The rule itself is vanilla `SlimeEat.FinishChomp`
-  (0xBB6780): `skipProduction = _keepEatingWhenFull && !IsHungryFor(food)`, passed to `EatAndProduce` (and the chomper
-  then waits `TimePerEatWhenFull`). `IsHungryFor` = drive >= `MinDriveToEat`, drive = `max(hunger, entry.MinDrive) +
-  entry.ExtraDrive`; every meal lowers the hunger by `DrivePerEat` (`InvokeOnEat`), and it rises again at the
-  emotion's hunger rate (`ComputeHungerChangePerHour`). So the reset is the hunger timer, not the day / night cycle
-  (the stone form is a separate actor, `TurnToStoneInDaylight.BecomeStatue` swaps in a `RingtailStatue`, nothing to do
-  with eating). Shadow already had the flag from us, but its hunger rate is 0, so the rhythm never came back. What we
-  do per kept slime (in memory only, put back when it stops being kept): our diet entries use `MinDrive` 0 and
-  `ExtraDrive` 0 (drive = hunger); `SlimeEat.DrivePerEat` raised to at least **1.0**, so one plort meal empties the
-  hunger and every meal after it is eaten without a plort; `SlimeEmotions._hungerRecoveryRate` = the vanilla default
-  (`SlimeEmotionConfig.HungerRate.DefaultValue`, the rate every slime without an override gets; logged once as
-  `vanilla hunger rate .../game h`), `_hungerDirection` 1, then `ComputeHungerChangePerHour`. The next plort comes once
-  the hunger is back at the Shadow prefab's `MinDriveToEat` (0.333), i.e. after `0.333 / rate` game hours plus the
-  vanilla day / night recovery factors - the same timer a normal slime's hunger uses. The tick re-applies the rate if a
-  property change reset it, sets the face's `_isMischievous` while full (the Ringtail's cue), and logs
-  `shadow slime '...' ate and is full ... hungry again in ~N game h` / `is hungry again ... next meal makes a plort`
-  (at most 12 such lines per minute). The hunger value is saved in `SlimeModel.Emotions` like every slime's (vanilla
-  safe); the rate, `DrivePerEat` and the face flag are not saved.
-  **Fix (round 9):** the rhythm never ran before: `SlimeEmotionConfig` was looked up in the global namespace, it lives
-  in `MonomiPark.SlimeRancher.Slime` (user's log: `no hunger rhythm (class 'SlimeEmotionConfig' not found ...)`). So a
-  kept slime kept Shadow's hunger rate 0 and the vanilla `DrivePerEat`.
-- **No hit plorts on the ranch (round 9).** User: "hitting them with food while in a plot still drops plorts". That was
-  `ProducePlortsOnHit` (the Gold / Shadow "plort when hit" component): `ProcessCollisionEnter` (0x8859F0) calls
-  `ProducePlort` for any `ProducePlortGroups` object hitting faster than `_speedThresholdToProducePlort` (thrown food
-  included), its only caller. The `ProducePlort` detour now skips the call for a Shadow slime on the ranch
-  (`CellDirector.IsOnRanch(_regionMember)`, owned only): on the ranch plorts come only from meals while hungry. In the
-  wilds hit plorts are vanilla. Log once: `a hit on a shadow slime on the ranch made no plort`.
-- **Sunlight: the Phosphor rule (round 9).** User: "another upgrade to keep them in ... maybe solar shield works? should
-  have the same note as phosphor ... (that they hate sunlight when in ranch)". Vanilla Phosphors carry
-  `DestroyOutsideHoursOfDay` (`StartHour` / `EndHour` = the hours they live in, `Min/MaxEndureHoursOutsideWindow`,
-  `CavesPreventShutdown`): outside the window a shutdown clock runs (next `EndHour` + Random(endure) game h), then
-  `DeathHandler.Kill` + `Destroyer.DestroyActor`; any `CaveTrigger` holding the slime (`OnCaveEnter`) stops it. The
-  corral **Solar Shield is a CaveTrigger**: CORRAL prefab children "Base SolarShield" / "High SolarShield" (inactive until
-  bought, `SolarShieldUpgrader.Shields`), each with a "Cave Trigger" child (BoxCollider on layer 22, 10 x 5 x 10 and 10 x 8
-  x 10 m, `CaveTrigger` component). Adding the vanilla component to a shadow slime at runtime would miss the
-  trigger-enter of a slime already inside the shield, so the tick runs the same rule itself, per kept slime:
-  - day = the hour (`TimeDirector.CurrHour`) outside the Phosphor's window, read once from the Phosphor
-    `SlimeDefinition.prefab` (or its `SlimeModules`); defaults 18:00-06:00. Endure = the Phosphor's, floored at
-    0.25-0.5 game h (15-30 real s) so there is time to carry them into the shade. Log `sunlight rule from ...`.
-  - shade = inside the world AABB (`Collider.bounds`) of any enabled, active-in-hierarchy `CaveTrigger` collider
-    (rescanned with `FindObjectsOfTypeAll(CaveTrigger)` every ~10 s while slimes are kept in daylight; prefab assets
-    drop out with empty bounds). Plots sit on a 90-degree grid, so the shield's AABB is its box; natural caves count
-    too, as for Phosphors ("somewhere perpetually dark, like a cave").
-  - in daylight outside the shade: the face gets `_isFleeing` (scared look) and a fade clock of Random(endure) game h
-    starts (log `is out in the sun: it fades in ~N game h ...`); shade or night stops it (`is safe again`). When it runs
-    out the slime is alerted on purpose (vanilla `DoAlert` through the trampoline, own GameObject as the alert object);
-    our detours let a fading slime's scatter run, so it hops about and vanishes 10-15 s later with its DisappearFX
-    (`Action` -> `Destroyer.DestroyActor`). Log `fades away in the sunlight`. Nothing of this is saved; after a load the
-    clock starts fresh.
-  - Card text and Slimepedia: the card description ends with the sunlight warning; the English `PediaPage_en` entry
-    `m.risks.shadow_slime` ("Rancher Risks") gets a note appended while the upgrade is owned (`StringTable.GetEntry` /
-    `StringTableEntry.set_Value`, in memory; table found by name with `FindObjectsOfTypeAll(StringTable)` every ~10 s
-    until loaded; removed again when not owned / module off). Other languages keep the vanilla text.
-- **Largos (round 9: "mixes should work aswell, so largos work maybe if possible").** Not possible without new
-  content: 1.3.0 has no Shadow largo. The Shadow `SlimeDefinition` has `CanLargofy` 0 and no `SlimeDefinition` / string
-  (`Actor_en` has `l.<a>_<b>_largo` names for every vanilla pair; none with shadow) pairs it with anything. A largo needs
-  its own `SlimeDefinition` with an identifiable id; the save stores actors by persistence id, so a new one would be
-  unloadable for a mod-free game (same blocker as a new food item). Not built.
-- **Vacpack save.** No vanilla slot allows Shadow, so a load would drop them (`ValidateAndAdjustSlots`). The
-  `AmmoModel.Pull` detour gives the save an empty `AmmoSlot` (new object, same definition) in place of each slot
-  with shadow slimes and writes `custom_upgrades.vacpack.shadow_slots` = `v=count;...` (vanilla slot index); in the
-  Extra Tank slots they go through the extra-slot stash. The tick puts them back after a load (own slot first, then
-  any slot that takes them; log `N shadow slime(s) back in the vacpack from the sidecar`); not owned -> they wait
-  in the sidecar (log `shadow slimes wait in the sidecar ...`). A mod-free load: no shadow slimes in the vacpack
-  (vanilla would drop them anyway), ranch shadow slimes load as vanilla ones (they scatter and vanish once the
-  player comes near).
-- **Module off.** Owned flag off, diet back, kept slimes back to vanilla. Shadow slimes still in the vacpack are kept
-  in the save made next (no Pull detour) and dropped by the load after it: logged as a WARN at cleanup.
+- **Card**: like the Battery Saver (value `custom_upgrades.vacpack.shadow_catcher`), always shown. 40,000
+  + Tank Booster VII's items with the 70 Hyper plorts swapped for 25 Shadow plorts once the Shadow slime is
+  found; Shadow icon; description ends with the sunlight warning.
+- **Owned flag**: the vacpack tick publishes `shadow::SetOwned` and the regular slot definitions (AmmoSlot1's
+  type group: six vanilla + Extra Tank III / IV) every second.
+- **Vac**: `IsAllowed`: Shadow on a published slot -> true (never water, silos, drones, feeders).
+- **Calm**: `ScatterIfPlayerNear` skipped, `Relevancy` 0 while not alerted; hits still alert as vanilla.
+- **Ranch**: tracked when a scatter hook runs (GC handle); kept while `CellDirector.IsOnRanch`: `DoAlert` /
+  `Action` skipped, alert cleared, no hit plorts (`ProducePlort` skipped). They save natively. Logs `shadow
+  slime '...' is on the ranch: kept ...` / `left the ranch ...`.
+- **Eating**: copies of the Pink slime's food entries (fruit, veggies, meat) producing Shadow plorts go
+  into the Shadow `EatMap` (re-added after `RefreshDefinitions`).
+- **Ringtail rule** per kept slime (in memory): our entries `MinDrive` / `ExtraDrive` 0;
+  `_keepEatingWhenFull` + `InitFood`; `DrivePerEat` >= 1.0 (one plort meal empties the hunger);
+  `_hungerRecoveryRate` = `SlimeEmotionConfig.HungerRate.DefaultValue`, `_hungerDirection` 1. Next plort
+  when hunger is back at 0.333. Face `_isMischievous` while full. Logs `ate and is full ... hungry again in
+  ~N game h` / `is hungry again` (max 12 per minute). Hunger saves (`SlimeModel.Emotions`); the rest not.
+- **Phosphor rule**: day = outside the Phosphor's window (default 18:00-06:00), endure floored at
+  0.25-0.5 game h. Shade = inside an enabled, active `CaveTrigger` collider's AABB (Solar Shield, caves;
+  rescanned ~10 s). In the sun: scared face + fade clock (`is out in the sun: it fades in ~N game h`);
+  shade / night stop it (`is safe again`); run out -> vanilla `DoAlert`, it vanishes (`fades away in the
+  sunlight`). Not saved.
+- **Slimepedia**: English `m.risks.shadow_slime` gets a note while owned (in memory).
+- **Vacpack save**: `AmmoModel.Pull` gives the save an empty slot for each slot with shadow slimes and
+  writes `custom_upgrades.vacpack.shadow_slots` = `v=count;...` (vanilla index; Extra Tank slots via the
+  extra-slot stash); the tick puts them back (or they wait while not owned).
+- **Module off**: vanilla again; shadow slimes still in the vacpack go into the next save and are dropped
+  by the load after it (WARN at cleanup).
+- Limits: no Shadow largo in 1.3.0 (a new SlimeDefinition would be unloadable without the mod); no new food;
+  kept slimes eat whatever reaches them (a garden-fed corral loses food); hunger does not rise while
+  unloaded; vacuumed ones lose emotions; feral wild ones could eat.
 
-Limits: no new food item; kept slimes still eat whatever reaches them (as Ringtails do, paced by
-`TimePerEatWhenFull` while full), so a garden-fed corral loses its food, but only the hungry meals make plorts; hunger
-does not come back while the slime is unloaded (its scene loads with Shadow's rate 0 and the tick sets ours only once
-it is tracked again); a vacuumed shadow slime loses its emotions; feral wild shadow slimes could eat (global diet).
-Shadow plort price was not checked (economy).
+### Lava tank: not built
 
-**Test cases (not run yet):**
-1. Fabricator > vacpack upgrades: "Shadow Catcher" card at the end with the Shadow slime icon, 40,000 Newbucks + 25
-   Shadow plorts + Sloomber / Magma Comb / Royal Jelly; buy it (log `ShadowCatcher -> level 1`, `shadow catcher:
-   owned`).
-2. Grey Labyrinth: walk up to shadow slimes - they no longer scatter; vac one - it goes into a regular slot (not the
-   water slot); hit one with a plort - it and its neighbours still flee and vanish.
-3. Shoot it out on the ranch (in a corral with a Solar Shield): log `is on the ranch: kept`; stand next to it for a
-   minute - it stays; hit it with items more than 10 times - no plorts from the hits, no despawn.
-3a. Sunlight: by day, shoot one into a corral without a Solar Shield: scared face, log `is out in the sun: it fades in
-   ~N game h`; after N game h it hops about and vanishes (`fades away in the sunlight`). Vac it into a shielded
-   corral before that: `is safe again (in the shade)`. At night it is safe anywhere on the ranch.
-4. Feed it fruit / veggies / meat (shoot them at it, or a feeder): it eats and makes Shadow plorts (log `food
-   entries ... added to the Shadow diet`, `vanilla hunger rate .../game h`).
-4a. Ringtail rule: feed a hungry kept shadow slime several foods in a row: the first one makes a Shadow plort (log
-   `ate and is full ... hungry again in ~N game h`), the next ones are eaten with no plort, its face looks mischievous;
-   wait N game hours (or sleep): log `is hungry again`, the next food makes a plort again.
-4b. A kept slime in a corral with a garden / feeder: it keeps eating, but plorts come only about once per hunger cycle
-   (count them over a game day: about one per N hours, not one per food).
-4c. Carry it off the ranch or turn custom upgrades off: its face goes back to normal, it no longer eats when full.
-5. Save with shadow slimes in the vacpack (log `shadow slimes kept in the sidecar`), reload: they come back
-   (log `back in the vacpack from the sidecar`); the ranch shadow slime is still in its corral after the reload.
-6. Carry one off the ranch and release it: `left the ranch`, it may scatter if hit.
-7. Turn custom upgrades off: shadow slimes on the ranch behave as vanilla again (vanish when you come near); with
-   shadow slimes in the vacpack the WARN line appears.
-8. Mod-free load of such a save: loads fine, no shadow slimes in the vacpack, ranch shadow slimes present until
-   alerted.
+Lava is a `LavaVolume` trigger, not a liquid (RE: re/world.md "Lava"). A tank would need a runtime Lava
+`LiquidDefinition`, `LookupDirector` registration and a strip-and-sidecar save path (the risky part),
+`LiquidSourceSurface` on every `LavaVolume`, a lava slot appended like the extra slots, and new gameplay
+for shot lava.
 
-### Lava tank: not built (research)
+## Untested in game
 
-Lava in 1.3.0 is not a liquid the vacpack knows: it is `LavaVolume`, a trigger that calls `ILavaTriggerReact` on
-whatever enters it (`DestroyOnLava` poofs items after `_hoursOfContactAllowed`, `TakeDamageInLava` hurts the player,
-`BounceInLava` makes slimes / chickens hop out). There is no lava `IdentifiableType`: the only `LiquidDefinition`s are
-`Water` and `MagicWater` (identifiabletypes bundle). The vacpack takes liquids from a `LiquidSourceSurface`
-(`LiquidIdentifiableType`, `DestroyOnVac`, `FillVac`) registered in `LiquidSourceRegistry`. A lava tank would need:
+- Drones: Hen / Elder Collector sources (icons, offering rules, save + reload, elder migration), Coop
+  emptying the Hen Collector; several programs per drone (all; list in drone_price_limit NOTES).
+- Quantum Storage Link: card, fabricating, toggle, place / pick up, look and glitch, Use notices, drone
+  source, save + reload, module off, mod-free load.
+- DJ buildables: looks and positions (estimated from prefab numbers), standby tune, seat spin, labels and
+  preview ghost, largo seat, stacking on a stack, radio at the nozzle and re-adopt, owed radios, save +
+  reload, mod-free load. Mod buildable cards: positions, locked look, unlock, Sandbox override.
+- Radio shop: daily toy, picture, sold out, Coo-Coo Corner without it.
+- Plot menu: Sell / Purchase layout; Sell button after selling Music Box II (round 9 FAIL, cause not proven,
+  every silent exit now logs); checkmark after buying the last tier with the menu open.
+- Sell-All: receipt at other resolutions, input lock, pad keys, mouse; gold on HDRP/Lit.
+- Silo: tanks, slot displays at the new max, the merged Additional Storage card (round 8 saw separate cards;
+  the list check logs it). Alt-action sell prompt and key.
+- Props: Music Box II speaker animation, sizes, `Glow` / `Embers` playing, ember spots, plush hen facing.
+- Vacpack: 12 circles / pips, buying the tiers, save + reload, mod-free load, extra slots and keys, centred
+  row. Shadow Catcher: the whole feature.
 
-1. a new `LiquidDefinition` "Lava" made at runtime (clone of `Water`) with a reference id, icon, colour, localized
-   name, a shoot prefab (what leaves the vac) and the in / vac-fail FX;
-2. registration in `LookupDirector` (`_identifiableTypeByRefId`, the type groups) and, the hard part, the save's
-   persistence-id tables (`SaveReferenceTranslation` / `LoadReferenceTranslation`): a slot holding an unknown type
-   cannot be saved, so it needs the same strip-and-sidecar path as the extra slots, and lava must be kept out of every
-   other place a liquid can end up (silos, drones, plots and gadgets that take water);
-3. `LiquidSourceSurface` components (and colliders on the vac's layer) added to every `LavaVolume` object at runtime,
-   so the vac can suck from it, with `DestroyOnVac` off;
-4. a slot that takes it: a "lava tank" `AmmoSlotDefinition` (clone of `LiquidAmmoSlot` with its own type group that
-   holds only Lava, unlocked by a new upgrade property), appended like the extra slots;
-5. something for lava to do when shot: nothing in the game reacts to it (no food for fire slimes, no incinerator
-   input), so this is new gameplay.
+## History
 
-1, 3 and 4 follow the patterns above; 2 is the risky part (save format); 5 needs a design.
+- Rounds 4-5: Hen Collector two limits and sliders (now mouse only), Additional Storage merged, Silo
+  Capacity V, Battery Saver moved to the Fabricator, vacpack tiers merged into the vanilla cards.
+- Rounds 7-8: Fabricator cards moved to the category-runtime constructors; Slime DJ buildables.
+- Rounds 9-10: gadget looks, one DJ Speaker Stack, radio as a daily toy, Shadow Catcher hunger / sunlight,
+  gold button on HDRP/Lit, Sell button diagnostics. Details: git log.
