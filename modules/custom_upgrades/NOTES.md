@@ -179,6 +179,13 @@ re/custom-upgrades.md 2.1 / 2.4.
   held; chicks never) and, when the 6 game hour period is due, builds DoCollection's joints for the excess
   only; the vanilla FixedUpdate reels them in. Joints are released before a clone is removed. Fallback
   without those parts: direct store + puff.
+  **Don't regress (twice now):** the parts (`_region`, `_timeDir`, `_storage`, `_vacAudio`) are set by
+  Awake, which only runs once the clone is active in the hierarchy. A clone built while the plot is
+  inactive (rebuild right after a map teleport) has them null, so the build must not decide "stored
+  directly" for good: `CreateHen` only enables the vacuum when `activeInHierarchy`, and `ServeHen`
+  retries `EnableVacuum` every tick while the clone is active and not yet vacuuming (log `vacuum switched
+  on after activation`; the missing-parts WARN only after the warm-up). Build line says `inactive: vacuum
+  switched on once active` in that case.
 - **Limits**: hens 0..58 (default 18), roosters 0..20 (default 2) per coop; `hen_collector_keep_hens` /
   `_roosters` (an old `hen_collector_keep` n = min(2, n) roosters, rest hens). Two `PlotMenuSlider`s in one
   row (`SliderSpec.columns`, `Create(..., rowOf)`), **mouse only** (`keys = false`, gamepad later);

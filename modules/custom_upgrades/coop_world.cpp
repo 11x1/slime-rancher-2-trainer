@@ -70,6 +70,9 @@
 //   registered anywhere, collectorNextTime = 1e300: its own DoCollection never fires) and our tick
 //   builds the joints DoCollection would, for the chosen chickens only. Without those parts
 //   (names not found, no Region above the plot) the old direct store + puff is the fallback.
+//   A clone built while its plot is inactive (map teleport, region unloaded) has no Awake yet, so
+//   its refs are null at build time: the vacuum is then switched on by the tick once the clone is
+//   active (ServeHen, retried every tick), never locked to direct storing (round 14 regression).
 //   Placement (asset data of "patchCoop", plot-local = coop prefab root): the "Deluxe" container
 //   is NOT identity in the prefab - its localRotation is (0, -0.707, 0, 0.707) = -90 deg about Y,
 //   so the vanilla elder collector (CollectionPoint at Deluxe-local (3.75, 0.5, -3.75)) stands in
@@ -114,6 +117,7 @@
 #include <format>
 #include <initializer_list>
 #include <map>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -286,6 +290,7 @@ struct CoopWorld::Impl {
     size_t offLpmNext = 0;                         // LandPlotModel.collectorNextTime
     size_t offJrMeta = 0, offJrVac = 0, offJrJoint = 0;
     bool loggedNoVacuum = false;
+    std::set<std::string> vacuumLate;              // plots whose vacuum the tick switched on (logged once each)
 
     // Session-wide Hen Collector assets (built once, pinned, never freed).
     bool henTried = false;
@@ -425,7 +430,7 @@ struct CoopWorld::Impl {
     };
     Corner PickCorner(Il2CppObject* plot, Il2CppObject* pc);
     bool SetupVacuum(Resolver& R);
-    bool EnableVacuum(Il2CppObject* pc, const std::string& id);
+    bool EnableVacuum(Il2CppObject* pc, const std::string& id, bool warn = true);
     bool Vacuuming(Il2CppObject* pc) const { return vacuum && unity::Field<Il2CppObject*>(pc, offPcModel) != nullptr; }
     int PendingJoints(Il2CppObject* pc) const {
         return Vacuuming(pc) ? static_cast<int>(unity::ListCount(unity::Field<void*>(pc, offPcJoints))) : 0;
@@ -1172,7 +1177,11 @@ void CoopWorld::Impl::CreateHen(Il2CppObject* plot, CoopRequest& req, Il2CppObje
         return;
     }
     unity::SetActive(clone, true);  // Awake: collector refs, catchers, slot UIs (storage already has its model)
-    const bool vac = EnableVacuum(pc, req.id);
+    // Built while the plot is inactive (map teleport, region unloaded): Awake has not run yet, so the
+    // collector's refs are still null. The tick (ServeHen) then switches the vacuum on once the clone
+    // is active; a build never locks the clone to direct storing (round 14 regression).
+    const bool active = unity::ActiveInHierarchy(clone);
+    const bool vac = active && EnableVacuum(pc, req.id, false);
     LogPlacement(plot, clone, "built");
     if (req.hens) Restore(storage, *req.hens);
     int stored = 0;
@@ -1180,7 +1189,11 @@ void CoopWorld::Impl::CreateHen(Il2CppObject* plot, CoopRequest& req, Il2CppObje
         for (const HenSlot& s : *req.hens) stored += std::max(s.count, 0);
     timers[req.id] = PlotTimer{};
     SR2_INFO("[{}] hen collector built on plot '{}' ({} slot(s) x {}, {} chicken(s) restored, {}, {})", module, req.id,
-             nDefs, henMax, stored, vac ? "vacuum: the elder collector's own suction" : "no vacuum: stored directly",
+             nDefs, henMax, stored,
+             vac       ? "vacuum: the elder collector's own suction"
+             : !vacuum ? "no vacuum: stored directly"
+             : active  ? "vacuum parts not resolved yet, retried every tick"
+                       : "inactive: vacuum switched on once active",
              henButton ? "Activate button kept" : "no Activate button");
 }
 
@@ -1260,7 +1273,7 @@ bool CoopWorld::Impl::SetupVacuum(Resolver& R) {
 // After activation (Awake has set _region / _storage / _timeDir / CollectAnim; the constructor
 // _joints): a private LandPlotModel whose collectorNextTime never comes, then the component on, so
 // the vanilla FixedUpdate reels in, stores, puffs and animates whatever joints we hand it.
-bool CoopWorld::Impl::EnableVacuum(Il2CppObject* pc, const std::string& id) {
+bool CoopWorld::Impl::EnableVacuum(Il2CppObject* pc, const std::string& id, bool warn) {
     if (!vacuum) return false;
     Il2CppObject* collectPt = unity::Field<Il2CppObject*>(pc, offPcCollectPt);
     // FixedUpdate dereferences all of these without a check (NRE every physics frame otherwise).
@@ -1268,10 +1281,10 @@ bool CoopWorld::Impl::EnableVacuum(Il2CppObject* pc, const std::string& id) {
                        unity::Field<void*>(pc, offPcJoints) && unity::Field<Il2CppObject*>(pc, offPcStorage) &&
                        unity::Field<Il2CppObject*>(pc, offPcAudio) && unity::IsAlive(collectPt);
     if (!parts) {
-        if (!loggedNoVacuum) SR2_WARN("[{}] hen collector on plot '{}': collector has no Region / TimeDirector / storage / audio / "
+        if (warn && !loggedNoVacuum) SR2_WARN("[{}] hen collector on plot '{}': collector has no Region / TimeDirector / storage / audio / "
                                       "CollectPt - "
                                       "chickens are stored directly", module, id);
-        loggedNoVacuum = true;
+        if (warn) loggedNoVacuum = true;
         return false;
     }
     Il2CppObject* model = objectNew(landPlotModelClass);
@@ -1508,6 +1521,16 @@ void CoopWorld::Impl::ServeHen(Il2CppObject* clone, const CoopInfo& c, CoopReque
     if (req.hens && live != *req.hens) *req.hens = live;
     Il2CppObject* pc = InChildren(unity::TransformOf(clone), plortCollectorClass, true);
     if (!pc) return;
+    // No vacuum yet (built while the plot was inactive, or Awake's refs not set at build time): switch
+    // it on once the clone is active and Awake has set the collector's refs. Retried every tick; the
+    // missing-parts warning (once per session) only after the warm-up, so a loading region is quiet.
+    if (vacuum && !Vacuuming(pc) && unity::ActiveInHierarchy(clone)) {
+        const bool warn = timers[req.id].age >= kWarmupTicks;
+        if (EnableVacuum(pc, req.id, warn) && vacuumLate.insert(req.id).second)
+            SR2_INFO("[{}] hen collector on plot '{}': vacuum switched on after activation (the elder collector's own "
+                     "suction)", module, req.id);
+        if (sr2::core::ModuleFaulted(module)) return;
+    }
     // Vacuum: the collector's FixedUpdate animates the cyclone; direct storing: off between bursts.
     const bool vac = Vacuuming(pc);
     Il2CppObject* anim = unity::Field<Il2CppObject*>(pc, offPcAnim);
