@@ -36,6 +36,14 @@
 
 `DroneStationOutputPortVisualController` (spout look). Ghost drones: `ComponentAcquisitionDroneController` fades its shader float `_PhaseValue` 0 -> 1 in `Update` (`_phaseTimer`).
 
+### Drone phase-through pass (data + IDA)
+The look of a drone flying through geometry is an HDRP custom pass, not the drone's shader.
+- Core scene GameObject `DronePhaseThroughCustomPass` (inactive in the scene data): a global `CustomPassVolume` (priority 12, injection point 3 = BeforePostProcess) with two `MP.SR.Rendering.Pass.DronePhaseThroughCustomPass` entries: "Ranch Drone Phase Through Custom Pass" (`_renderingLayerMaskFilter` 65536 = bit 16, material `DronePhaseThroughCustomPass`) and "Explorer Drone ..." (bit 17, material `ExplorerDronePhaseThroughCustomPass`); both `_layerMask` = layer 27, `_playerLayer` = layer 8, target colour buffer Custom, depth Camera.
+- `DronePhaseThroughCustomPass.Execute` 0x8CDED0: `DrawRenderers` of layer mask (`_layerMask | _playerLayer`) filtered by `_renderingLayerMaskFilter`, shader pass `GBuffer` (`_shaderTags[2]`; Setup 0x8CE3C0 builds Forward, ForwardOnly, GBuffer, SRPDefaultUnlit, FirstPass, DepthOnly, DepthForwardOnly), depth LessEqual, then `HDUtils.DrawFullScreen(_fullscreenPhaseMaterial)`. Fields +0xD8 `_drawInSceneView`, +0xDC `_layerMask`, +0xE0 `_playerLayer`, +0xE4 `_renderingLayerMaskFilter`, +0xE8 `_fullscreenPhaseMaterial`, +0xF0 `_shaderTags`.
+- Shader `DronePhaseThroughCustomPass` (properties): scanlines (`_ScanlineBGColor` cyan, `_ScanlineLineColor`, `_ScanlineOutlineColor` HDR, `_ScanlineSize` 0.5, `_ScreenUVPanningSpeed` 3), intersection edge (`_IntersectionEdgeColorClose` HDR cyan ~350, `_DepthDifference` 1.8 ranch / 0.25 explorer, `_MinDepth` 0.8), noise.
+- `DroneCustomPassController` (+0x20 `_phaseThroughCustomPassVolume`, +0x28 `_currSceneGroup`): `Start` 0x9F65C0 subscribes to scene group loads; `OnSceneGroupLoaded` 0x9F60E0 (gameplay groups) subscribes `DroneDirector` drone registered / deregistered -> `UpdateCustomPassActive` 0x9F6780 = `volume.SetActive(GameModel.AllDroneStations(...).Any(s => s.SceneGroup == current))`. So the pass runs only while the scene group has a drone station.
+- Mod use: quantum_link.cpp (the Quantum Storage Link's phase ghost: renderers on layer 27 with rendering layer bit 16 inside the link; switches the volume on during a moment when it is off).
+
 ## From the custom_upgrades notes
 
 ### RanchDrone (MonomiPark.SlimeRancher.Drone)

@@ -142,8 +142,23 @@ constexpr int kSlotMax = 999;        // per slot
 constexpr int kTypesPerProgram = 4;  // cloud types one program's source offers at once
 constexpr double kCacheSeconds = 1.0;
 constexpr double kSlotIdleSeconds = 30.0;
-constexpr double kPulseSeconds = 7.0;
 constexpr double kTakeFxSeconds = 1.5;
+// Round 14 look ("the purple is too strong"; "i dont like the pinging effect it has, too quick"; "has a suction
+// effect on the output"; the arrows "shows like items can go in the link which they cant"; "the drone has a cool
+// effect when passing through it, can we make the quantum link have the same effect in random intervals"):
+constexpr float kLinkTint = 0.3f;        // colours this far towards kPurple (was 0.6)
+constexpr double kQuantumMin = 14.0;     // a quantum moment (phase-through + glow jitter) every 14-32 s
+constexpr double kQuantumMax = 32.0;
+constexpr double kPhaseMin = 0.9;        // ... the phase-through shows this long
+constexpr double kPhaseMax = 1.6;
+constexpr float kGhostScale = 0.97f;     // the phase ghost: the link's model this much smaller, inside it
+// DronePhaseThroughCustomPass (core scene volume 'DronePhaseThroughCustomPass', data): draws renderers on layer 27
+// (the Refinery Link's model is on it already) whose renderingLayerMask has this bit, and overlays the parts hidden
+// behind other geometry with scanlines and a cyan intersection edge. 1 << 16 = "Ranch Drone Phase Through Custom
+// Pass" (1 << 17 is the explorer drones' pass).
+constexpr uint32_t kRanchDronePhaseBit = 1u << 16;
+constexpr const char* kPortInMesh = "techDepositorPort01_input";    // the link's port: arrows pointing in
+constexpr const char* kPortOutMesh = "techDepositorPort01_output";  // the drone station chute's: arrows out
 constexpr int kStaleTicks = 5;       // ticks with a readable model list before a never-seen listed id is stale
 constexpr int kStaleTicksEmpty = 60; // the same when the save has no Refinery Link at all
 constexpr int32_t kTeleporterType = 1;  // GadgetDefinition.Types.TELEPORTER
@@ -279,6 +294,18 @@ struct Impl {
     Il2CppObject* slotDef = nullptr;
     Il2CppObject* cloudFx = nullptr;  // drone station: cloud withdraw FX prefab
     Il2CppObject* glowSrc = nullptr;  // teleporter active FX
+    Il2CppObject* outMesh = nullptr;  // the drone station prefab's output port mesh (kPortOutMesh)
+    Il2CppObject* inMesh = nullptr;   // the Refinery Link's own port mesh (kPortInMesh), first one seen
+    // the drone phase-through pass volume (DroneCustomPassController._phaseThroughCustomPassVolume): the game keeps
+    // it active only while the scene group has a drone station; a quantum moment switches it on meanwhile.
+    Il2CppClass* passCtrlClass = nullptr, *meshFilterClass = nullptr;
+    size_t offPassVolume = 0;
+    const MethodInfo* mfGetMesh = nullptr, *mfSetMesh = nullptr, *rendGetLayers = nullptr, *rendSetLayers = nullptr;
+    const MethodInfo* goActiveSelf = nullptr;
+    Il2CppGCHandle passVolume = nullptr;
+    double passLookAt = -1e9;
+    int phaseUsers = 0;
+    bool volumeForced = false, loggedVolume = false, loggedGhost = false, loggedLabel = false;
     Il2CppObject* icon = nullptr;     // our purple copy of the Refinery Link's icon (nullptr: not made)
     Il2CppObject* squareIcon = nullptr;  // the same on a square canvas: the drone source icon
     bool defFailed = false, slotDefTried = false, fxTried = false;
@@ -327,13 +354,19 @@ struct Impl {
         int mirror[kSlots] = {};          // count we set in each slot
         std::vector<RendRec> rends;
         std::vector<Il2CppGCHandle> handles;
-        double nextPulse = 0.0, nextTakeFx = 0.0;
-        // the glitch (Frame): the glow drops out and comes back in a stutter every few seconds
+        double nextTakeFx = 0.0;
+        // the quantum moment (Frame, Glitch): every kQuantumMin-Max s the glow jitters and the ghost phases through
         Il2CppObject* glow = nullptr;     // the glow's GameObject
+        Il2CppObject* ghost = nullptr;    // the phase ghost (a smaller copy of the link's model, inactive between moments)
+        Vec3 ghostScale{0.75f, 0.75f, 0.75f};  // the model's own local scale (the ghost gets kGhostScale of it)
         std::vector<Il2CppObject*> interactables;  // the link's BaseUIInteractables (Use)
-        double glitchAt = 0.0, glitchEnd = 0.0, nextFlip = 0.0;
-        bool glitching = false;
+        double glitchAt = 0.0, glitchEnd = 0.0, phaseEnd = 0.0, nextFlip = 0.0;
+        bool glitching = false, phasing = false;
         uint32_t rng = 1;
+        // switched off / swapped on the link itself (put back when it turns plain)
+        std::vector<Il2CppObject*> suction;  // the Refinery Link's "Dust" vac particles (inactive)
+        Il2CppObject* portFilter = nullptr;  // the port's MeshFilter (output mesh while quantum)
+        Il2CppObject* portMesh = nullptr;    // ... its own input mesh
     };
     std::map<int64_t, Rec> recs;
     std::unordered_set<Il2CppObject*> storages;  // identities of our storages (Decrement detour)
@@ -594,6 +627,12 @@ struct Impl {
     void MakeLook();
     void Glitch(Rec& rec, double now);
     int ScaleParticles(Il2CppObject* glow);
+    Il2CppObject* NamedChild(Il2CppObject* tr, std::string_view prefix);
+    int SwapPortMesh(Il2CppObject* root, Rec* rec);
+    void BuildGhost(Rec& rec, Il2CppObject* rootTr, Il2CppObject* holderTr);
+    Il2CppObject* PassVolume();
+    void PhaseOn(Rec& rec);
+    void PhaseOff(Rec& rec);
     bool OpenCloudMenu();
     void CloudFrame();
     std::string HideCloudHints(Il2CppObject* cloudMenu);
@@ -1118,6 +1157,16 @@ void Impl::FindFx() {
         Il2CppObject* ctrl = unity::IsAlive(prefab) ? InChildren(prefab, cloudCtrlClass) : nullptr;
         Il2CppObject* fx = ctrl ? unity::Field<Il2CppObject*>(ctrl, offSpawnFx) : nullptr;
         if (unity::IsAlive(fx) && unity::NewGCHandle(fx)) cloudFx = fx;
+        // The output port mesh of the station's chute (arrows pointing out; data: gadgetDroneStation/
+        // model_DroneStationQuantum/techChute/techDepositorPort_output/.../techDepositorPort01_inputOutput).
+        for (Il2CppObject* mf : unity::IsAlive(prefab) && mfGetMesh ? AllInChildren(prefab, meshFilterClass) : std::vector<Il2CppObject*>{}) {
+            bool ok = false;
+            Il2CppObject* mesh = Call(mfGetMesh, mf, {}, "MeshFilter.get_sharedMesh", &ok);
+            if (ok && unity::IsAlive(mesh) && unity::GetName(mesh) == kPortOutMesh && unity::NewGCHandle(mesh)) {
+                outMesh = mesh;
+                break;
+            }
+        }
     }
     // A teleporter gadget's active FX (the glow), found in the gadget definitions group.
     Il2CppObject* lookup = host.lookup ? host.lookup() : nullptr;
@@ -1144,8 +1193,9 @@ void Impl::FindFx() {
         for (size_t i = 0, n = unity::ListCount(subs); i < n && i < 64; ++i)
             groups.push_back(static_cast<Il2CppObject*>(unity::ListAt(subs, i)));
     }
-    SR2_INFO("[{}] quantum link: quantum pulse FX {}, glow {}", module, cloudFx ? unity::GetName(cloudFx) : "not found",
-             glowSrc ? "found" : "not found (no teleporter FX)");
+    SR2_INFO("[{}] quantum link: quantum pulse FX {}, glow {}, output port mesh {}", module,
+             cloudFx ? unity::GetName(cloudFx) : "not found", glowSrc ? "found" : "not found (no teleporter FX)",
+             outMesh ? "found (the port's arrows point out)" : "not found (the port keeps its input arrows)");
 }
 
 // Colour properties towards quantum purple, emission properties to cyan. Property names from the
@@ -1171,8 +1221,8 @@ void Impl::Tint(Il2CppObject* mat, int& colors, int& emissions, std::string& pro
             out = {kCyan.r * k, kCyan.g * k, kCyan.b * k, c.a};
             ++emissions;
         } else {
-            constexpr float t = 0.6f;
-            out = {c.r + (kPurple.r - c.r) * t, c.g + (kPurple.g - c.g) * t, c.b + (kPurple.b - c.b) * t, c.a};
+            constexpr float t = kLinkTint;
+            out ={c.r + (kPurple.r - c.r) * t, c.g + (kPurple.g - c.g) * t, c.b + (kPurple.b - c.b) * t, c.a};
             ++colors;
         }
         Call(matSetColor, mat, {s, &out}, "Material.SetColor", &ok);
@@ -1267,6 +1317,18 @@ bool Impl::Build(int64_t id, Il2CppObject* root, Rec& rec) {
     rec.root = root;
     TintRenderers(root, &rec, "link");
     if (Faulted()) return false;
+    // The Refinery Link's vac suction at its port (model_refineryLink/"Dust " with "Rings": vac particles) goes off,
+    // the port's inward arrows become the drone station chute's outward ones.
+    Il2CppObject* modelTr = NamedChild(rootTr, "model_refineryLink");
+    if (Il2CppObject* dust = modelTr ? NamedChild(modelTr, "Dust") : nullptr) {
+        Il2CppObject* go = unity::GameObjectOf(dust);
+        if (unity::IsAlive(go)) {
+            unity::SetActive(go, false);
+            rec.suction.push_back(go);
+            if (Il2CppGCHandle h = unity::NewGCHandle(go)) rec.handles.push_back(h);
+        }
+    }
+    const int ports = SwapPortMesh(root, &rec);
     bool ok = false;
     Il2CppObject* holder = objectNew(gameObjectClass);
     if (holder) Call(goCtor, holder, {unity::NewString(std::format("{}{}", kHolderPrefix, generation))}, "GameObject..ctor", &ok);
@@ -1309,6 +1371,12 @@ bool Impl::Build(int64_t id, Il2CppObject* root, Rec& rec) {
         loggedGlow = true;
         SR2_INFO("[{}] quantum link: no glow FX - links are tinted only", module);
     }
+    if (modelTr) BuildGhost(rec, modelTr, holderTr);
+    if (!rec.glow) {  // the quantum moments run for the ghost alone
+        rec.rng = static_cast<uint32_t>(id * 2654435761u) | 1u;
+        rec.glitchAt = Now() + 4.0 + static_cast<double>(id % 7) * 0.7;
+    }
+    if (Faulted()) return false;
     // the drone storage
     if (EnsureSlotDef()) {
         Il2CppObject* sgo = objectNew(gameObjectClass);
@@ -1367,8 +1435,11 @@ bool Impl::Build(int64_t id, Il2CppObject* root, Rec& rec) {
                              : " - not hooked, Use keeps its vanilla action");
         }
     if (Il2CppGCHandle h = unity::NewGCHandle(root)) rec.handles.push_back(h);
-    SR2_INFO("[{}] quantum link: actor {} built ({} renderer(s) tinted, glow {}, drone storage {}, drone port {})", module, id,
-             rec.rends.size(), glowSrc ? "on" : "off", rec.storage ? "ready" : "missing", rec.catcher ? "ready" : "missing");
+    SR2_INFO("[{}] quantum link: actor {} built ({} renderer(s) tinted, glow {}, phase ghost {}, suction {}, {} port arrow "
+             "mesh(es) flipped, drone storage {}, drone port {})",
+             module, id, rec.rends.size(), glowSrc ? "on" : "off", rec.ghost ? "ready" : "missing",
+             rec.suction.empty() ? "not found" : "off", ports, rec.storage ? "ready" : "missing",
+             rec.catcher ? "ready" : "missing");
     return true;
 }
 
@@ -1376,8 +1447,13 @@ bool Impl::Build(int64_t id, Il2CppObject* root, Rec& rec) {
 void Impl::Undecorate(Rec& rec, bool restore) {
     if (rec.storage) storages.erase(rec.storage);
     for (Il2CppObject* c : rec.interactables) interactables.erase(c);
+    if (rec.phasing) PhaseOff(rec);  // the pass volume goes back to the game's state
     if (restore && unity::IsAlive(rec.root)) {
         bool ok = false;
+        for (Il2CppObject* go : rec.suction)
+            if (unity::IsAlive(go)) unity::SetActive(go, true);
+        if (unity::IsAlive(rec.portFilter) && unity::IsAlive(rec.portMesh))
+            Call(mfSetMesh, rec.portFilter, {rec.portMesh}, "MeshFilter.set_sharedMesh", &ok);
         for (const RendRec& rr : rec.rends) {
             if (!unity::IsAlive(rr.renderer)) continue;
             Il2CppObject* inst = Call(rendGetShared, rr.renderer, {}, "Renderer.get_sharedMaterials", &ok);
@@ -1439,19 +1515,20 @@ void Impl::MakeLook() {
     look.artTint = {kPurple.r, kPurple.g, kPurple.b};  // details: the Refinery Link's full art in purple (round 12)
     look.artAmount = 0.85f;
     look.dressPreview = [this](Il2CppObject* placeholder) {
-        const int n = gadget_look::TintTree(placeholder, {kPurple.r, kPurple.g, kPurple.b}, 0.6f, {kCyan.r, kCyan.g, kCyan.b},
-                                            "Quantum Storage Link preview");
-        if (!loggedPreview) SR2_INFO("[{}] quantum link: placement preview tinted ({} material(s))", module, n);
+        const int n = gadget_look::TintTree(placeholder, {kPurple.r, kPurple.g, kPurple.b}, kLinkTint,
+                                            {kCyan.r, kCyan.g, kCyan.b}, "Quantum Storage Link preview");
+        const int ports = SwapPortMesh(placeholder, nullptr);  // the preview shows the outward arrows too
+        if (!loggedPreview)
+            SR2_INFO("[{}] quantum link: placement preview tinted ({} material(s), {} port mesh(es) swapped)", module, n, ports);
         loggedPreview = true;
     };
     gadget_look::Register(ours, std::move(look));
 }
 
-// The glow jitters in place and size (every 30-80 ms) for about half a second every 3.5-8 s. It used to drop
-// out too (SetActive off / on), which restarted its particle systems: the user saw the effect "disappear in like
-// 6-7 s intervals" (round 11). The ghost drones' look (ComponentAcquisitionDroneController: a material float
-// "_PhaseValue" faded 0 -> 1 in Update) is a property of their own shader, so it can't be put on the teleporter
-// FX; this jitter only hints at it with the transform.
+// A quantum moment every kQuantumMin-Max s (round 14; it was every 3.5-8 s, the user found the effects "too
+// quick"): the glow jitters in place and size (every 30-80 ms) for about half a second, and the phase ghost shows
+// for kPhaseMin-Max s, nudged a little at every flip so its edges cross the link's surface. The glow used to drop
+// out too (SetActive off / on), which restarted its particle systems ("disappear in like 6-7 s intervals", round 11).
 void Impl::Glitch(Rec& rec, double now) {
     auto rnd = [&rec] {
         rec.rng ^= rec.rng << 13;
@@ -1459,27 +1536,187 @@ void Impl::Glitch(Rec& rec, double now) {
         rec.rng ^= rec.rng << 5;
         return static_cast<float>(rec.rng & 0xFFFFFF) / static_cast<float>(0x1000000);
     };
-    Il2CppObject* tr = unity::TransformOf(rec.glow);
-    if (!tr) return;
+    Il2CppObject* tr = rec.glow ? unity::TransformOf(rec.glow) : nullptr;
+    Il2CppObject* gtr = rec.ghost ? unity::TransformOf(rec.ghost) : nullptr;
+    if (!tr && !gtr) return;
     if (!rec.glitching) {
         rec.glitching = true;
         rec.glitchEnd = now + 0.35 + rnd() * 0.3;
+        rec.phaseEnd = now + kPhaseMin + rnd() * (kPhaseMax - kPhaseMin);
         rec.nextFlip = now;
+        if (gtr) PhaseOn(rec);
     }
-    if (now >= rec.glitchEnd) {  // back to normal
+    Vec3 glowPos{0.0f, kGlowHeight, 0.0f}, glowScale{kGlowScale, kGlowScale, kGlowScale};
+    if (now >= rec.glitchEnd && (now >= rec.phaseEnd || !rec.phasing)) {  // back to normal
         rec.glitching = false;
-        rec.glitchAt = now + 3.5 + rnd() * 4.5;
-        Vec3 pos{0.0f, kGlowHeight, 0.0f}, scale{kGlowScale, kGlowScale, kGlowScale};
-        Call(trSetLocalPos, tr, {&pos}, "Transform.set_localPosition");
-        Call(trSetLocalScale, tr, {&scale}, "Transform.set_localScale");
+        rec.glitchAt = now + kQuantumMin + rnd() * (kQuantumMax - kQuantumMin);
+        if (rec.phasing) PhaseOff(rec);
+        if (tr) {
+            Call(trSetLocalPos, tr, {&glowPos}, "Transform.set_localPosition");
+            Call(trSetLocalScale, tr, {&glowScale}, "Transform.set_localScale");
+        }
         return;
     }
+    if (rec.phasing && now >= rec.phaseEnd) PhaseOff(rec);
     if (now < rec.nextFlip) return;
     rec.nextFlip = now + 0.03 + rnd() * 0.05;
-    Vec3 pos{(rnd() - 0.5f) * 0.08f, kGlowHeight + (rnd() - 0.5f) * 0.06f, (rnd() - 0.5f) * 0.08f};
-    Vec3 scale{kGlowScale * (0.8f + rnd() * 0.35f), kGlowScale * (0.7f + rnd() * 0.45f), kGlowScale * (0.8f + rnd() * 0.35f)};
-    Call(trSetLocalPos, tr, {&pos}, "Transform.set_localPosition");
-    Call(trSetLocalScale, tr, {&scale}, "Transform.set_localScale");
+    if (tr) {
+        if (now < rec.glitchEnd) {
+            glowPos = {(rnd() - 0.5f) * 0.08f, kGlowHeight + (rnd() - 0.5f) * 0.06f, (rnd() - 0.5f) * 0.08f};
+            glowScale = {kGlowScale * (0.8f + rnd() * 0.35f), kGlowScale * (0.7f + rnd() * 0.45f),
+                         kGlowScale * (0.8f + rnd() * 0.35f)};
+        }
+        Call(trSetLocalPos, tr, {&glowPos}, "Transform.set_localPosition");
+        Call(trSetLocalScale, tr, {&glowScale}, "Transform.set_localScale");
+    }
+    if (gtr && rec.phasing) {
+        const float k = kGhostScale + (rnd() - 0.5f) * 0.04f;
+        Vec3 pos{(rnd() - 0.5f) * 0.05f, (rnd() - 0.5f) * 0.04f, (rnd() - 0.5f) * 0.05f};
+        Vec3 scale{rec.ghostScale.x * k, rec.ghostScale.y * k, rec.ghostScale.z * k};
+        Call(trSetLocalPos, gtr, {&pos}, "Transform.set_localPosition");
+        Call(trSetLocalScale, gtr, {&scale}, "Transform.set_localScale");
+    }
+}
+
+// The direct child of `tr` whose name starts with `prefix` (the prefab's names, some with a trailing space).
+Il2CppObject* Impl::NamedChild(Il2CppObject* tr, std::string_view prefix) {
+    for (Il2CppObject* child : ChildTransforms(tr))
+        if (Il2CppObject* go = unity::GameObjectOf(child); go && unity::GetName(go).starts_with(prefix)) return child;
+    return nullptr;
+}
+
+// Every MeshFilter under `root` showing the port's input mesh (arrows pointing in) gets the drone station chute's
+// output mesh (arrows pointing out): "shows like items can go in the link which they cant" (round 14). With `rec`,
+// the first one is remembered to put back. Returns how many were swapped.
+int Impl::SwapPortMesh(Il2CppObject* root, Rec* rec) {
+    FindFx();
+    if (!outMesh || !mfGetMesh || !mfSetMesh || !meshFilterClass) return 0;
+    int n = 0;
+    for (Il2CppObject* mf : AllInChildren(root, meshFilterClass)) {
+        bool ok = false;
+        Il2CppObject* mesh = Call(mfGetMesh, mf, {}, "MeshFilter.get_sharedMesh", &ok);
+        if (!ok || !unity::IsAlive(mesh)) continue;
+        if (mesh == outMesh && rec && !rec->portFilter && inMesh) {  // swapped by an earlier build (same link)
+            if (Il2CppGCHandle hf = unity::NewGCHandle(mf)) rec->handles.push_back(hf);
+            rec->portFilter = mf;
+            rec->portMesh = inMesh;
+            continue;
+        }
+        if (unity::GetName(mesh) != kPortInMesh) continue;
+        if (!inMesh && unity::NewGCHandle(mesh)) inMesh = mesh;  // pinned for the session
+        Call(mfSetMesh, mf, {outMesh}, "MeshFilter.set_sharedMesh", &ok);
+        if (!ok) continue;
+        ++n;
+        if (rec && !rec->portFilter) {
+            if (Il2CppGCHandle hf = unity::NewGCHandle(mf)) rec->handles.push_back(hf);
+            rec->portFilter = mf;
+            rec->portMesh = mesh;
+        }
+    }
+    return n;
+}
+
+// The phase ghost: a copy of the link's model (renderers only, our tinted materials) under the holder, kGhostScale of
+// its size so it sits just inside the link, its renderers in the ranch drones' phase-through rendering layer. While it
+// is active, the game's DronePhaseThroughCustomPass draws it like a drone passing through the link (round 14: "the
+// drone has a cool effect when passing through it"): scanlines over the link and a cyan edge where the ghost's
+// surface crosses the link's. Inactive between quantum moments.
+void Impl::BuildGhost(Rec& rec, Il2CppObject* modelTr, Il2CppObject* holderTr) {
+    if (!rendGetLayers || !rendSetLayers) return;
+    Il2CppObject* model = unity::GameObjectOf(modelTr);
+    Il2CppObject* ghost = unity::IsAlive(model) ? unity::Instantiate(model, holderTr) : nullptr;
+    if (!unity::IsAlive(ghost)) return;
+    unity::SetActive(ghost, false);
+    unity::SetName(ghost, "sr2qghost");
+    Strip(ghost);
+    if (particleClass)  // the vac particles (the original's are switched off, the copy's go)
+        for (Il2CppObject* ps : AllInChildren(ghost, particleClass)) DestroyNow(unity::GameObjectOf(ps));
+    if (Faulted()) return;
+    bool ok = false;
+    if (trGetLocalScale) {
+        Vec3 s = Value<Vec3>(Call(trGetLocalScale, modelTr, {}, "Transform.get_localScale", &ok));
+        if (ok && s.x > 0.0f && s.y > 0.0f && s.z > 0.0f) rec.ghostScale = s;
+    }
+    Vec3 scale{rec.ghostScale.x * kGhostScale, rec.ghostScale.y * kGhostScale, rec.ghostScale.z * kGhostScale};
+    Call(trSetLocalScale, unity::TransformOf(ghost), {&scale}, "Transform.set_localScale");
+    int rends = 0;
+    for (Il2CppObject* r : AllInChildren(ghost, rendererClass)) {
+        uint32_t mask = Value<uint32_t>(Call(rendGetLayers, r, {}, "Renderer.get_renderingLayerMask", &ok));
+        if (!ok) continue;
+        mask |= kRanchDronePhaseBit;
+        Call(rendSetLayers, r, {&mask}, "Renderer.set_renderingLayerMask", &ok);
+        rends += ok ? 1 : 0;
+    }
+    if (!rends) {
+        DestroyNow(ghost);
+        return;
+    }
+    rec.ghost = ghost;
+    if (Il2CppGCHandle h = unity::NewGCHandle(ghost)) rec.handles.push_back(h);
+    if (!loggedGhost) {
+        loggedGhost = true;
+        SR2_INFO("[{}] quantum link: phase ghost = a copy of '{}' at {:.2f} size, {} renderer(s) in rendering layer 0x{:X} "
+                 "(the ranch drones' phase-through pass); quantum moments every {:.0f}-{:.0f} s",
+                 module, unity::GetName(model), kGhostScale, rends, kRanchDronePhaseBit, kQuantumMin, kQuantumMax);
+    }
+}
+
+// The drone phase-through pass volume (cached; looked up again at most every 30 s while missing).
+Il2CppObject* Impl::PassVolume() {
+    if (Il2CppObject* v = passVolume ? unity::GCHandleTarget(passVolume) : nullptr; unity::IsAlive(v)) return v;
+    if (!passCtrlClass || !offPassVolume || Now() - passLookAt < 30.0) return nullptr;
+    passLookAt = Now();
+    if (passVolume) {
+        unity::FreeGCHandle(passVolume);  // main thread, not inside a hook (Frame)
+        passVolume = nullptr;
+    }
+    for (Il2CppObject* c : unity::FindObjectsOfTypeAll(passCtrlClass)) {  // at most every 30 s, only while missing
+        Il2CppObject* v = unity::IsAlive(c) ? unity::Field<Il2CppObject*>(c, offPassVolume) : nullptr;
+        if (!unity::IsAlive(v) || !IsA(v, gameObjectClass)) continue;
+        passVolume = unity::NewGCHandle(v);
+        if (!loggedVolume) {
+            loggedVolume = true;
+            bool ok = false;
+            const bool on = Value<bool>(Call(goActiveSelf, v, {}, "GameObject.get_activeSelf", &ok));
+            SR2_INFO("[{}] quantum link: drone phase-through pass volume '{}' ({} now; switched on during quantum moments "
+                     "when the game has it off)", module, unity::GetName(v), ok ? (on ? "on" : "off") : "?");
+        }
+        return passVolume ? v : nullptr;
+    }
+    if (!loggedVolume) {
+        loggedVolume = true;
+        SR2_INFO("[{}] quantum link: no DroneCustomPassController - the phase ghost shows only while the game's "
+                 "phase-through pass is on", module);
+    }
+    return nullptr;
+}
+
+void Impl::PhaseOn(Rec& rec) {
+    if (rec.phasing || !unity::IsAlive(rec.ghost)) return;
+    rec.phasing = true;
+    unity::SetActive(rec.ghost, true);
+    ++phaseUsers;
+    Il2CppObject* v = PassVolume();
+    bool ok = false;
+    if (v && !volumeForced && goActiveSelf && !Value<bool>(Call(goActiveSelf, v, {}, "GameObject.get_activeSelf", &ok)) && ok) {
+        unity::SetActive(v, true);
+        volumeForced = true;
+    }
+}
+
+void Impl::PhaseOff(Rec& rec) {
+    if (!rec.phasing) return;
+    rec.phasing = false;
+    const bool calls = !Faulted();
+    if (calls && unity::IsAlive(rec.ghost)) unity::SetActive(rec.ghost, false);
+    if (--phaseUsers > 0) return;
+    phaseUsers = 0;
+    if (volumeForced) {
+        volumeForced = false;
+        if (!calls) return;
+        Il2CppObject* v = passVolume ? unity::GCHandleTarget(passVolume) : nullptr;
+        if (unity::IsAlive(v)) unity::SetActive(v, false);
+    }
 }
 
 // Every particle system under the glow (not its root) that simulates in Local scaling mode ignores its parents'
@@ -2039,11 +2276,9 @@ void Impl::Scan(double now) {
     }
     if (listed != before) SetActors(listed);
     if (kits != kitsBefore) SetKits(kits);
-    for (auto& [id, rec] : recs)  // the quantum pulse
-        if (now >= rec.nextPulse) {
-            rec.nextPulse = now + kPulseSeconds + static_cast<double>(id % 5) * 0.3;
-            Pulse(rec, nullptr);
-        }
+    // Round 14: no idle pulse any more (the cloud-withdraw FX every ~7 s: "i dont like the pinging effect it has, too
+    // quick"); it plays only when a drone takes from the link (OnTaken).
+    (void)now;
 }
 
 std::string MethodBySuffixName(Il2CppClass* k, std::string_view suffix, uint32_t argc, const MethodInfo*& out) {
@@ -2326,6 +2561,19 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
                                               resolveIcall("UnityEngine.ParticleSystem/MainModule::get_scalingMode()"))
                                         : nullptr;
         p->trGetLocalScale = R.Method(transform, "get_localScale", 0, nullptr);
+        // optional (round 14 look): the port's outward arrows, the phase ghost and the drone phase-through volume
+        p->meshFilterClass = R.Class(kCore, "UnityEngine", "MeshFilter", nullptr);
+        p->mfGetMesh = p->meshFilterClass ? R.Method(p->meshFilterClass, "get_sharedMesh", 0, nullptr) : nullptr;
+        p->mfSetMesh = p->meshFilterClass ? R.Method(p->meshFilterClass, "set_sharedMesh", 1, nullptr) : nullptr;
+        p->rendGetLayers = R.Method(p->rendererClass, "get_renderingLayerMask", 0, nullptr);
+        p->rendSetLayers = R.Method(p->rendererClass, "set_renderingLayerMask", 1, nullptr);
+        p->goActiveSelf = R.Method(p->gameObjectClass, "get_activeSelf", 0, nullptr);
+        p->passCtrlClass = R.Class(kImage, "MonomiPark.SlimeRancher.Drone", "DroneCustomPassController", nullptr);
+        if (auto o = p->passCtrlClass ? R.FieldOffset(p->passCtrlClass, "_phaseThroughCustomPassVolume") : std::nullopt) p->offPassVolume = *o;
+        if (!p->mfGetMesh || !p->mfSetMesh || !p->rendGetLayers || !p->rendSetLayers || !p->goActiveSelf || !p->offPassVolume)
+            SR2_WARN("[{}] quantum link: round 14 look partly unavailable (MeshFilter {}, renderingLayerMask {}, phase volume {}) "
+                     "- the port arrows / phase ghost may stay vanilla", p->module, p->mfSetMesh ? "ok" : "missing",
+                     p->rendSetLayers ? "ok" : "missing", p->offPassVolume ? "ok" : "missing");
     }
     if (!p->lsCtor || !p->ammoModelCtor || !p->fabItemCtor) why = "constructors not found";
     // hooks
@@ -2398,7 +2646,13 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
     gadget_look::AddPlacedLabel([](Il2CppObject* gadget, Il2CppObject* def) -> Il2CppObject* {
         if (!g || !g->armed || !g->ours || def != g->base || g->Faulted() || !g->Listed(g->ActorOfGadget(gadget))) return nullptr;
         Il2CppObject* name = unity::Field<Il2CppObject*>(g->ours, g->offLocName);
-        return name != unity::Field<Il2CppObject*>(g->base, g->offLocName) ? name : nullptr;
+        if (name == unity::Field<Il2CppObject*>(g->base, g->offLocName)) return nullptr;
+        if (!g->loggedLabel) {  // round 14: the user still saw "Refinery Link"; the log tells whether this ran
+            g->loggedLabel = true;
+            SR2_INFO("[{}] quantum link: gadget-mode label of a placed link (actor {}) = {}", g->module,
+                     g->ActorOfGadget(gadget), kTitle);
+        }
+        return name;
     });
     return true;
 }
@@ -2409,11 +2663,13 @@ void QuantumLink::Frame() {
     if (g->recs.empty() || g->Faulted()) return;
     const double now = Now();
     for (auto& [id, rec] : g->recs) {
-        if (!rec.glow || (!rec.glitching && now < rec.glitchAt)) continue;
-        if (!unity::IsAlive(rec.glow)) {
-            rec.glow = nullptr;
-            continue;
+        if ((!rec.glow && !rec.ghost) || (!rec.glitching && now < rec.glitchAt)) continue;
+        if (rec.glow && !unity::IsAlive(rec.glow)) rec.glow = nullptr;
+        if (rec.ghost && !unity::IsAlive(rec.ghost)) {
+            rec.ghost = nullptr;
+            g_guard.Run([&] { g->PhaseOff(rec); });
         }
+        if (!rec.glow && !rec.ghost) continue;
         g_guard.Run([&] { g->Glitch(rec, now); });
         if (g->Faulted()) return;
     }
@@ -2493,6 +2749,8 @@ void QuantumLink::Reset() {
     p.seenIds.clear();
     p.cache.clear();
     p.stableTicks = 0;
+    p.phaseUsers = 0;        // the next scene group load sets the pass volume again (DroneCustomPassController)
+    p.volumeForced = false;
     ++p.generation;
     for (int i = 0; i < kSlots; ++i) {
         p.slotType[i] = nullptr;
