@@ -82,6 +82,11 @@
 //   "hen_collector_keep" n reads as min(2, n) roosters + the rest hens), saved with the next game
 //   save like ownership, and read live by the collector (CoopRequest.keepHens / keepRoosters).
 //
+//   Auto-Feeder food lock (feeder_lock.cpp, round 15): while the owned vanilla Auto-Feeder card is
+//   selected in a corral's purchase menu, one more slider there picks the only food the feeder takes
+//   ("Feeder takes: any food" = vanilla). Per plot value "custom_upgrades.feeder_lock" in the sidecar;
+//   drones and shots of other foods are refused by that feeder only.
+//
 //   Hen Collector save safety: its storage is a LOCAL AmmoSlotManager (never linked to the
 //   plot's LandPlotModel, so never in the vanilla save; the vanilla elder slots would not
 //   accept hens on a mod-free load anyway); its contents are kept in the sidecar
@@ -248,6 +253,7 @@
 #include "modules/custom_upgrades/sale_notify.h"
 #include "modules/custom_upgrades/silo_receipt.h"
 #include "modules/custom_upgrades/silo_world.h"
+#include "modules/custom_upgrades/feeder_lock.h"
 #include "modules/custom_upgrades/shadow_catcher.h"
 #include "modules/custom_upgrades/vacpack_upgrades.h"
 #include "modules/slime_dj/api.h"
@@ -287,6 +293,7 @@ constexpr int32_t kPlotIncinerator = 7;
 // LandPlot.Upgrade (vanilla)
 constexpr int32_t kUpgMusicBox = 2;
 constexpr int32_t kUpgSprinkler = 7;
+constexpr int32_t kUpgFeeder = 9;
 constexpr int32_t kUpgAirNet = 11;
 constexpr int32_t kUpgAshTrough = 14;
 constexpr int32_t kUpgDeluxeCoop = 17;
@@ -295,7 +302,7 @@ constexpr int32_t kUpgStorageCapacity = 20;  // template preference
 constexpr int32_t kUpgStorageSections[] = {3, 4, 5};
 constexpr unsigned long long kTierCacheFrames = 900;
 constexpr float kWorldTickSeconds = 1.0f;  // coop world objects: create / fit / remove
-constexpr int kWorldSteps = 12;            // WorldStep parts, one per frame (round 13: all in one frame took 2-3.5 ms)
+constexpr int kWorldSteps = 13;            // WorldStep parts, one per frame (round 13: all in one frame took 2-3.5 ms)
 
 using custom_upgrades::Family;
 constexpr int kFamilies = static_cast<int>(Family::kCount);
@@ -622,11 +629,14 @@ public:
     bool WorldQuery(Il2CppObject* plot, custom_upgrades::world::CoopRequest& req);
     void AfterDetailsBind(Il2CppObject* view, Il2CppObject* vm);
     void SliderTick(float dt);
-    bool SliderActive() const { return sliderHens_.Active() || sliderRoosters_.Active(); }
+    bool SliderActive() const { return sliderHens_.Active() || sliderRoosters_.Active() || sliderFeeder_.Active(); }
     void DestroySliders() {
         sliderHens_.Destroy();  // the row's builder first (removes the row with both)
         sliderRoosters_.Destroy();
+        sliderFeeder_.Destroy();
     }
+    void FeederCardBind(Il2CppObject* view, Il2CppObject* desc, Il2CppObject* plot, Il2CppObject* config);
+    void FeederLockTick();
 
     // api.h
     std::string CanSellCustom(Il2CppObject* plot, int32_t upg, std::string* brief);
@@ -740,6 +750,8 @@ private:
     std::vector<custom_upgrades::world::PropRequest> WantedProps() const;
     custom_upgrades::ui::PlotMenuSlider sliderHens_;      // Hen Collector limits, side by side (one pair
     custom_upgrades::ui::PlotMenuSlider sliderRoosters_;  // at a time; the hens slider builds the row)
+    custom_upgrades::ui::PlotMenuSlider sliderFeeder_;    // Auto-Feeder food lock (corral Feeder card)
+    custom_upgrades::feeder::FeederLock feeder_;          // Auto-Feeder food lock effect (feeder_lock.h)
     custom_upgrades::ui::SaleNotices notices_;    // Sell-All: per-plort HUD notifications
     custom_upgrades::ui::SiloReceipt receipt_;    // Sell-All: confirmation dialog (silo_receipt.h)
     // While the receipt is open: the silo, the pressed button (both pinned; handles freed by a posted
@@ -1105,6 +1117,7 @@ void CustomUpgrades::ResetState(const char* why) {
     silo_.Reset();
     radioButtons_.Reset();
     props_.Reset();
+    feeder_.Cleanup(why);  // the loaded save's locks come from its sidecar at the next tick
     notices_.Clear();
     DestroySliders();  // their value callbacks belong to the old state
     if (receipt_.IsOpen() && main_thread::IsMainThread()) CloseReceipt(why);  // its silo belongs to the old game
@@ -2245,6 +2258,7 @@ void CustomUpgrades::Cleanup(const char* why) {
     RestoreCapacities(why);  // silos back to their vanilla capacity per slot (contents stay)
     vacpack_.Cleanup(why);   // vacpack upgrade levels off, our definitions out of the game's lists
     shadow_.Cleanup(why);    // Shadow diet back to vanilla, kept shadow slimes behave as in vanilla again
+    feeder_.Cleanup(why);    // locked auto-feeders take any food again
     int removed = 0, restored = 0;
     for (auto& inj : injections_) {
         for (Injected& in : inj->items) {
@@ -2546,6 +2560,13 @@ bool CustomUpgrades::WorldStep(int step) {
         {
             SR2_PERF_DETAIL("custom_upgrades.world: vacpack");
             vacpack_.Tick();
+        }
+        return true;
+    case 12:
+        if (!feeder_.Ready()) return false;
+        {
+            SR2_PERF_DETAIL("custom_upgrades.world: feeder locks");
+            FeederLockTick();
         }
         return true;
     default:
@@ -2920,6 +2941,10 @@ void CustomUpgrades::AfterDetailsBind(Il2CppObject* view, Il2CppObject* vm) {
     if (!desc) return;
     Il2CppObject* plot = unity::Field<Il2CppObject*>(menuRoot_, offActivator_);
     Il2CppObject* config = unity::Field<Il2CppObject*>(menuRoot_, offMenuConfig_);
+    if (unity::IsAlive(plot) && IsA(plot, plotClass_) && PlotType(plot) == kPlotCorral) {
+        FeederCardBind(view, desc, plot, config);
+        return;
+    }
     if (!unity::IsAlive(plot) || !IsA(plot, plotClass_) || PlotType(plot) != kPlotCoop) return;
     // Our Hen Collector item of this menu: its own LocalizedString instance (pointer identity).
     bool ours = false;
@@ -2975,6 +3000,89 @@ void CustomUpgrades::SliderTick(float dt) {
     if (!main_thread::IsMainThread()) return;
     sliderHens_.Tick(dt);
     sliderRoosters_.Tick(dt);
+    sliderFeeder_.Tick(dt);
+}
+
+// ---------------------------------------------------------------- auto-feeder lock --
+
+// Round 15 (user: "Give the autofeeder an option to lock 1 item in it as always in the buy menu so drones
+// can be filtered to put specific food items in them not just everything"): while the corral's OWNED
+// vanilla Auto-Feeder card is selected, a slider in the details panel (the cost row's slot, like the Hen
+// Collector limits) picks the one food the feeder takes: 0 = any food (vanilla), then the feeder's foods in
+// their group order. Mouse only (keys stay with the menu). Saved per plot in the sidecar (PlotValue
+// feeder::kLockKey = the food's asset name), applied at once (FeederLock::SetNow) and by the world tick.
+void CustomUpgrades::FeederCardBind(Il2CppObject* view, Il2CppObject* desc, Il2CppObject* plot, Il2CppObject* config) {
+    namespace fl = custom_upgrades::feeder;
+    if (!feeder_.Ready() || !sliderFeeder_.Ready() || !VanillaOwned(plot, kUpgFeeder)) return;
+    // The vanilla Feeder card of this menu: its own _description instance (pointer identity).
+    bool feederCard = false;
+    for (auto& inj : injections_) {
+        if (inj->config != config || !inj->list) continue;
+        for (size_t i = 0, n = unity::ListCount(inj->list); i < n && i < 64 && !feederCard; ++i) {
+            auto* item = static_cast<Il2CppObject*>(unity::ListAt(inj->list, i));
+            if (!unity::IsAlive(item) || !IsA(item, upgItemClass_)) continue;
+            feederCard = unity::Field<int32_t>(item, offItemUpgrade_) == kUpgFeeder &&
+                         unity::Field<Il2CppObject*>(item, offItemDesc_) == desc;
+        }
+    }
+    if (!feederCard) return;
+    const std::string id = PlotId(plot);
+    if (id.empty() || !EnsureLoaded()) return;
+    std::vector<fl::Food> foods;
+    if (!feeder_.Foods(plot, foods) || foods.empty()) return;
+    const std::string current = PlotValueOf(plot, fl::kLockKey);
+    int value = 0;
+    for (size_t i = 0; i < foods.size(); ++i)
+        if (foods[i].id == current) value = static_cast<int>(i) + 1;
+    auto list = std::make_shared<const std::vector<fl::Food>>(std::move(foods));
+
+    custom_upgrades::ui::SliderSpec spec;
+    spec.name = "FeederLock";
+    spec.min = 0;
+    spec.max = static_cast<int>(list->size());
+    spec.value = value;
+    spec.keys = false;
+    spec.label = [list](int v) {
+        if (v <= 0 || v > static_cast<int>(list->size())) return std::string("Feeder takes: any food");
+        return std::format("Feeder takes only: {}", (*list)[v - 1].name);
+    };
+    // By plot id (never a pointer into the state): the save may be reloaded while the menu is open.
+    spec.onChange = [this, id, list, game = state_.game](int v) {
+        if (!state_.loaded || state_.game != game) return;
+        bool ok = false;
+        Il2CppObject* sc = Invoke(sceneCtxInstMi_, nullptr, {}, "SceneContext.Instance", &ok);
+        Il2CppObject* gm = ok && offScGameModel_ && unity::IsAlive(sc) ? unity::Field<Il2CppObject*>(sc, offScGameModel_) : nullptr;
+        Il2CppObject* live = gm ? LivePlot(gm, id) : nullptr;
+        if (!live || PlotType(live) != kPlotCorral) return;
+        const fl::Food* f = v > 0 && v <= static_cast<int>(list->size()) ? &(*list)[v - 1] : nullptr;
+        SetPlotValueOf(live, fl::kLockKey, f ? f->id : std::string());
+        feeder_.SetNow(live, f ? f->type : nullptr, id);
+    };
+    sliderFeeder_.Create(view, spec);
+}
+
+// World tick part: the corrals with a locked feeder (sidecar values) -> their live plots.
+void CustomUpgrades::FeederLockTick() {
+    namespace fl = custom_upgrades::feeder;
+    std::vector<fl::LockRequest> locks;
+    Il2CppObject* gm = nullptr;
+    bool tried = false;
+    for (const auto& [id, ps] : state_.plots) {
+        if (ps.type != kPlotCorral) continue;
+        auto v = ps.values.find(fl::kLockKey);
+        if (v == ps.values.end() || v->second.empty()) continue;
+        if (!tried) {
+            tried = true;
+            bool ok = false;
+            Il2CppObject* sc = Invoke(sceneCtxInstMi_, nullptr, {}, "SceneContext.Instance", &ok);
+            gm = ok && offScGameModel_ && unity::IsAlive(sc) ? unity::Field<Il2CppObject*>(sc, offScGameModel_) : nullptr;
+        }
+        if (!gm) break;
+        Il2CppObject* plot = LivePlot(gm, id);
+        if (plot && PlotType(plot) == kPlotCorral) locks.push_back({plot, id, v->second});
+        if (sr2::core::ModuleFaulted(kModule)) return;
+    }
+    feeder_.Tick(locks);
 }
 
 // ---------------------------------------------------------------- buying --
@@ -3642,7 +3750,8 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         Il2CppClass* vm = R.Class(kImage, "MonomiPark.SlimeRancher.UI.Purchase", "PurchaseItemDetailsContentViewModel", &serr);
         auto o = vm ? R.FieldOffset(vm, "_description", &serr) : std::nullopt;
         detailsBindMi = view ? R.Method(view, "BindData", 1, &serr) : nullptr;  // the class's own override
-        if (o && detailsBindMi && sliderHens_.Setup(R, kModule, serr) && sliderRoosters_.Setup(R, kModule, serr)) {
+        if (o && detailsBindMi && sliderHens_.Setup(R, kModule, serr) && sliderRoosters_.Setup(R, kModule, serr) &&
+            sliderFeeder_.Setup(R, kModule, serr)) {
             offVmDescription_ = *o;
         } else {
             detailsBindMi = nullptr;
@@ -3830,6 +3939,12 @@ bool CustomUpgrades::Setup(sr2::core::ModuleContext& ctx) {
         std::string serr, sreport;
         if (shadow_.Setup(ctx, serr, sreport)) report += sreport;
         else SR2_WARN("[{}] shadow catcher unavailable ({}) - owning the upgrade changes nothing", kModule, serr);
+    }
+    // Auto-Feeder food lock (optional: without it feeders stay vanilla and the Feeder card has no slider).
+    {
+        std::string ferr, freport;
+        if (feeder_.Setup(ctx, ferr, freport)) report += freport;
+        else SR2_WARN("[{}] auto-feeder food lock unavailable ({}) - feeders take any food", kModule, ferr);
     }
 
     main_thread::AddFrameCallback(kModule, [](float dt) {

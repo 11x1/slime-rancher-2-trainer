@@ -57,6 +57,13 @@ Cloning: `Object.Instantiate(childOfPrefab, plotTransform)` copies the sub-hiera
 
 - `Incinerate.GetAshSpace()` (the incinerator only takes items while the ash trough has room); `SlimeFeeder`; `SpawnResource._landPlot` (gardens); `TrackContainedIdentifiables.AirNets` (corral slime integrity check).
 
+### SlimeFeeder (corral Auto-Feeder, IDA; round 15 custom_upgrades feeder_lock.cpp)
+- fields: `HoursByFeedSpeed` +0x28, `ItemsPerFeeding` +0x30, `_storage` +0x68 (SiloStorage), `_timeDir` +0x70, `_nextEject` +0x78, `_region` +0x80, `_model` +0x88
+- `Awake` 0x9959A0: `_storage = GetComponentInParent<SiloStorage>()` (the storage sits on a parent object, not on the feeder's own one), `_region = GetComponentInParent<Region>()`. Only runs once the FEEDER part is active (bought), so `_storage` is null on an unbought feeder.
+- `GetFoodId` 0x996150 / `GetFoodCount` 0x996110: one food type at a time (the storage slot holds one type).
+- How food gets in (all through the feeder's SiloStorage): the player's shot -> `SiloCatcher.OnTriggerEnter` 0x993B50 -> `Insert` 0x993650 -> virtual `SiloStorage.MaybeAddToSpecificSlot` 0x995810 (false = nothing happens, the item stays outside; also vanilla's answer for a non-food); drones -> `RanchDroneSinkProgramFeeder.GetSinks` (re/drones.md "Feeder sink") -> `SiloStorage.CanSpecificSlotAccept` 0x995580 (-> `AmmoSlotManager.CouldAddToSlot`), deposit `StorageMetadata.Increment`.
+- `SiloStorage` 0x995530 `CanAnySlotAccept(AmmoMetadata)`, 0x995580 `CanSpecificSlotAccept(AmmoMetadata, slot, overflow)` (AmmoMetadata is a 32-byte struct passed by reference, `Id` at +0x0), 0x995740 `MaybeAddAsResource(type, slot, count, overflow)`, 0x9957B0 `MaybeAddToAnySlot(AmmoMetadata)`, 0x995810 `MaybeAddToSpecificSlot(Identifiable, slot, overflow)` (+ RadiantSlimeDirector.CollectAndRegister on success): each its own body, all hooked by custom_upgrades feeder_lock.cpp (pass-through except for a locked feeder's storage).
+
 ## From the custom_upgrades notes
 
 ### LandPlotUIRoot (plot purchase menu)  : ListUIRoot`4

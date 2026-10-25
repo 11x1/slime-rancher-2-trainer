@@ -153,7 +153,7 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | PlayerUpgradeFabricateCategoryRuntime..ctor(2) | 0x82BE90 | custom_upgrades.PlayerUpgradeFabricateCategoryRuntime..ctor | custom_upgrades/vacpack_upgrades.cpp | add upgrade cards (own ctor, no parent walk) |
 | PlortCollectorActivator.Activate(0) | 0x52DD60 | custom_upgrades.PlortCollectorActivator.Activate | custom_upgrades/module.cpp | silo Sell-All, Corral Radio + Hen Collector buttons (silo_world, coop_world) (opt) |
 | ProducePlortsOnHit.ProducePlort(0) | 0x885CA0 | custom_upgrades.ProducePlortsOnHit.ProducePlort | custom_upgrades/shadow_catcher.cpp | lift hit-plort despawn limit (opt) |
-| PurchaseItemDetailsContentView.BindData(1) | 0x6D9EA0 | custom_upgrades.PurchaseItemDetailsContentView.BindData | custom_upgrades/module.cpp | Hen Collector limit sliders (opt; the class's own override) |
+| PurchaseItemDetailsContentView.BindData(1) | 0x6D9EA0 | custom_upgrades.PurchaseItemDetailsContentView.BindData | custom_upgrades/module.cpp | Hen Collector limit sliders, Auto-Feeder food lock slider (opt; the class's own override) |
 | RanchDrone.GatherSourceTask(1) | 0xA19B40 | custom_upgrades.RanchDrone.GatherSourceTask | custom_upgrades/drone_source.cpp | custom drone sources |
 | RanchDrone.GatherSourceTasks(1) | 0xA1AA90 | custom_upgrades.RanchDrone.GatherSourceTasks | custom_upgrades/drone_source.cpp | custom drone sources |
 | RanchDroneBehaviourDumpAmmo.Relevancy(1) | 0xA22CD0 | drone_price_limit.RanchDroneBehaviourDumpAmmo.Relevancy | drone_price_limit/module.cpp | hold plorts below limit |
@@ -183,6 +183,11 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | ShopRuntimeItem.get_Asset(0) | 0x8C1E20 | custom_upgrades.radio_shop.ShopRuntimeItem.get_Asset | custom_upgrades/radio_shop.cpp | Slime Radio shop entry |
 | ShopRuntimeItem.get_Description(0) | 0x8C1EC0 | custom_upgrades.radio_shop.ShopRuntimeItem.get_Description | custom_upgrades/radio_shop.cpp | Slime Radio shop entry |
 | ShopRuntimeItem.TryPurchase(3) | 0x8C1040 | custom_upgrades.radio_shop.ShopRuntimeItem.TryPurchase | custom_upgrades/radio_shop.cpp | Slime Radio shop entry |
+| SiloStorage.CanAnySlotAccept(1) | 0x995530 | custom_upgrades.SiloStorage.CanAnySlotAccept | custom_upgrades/feeder_lock.cpp | auto-feeder food lock (locked feeder storages only) |
+| SiloStorage.CanSpecificSlotAccept(3) | 0x995580 | custom_upgrades.SiloStorage.CanSpecificSlotAccept | custom_upgrades/feeder_lock.cpp | auto-feeder food lock: drone Feeder sinks (GetSinks lambda) |
+| SiloStorage.MaybeAddAsResource(4) | 0x995740 | custom_upgrades.SiloStorage.MaybeAddAsResource | custom_upgrades/feeder_lock.cpp | auto-feeder food lock (backstop) |
+| SiloStorage.MaybeAddToAnySlot(1) | 0x9957B0 | custom_upgrades.SiloStorage.MaybeAddToAnySlot | custom_upgrades/feeder_lock.cpp | auto-feeder food lock (backstop) |
+| SiloStorage.MaybeAddToSpecificSlot(3) | 0x995810 | custom_upgrades.SiloStorage.MaybeAddToSpecificSlot | custom_upgrades/feeder_lock.cpp | auto-feeder food lock: food shot into the feeder (SiloCatcher.Insert) |
 | SlimeEmotions.ComputeAgitationChangePerHour(0) | 0x88ABA0 | plot_upgrades.SlimeEmotions.ComputeAgitationChangePerHour | plot_upgrades/module.cpp | music box booster |
 | SpawnResource.UpdateToTime(3) | 0xBC2C00 | plot_upgrades.SpawnResource.UpdateToTime | plot_upgrades/module.cpp | garden booster |
 | SpawnTemporaryObjectActivity.Spawn(2) | 0x66DB30 | spawn_scaling.SpawnTemporaryObjectActivity.Spawn | spawn_scaling/module.cpp | weather patch-on-touch (opt) |
@@ -213,7 +218,7 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | Win32 WndProc of the game window | user32 | (no HookManager entry) | ui/overlay.cpp | `SetWindowLongPtrW(GWLP_WNDPROC)` subclass: overlay input |
 | Win32 WH_GETMESSAGE hook (window thread) | user32 | (no HookManager entry) | ui/overlay.cpp | `SetWindowsHookExW` while overlay has input: block Steam Shift+Tab, feed Tab to ImGui; refreshed every 2 s |
 
-Count: 177 MinHook hooks (core 2, ui 16, custom_upgrades 58, hl2_movement 17, sell_upgrades 13,
+Count: 182 MinHook hooks (core 2, ui 16, custom_upgrades 63, hl2_movement 17, sell_upgrades 13,
 quick_travel 11, sandbox 10 in four groups, drone_price_limit 9, free_placement 7, spawn_scaling 7,
 plot_upgrades 6, map_tools 5, minimap 5, quick_start 5, misc_tweaks 4, instant_build 1, slime_dj 1)
 plus the two Win32 hooks. No two hooks share a target. Modules without hooks: collectibles,
