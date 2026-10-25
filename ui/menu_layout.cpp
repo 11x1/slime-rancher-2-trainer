@@ -50,6 +50,7 @@ std::vector<Category> Spec() {
     plot.title = "Plot upgrades";
     plot.modules = {"plot_upgrades", "sell_upgrades"};  // sell: works on the game's own plot upgrades too
     plot.needCard = {"plot_upgrades"};                  // its tiers exist only while Custom Upgrades is on
+    plot.groups = {"Plot upgrades"};  // round 18: Auto-Feeder fill lights (was a "Corrals" card of its own)
     CardSection refinery;
     refinery.title = "Refinery upgrades";
     // Generic on purpose: the list of Fabricator upgrades grows (round 12 G: drone programs).
