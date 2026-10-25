@@ -2000,6 +2000,35 @@ void TipKeys(const std::vector<KeyRow>& keys) {
     ImGui::Dummy(ImVec2(blockW, rowH * static_cast<float>(keys.size())));
 }
 
+// Fabricator cost inside a tooltip: a "Fabricator cost" heading, one line per ingredient, each with its icon
+// (Newbucks: a drawn coin). The crafter's item tooltips and the upgrade entries' (RichTooltip).
+void CostRows(const std::vector<sbx::CostLine>& costs) {
+    const Palette& P = theme::Colors();
+    FontScope f(theme::Body(), theme::kSmallSize);
+    ImGui::Dummy(ImVec2(0, U(1)));
+    ImGui::PushStyleColor(ImGuiCol_Text, P.soft);
+    ImGui::TextUnformatted("Fabricator cost");
+    ImGui::PopStyleColor();
+    const float e = U(20);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    for (const sbx::CostLine& c : costs) {
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float y = p.y + (ImGui::GetFrameHeight() - e) * 0.5f;
+        if (c.currency) {
+            // Newbucks (or another currency): a small coin.
+            const ImVec2 cc(p.x + e * 0.5f, y + e * 0.5f);
+            dl->AddCircleFilled(cc, e * 0.38f, IM_COL32(0xF0, 0xC2, 0x4B, 0xFF));
+            dl->AddCircle(cc, e * 0.38f, IM_COL32(0xA8, 0x7A, 0x1E, 0xFF), 0, std::max(1.0f, U(1.5f)));
+        } else if (!item_grid::DrawIcons(dl, c.icon, 0, ImVec2(p.x, y), ImVec2(p.x + e, y + e))) {
+            dl->AddCircleFilled(ImVec2(p.x + e * 0.5f, y + e * 0.5f), e * 0.25f, KindAccent(c.kind));
+        }
+        ImGui::Dummy(ImVec2(e, ImGui::GetFrameHeight()));
+        ImGui::SameLine(0, U(6));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(c.text.c_str());
+    }
+}
+
 // Item tooltip: the name with its group as a small tag; for slimes, foods and plorts the
 // diet links with icons (favourite food, plort, who loves / makes it; no largos under "Made
 // by"); optional cost lines with icons (crafter), a dim info line, then the left / right click
@@ -2028,32 +2057,7 @@ void ItemTooltip(const sbx::Snapshot& s, const std::string& name, sbx::Kind kind
             RelationRow(s, "Favourite of", r->favouriteOf, 6);
             RelationRow(s, "Made by", r->plortOf, 6, true);
         }
-        if (costs && !costs->empty()) {
-            // Fabricator cost: one line per ingredient, each with its icon.
-            FontScope f(theme::Body(), theme::kSmallSize);
-            ImGui::Dummy(ImVec2(0, U(1)));
-            ImGui::PushStyleColor(ImGuiCol_Text, P.soft);
-            ImGui::TextUnformatted("Fabricator cost");
-            ImGui::PopStyleColor();
-            const float e = U(20);
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            for (const sbx::CostLine& c : *costs) {
-                const ImVec2 p = ImGui::GetCursorScreenPos();
-                const float y = p.y + (ImGui::GetFrameHeight() - e) * 0.5f;
-                if (c.currency) {
-                    // Newbucks (or another currency): a small coin.
-                    const ImVec2 cc(p.x + e * 0.5f, y + e * 0.5f);
-                    dl->AddCircleFilled(cc, e * 0.38f, IM_COL32(0xF0, 0xC2, 0x4B, 0xFF));
-                    dl->AddCircle(cc, e * 0.38f, IM_COL32(0xA8, 0x7A, 0x1E, 0xFF), 0, std::max(1.0f, U(1.5f)));
-                } else if (!item_grid::DrawIcons(dl, c.icon, 0, ImVec2(p.x, y), ImVec2(p.x + e, y + e))) {
-                    dl->AddCircleFilled(ImVec2(p.x + e * 0.5f, y + e * 0.5f), e * 0.25f, KindAccent(c.kind));
-                }
-                ImGui::Dummy(ImVec2(e, ImGui::GetFrameHeight()));
-                ImGui::SameLine(0, U(6));
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextUnformatted(c.text.c_str());
-            }
-        }
+        if (costs && !costs->empty()) CostRows(*costs);
         if (info && *info) {
             FontScope f(theme::Body(), theme::kSmallSize - 1);
             ImGui::PushStyleColor(ImGuiCol_Text, P.dim);
@@ -2094,6 +2098,7 @@ void RichTooltip(const sandbox_upgrades::Tip& t) {
             }
             ImGui::PopTextWrapPos();
         }
+        if (t.costs && !t.costs->empty()) CostRows(*t.costs);
         TipKeys(t.keys);
         ImGui::EndTooltip();
     }

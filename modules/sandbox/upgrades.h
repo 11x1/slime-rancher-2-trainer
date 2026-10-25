@@ -12,6 +12,9 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
+
+#include "ui/sandbox_bridge.h"  // CostLine
 
 struct Il2CppObject;
 
@@ -27,6 +30,9 @@ struct UpgradesHost {
     std::function<void(bool)> refreshFabricator;     // the open Fabricator (true: rebuild its grid, RebuildFabricator)
     std::function<void()> changed;                   // levels / blueprints changed: the main snapshot's counts now
     std::function<std::string(bool)> vacpackState;   // "slot 1 holds up to 60, ..." (log; true: maxima follow AmmoLimit)
+    // The Newbucks and refinery item lines of a PurchaseCost struct in place (module.cpp CostOf; nothing while the
+    // crafter's cost offsets are missing), for the upgrade entries' tooltips (the next level's cost).
+    std::function<void(const char*, std::vector<sr2::ui::sandbox::CostLine>&)> costLines;
 };
 
 // Worker thread, from Sandbox::Setup. Never fails the module.

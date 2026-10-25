@@ -286,6 +286,7 @@ void UpgradesTab(const Helpers& h, const ub::State& st) {
         const bool pressed = nav::Button("##entry", ImVec2(cl + colW + cr, ct + eh + cbm), ImGuiButtonFlags_MouseButtonRight);
         entryNav.Done();
         const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem | ImGuiHoveredFlags_AllowWhenOverlappedByItem);
+        const bool tipHover = ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenOverlappedByItem);
         const bool focused = nav::Focused();
         if (pressed || nav::ContextKey()) openMenu = u.id;
         if (ImGui::IsItemFocused() && !ImGui::IsPopupOpen(kUpgradeCtx)) {
@@ -295,8 +296,8 @@ void UpgradesTab(const Helpers& h, const ub::State& st) {
                 RequestLevel(u, level - 1);
         }
         WheelLevels(u);
-        // No tooltip on the entry (round 8 feedback: name and tier are on it; the controls are in the
-        // right-click menu).
+        // The entry's tooltip shows what the next level costs (round 16: "add refinery upgrade tooltips"), not the
+        // name / tier / controls (round 8: those are on the entry and in the right-click menu). Drawn at the end.
         dl->AddRectFilled(a, b, hovered ? P.frameHover : P.frame, U(8));
         if (focused) nav::Ring(a, b, U(8));
         // Icon tile, dimmed while not bought.
@@ -338,6 +339,25 @@ void UpgradesTab(const Helpers& h, const ub::State& st) {
         glyph(true);
         ImGui::EndDisabled();
         ImGui::PopItemFlag();
+        // Cost tooltip: not over the - / + buttons, not while a menu is open, not while a level change is pending
+        // (the published next level would be the old one's).
+        if (tipHover && level == u.level && !ImGui::IsPopupOpen(kUpgradeCtx) &&
+            ImGui::GetIO().MousePos.x < b.x - pad - 2 * btn - U(4)) {
+            Tip tip;
+            if (u.nextTitle.empty()) {
+                tip.name = u.name;
+                tip.lines.push_back({"Fully upgraded: the Fabricator has nothing left to sell.", 0});
+            } else {
+                tip.name = u.nextTitle;
+                tip.tag = level < 0 ? "First level" : "Next level";
+                tip.tagCol = h.upgradeAccent;
+                tip.costs = &u.nextCosts;
+                if (u.nextCosts.empty()) tip.lines.push_back({"The Fabricator lists no cost for it.", 0});
+                if (u.discoverable && !u.discovered)
+                    tip.lines.push_back({"Hidden in the Fabricator until found.", P.dim});
+            }
+            h.tip(tip);
+        }
         ImGui::PopID();
     }
     ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + static_cast<float>(rows) * (eh + gap) - gap));
