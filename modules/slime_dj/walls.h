@@ -1,6 +1,7 @@
 #pragma once
-// slime_dj: "Walls dance to the music". The energy walls of a corral whose Music Box plays the
-// song (and its Air Net, if bought) dance to the beat analysis of the song (beat.h): a vanilla
+// slime_dj: "Walls dance to the music". The energy walls of a corral whose Music Box plays a
+// song (and its Air Net, if bought) dance to the beat analysis of that song (beat.h; the global
+// queue's, or the corral's own Corral Radio's): a vanilla
 // barrier ripple runs round the walls on every beat, glow and colour follow the bass.
 //
 // Main thread only, inside the module's guarded tick (no hooks). Objects are found once per plot
@@ -9,6 +10,8 @@
 // the plot leaves the hearing range, the setting is turned off or the module is disabled. See
 // NOTES.md "Walls dance to the music".
 
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -26,12 +29,20 @@ public:
     bool Resolve(std::string& why);
     bool Ready() const;
 
-    // Every music box scan: the MusicBoxUpgrader components of the corrals to animate now (their
-    // box plays the song and the camera is within hearing range). Others are restored and dropped.
-    void Sync(const std::vector<Il2CppObject*>& upgraders);
-    // Every frame. `beat`: the analysis at the play position, nullptr while nothing plays (the
-    // walls then settle and are restored). `intensity`: the setting, 0..2.
-    void Tick(float dt, const BeatTrack::Sample* beat, float intensity);
+    // A corral to animate: its MusicBoxUpgrader, the song it follows (`group`: an opaque id of the
+    // module's channel, the global queue or that corral's Corral Radio; never dereferenced) and a
+    // factor on the intensity (speakers placed in the corral make its walls move more).
+    struct Target {
+        Il2CppObject* up = nullptr;
+        uintptr_t group = 0;
+        float boost = 1.0f;
+    };
+    // Every music box scan: the corrals to animate now (their box plays a song and the camera is
+    // within hearing range). Others are restored and dropped.
+    void Sync(const std::vector<Target>& targets);
+    // Every frame. `beatOf(group)`: the analysis of that song at its play position, nullptr while it
+    // does not play (those walls then settle and are restored). `intensity`: the setting, 0..2.
+    void Tick(float dt, const std::function<const BeatTrack::Sample*(uintptr_t)>& beatOf, float intensity);
     // Restores everything and forgets the plots (setting off, song stopped, module disabled).
     void Clear();
     size_t Plots() const;

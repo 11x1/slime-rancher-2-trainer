@@ -30,7 +30,9 @@ enum class EmitterKind : int {
 
 // `obj`: a GameObject or any Component on it (the speaker is parented to its transform).
 // `rangeScale` multiplies the Hearing range setting (0.1-4), `volumeScale` the song volume
-// (0-1; Unity caps an AudioSource at full volume). False if obj is not a live Unity object.
+// (0-2; above 1 through the channel's PCM gain, peak-limited). Volume 0 = the speaker stops (no
+// voice used, not counted by Amplify) until it is registered again with more. False if obj is not
+// a live Unity object.
 bool RegisterEmitter(Il2CppObject* obj, EmitterKind kind, float rangeScale = 1.0f, float volumeScale = 1.0f);
 // Same object (or the same Component) as registered. Unknown objects are ignored.
 void UnregisterEmitter(Il2CppObject* obj);

@@ -42,6 +42,7 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <unordered_map>
 
 #include "core/detour_guard.h"
 #include "core/guard.h"
@@ -83,6 +84,8 @@ constexpr float kRest = 0.004f;                      // below this the walls cou
 constexpr float kCalmShare = 0.15f;
 constexpr float kRippleEnergy = 0.35f;
 constexpr float kEnergyTime = 0.4f;                  // energy smoothing (s)
+// Speakers in a corral (round 12) raise its intensity up to this (or the setting, if higher).
+constexpr float kBoostedMax = 2.5f;
 
 struct Vec3 {
     float x, y, z;
@@ -172,15 +175,23 @@ struct WallDancer::Impl {
         std::vector<Part> parts;
         std::vector<Side> sides;        // 4 when the corners were found, else empty (no ripples)
         bool touched = false;           // something is changed right now
+        uintptr_t group = 0;            // the song it follows (Target::group)
+        float boost = 1.0f;             // intensity factor (speakers in the corral)
+    };
+    // The animation state of one song (round 12: every Corral Radio has its own; plots of the same
+    // song move together).
+    struct Groove {
+        float env = 0, pulse = 0, rot = 0, rotTarget = 0, hue = 0;
+        float energy = 1;                           // smoothed BeatTrack energy
+        float sinceBeat = 10, beatInterval = 0.5f;  // s; the tempo (smoothed gap between beats)
+        bool onBeat = false, settled = true;        // this frame
     };
     std::vector<Plot> plots;
+    std::unordered_map<uintptr_t, Groove> grooves;
     Il2CppGCHandle work = nullptr;     // shared MaterialPropertyBlock
     Il2CppGCHandle ripples = nullptr;  // the scene's CorralBarrierRipples
     ULONGLONG ripplesSearch = 0;       // last search (tick count), at most every 10 s
     bool ripplesLogged = false, ripplesMissingLogged = false;
-    float env = 0, pulse = 0, rot = 0, rotTarget = 0, hue = 0;
-    float energy = 1;                  // smoothed BeatTrack energy
-    float sinceBeat = 10, beatInterval = 0.5f;  // s; the tempo (smoothed gap between beats)
     size_t rippleNext = 0;             // round robin over plots when there are more than 4
     uint64_t ripplesSpawned = 0;
     int builtLogs = 0;
@@ -424,20 +435,25 @@ struct WallDancer::Impl {
         return arr && unity::ArrayLength(arr) >= kRippleSlots ? r : nullptr;
     }
 
-    // A beat: one ripple per corral (on the side nearest the chase), at most 4 corrals per beat.
+    // A beat: one ripple per corral whose song has a beat now (on the side nearest its chase), at most
+    // 4 per frame (the ring has 4 slots; round robin when more corrals beat at once).
     void SpawnRipples() {
-        bool any = false;
-        for (const Plot& p : plots) any = any || !p.sides.empty();
-        if (!any) return;
+        auto beats = [&](const Plot& p) {
+            if (p.sides.empty()) return false;
+            auto g = grooves.find(p.group);
+            return g != grooves.end() && g->second.onBeat && g->second.energy >= kRippleEnergy;
+        };
+        if (std::none_of(plots.begin(), plots.end(), beats)) return;
         Il2CppObject* r = Ripples(false);
         if (!r) return;
         size_t done = 0;
         for (size_t i = 0; i < plots.size() && done < kRippleSlots; ++i) {
             const Plot& plot = plots[(rippleNext + i) % plots.size()];
-            if (plot.sides.empty()) continue;
+            if (!beats(plot)) continue;
+            const float target = grooves[plot.group].rotTarget;
             const Side* best = &plot.sides[0];
             for (const Side& s : plot.sides)
-                if (AngleDiff(s.angle, rotTarget) < AngleDiff(best->angle, rotTarget)) best = &s;
+                if (AngleDiff(s.angle, target) < AngleDiff(best->angle, target)) best = &s;
             spawnRipple.fn(r, best->at, spawnRipple.mi);
             ++done;
             ++ripplesSpawned;
@@ -450,14 +466,15 @@ struct WallDancer::Impl {
         }
     }
 
-    // How many corrals get a ripple per beat (the ring's slots are shared).
-    size_t RipplesPerBeat() const {
+    // How many corrals get a ripple per beat of this song (the ring's slots are shared).
+    size_t RipplesPerBeat(uintptr_t group) const {
         size_t n = 0;
-        for (const Plot& p : plots) n += p.sides.empty() ? 0 : 1;
+        for (const Plot& p : plots) n += p.sides.empty() || p.group != group ? 0 : 1;
         return std::clamp<size_t>(n, 1, kRippleSlots);
     }
 
-    void Animate(Plot& plot, float intensity) {
+    void Animate(Plot& plot, const Groove& gr, float intensity) {
+        const float env = gr.env, pulse = gr.pulse, rot = gr.rot, hue = gr.hue;
         Il2CppObject* work0 = Target(work);
         if (!work0) return;
         plot.touched = true;
@@ -465,7 +482,7 @@ struct WallDancer::Impl {
         const float drive = intensity * (1.0f + 0.75f * std::max(0.0f, intensity - 1.0f));
         const float mix = std::min(1.0f, kColourMix * intensity);
         // A ripple's slot comes round again after (4 / ripples per beat) beats: fade before that.
-        const float life = static_cast<float>(kRippleSlots / RipplesPerBeat()) * beatInterval;
+        const float life = static_cast<float>(kRippleSlots / RipplesPerBeat(plot.group)) * gr.beatInterval;
         for (Part& pt : plot.parts) {
             Il2CppObject* r = Target(pt.rend);
             if (!r) continue;
@@ -587,7 +604,7 @@ bool WallDancer::Resolve(std::string& why) {
     return true;
 }
 
-void WallDancer::Sync(const std::vector<Il2CppObject*>& upgraders) {
+void WallDancer::Sync(const std::vector<Target>& targets) {
     Impl& P = *p_;
     if (!P.ready) return;
     if (!P.ids[Impl::kIntensity]) {  // main thread, first use
@@ -604,8 +621,11 @@ void WallDancer::Sync(const std::vector<Il2CppObject*>& upgraders) {
     for (size_t i = 0; i < P.plots.size();) {
         Impl::Plot& plot = P.plots[i];
         Il2CppObject* up = Impl::Target(plot.up);
-        bool keep = up && std::find(upgraders.begin(), upgraders.end(), up) != upgraders.end();
+        auto t = std::find_if(targets.begin(), targets.end(), [&](const Target& x) { return x.up == up; });
+        bool keep = up && t != targets.end();
         if (keep) {
+            plot.group = t->group;
+            plot.boost = t->boost;
             Il2CppObject *walls = nullptr, *net = nullptr;
             P.Find(up, walls, net);
             keep = walls == plot.walls && net == plot.net;
@@ -617,7 +637,8 @@ void WallDancer::Sync(const std::vector<Il2CppObject*>& upgraders) {
         P.Drop(plot);
         P.plots.erase(P.plots.begin() + static_cast<std::ptrdiff_t>(i));
     }
-    for (Il2CppObject* up : upgraders) {
+    for (const Target& t : targets) {
+        Il2CppObject* up = t.up;
         if (P.plots.size() >= kMaxPlots) break;
         if (!unity::IsAlive(up)) continue;
         const bool have = std::any_of(P.plots.begin(), P.plots.end(), [&](const Impl::Plot& pl) { return Impl::Target(pl.up) == up; });
@@ -625,51 +646,65 @@ void WallDancer::Sync(const std::vector<Il2CppObject*>& upgraders) {
         Impl::Plot plot;
         plot.up = unity::NewGCHandle(up);
         if (!plot.up) continue;
+        plot.group = t.group;
+        plot.boost = t.boost;
         P.Build(plot, up);
         P.plots.push_back(std::move(plot));
     }
+    // One groove per song in use (a new one starts calm; one no plot follows any more is dropped).
+    for (auto it = P.grooves.begin(); it != P.grooves.end();) {
+        const uintptr_t g = it->first;
+        if (std::any_of(P.plots.begin(), P.plots.end(), [&](const Impl::Plot& pl) { return pl.group == g; })) ++it;
+        else it = P.grooves.erase(it);
+    }
+    for (const Impl::Plot& pl : P.plots) P.grooves.try_emplace(pl.group);
     if (!P.plots.empty()) P.Ripples(true);  // find (or re-find) the ripple ring here, not on a beat
 }
 
-void WallDancer::Tick(float dt, const BeatTrack::Sample* beat, float intensity) {
+void WallDancer::Tick(float dt, const std::function<const BeatTrack::Sample*(uintptr_t)>& beatOf, float intensity) {
     Impl& P = *p_;
     if (!P.ready || P.plots.empty()) return;
     dt = std::clamp(dt, 0.0f, 0.1f);
-    if (beat) P.energy += (beat->energy - P.energy) * (1.0f - std::exp(-dt / kEnergyTime));
-    const float gain = kCalmShare + (1.0f - kCalmShare) * P.energy;
-    const float level = beat ? beat->level * gain : 0.0f;
-    P.env += (level - P.env) * (1.0f - std::exp(-dt / (level > P.env ? kAttack : kRelease)));
-    P.pulse *= std::exp(-dt / kPulseDecay);
-    P.sinceBeat += dt;
-    const bool onBeat = beat && beat->beat > 0;
-    if (onBeat) {
-        P.pulse = std::max(P.pulse, beat->beat * gain);
-        P.rotTarget += kPi / 2;
-        P.hue += kHueStep * gain;
-        if (P.sinceBeat < 1.5f) P.beatInterval += (std::max(P.sinceBeat, 0.15f) - P.beatInterval) * 0.25f;
-        P.sinceBeat = 0;
+    bool anyBeat = false;
+    for (auto& [group, G] : P.grooves) {
+        const BeatTrack::Sample* beat = beatOf ? beatOf(group) : nullptr;
+        if (beat) G.energy += (beat->energy - G.energy) * (1.0f - std::exp(-dt / kEnergyTime));
+        const float gain = kCalmShare + (1.0f - kCalmShare) * G.energy;
+        const float level = beat ? beat->level * gain : 0.0f;
+        G.env += (level - G.env) * (1.0f - std::exp(-dt / (level > G.env ? kAttack : kRelease)));
+        G.pulse *= std::exp(-dt / kPulseDecay);
+        G.sinceBeat += dt;
+        G.onBeat = beat && beat->beat > 0;
+        if (G.onBeat) {
+            G.pulse = std::max(G.pulse, beat->beat * gain);
+            G.rotTarget += kPi / 2;
+            G.hue += kHueStep * gain;
+            if (G.sinceBeat < 1.5f) G.beatInterval += (std::max(G.sinceBeat, 0.15f) - G.beatInterval) * 0.25f;
+            G.sinceBeat = 0;
+            anyBeat = true;
+        }
+        G.rot += (G.rotTarget - G.rot) * (1.0f - std::exp(-dt / kChaseTime));
+        if (G.rotTarget > 64 * kPi) {  // keep the angles small
+            G.rotTarget -= 64 * kPi;
+            G.rot -= 64 * kPi;
+        }
+        G.hue -= std::floor(G.hue);
+        G.settled = !beat && G.env < kRest && G.pulse < kRest;
     }
-    P.rot += (P.rotTarget - P.rot) * (1.0f - std::exp(-dt / kChaseTime));
-    if (P.rotTarget > 64 * kPi) {  // keep the angles small
-        P.rotTarget -= 64 * kPi;
-        P.rot -= 64 * kPi;
-    }
-    P.hue -= std::floor(P.hue);
-    const bool settled = !beat && P.env < kRest && P.pulse < kRest;
+    const float base = std::clamp(intensity, 0.0f, 2.0f);
     for (Impl::Plot& plot : P.plots) {
-        if (settled) P.Restore(plot);
-        else P.Animate(plot, std::clamp(intensity, 0.0f, 2.0f));
+        const Impl::Groove& G = P.grooves[plot.group];
+        if (G.settled) P.Restore(plot);
+        else P.Animate(plot, G, std::min(base * plot.boost, std::max(base, kBoostedMax)));
     }
-    if (onBeat && P.energy >= kRippleEnergy) P.SpawnRipples();  // after Animate: the new ripple starts with this frame's push / fade
+    if (anyBeat) P.SpawnRipples();  // after Animate: the new ripple starts with this frame's push / fade
 }
 
 void WallDancer::Clear() {
     Impl& P = *p_;
     for (Impl::Plot& plot : P.plots) P.Drop(plot);
     P.plots.clear();
-    P.env = P.pulse = 0;
-    P.energy = 1;
-    P.sinceBeat = 10;
+    P.grooves.clear();
 }
 
 }  // namespace sr2::modules::slime_dj
