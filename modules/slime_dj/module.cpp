@@ -107,8 +107,17 @@ constexpr int kMaxExceptions = 20;
 constexpr int kMaxFailuresInARow = 3;
 // 3D: linear rolloff, full volume up to kFullFraction of the hearing range, silent at the range.
 constexpr float kFullFraction = 0.2f;
-// Amplify: each other speaker within hearing range adds kAmpStep (volume and range), up to kAmpMax.
-constexpr float kAmpStep = 0.25f, kAmpMax = 2.0f;
+// Amplify (round 11): each other speaker within hearing range adds kAmpVolStep volume (up to
+// kAmpVolMax, +4 dB) and kAmpRangeStep range (up to kAmpRangeMax); an amplified speaker is at full
+// volume only up to kAmpFullFraction of its range, so each one is heard from where it stands instead of
+// one wide blob. Volume above 1 (AudioSource.volume tops out there) comes from a channel gain baked into
+// the PCM written into the clip ring (soft-limited above kLimitKnee); the speakers' volumes are divided
+// by the gain of the ring chunk being played.
+constexpr float kAmpVolStep = 0.15f, kAmpVolMax = 1.6f;
+constexpr float kAmpRangeStep = 0.1f, kAmpRangeMax = 1.3f;
+constexpr float kAmpFullFraction = 0.1f;
+constexpr float kGainStepPerChunk = 0.05f;  // the channel gain moves at most this much per 0.5 s chunk
+constexpr float kLimitKnee = 0.89f;
 // Speakers more than this far from the clock speaker are moved back to it (two scans in a row).
 constexpr double kDriftSeconds = 0.03;
 // Walls dance: the analysis is read this far behind the play head (AudioSource.timeSamples runs
@@ -174,10 +183,12 @@ struct Speaker {
     bool paused = false;
     float volume = -1.0f;
     float maxD = -1.0f;    // hearing range applied (m)
+    bool ampedRange = false;  // the applied min distance is Amplify's (kAmpFullFraction)
     // emitter (api.h): owner key as registered, scales; music boxes: nullptr, 1, 1
     Il2CppObject* emitter = nullptr;
     float rangeScale = 1.0f, volScale = 1.0f;
-    float boost = 1.0f;    // amplify (other speakers in range)
+    float boost = 1.0f;    // amplify: volume factor (other speakers in range)
+    float rangeBoost = 1.0f;  // amplify: range factor
     int drift = 0;         // scans in a row it was off the clock speaker
     // Our GameObject is active in the hierarchy (checked every box scan). Unity refuses Play() on a
     // disabled AudioSource and stops it for good when its object is switched off, so a speaker that
@@ -211,6 +222,9 @@ struct Current {
     Il2CppObject* lastMaster = nullptr;  // identity only (never dereferenced)
     bool started = false, userPaused = false, buffering = false;
     std::vector<float> tmp;
+    // Amplify: gain baked into each ring chunk (by chunk index), the gain written last, the one wanted.
+    std::array<float, kRingChunks> chunkGain{};
+    float gain = 1.0f, wantGain = 1.0f;
 };
 
 struct QueueItem {
@@ -538,9 +552,9 @@ private:
         def("mute_vanilla", "Mute the vanilla tune", Kind::Bool, 1, 0, 1, 1,
             "Silences the music box's own tune while a song plays.");
         def("amplify", "Amplify with more music boxes", Kind::Bool, 0, 0, 1, 1,
-            "Each other music box or speaker within hearing range of a box makes it 25 % louder and carry 25 % "
-            "farther, up to double. All boxes always play the song in sync, so boxes close together also add up "
-            "on their own.");
+            "Each other music box or speaker within hearing range of a box makes it 15 % louder (up to 60 %, also "
+            "above full volume) and carry 10 % farther (up to 30 %). Amplified speakers are loudest right next to "
+            "them, so you hear the song coming from every speaker around you.");
         def("dance_walls", "Walls dance to the music", Kind::Bool, 0, 0, 1, 1,
             "The energy walls of a corral whose music box plays ripple round the corral on every beat (like a "
             "shot through the wall), and they and the Air Net, if bought, glow and change colour with the song. Only corrals within hearing range. Everything goes back to "
@@ -928,11 +942,13 @@ private:
 
     // Hearing range x the emitter's scale x Amplify's boost; set when it changed.
     void ApplyRange(Speaker& sp, Il2CppObject* src) {
-        const float maxD = std::clamp(cfg_.range * sp.rangeScale * sp.boost, 2.0f, 1000.0f);
-        if (std::fabs(maxD - sp.maxD) < 0.05f) return;
-        srcSetMinDistance_.fn(src, std::max(0.5f, maxD * kFullFraction), srcSetMinDistance_.mi);
+        const float maxD = std::clamp(cfg_.range * sp.rangeScale * sp.rangeBoost, 2.0f, 1000.0f);
+        const bool amped = sp.boost > 1.0f;
+        if (std::fabs(maxD - sp.maxD) < 0.05f && amped == sp.ampedRange) return;
+        srcSetMinDistance_.fn(src, std::max(0.5f, maxD * (amped ? kAmpFullFraction : kFullFraction)), srcSetMinDistance_.mi);
         srcSetMaxDistance_.fn(src, maxD, srcSetMaxDistance_.mi);
         sp.maxD = maxD;
+        sp.ampedRange = amped;
     }
 
     void Unmute(Speaker& sp) {
@@ -1095,7 +1111,8 @@ private:
                 const float dx = pos[i].x - pos[j].x, dy = pos[i].y - pos[j].y, dz = pos[i].z - pos[j].z;
                 if (dx * dx + dy * dy + dz * dz <= r * r) ++n;
             }
-            speakers_[i].boost = std::min(1.0f + kAmpStep * static_cast<float>(n), kAmpMax);
+            speakers_[i].boost = std::min(1.0f + kAmpVolStep * static_cast<float>(n), kAmpVolMax);
+            speakers_[i].rangeBoost = std::min(1.0f + kAmpRangeStep * static_cast<float>(n), kAmpRangeMax);
         }
     }
 
@@ -1349,6 +1366,10 @@ private:
         for (int i = 0; i < maxWrites && c.writeHead + c.chunk <= playChunkStart + c.ring; ++i) {
             uint32_t frames = 0;
             if (c.stream->Pop(c.tmp, frames) && c.tmp.size() == n) {
+                // Amplify's channel gain, moved towards the wanted one a step per chunk.
+                c.gain = std::clamp(c.wantGain, c.gain - kGainStepPerChunk, c.gain + kGainStepPerChunk);
+                if (c.gain > 1.0005f) ApplyGain(c.tmp, c.gain);
+                else c.gain = 1.0f;
                 std::memcpy(dst, c.tmp.data(), n * sizeof(float));
                 c.realWritten += frames;
             } else if (c.stream->Done()) {
@@ -1358,6 +1379,7 @@ private:
                 break;  // the decoder is behind
             }
             const int32_t offset = static_cast<int32_t>(c.writeHead % c.ring);
+            c.chunkGain[(c.writeHead / c.chunk) % kRingChunks] = c.gain;
             if (!clipSetData_.fn(clip, static_cast<Il2CppArray*>(static_cast<void*>(buf)), offset, clipSetData_.mi)) {
                 SongFailed(ch, "AudioClip.SetData refused the data");
                 return false;
@@ -1365,6 +1387,15 @@ private:
             c.writeHead += c.chunk;
         }
         return true;
+    }
+
+    // Amplify's PCM gain with a soft knee: samples above kLimitKnee bend towards 1 instead of clipping.
+    static void ApplyGain(std::vector<float>& pcm, float g) {
+        constexpr float k = kLimitKnee, room = 1.0f - kLimitKnee;
+        for (float& x : pcm) {
+            const float y = x * g, a = std::fabs(y);
+            x = a <= k ? y : std::copysign(k + room * std::tanh((a - k) / room), y);
+        }
     }
 
     // The clock of a channel: its first speaker that plays the song (or is paused with the others).
@@ -1455,10 +1486,25 @@ private:
 
     void TickMix() {
         const float vol = std::clamp(cfg_.volume * MusicVolume(), 0.0f, 2.0f);
+        // Amplify: AudioSource.volume tops out at 1, so a channel whose loudest speaker wants more gets
+        // that gain baked into the PCM (Fill) and every speaker divides it out again, by the gain of the
+        // chunk now playing.
+        auto chunkGain = [](const Current* c) {
+            return c && c->chunk ? std::max(1.0f, c->chunkGain[(c->playPos / c->chunk) % kRingChunks]) : 1.0f;
+        };
+        auto setWant = [&](Channel& ch) {
+            if (!ch.cur) return;
+            float want = 1.0f;
+            if (cfg_.amplify)
+                for (const Speaker& sp : speakers_)
+                    if (sp.ch == &ch && sp.live) want = std::max(want, vol * sp.volScale * sp.boost);
+            ch.cur->wantGain = std::min(want, kAmpVolMax);
+        };
+        setWant(global_);
+        for (auto& r : radios_) setWant(*r);
         for (Speaker& sp : speakers_) {
-            // AudioSource.volume tops out at 1: Amplify's extra volume only helps below that (its
-            // range boost always does).
-            const float v = std::clamp(vol * sp.volScale * sp.boost * sp.lpVol, 0.0f, 1.0f);
+            const float g = chunkGain(sp.ch ? sp.ch->cur.get() : nullptr);
+            const float v = std::clamp(vol * sp.volScale * sp.boost * sp.lpVol / g, 0.0f, 1.0f);
             Il2CppObject* src = Target(sp.src);
             if (src && std::fabs(sp.volume - v) > 0.002f) {
                 srcSetVolume_.fn(src, v, srcSetVolume_.mi);
