@@ -23,7 +23,7 @@ The script-drawn PNGs were removed from `assets/icons/`. Each name below has not
 | `ash_boost` | Ash Booster | the Ash Trough upgrade icon |
 | `sell_all` | Sell-All Button | the Market Link icon |
 | `growth_1`, `growth_2` | Sprinkler II / III | the Sprinkler upgrade icon |
-| `coop_air_net` | Coop Air Net | the corral's Air Net upgrade icon |
+| `coop_air_net` | Coop Air Net | the corral's Air Net upgrade icon, for good (the user's choice, no drawing planned) |
 | `gordo` | collectible tracker | sprite `iconGordoPedia_small` / `iconGordoPedia` (Slimepedia), else the map marker |
 | `plort_door`, `shadow_door` | collectible tracker | the map marker sprites |
 | `ghost_drone` | collectible tracker (under the minimap) | sprite `iconExplorerDronePedia` (user's pick), else placeholder |
