@@ -359,6 +359,7 @@ private:
     bool SlotUnlockUpgrades(const Ctx& c, Il2CppObject* slot, Il2CppObject** upgradeModel,
                             std::vector<Il2CppObject*>* out = nullptr);
     std::string RecipeCost(Il2CppObject* def, std::vector<bridge::CostLine>* lines = nullptr);
+    std::string CostOf(const char* costs, std::vector<bridge::CostLine>* lines);  // a PurchaseCost struct in place
     Il2CppObject* GadgetDirector();
     void Refresh();
     void TopUpEnergy();
@@ -815,7 +816,10 @@ bool Sandbox::Setup(sr2::core::ModuleContext& ctx) {
     sandbox::SetupUpgrades(ctx, {[this](uintptr_t id) { return Lookup(recipeById_, id, gadgetDefClass_); },
                                  [this](bool rebuild) { RefreshFabricator(rebuild); },
                                  [this] { lastRecipeState_ = lastUpgState_ = lastSnap_ = 0; },
-                                 [this](bool sync) { return VacpackState(sync); }});  // upgrades.cpp
+                                 [this](bool sync) { return VacpackState(sync); },
+                                 [this](const char* costs, std::vector<bridge::CostLine>& lines) {
+                                     if (craftWhy_.empty()) CostOf(costs, &lines);
+                                 }});  // upgrades.cpp
     sandbox::SetupWeather(ctx);  // the Weather card (weather.cpp)
 
     g_self = this;
@@ -2134,6 +2138,12 @@ bool Sandbox::RenderNextIcon() {
 
 // "20 x Pink Plort, 150 Newbucks": the recipe's ident and currency costs as the fabricator charges them.
 std::string Sandbox::RecipeCost(Il2CppObject* def, std::vector<bridge::CostLine>* lines) {
+    return CostOf(reinterpret_cast<const char*>(def) + offCraftCosts_, lines);
+}
+
+// The ident and currency costs of a PurchaseCost struct at `costs` (a GadgetDefinition's CraftingCosts, an
+// UpgradeLevelDefinition's _costs). Upgrade components are not read here (upgrades.cpp adds them).
+std::string Sandbox::CostOf(const char* costs, std::vector<bridge::CostLine>* lines) {
     std::string out;
     auto add = [&](const std::string& s) { out += (out.empty() ? "" : ", ") + s; };
     auto line = [&](const std::string& s, Il2CppObject* type) {
@@ -2148,8 +2158,7 @@ std::string Sandbox::RecipeCost(Il2CppObject* def, std::vector<bridge::CostLine>
         }
         lines->push_back(std::move(l));
     };
-    char* costs = reinterpret_cast<char*>(def) + offCraftCosts_;
-    void* ident = *reinterpret_cast<void**>(costs + offCostIdent_);
+    void* ident = *reinterpret_cast<void* const*>(costs + offCostIdent_);
     if (const size_t n = unity::ListCount(ident)) {
         size_t offItems = 0;
         Il2CppClass* lk = api().il2cpp_object_get_class(static_cast<Il2CppObject*>(ident));
@@ -2166,7 +2175,7 @@ std::string Sandbox::RecipeCost(Il2CppObject* def, std::vector<bridge::CostLine>
             }
         }
     }
-    void* cur = *reinterpret_cast<void**>(costs + offCostCurrency_);
+    void* cur = *reinterpret_cast<void* const*>(costs + offCostCurrency_);
     for (size_t i = 0, n = unity::ListCount(cur); i < n; ++i) {
         auto* e = static_cast<Il2CppObject*>(unity::ListAt(cur, i));
         if (!e) continue;

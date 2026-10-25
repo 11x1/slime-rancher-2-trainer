@@ -28,6 +28,8 @@ struct Tip {
     std::string tag;                                   // "" = no tag
     ImU32 tagCol = 0;
     std::vector<std::pair<std::string, ImU32>> lines;  // text, colour (0: the soft text colour)
+    // After the lines: "Fabricator cost", one row per entry with its icon (the crafter tooltip's rows). nullptr: none.
+    const std::vector<::sr2::ui::sandbox::CostLine>* costs = nullptr;
     std::vector<KeyRow> keys;
 };
 

@@ -256,6 +256,7 @@ struct State {
     size_t offUdNeedsComponent = 0;  // _requireComponentToBeVisibleToPlayer (optional)
     size_t offPsDefs = 0, offPsModel = 0, offPsAmmo = 0;
     size_t offAmModel = 0, offAmodelSlots = 0, offAmSelected = 0;
+    size_t offAmDefs = 0;  // AmmoSlotManager._ammoSlotDefinitions (readonly; the live extension sets it)
     size_t offSlotId = 0, offSlotCount = 0, offSlotDef = 0;
     size_t offSdProp = 0, offSdThreshold = 0, offSdHotkey = 0;
     size_t offSdGroup = 0;  // AmmoSlotDefinition._slotTypeGroup (Shadow Catcher's player slots)
@@ -286,6 +287,8 @@ struct State {
     const MethodInfo* selectSlotInt = nullptr;  // VacuumItem.SelectSlot(int) (private)
     const MethodInfo* lockState = nullptr;      // Cursor.get_lockState
     const MethodInfo* timeScale = nullptr;      // Time.get_timeScale
+    const MethodInfo* ammoReset = nullptr;      // AmmoModel.Reset(AmmoSlotDefinition[]) (the live extension)
+    const MethodInfo* ammoUiStart = nullptr;    // AmmoSlotUI.Start (binds the HUD row to the live slots)
 
     SetLevelFn origSetLevel = nullptr;
     CountFn origCount = nullptr;
@@ -312,6 +315,7 @@ struct State {
     int insertAt = 0;          // index of our first slot = right after "ExpansionAmmoSlot 2", before the water slot
     Il2CppObject* restoredAmmo = nullptr;  // AmmoModel whose extra slots were refilled (identity only)
     bool applying = false;                 // our own SetUpgradeLevel calls: not a purchase
+    bool hudRebind = false;  // the live extension ran: the HUD row binds the new slot list
     bool loggedNoSlots = false, loggedNoBlueprint = false, loggedRemap = false, loggedKeys = false;
     std::string cardState;  // the Fabricator cards' last logged state (logged when it changes)
     bool migrated = false;    // old per-station battery tiers checked for this save
@@ -1068,6 +1072,82 @@ void VanillaOrder(const Player& p) {
              g.vanillaSlotCount);
 }
 
+// The live slots into our layout without a reload. Two cases leave a player without them:
+//   * built while the module was off: the per-save gate (module.cpp GateTick) switches custom upgrades on
+//     only once the save is loaded, after PlayerState.InitModel ran without our hook (round 16: "Extra Tank
+//     doesn't give me a space anymore", 7 of 7 slots with Extra Tank IV). The game makes the two new slots
+//     itself: AmmoModel.Reset on a 2-slot array (new AmmoSlot, OnAmmoChanged -> the model, Definition,
+//     Setup(tracker): unlock threshold and AmmoLimit bound), then the model gets the old slot objects (their
+//     contents and HUD subscriptions kept) with the new ones before the water slot;
+//   * switched off and on again: VanillaOrder put our slots last; they move back before the water slot.
+// PlayerState's and the AmmoSlotManager's definition arrays become ours (ValidateAndAdjustSlots, Cleanup).
+// The HUD row binds the new list on the next tick (RebindHud).
+void ExtendLive(const Player& p) {
+    if (!g.arrayNew || !g.offAmDefs || !g.ammoReset || !p.state || !p.ammo || !p.ammoModel) return;
+    auto* live = unity::Field<Il2CppArray*>(p.ammoModel, g.offAmodelSlots);
+    if (!live || Extended(live)) return;
+    const int liveN = static_cast<int>(unity::ArrayLength(live));
+    auto fail = [&](const std::string& why) {
+        if (g.loggedNoSlots) return;
+        g.loggedNoSlots = true;
+        SR2_WARN("[{}] vacpack: extra slots not added to the live vacpack ({}) - they appear after loading the save "
+                 "with custom upgrades on", kModule, why);
+    };
+    Il2CppObject* made[kExtraSlots] = {};
+    const char* how = "";
+    if (g.vanillaSlotCount && liveN == g.vanillaSlotCount + kExtraSlots) {  // VanillaOrder's layout
+        for (int k = 0; k < kExtraSlots; ++k) {
+            auto* s = static_cast<Il2CppObject*>(unity::ArrayAt(live, static_cast<size_t>(g.vanillaSlotCount + k)));
+            if (!IsA(s, g.ammoSlotClass) || unity::Field<Il2CppObject*>(s, g.offSlotDef) != g.extraSlotDefs[k])
+                return fail(std::format("{} slots, not in a known layout", liveN));
+            made[k] = s;
+        }
+        how = "moved back before the water slot";
+    } else {  // a player built without them
+        auto* defs = unity::Field<Il2CppArray*>(p.state, g.offPsDefs);
+        if (!defs || static_cast<int>(unity::ArrayLength(defs)) != liveN)
+            return fail(std::format("{} slots for {} definitions", liveN, defs ? unity::ArrayLength(defs) : 0));
+        ExtendSlots(p.state);
+        if (!g.extendedSlotArray || unity::Field<Il2CppObject*>(p.state, g.offPsDefs) != g.extendedSlotArray ||
+            g.vanillaSlotCount != liveN)
+            return fail("no extended slot definitions");
+        Il2CppArray* tmp = g.arrayNew(g.ammoSlotClass, kExtraSlots);
+        Il2CppArray* tmpDefs = g.arrayNew(g.slotDefClass, kExtraSlots);
+        if (!tmp || !tmpDefs) return fail("array allocation");
+        for (int k = 0; k < kExtraSlots; ++k) SetArrayRef(tmpDefs, static_cast<size_t>(k), g.extraSlotDefs[k]);
+        SetRef(p.ammoModel, g.offAmodelSlots, reinterpret_cast<Il2CppObject*>(tmp));
+        bool ok = false;
+        Invoke(g.ammoReset, p.ammoModel, {tmpDefs}, "AmmoModel.Reset", &ok);
+        auto* after = unity::Field<Il2CppArray*>(p.ammoModel, g.offAmodelSlots);
+        SetRef(p.ammoModel, g.offAmodelSlots, reinterpret_cast<Il2CppObject*>(live));  // back before anything reads it
+        if (!ok || after != tmp) return fail("AmmoModel.Reset failed");
+        for (int k = 0; k < kExtraSlots; ++k) {
+            auto* s = static_cast<Il2CppObject*>(unity::ArrayAt(tmp, static_cast<size_t>(k)));
+            if (!IsA(s, g.ammoSlotClass) || unity::Field<Il2CppObject*>(s, g.offSlotDef) != g.extraSlotDefs[k])
+                return fail("AmmoModel.Reset made no slot");
+            made[k] = s;
+        }
+        how = "added before the water slot";
+    }
+    const int n = g.vanillaSlotCount + kExtraSlots;
+    Il2CppArray* ext = g.arrayNew(g.ammoSlotClass, static_cast<uintptr_t>(n));
+    if (!ext) return fail("array allocation");
+    for (int v = 0; v < g.vanillaSlotCount; ++v)
+        SetArrayRef(ext, static_cast<size_t>(ExtIndexOfVanilla(v)), static_cast<Il2CppObject*>(unity::ArrayAt(live, v)));
+    for (int k = 0; k < kExtraSlots; ++k) SetArrayRef(ext, static_cast<size_t>(ExtraIndex(k)), made[k]);
+    SetRef(p.ammoModel, g.offAmodelSlots, reinterpret_cast<Il2CppObject*>(ext));
+    if (g.vanillaSlotArray && unity::Field<Il2CppObject*>(p.state, g.offPsDefs) == g.vanillaSlotArray)
+        SetRef(p.state, g.offPsDefs, g.extendedSlotArray);
+    SetRef(p.ammo, g.offAmDefs, g.extendedSlotArray);
+    if (g.offAmSelected) {
+        int32_t& sel = unity::Field<int32_t>(p.ammo, g.offAmSelected);
+        if (sel >= g.insertAt) sel += kExtraSlots;
+    }
+    g.hudRebind = true;
+    SR2_INFO("[{}] vacpack: live vacpack {} -> {} slots (extra slots {} / {} {}; custom upgrades came on after the "
+             "player was built)", kModule, liveN, n, ExtraIndex(0) + 1, ExtraIndex(1) + 1, how);
+}
+
 // ---- Shadow Catcher ----
 
 const Ours* ShadowOurs() {
@@ -1387,6 +1467,24 @@ void RestoreHud() {
         Invoke(g.rtSetSize, rt, {&v}, "RectTransform.set_sizeDelta");
     }
     g.hudWidth = 0.0f;
+}
+
+// After ExtendLive: AmmoSlotUI.Start binds the HUD row again (AmmoSlotManager.Slots -> AmmoSlotAdapter.
+// BindDataList; the adapter keeps the list it was given, so it would never show the new slots). Called
+// from the ~1 Hz tick until the HUD is found.
+void RebindHud() {
+    if (!g.hudRebind) return;
+    if (!g.ammoUiStart) {
+        g.hudRebind = false;
+        SR2_WARN("[{}] vacpack: AmmoSlotUI.Start not found - the HUD shows the extra slots after the next load", kModule);
+        return;
+    }
+    Il2CppObject* ui = HudRow();
+    if (!ui) return;
+    g.hudRebind = false;
+    bool ok = false;
+    Invoke(g.ammoUiStart, ui, {}, "AmmoSlotUI.Start", &ok);
+    SR2_INFO("[{}] vacpack: HUD slot row bound to the extended slots{}", kModule, ok ? "" : " FAILED");
 }
 
 // ---- number keys ----
@@ -1767,17 +1865,16 @@ void VacpackUpgrades::Tick() {
         LauncherArt();
         // Extra slots' contents, once per player ammo model; the HUD row wide enough to centre them.
         auto* live = p.ammoModel ? unity::Field<Il2CppArray*>(p.ammoModel, g.offAmodelSlots) : nullptr;
+        if (live && !Extended(live)) {  // custom upgrades came on after the player was built
+            ExtendLive(p);
+            live = unity::Field<Il2CppArray*>(p.ammoModel, g.offAmodelSlots);
+        }
         if (p.ammoModel && p.ammoModel != g.restoredAmmo) RestoreStash(p);
         RestoreShadows(p);
         g.hudFindTimer += 1.0f;  // ~1 Hz
-        if (Extended(live)) WidenHud();
-        int slotsLevel = -1;
-        for (const Ours& o : g.ours)
-            if (o.spec && o.spec->kind == Kind::kSlots && o.extended) slotsLevel = DictGet(dict, o.spec->parentId) - VanillaMax(o);
-        if (!Extended(live) && !g.loggedNoSlots && slotsLevel > 0) {
-            g.loggedNoSlots = true;  // custom upgrades were switched on after this save was loaded
-            SR2_INFO("[{}] vacpack: Extra Tank III/IV owned but the player was built without the extra slots - they "
-                     "appear after loading the save again", kModule);
+        if (Extended(live)) {
+            WidenHud();
+            RebindHud();
         }
     });
 }
@@ -1979,6 +2076,12 @@ bool VacpackUpgrades::Setup(sr2::core::ModuleContext& ctx, Host host, std::strin
         if (auto o = R.FieldOffset(propDef, "DefaultValue")) g.offPropDefault = *o;  // texts only (fallback 20)
     if (auto o = R.FieldOffset(g.upgradeDefClass, "_requireComponentToBeVisibleToPlayer")) g.offUdNeedsComponent = *o;
     if (auto o = R.FieldOffset(g.ammoMgrClass, "_selectedAmmoIdx")) g.offAmSelected = *o;
+    // The live extension (a player built before custom upgrades came on); optional.
+    if (auto o = R.FieldOffset(g.ammoMgrClass, "_ammoSlotDefinitions")) g.offAmDefs = *o;
+    if (ammoModel) g.ammoReset = R.Method(ammoModel, "Reset", 1, nullptr);
+    if (!g.offAmDefs || !g.ammoReset)
+        SR2_WARN("[{}] vacpack: extra slots need a reload when custom upgrades come on with a save loaded "
+                 "(AmmoSlotManager._ammoSlotDefinitions / AmmoModel.Reset not found)", kModule);
     // Shadow Catcher: the player's regular slots = AmmoSlot1's type group (no group -> it changes nothing).
     if (auto o = R.FieldOffset(g.slotDefClass, "_slotTypeGroup")) g.offSdGroup = *o;
     if (!g.offSdGroup || !g.objectNew)
@@ -2070,6 +2173,7 @@ bool VacpackUpgrades::Setup(sr2::core::ModuleContext& ctx, Host host, std::strin
         Il2CppClass* time = R.Class("UnityEngine.CoreModule", "UnityEngine", "Time", &err);
         g.vacItemClass = R.Class(kImage, "MonomiPark.SlimeRancher.Player.PlayerItems", "VacuumItem", &err);
         g.ammoUiClass = R.Class(kImage, "MonomiPark.SlimeRancher.UI", "AmmoSlotUI", &err);
+        if (g.ammoUiClass) g.ammoUiStart = R.Method(g.ammoUiClass, "Start", 0, &err);
         if (rect) {
             g.rtGetSize = R.Method(rect, "get_sizeDelta", 0, &err);
             g.rtSetSize = R.Method(rect, "set_sizeDelta", 1, &err);

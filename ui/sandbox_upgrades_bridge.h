@@ -19,6 +19,8 @@
 #include <string>
 #include <vector>
 
+#include "sandbox_bridge.h"  // CostLine
+
 namespace sr2::ui::sandbox::upgrades {
 
 // One player upgrade (UpgradeModel.upgradeDefinitions: Tank Booster, Extra Tank, Jetpack, ...).
@@ -32,6 +34,10 @@ struct Upgrade {
     bool discoverable = false;  // hidden in the Fabricator until found (_requireComponentToBeVisibleToPlayer + a level-0 component)
     bool discovered = true;     // not hidden right now (bought, or the player holds level 0's components)
     bool slotTier = false;      // the vacpack slot count upgrade ("AmmoSlots", Extra Tank)
+    // The next level as the Fabricator offers it (the entry's tooltip): its title and what the Fabricator asks for
+    // (UpgradeLevelDefinition._costs: Newbucks, refinery items, upgrade components). Empty title: fully upgraded.
+    std::string nextTitle;
+    std::vector<CostLine> nextCosts;
 };
 
 // One of the mod's own buildables (custom_upgrades/buildables.h: Quantum Storage Link, DJ Booth, DJ Speaker,

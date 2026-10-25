@@ -289,6 +289,58 @@ const DefInfo& Info(Il2CppObject* def) {
     return g_defInfo.emplace(reinterpret_cast<uintptr_t>(def), std::move(info)).first->second;
 }
 
+// A level's title and Fabricator cost for the entry tooltip (round 16: "add refinery upgrade tooltips to
+// upgrades"): Newbucks and refinery items through module.cpp (CostOf, the crafter tooltip's lines), then the
+// upgrade components (PurchaseCost.ComponentCosts, one entry per piece: counted). Kept per level object for a
+// few seconds (the page publishes twice a second; custom_upgrades may rescale its tiers' costs).
+struct LevelCost {
+    unsigned long long tick = 0;
+    std::string title;
+    std::vector<sr2::ui::sandbox::CostLine> lines;
+};
+std::unordered_map<uintptr_t, LevelCost> g_levelCost;
+constexpr unsigned long long kLevelCostMs = 5000;
+size_t g_offCompTitle = 0, g_offCompIcon = 0;  // UpgradeComponent._title / _icon (from the live object)
+
+const LevelCost* CostOfLevel(Il2CppObject* def, int level, unsigned long long now) {
+    Il2CppObject* l = LevelDef(def, level);
+    if (!l) return nullptr;
+    LevelCost& c = g_levelCost[reinterpret_cast<uintptr_t>(l)];
+    if (c.tick && now - c.tick < kLevelCostMs) return &c;
+    c = LevelCost{};
+    c.tick = now;
+    if (g_offUlTitle) c.title = Localized(unity::Field<Il2CppObject*>(l, g_offUlTitle));
+    if (!g_offUlCosts) return &c;
+    const char* costs = reinterpret_cast<const char*>(l) + g_offUlCosts;
+    if (g_host.costLines) g_host.costLines(costs, c.lines);
+    if (!g_offCostComponents) return &c;
+    void* comps = *reinterpret_cast<void* const*>(costs + g_offCostComponents);
+    std::vector<std::pair<Il2CppObject*, int>> counted;
+    for (size_t i = 0, n = unity::ListCount(comps); i < n; ++i) {
+        auto* comp = static_cast<Il2CppObject*>(unity::ListAt(comps, i));
+        if (!comp || !unity::IsAlive(comp)) continue;
+        auto it = std::find_if(counted.begin(), counted.end(), [&](const auto& e) { return e.first == comp; });
+        if (it != counted.end()) ++it->second;
+        else counted.emplace_back(comp, 1);
+    }
+    for (const auto& [comp, count] : counted) {
+        if (!g_offCompTitle) {
+            Il2CppClass* k = api().il2cpp_object_get_class(comp);
+            if (auto o = Resolver::Get().FieldOffset(k, "_title")) g_offCompTitle = *o;
+            if (auto o = Resolver::Get().FieldOffset(k, "_icon")) g_offCompIcon = *o;
+        }
+        std::string name = g_offCompTitle ? Localized(unity::Field<Il2CppObject*>(comp, g_offCompTitle)) : std::string();
+        if (name.empty()) name = unity::GetName(comp);
+        sr2::ui::sandbox::CostLine line;
+        line.text = std::format("{} x {}", count, name);
+        if (auto* sprite = g_offCompIcon ? unity::Field<Il2CppObject*>(comp, g_offCompIcon) : nullptr;
+            sprite && unity::IsAlive(sprite))
+            line.icon = sr2::ui::item_icons::Register(sprite);
+        c.lines.push_back(std::move(line));
+    }
+    return &c;
+}
+
 // ------------------------------------------------------------ components ----
 Il2CppObject* SpendableDirector() {
     Il2CppObject* spend = nullptr;
@@ -399,6 +451,11 @@ void Publish() {
             const auto gate = spend ? GateComponents(def) : std::vector<Il2CppObject*>();
             u.discoverable = !gate.empty();
             u.discovered = !Hidden(spend, gate, u.level);
+            if (u.level + 1 < levels)
+                if (const LevelCost* next = CostOfLevel(def, u.level + 1, st.tick)) {
+                    u.nextTitle = next->title.empty() ? u.name : next->title;
+                    u.nextCosts = next->lines;
+                }
             st.upgrades.push_back(std::move(u));
         }
         if (st.upgrades.empty()) st.why = "The player's upgrade list is empty.";
