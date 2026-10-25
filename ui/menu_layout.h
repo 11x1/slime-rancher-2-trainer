@@ -32,8 +32,9 @@ enum class TabKind {
 // The Sandbox category's tabs, one page each.
 enum class SandboxPage { General, Vacpack, SpawnCraft, Upgrades, Weather };
 
-// Cards: a part of one module's card under a small heading. It holds some of the card module's own groups
-// and other modules, each drawn as its switch (a row) and then its rows.
+// Cards: a card of its own under one module's card (round 14; was a heading inside it), named by `title`.
+// It holds some of the card module's own groups and other modules, each drawn as its switch (a row) and
+// then its rows.
 struct CardSection {
     std::string title;
     std::string note;                   // dim line under the heading ("" = none)
@@ -57,8 +58,8 @@ struct Tab {
     bool stacked = false;                           // Cards: columns[0] full width on top, the other columns
                                                     //   side by side under it
     std::map<std::string, std::string> cardHelp;    // Cards: tooltip of a module's switch (default: its own)
-    std::map<std::string, std::vector<CardSection>> sections;  // Cards: a card module's sections (none: its
-                                                               //   groups as one list of rows)
+    std::map<std::string, std::vector<CardSection>> sections;  // Cards: a card module's section cards (none:
+                                                               //   its groups as one list of rows in its card)
     std::map<std::string, std::string> switchLabel;  // Cards: row label of a module's switch inside a section
                                                      //   (default: the module's title)
     SandboxPage sandboxPage = SandboxPage::General;  // Sandbox: which of its pages
