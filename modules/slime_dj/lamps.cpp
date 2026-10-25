@@ -1,0 +1,651 @@
+// slime_dj: "Lamps pulse to the music" (see lamps.h, NOTES.md).
+//
+// Electric Pillar Lamp: GadgetDefinition "ElectricLampPillar", prefab "decorElectricLampPillar"
+// (identifiabletypes bundle, UnityPy, game 1.3.0): root Gadget + RegionMember +
+// SanctuaryRoomMemberGadget; "labyrinthPillar01" (glass pillar + bronze bases, LODGroup); and
+// "PillarLightningFX": the lamp's light is fake, it has NO Light component:
+//   * "Sphere Light" / "Sphere Light (2)" (big scaled spheres, material SphereLightPillarLightning_02,
+//     a glow-volume shader: _Color (1, 0.83, 0.38), _BrightnessMultiplier 5);
+//   * LightningMesh / _Rotated / Aura / Aura_Rotated / _Bottom / _Top (materials LightningPillar_*,
+//     an unlit lightning shader: HDR _ColorCore (8.2, 4.5, 2.7) and _ColorEdge (4.2, 3.4, 0.75), up to
+//     135 on the end caps, _Color yellow);
+//   * two ParticleSystems (ChargedSpikes, untouched) and a looping SECTR_PointSource hum ("Sound").
+// No script animates any of it, so property blocks on those renderers are the whole look.
+//
+// Finding the lamps: GameModel.identifiablesByIdent[definition] = the GadgetModels of every placed
+// lamp (loaded or not); GadgetModel.transform is the placed object (null / destroyed while its scene
+// is not loaded). One dictionary lookup per definition, at most every kFindSeconds, never a scene
+// search. Lamps within the range of a playing speaker get a record: GC handles to their glowing
+// renderers and the material values. Everything else is never touched.
+//
+// Per frame, per channel (global queue, each Corral Radio): the analysis at its play position
+// (BeatTrack::Query, as the walls read it) smoothed the walls' way (bass level attack 15 ms /
+// release 100 ms, beat pulse decaying with 0.15 s, energy over 0.4 s scaling both down in calm
+// parts, a hue step per beat). Per lamp, with w = how close it is to its nearest playing speaker,
+// e = w x level, p = w x pulse:
+//   _BrightnessMultiplier = base x (1 + kGlowLevel e + kGlowBeat p)        (the light spheres)
+//   _ColorCore / _ColorEdge = base x (1 + kBoltLevel e + kBoltBeat p)       (the lightning)
+//   every colour (also _Color) mixed towards the hue by kColourMix x max(e, p), brightness kept.
+// Restore: the renderer's own property block as it was before the first change.
+
+#include "modules/slime_dj/lamps.h"
+
+#include <windows.h>
+
+#include <algorithm>
+#include <cmath>
+#include <format>
+#include <unordered_map>
+
+#include "core/detour_guard.h"
+#include "core/guard.h"
+#include "core/log.h"
+#include "core/module.h"
+#include "core/resolver.h"
+#include "core/unity.h"
+
+namespace sr2::modules::slime_dj {
+
+namespace {
+namespace unity = sr2::core::unity;
+using il2cpp::api;
+using il2cpp::Resolver;
+
+constexpr const char* kModule = "slime_dj";
+constexpr const char* kImage = "Assembly-CSharp";
+constexpr const char* kCore = "UnityEngine.CoreModule";
+constexpr const char* kLampPrefab = "decorElectricLampPillar";
+constexpr float kFindSeconds = 4.0f;          // lamp list refresh (identifiablesByIdent), at most this often
+constexpr float kDefRetrySeconds = 10.0f;     // definition not found yet (groups not loaded)
+constexpr size_t kMaxLamps = 48;              // pulsing at once (nearest to a speaker first)
+constexpr size_t kMaxModels = 2048;           // placed lamps read per refresh
+constexpr size_t kMaxRends = 16;              // per lamp (the prefab has 8 glowing renderers)
+constexpr float kFullShare = 0.4f;            // full strength up to this share of the range, then fading to 0
+// Look (same feel as the walls, walls.cpp)
+constexpr float kAttack = 0.015f, kRelease = 0.10f;  // bass level smoothing (s)
+constexpr float kPulseDecay = 0.15f;                 // beat pulse time constant (s)
+constexpr float kEnergyTime = 0.4f;                  // energy smoothing (s)
+constexpr float kCalmShare = 0.15f;                  // level / pulse share left in the calmest part
+constexpr float kHueStep = 0.11f;                    // colour wheel step per beat
+constexpr float kGlowLevel = 0.8f, kGlowBeat = 1.6f; // _BrightnessMultiplier x (1 + level a + pulse b)
+constexpr float kBoltLevel = 1.0f, kBoltBeat = 2.5f; // _ColorCore / _ColorEdge, same form
+constexpr float kColourMix = 0.7f;                   // hue share at full level / pulse
+constexpr float kRest = 0.004f;                      // below this a channel counts as settled
+
+struct Vec3 {
+    float x, y, z;
+};
+struct Color {
+    float r, g, b, a;
+};
+
+template <class Fn>
+struct M {
+    Fn fn = nullptr;
+    const MethodInfo* mi = nullptr;
+    explicit operator bool() const { return fn != nullptr; }
+};
+
+Color Hsv(float h, float s, float v) {
+    h -= std::floor(h);
+    const float i = std::floor(h * 6.0f), f = h * 6.0f - i;
+    const float p = v * (1 - s), q = v * (1 - s * f), t = v * (1 - s * (1 - f));
+    switch (static_cast<int>(i) % 6) {
+        case 0: return {v, t, p, 1};
+        case 1: return {q, v, p, 1};
+        case 2: return {p, v, t, 1};
+        case 3: return {p, q, v, 1};
+        case 4: return {t, p, v, 1};
+        default: return {v, p, q, 1};
+    }
+}
+
+// `base` mixed towards `hue` by k, keeping base's brightness (max channel) so a pale lamp does not
+// turn darker, and its alpha.
+Color Tint(const Color& base, const Color& hue, float k) {
+    const float bright = std::max({base.r, base.g, base.b, 1e-4f});
+    return {base.r + (hue.r * bright - base.r) * k, base.g + (hue.g * bright - base.g) * k,
+            base.b + (hue.b * bright - base.b) * k, base.a};
+}
+}  // namespace
+
+struct LampPulser::Impl {
+    // ---- resolved
+    bool ready = false;
+    Il2CppClass* rendererClass = nullptr;
+    Il2CppClass* groupClass = nullptr;
+    Il2CppClass* gadgetDefClass = nullptr;
+    Il2CppClass* gadgetModelClass = nullptr;
+    Il2CppClass* mpbClass = nullptr;
+    size_t offGcLookup = 0, offScGameModel = 0, offGadgetDefs = 0, offMembers = 0, offSubGroups = 0, offPrefab = 0,
+           offVariantOf = 0, offByIdent = 0, offGmTransform = 0;
+    const MethodInfo* gameCtxInst = nullptr;   // SRSingleton<GameContext>.get_Instance
+    const MethodInfo* sceneCtxInst = nullptr;  // SRSingleton<SceneContext>.get_Instance
+    const MethodInfo* compsInChildren = nullptr;  // Component.GetComponentsInChildren(Type, bool)
+    const MethodInfo* mpbCtor = nullptr;
+    using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
+    ObjectNewFn objectNew = nullptr;
+    M<void (*)(Il2CppObject*, const MethodInfo*)> mpbClear;
+    M<void (*)(Il2CppObject*, int32_t, float, const MethodInfo*)> mpbSetFloat;
+    M<void (*)(Il2CppObject*, int32_t, Color, const MethodInfo*)> mpbSetColor;
+    M<void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*)> rendGetBlock, rendSetBlock;
+    M<Il2CppObject* (*)(Il2CppObject*, const MethodInfo*)> rendSharedMaterial;
+    M<bool (*)(Il2CppObject*, int32_t, const MethodInfo*)> matHasProperty;
+    M<Color (*)(Il2CppObject*, int32_t, const MethodInfo*)> matGetColor;
+    M<float (*)(Il2CppObject*, int32_t, const MethodInfo*)> matGetFloat;
+    M<int32_t (*)(Il2CppString*, const MethodInfo*)> propertyToId;
+    M<Vec3 (*)(Il2CppObject*, const MethodInfo*)> trGetPosition;
+    // the live Dictionary<IdentifiableType, List<IdentifiableModel>> class (generic: looked up on it)
+    Il2CppClass* dictClass = nullptr;
+    const MethodInfo* dictTryGet = nullptr;
+    enum Prop { kBright, kTint, kCore, kEdge, kProps };  // _BrightnessMultiplier, _Color, _ColorCore, _ColorEdge
+    int32_t ids[kProps] = {};
+
+    // ---- state
+    struct RendRec {
+        Il2CppGCHandle h = nullptr, saved = nullptr;  // saved: the renderer's own block
+        bool has[kProps] = {};
+        float bright = 0;        // kBright
+        Color col[kProps] = {};  // kTint, kCore, kEdge
+    };
+    struct Lamp {
+        Il2CppGCHandle tr = nullptr;  // the placed lamp's Transform (identity + alive check)
+        Vec3 pos{};
+        std::vector<RendRec> rends;
+        const void* channel = nullptr;  // nearest playing speaker's channel
+        float weight = 0;               // 0..1 from its distance to that speaker
+        float shown = 0;                // weight eased in (a lamp entering range fades in)
+        bool touched = false;
+    };
+    struct ChannelState {
+        uint64_t last = 0;
+        unsigned gen = 0;
+        float env = 0, pulse = 0, energy = 1, hue = 0;
+        bool active = false;  // has a beat sample this frame
+        bool seen = false;    // listed this frame
+    };
+    std::vector<Lamp> lamps;
+    std::unordered_map<const void*, ChannelState> channels;
+    std::vector<Il2CppGCHandle> defs;  // lamp definitions (base + variants)
+    ULONGLONG defSearch = 0, lastFind = 0;
+    bool defsLogged = false, defsMissingLogged = false;
+    Il2CppGCHandle work = nullptr;     // shared MaterialPropertyBlock
+    std::vector<std::pair<Il2CppObject*, Vec3>> placed;  // Find: lamp transforms (raw, valid during this Sync) + position
+    size_t loaded = 0;                 // lamps loaded at the last refresh (for the log)
+    size_t lastLogged = 0;
+    int builtLogs = 0;
+
+    template <class Fn>
+    static bool Bind(M<Fn>& m, const MethodInfo* mi) {
+        void* p = mi ? Resolver::Get().MethodPointer(mi) : nullptr;
+        if (!p) return false;
+        m.fn = reinterpret_cast<Fn>(p);
+        m.mi = mi;
+        return true;
+    }
+    static Il2CppObject* Target(Il2CppGCHandle h) {
+        Il2CppObject* o = h ? unity::GCHandleTarget(h) : nullptr;
+        return unity::IsAlive(o) ? o : nullptr;
+    }
+    static void Free(Il2CppGCHandle& h) {
+        if (h) unity::FreeGCHandle(h);
+        h = nullptr;
+    }
+    bool IsA(Il2CppObject* obj, Il2CppClass* k) const {
+        const auto& a = api();
+        if (!obj || !k || !a.il2cpp_object_get_class) return false;
+        Il2CppClass* c = a.il2cpp_object_get_class(obj);
+        if (c == k) return true;
+        return c && a.il2cpp_class_is_assignable_from && a.il2cpp_class_is_assignable_from(k, c);
+    }
+    Il2CppObject* Invoke(const MethodInfo* m, void* obj, std::initializer_list<void*> args, const char* what, bool* ok) {
+        if (!m) {
+            *ok = false;
+            return nullptr;
+        }
+        std::vector<void*> params(args);
+        std::string err;
+        Il2CppObject* r = Resolver::Get().Invoke(m, obj, params.empty() ? nullptr : params.data(), &err);
+        *ok = err.empty();
+        if (!*ok) {
+            if (err.rfind("native exception", 0) == 0) core::MarkModuleFaulted(kModule, std::format("lamps: {}: {}", what, err));
+            else SR2_WARN("slime_dj: lamps: {} failed: {}", what, err);
+        }
+        return r;
+    }
+    Il2CppObject* NewBlock() {
+        Il2CppObject* b = objectNew(mpbClass);
+        bool ok = false;
+        if (b) Invoke(mpbCtor, b, {}, "MaterialPropertyBlock..ctor", &ok);
+        return ok ? b : nullptr;
+    }
+    Vec3 Position(Il2CppObject* tr, bool* ok) {
+        const Vec3 p = trGetPosition.fn(tr, trGetPosition.mi);
+        *ok = std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
+        return p;
+    }
+
+    // ---- definitions: the lamp's GadgetDefinition and its variants, from the gadget groups.
+    bool Defs() {
+        for (size_t i = 0; i < defs.size();)
+            if (Target(defs[i])) {
+                ++i;
+            } else {
+                Free(defs[i]);
+                defs.erase(defs.begin() + static_cast<std::ptrdiff_t>(i));
+            }
+        if (!defs.empty()) return true;
+        const ULONGLONG now = GetTickCount64();
+        if (defSearch && now - defSearch < static_cast<ULONGLONG>(kDefRetrySeconds * 1000)) return false;
+        defSearch = now;
+        bool ok = false;
+        Il2CppObject* gc = Invoke(gameCtxInst, nullptr, {}, "GameContext.Instance", &ok);
+        Il2CppObject* lookup = ok && unity::IsAlive(gc) ? unity::Field<Il2CppObject*>(gc, offGcLookup) : nullptr;
+        if (!unity::IsAlive(lookup)) return false;
+        std::vector<Il2CppObject*> groups{unity::Field<Il2CppObject*>(lookup, offGadgetDefs)}, all;
+        Il2CppObject* base = nullptr;
+        for (size_t gi = 0; gi < groups.size() && gi < 64; ++gi) {
+            Il2CppObject* grp = groups[gi];
+            if (!unity::IsAlive(grp) || !IsA(grp, groupClass)) continue;
+            void* members = unity::Field<void*>(grp, offMembers);
+            for (size_t i = 0, n = unity::ListCount(members); i < n && i < 2000; ++i) {
+                auto* t = static_cast<Il2CppObject*>(unity::ListAt(members, i));
+                if (!unity::IsAlive(t) || !IsA(t, gadgetDefClass)) continue;
+                all.push_back(t);
+                Il2CppObject* prefab = unity::Field<Il2CppObject*>(t, offPrefab);
+                if (!base && unity::IsAlive(prefab) && unity::GetName(prefab) == kLampPrefab) base = t;
+            }
+            void* subs = unity::Field<void*>(grp, offSubGroups);
+            for (size_t i = 0, n = unity::ListCount(subs); i < n && i < 64; ++i)
+                groups.push_back(static_cast<Il2CppObject*>(unity::ListAt(subs, i)));
+        }
+        if (!base) {
+            if (!all.empty() && !defsMissingLogged) {
+                defsMissingLogged = true;
+                SR2_WARN("slime_dj: lamps: no gadget definition with prefab '{}' among {} (retried every {:.0f} s)", kLampPrefab,
+                         all.size(), kDefRetrySeconds);
+            }
+            return false;
+        }
+        std::string names;
+        for (Il2CppObject* t : all) {
+            if (t != base && unity::Field<Il2CppObject*>(t, offVariantOf) != base) continue;
+            if (std::any_of(defs.begin(), defs.end(), [&](Il2CppGCHandle h) { return Target(h) == t; })) continue;
+            if (Il2CppGCHandle h = unity::NewGCHandle(t)) {
+                defs.push_back(h);
+                names += (names.empty() ? "" : ", ") + unity::GetName(t);
+            }
+        }
+        if (!defsLogged && !defs.empty()) {
+            defsLogged = true;
+            SR2_INFO("slime_dj: lamps: Electric Pillar Lamp definition(s): {}", names);
+        }
+        return !defs.empty();
+    }
+
+    // ---- every placed lamp that is loaded now (transform + position).
+    void Find() {
+        placed.clear();
+        if (!Defs()) return;
+        bool ok = false;
+        Il2CppObject* sc = Invoke(sceneCtxInst, nullptr, {}, "SceneContext.Instance", &ok);
+        Il2CppObject* gm = ok && unity::IsAlive(sc) ? unity::Field<Il2CppObject*>(sc, offScGameModel) : nullptr;
+        Il2CppObject* dict = unity::IsAlive(gm) ? unity::Field<Il2CppObject*>(gm, offByIdent) : nullptr;
+        if (!dict) return;
+        if (Il2CppClass* k = unity::ClassOf(dict); k != dictClass) {
+            dictClass = k;
+            dictTryGet = k ? Resolver::Get().Method(k, "TryGetValue", 2, nullptr) : nullptr;
+        }
+        if (!dictTryGet) return;
+        for (Il2CppGCHandle h : defs) {
+            Il2CppObject* def = Target(h);
+            if (!def) continue;
+            Il2CppObject* list = nullptr;
+            Il2CppObject* boxed = Invoke(dictTryGet, dict, {def, &list}, "identifiablesByIdent.TryGetValue", &ok);
+            if (!ok) return;
+            const bool found = boxed && *reinterpret_cast<bool*>(reinterpret_cast<char*>(boxed) + 2 * sizeof(void*));
+            for (size_t i = 0, n = found && list ? unity::ListCount(list) : 0; i < n && placed.size() < kMaxModels; ++i) {
+                auto* m = static_cast<Il2CppObject*>(unity::ListAt(list, i));
+                if (!m || !IsA(m, gadgetModelClass)) continue;
+                Il2CppObject* tr = unity::Field<Il2CppObject*>(m, offGmTransform);
+                if (!unity::IsAlive(tr) || !unity::ActiveInHierarchy(unity::GameObjectOf(tr))) continue;
+                bool posOk = false;
+                const Vec3 p = Position(tr, &posOk);
+                if (posOk) placed.emplace_back(tr, p);
+            }
+        }
+    }
+
+    std::vector<Il2CppObject*> Children(Il2CppObject* tr, Il2CppClass* k, size_t max) {
+        std::vector<Il2CppObject*> out;
+        bool inactive = false, ok = false;
+        Il2CppObject* arr = Invoke(compsInChildren, tr, {unity::TypeOf(k), &inactive}, "GetComponentsInChildren", &ok);
+        for (size_t i = 0, n = ok ? std::min<size_t>(unity::ArrayLength(arr), 64) : 0; i < n && out.size() < max; ++i) {
+            auto* c = static_cast<Il2CppObject*>(unity::ArrayAt(arr, i));
+            if (unity::IsAlive(c) && IsA(c, k)) out.push_back(c);
+        }
+        return out;
+    }
+
+    bool Build(Lamp& lamp, Il2CppObject* tr) {
+        std::string glow;
+        for (Il2CppObject* r : Children(tr, rendererClass, 48)) {
+            if (lamp.rends.size() >= kMaxRends) break;
+            Il2CppObject* mat = rendSharedMaterial.fn(r, rendSharedMaterial.mi);
+            if (!unity::IsAlive(mat)) continue;
+            RendRec rec;
+            for (int k = 0; k < kProps; ++k) {
+                rec.has[k] = ids[k] && matHasProperty.fn(mat, ids[k], matHasProperty.mi);
+                if (!rec.has[k]) continue;
+                if (k == kBright) {
+                    rec.bright = matGetFloat.fn(mat, ids[k], matGetFloat.mi);
+                    rec.has[k] = std::isfinite(rec.bright);
+                } else {
+                    rec.col[k] = matGetColor.fn(mat, ids[k], matGetColor.mi);
+                    rec.has[k] = std::isfinite(rec.col[k].r) && std::isfinite(rec.col[k].g) && std::isfinite(rec.col[k].b);
+                }
+            }
+            // only the glow (sphere lights: _BrightnessMultiplier) and the lightning (_ColorCore / _ColorEdge);
+            // the pillar, its bases and the grass quads have neither
+            if (!rec.has[kBright] && !rec.has[kCore] && !rec.has[kEdge]) continue;
+            Il2CppObject* saved = NewBlock();
+            if (!saved) continue;
+            mpbClear.fn(saved, mpbClear.mi);
+            rendGetBlock.fn(r, saved, rendGetBlock.mi);  // the renderer's own block, set back on restore
+            rec.h = unity::NewGCHandle(r);
+            rec.saved = unity::NewGCHandle(saved);
+            if (!rec.h || !rec.saved) {
+                Free(rec.h);
+                Free(rec.saved);
+                continue;
+            }
+            if (glow.size() < 200)
+                glow += std::format("{}{}", glow.empty() ? "" : ", ",
+                                    rec.has[kBright] ? std::format("'{}' brightness {:.2f}", unity::GetName(mat), rec.bright)
+                                                     : std::format("'{}' core ({:.1f}, {:.1f}, {:.1f})", unity::GetName(mat),
+                                                                   rec.col[kCore].r, rec.col[kCore].g, rec.col[kCore].b));
+            lamp.rends.push_back(rec);
+        }
+        if (lamp.rends.empty()) return false;
+        if (builtLogs++ < 8)
+            SR2_INFO("slime_dj: lamps: pulsing lamp at ({:.0f}, {:.0f}, {:.0f}): {} glowing renderer(s): {}", lamp.pos.x, lamp.pos.y,
+                     lamp.pos.z, lamp.rends.size(), glow);
+        return true;
+    }
+
+    void Restore(Lamp& lamp) {
+        if (!lamp.touched) return;
+        lamp.touched = false;
+        for (const RendRec& r : lamp.rends) {
+            Il2CppObject* o = Target(r.h);
+            Il2CppObject* saved = Target(r.saved);
+            if (o && saved) rendSetBlock.fn(o, saved, rendSetBlock.mi);
+        }
+    }
+
+    void Drop(Lamp& lamp) {
+        Restore(lamp);
+        for (RendRec& r : lamp.rends) {
+            Free(r.h);
+            Free(r.saved);
+        }
+        lamp.rends.clear();
+        Free(lamp.tr);
+    }
+
+    void Animate(Lamp& lamp, const ChannelState& ch) {
+        Il2CppObject* work0 = Target(work);
+        if (!work0) return;
+        const float w = lamp.shown;
+        const float e = ch.env * w, p = ch.pulse * w;
+        const Color hue = Hsv(ch.hue, 0.85f, 1.0f);
+        const float k = kColourMix * std::min(1.0f, std::max(e, p));
+        const float glow = 1.0f + kGlowLevel * e + kGlowBeat * p, bolt = 1.0f + kBoltLevel * e + kBoltBeat * p;
+        lamp.touched = true;
+        for (const RendRec& r : lamp.rends) {
+            Il2CppObject* o = Target(r.h);
+            if (!o) continue;
+            mpbClear.fn(work0, mpbClear.mi);
+            rendGetBlock.fn(o, work0, rendGetBlock.mi);  // keeps whatever else the game put there
+            if (r.has[kBright]) mpbSetFloat.fn(work0, ids[kBright], r.bright * glow, mpbSetFloat.mi);
+            if (r.has[kTint]) mpbSetColor.fn(work0, ids[kTint], Tint(r.col[kTint], hue, k), mpbSetColor.mi);
+            for (int c : {kCore, kEdge})
+                if (r.has[c]) {
+                    const Color t = Tint(r.col[c], hue, k);
+                    mpbSetColor.fn(work0, ids[c], Color{t.r * bolt, t.g * bolt, t.b * bolt, t.a}, mpbSetColor.mi);
+                }
+            rendSetBlock.fn(o, work0, rendSetBlock.mi);
+        }
+    }
+};
+
+LampPulser::LampPulser() : p_(std::make_unique<Impl>()) {}
+LampPulser::~LampPulser() = default;  // never runs for the module's instance (leaked on purpose)
+
+bool LampPulser::Ready() const { return p_->ready; }
+size_t LampPulser::Lamps() const { return p_->lamps.size(); }
+
+bool LampPulser::Resolve(std::string& why) {
+    Impl& P = *p_;
+    Resolver& R = Resolver::Get();
+    auto parentOf = [](Il2CppClass* c) { return api().il2cpp_class_get_parent ? api().il2cpp_class_get_parent(c) : nullptr; };
+    auto cls = [&](const char* image, const char* ns, const char* name) -> Il2CppClass* {
+        std::string err;
+        Il2CppClass* k = R.Class(image, ns, name, &err);
+        if (!k && why.empty()) why = std::format("class {}.{}: {}", ns, name, err);
+        return k;
+    };
+    auto off = [&](Il2CppClass* k, const char* field, size_t& out) {
+        for (Il2CppClass* c = k; c; c = parentOf(c))
+            if (auto o = R.FieldOffset(c, field)) {
+                out = *o;
+                return;
+            }
+        if (why.empty()) why = std::format("field {} not found", field);
+    };
+    auto byParams = [&](Il2CppClass* k, const char* name, std::initializer_list<std::string_view> params) -> const MethodInfo* {
+        std::string err;
+        const MethodInfo* m = k ? R.MethodByParams(k, name, params, &err) : nullptr;
+        if (!m && why.empty()) why = std::format("{}: {}", name, err);
+        return m;
+    };
+    auto bind = [&](auto& m, const MethodInfo* mi, const char* what) {
+        if (!Impl::Bind(m, mi) && why.empty()) why = std::format("{}: no native body", what);
+    };
+
+    HMODULE ga = api().module;
+    P.objectNew = reinterpret_cast<Impl::ObjectNewFn>(ga ? GetProcAddress(ga, "il2cpp_object_new") : nullptr);
+    if (!P.objectNew) why = "il2cpp_object_new export missing";
+    Il2CppClass* gameCtx = cls(kImage, "", "GameContext");
+    Il2CppClass* sceneCtx = cls(kImage, "", "SceneContext");
+    Il2CppClass* lookup = cls(kImage, "", "LookupDirector");
+    Il2CppClass* identType = cls(kImage, "", "IdentifiableType");
+    P.groupClass = cls(kImage, "", "IdentifiableTypeGroup");
+    P.gadgetDefClass = cls(kImage, "", "GadgetDefinition");
+    Il2CppClass* gameModel = cls(kImage, "MonomiPark.SlimeRancher.DataModel", "GameModel");
+    P.gadgetModelClass = cls(kImage, "MonomiPark.SlimeRancher.DataModel", "GadgetModel");
+    Il2CppClass* component = cls(kCore, "UnityEngine", "Component");
+    Il2CppClass* transform = cls(kCore, "UnityEngine", "Transform");
+    Il2CppClass* material = cls(kCore, "UnityEngine", "Material");
+    Il2CppClass* shader = cls(kCore, "UnityEngine", "Shader");
+    P.rendererClass = cls(kCore, "UnityEngine", "Renderer");
+    P.mpbClass = cls(kCore, "UnityEngine", "MaterialPropertyBlock");
+    if (!why.empty()) return false;
+    off(gameCtx, "<LookupDirector>k__BackingField", P.offGcLookup);
+    off(sceneCtx, "<GameModel>k__BackingField", P.offScGameModel);
+    off(lookup, "_gadgetDefinitions", P.offGadgetDefs);
+    off(P.groupClass, "_memberTypes", P.offMembers);
+    off(P.groupClass, "_memberGroups", P.offSubGroups);
+    off(identType, "prefab", P.offPrefab);
+    off(P.gadgetDefClass, "VariantOf", P.offVariantOf);
+    off(gameModel, "identifiablesByIdent", P.offByIdent);
+    off(P.gadgetModelClass, "transform", P.offGmTransform);
+    if (!why.empty()) return false;
+    P.gameCtxInst = R.Method(parentOf(gameCtx), "get_Instance", 0, nullptr);
+    P.sceneCtxInst = R.Method(parentOf(sceneCtx), "get_Instance", 0, nullptr);
+    if (!P.gameCtxInst || !P.sceneCtxInst) why = "SRSingleton.get_Instance not found";
+    P.compsInChildren = byParams(component, "GetComponentsInChildren", {"System.Type", "System.Boolean"});
+    P.mpbCtor = byParams(P.mpbClass, ".ctor", {});
+    bind(P.mpbClear, byParams(P.mpbClass, "Clear", {}), "MaterialPropertyBlock.Clear");
+    bind(P.mpbSetFloat, byParams(P.mpbClass, "SetFloat", {"System.Int32", "System.Single"}), "MaterialPropertyBlock.SetFloat");
+    bind(P.mpbSetColor, byParams(P.mpbClass, "SetColor", {"System.Int32", "UnityEngine.Color"}), "MaterialPropertyBlock.SetColor");
+    bind(P.rendGetBlock, byParams(P.rendererClass, "GetPropertyBlock", {"UnityEngine.MaterialPropertyBlock"}), "Renderer.GetPropertyBlock");
+    bind(P.rendSetBlock, byParams(P.rendererClass, "SetPropertyBlock", {"UnityEngine.MaterialPropertyBlock"}), "Renderer.SetPropertyBlock");
+    bind(P.rendSharedMaterial, byParams(P.rendererClass, "get_sharedMaterial", {}), "Renderer.get_sharedMaterial");
+    bind(P.matHasProperty, byParams(material, "HasProperty", {"System.Int32"}), "Material.HasProperty");
+    bind(P.matGetColor, byParams(material, "GetColor", {"System.Int32"}), "Material.GetColor");
+    bind(P.matGetFloat, byParams(material, "GetFloat", {"System.Int32"}), "Material.GetFloat");
+    bind(P.propertyToId, byParams(shader, "PropertyToID", {"System.String"}), "Shader.PropertyToID");
+    bind(P.trGetPosition, byParams(transform, "get_position", {}), "Transform.get_position");
+    if (!why.empty()) return false;
+    P.ready = true;
+    return true;
+}
+
+void LampPulser::Sync(const std::vector<Source>& sources, float range) {
+    Impl& P = *p_;
+    if (!P.ready) return;
+    if (!P.ids[Impl::kBright]) {  // main thread, first use
+        static constexpr const char* kNames[Impl::kProps] = {"_BrightnessMultiplier", "_Color", "_ColorCore", "_ColorEdge"};
+        for (int k = 0; k < Impl::kProps; ++k) P.ids[k] = P.propertyToId.fn(unity::NewString(kNames[k]), P.propertyToId.mi);
+    }
+    if (!Impl::Target(P.work)) {
+        Impl::Free(P.work);
+        if (Il2CppObject* b = P.NewBlock()) P.work = unity::NewGCHandle(b);
+    }
+    range = std::max(range, 1.0f);
+    // Candidates: every loaded lamp at a refresh (at most every kFindSeconds; right away when speakers
+    // start playing again); between refreshes only the lamps already held (their speakers may move or
+    // stop). Raw pointers from Find are used in this call only.
+    const ULONGLONG now = GetTickCount64();
+    P.placed.clear();
+    if (sources.empty()) {
+        P.lastFind = 0;
+    } else if (!P.lastFind || now - P.lastFind >= static_cast<ULONGLONG>(kFindSeconds * 1000)) {
+        P.lastFind = now;
+        P.Find();
+        P.loaded = P.placed.size();
+    } else {
+        for (const Impl::Lamp& l : P.lamps)
+            if (Il2CppObject* tr = Impl::Target(l.tr)) P.placed.emplace_back(tr, l.pos);
+    }
+    // Which lamps are in range of a playing speaker: nearest speaker, weight by distance.
+    struct Want {
+        Il2CppObject* tr;
+        Vec3 pos;
+        const void* channel;
+        float weight, d2;
+    };
+    std::vector<Want> want;
+    for (const auto& [tr, pos] : P.placed) {
+        float best = range * range;
+        const void* ch = nullptr;
+        for (const Source& s : sources) {
+            const float dx = s.x - pos.x, dy = s.y - pos.y, dz = s.z - pos.z, d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 < best) {
+                best = d2;
+                ch = s.channel;
+            }
+        }
+        if (!ch) continue;
+        const float d = std::sqrt(best);
+        const float w = std::clamp((range - d) / (range * (1.0f - kFullShare)), 0.0f, 1.0f);
+        want.push_back({tr, pos, ch, w, best});
+    }
+    if (want.size() > kMaxLamps) {
+        std::partial_sort(want.begin(), want.begin() + kMaxLamps, want.end(), [](const Want& a, const Want& b) { return a.d2 < b.d2; });
+        want.resize(kMaxLamps);
+    }
+    // Restore and drop lamps that are gone or out of range; update the others.
+    for (size_t i = 0; i < P.lamps.size();) {
+        Impl::Lamp& lamp = P.lamps[i];
+        Il2CppObject* tr = Impl::Target(lamp.tr);
+        auto it = tr ? std::find_if(want.begin(), want.end(), [&](const Want& w) { return w.tr == tr; }) : want.end();
+        if (it == want.end()) {
+            P.Drop(lamp);
+            P.lamps.erase(P.lamps.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        if (lamp.channel != it->channel) P.Restore(lamp);  // another song now: start from the lamp's own look
+        lamp.channel = it->channel;
+        lamp.pos = it->pos;  // a lamp moved in gadget mode is a new placement: read again at each refresh
+        lamp.weight = it->weight;
+        ++i;
+    }
+    for (const Want& w : want) {
+        const bool have = std::any_of(P.lamps.begin(), P.lamps.end(), [&](const Impl::Lamp& l) { return Impl::Target(l.tr) == w.tr; });
+        if (have) continue;
+        Impl::Lamp lamp;
+        lamp.pos = w.pos;
+        lamp.channel = w.channel;
+        lamp.weight = w.weight;
+        lamp.tr = unity::NewGCHandle(w.tr);
+        if (!lamp.tr) continue;
+        if (!P.Build(lamp, w.tr)) {
+            P.Drop(lamp);
+            continue;
+        }
+        P.lamps.push_back(std::move(lamp));
+    }
+    if (P.lamps.size() != P.lastLogged) {
+        P.lastLogged = P.lamps.size();
+        SR2_INFO("slime_dj: lamps pulse at {} lamp(s) ({} loaded lamp(s), {} playing speaker(s), range {:.0f} m)", P.lamps.size(),
+                 P.loaded, sources.size(), range);
+    }
+    P.placed.clear();
+}
+
+void LampPulser::Tick(float dt, const std::vector<Channel>& channels) {
+    Impl& P = *p_;
+    if (!P.ready) return;
+    dt = std::clamp(dt, 0.0f, 0.1f);
+    for (auto& [key, st] : P.channels) st.seen = st.active = false;
+    for (const Channel& c : channels) {
+        Impl::ChannelState& st = P.channels[c.key];
+        st.seen = true;
+        BeatTrack::Sample s;
+        const BeatTrack::Sample* beat = nullptr;
+        if (c.playing && c.track) {
+            if (c.frame < st.last || st.gen != c.gen) st.last = c.frame;  // new song, seek
+            st.gen = c.gen;
+            if (c.track->Query(st.last, c.frame, s)) beat = &s;
+            st.last = c.frame;
+        }
+        st.active = beat != nullptr;
+        if (beat) st.energy += (beat->energy - st.energy) * (1.0f - std::exp(-dt / kEnergyTime));
+        const float gain = kCalmShare + (1.0f - kCalmShare) * st.energy;
+        const float level = beat ? beat->level * gain : 0.0f;
+        st.env += (level - st.env) * (1.0f - std::exp(-dt / (level > st.env ? kAttack : kRelease)));
+        st.pulse *= std::exp(-dt / kPulseDecay);
+        if (beat && beat->beat > 0) {
+            st.pulse = std::max(st.pulse, beat->beat * gain);
+            st.hue += kHueStep * gain;
+            st.hue -= std::floor(st.hue);
+        }
+    }
+    std::erase_if(P.channels, [&](const auto& e) {
+        return !e.second.seen && std::none_of(P.lamps.begin(), P.lamps.end(), [&](const Impl::Lamp& l) { return l.channel == e.first; });
+    });
+    for (Impl::Lamp& lamp : P.lamps) {
+        auto it = P.channels.find(lamp.channel);
+        Impl::ChannelState* st = it != P.channels.end() && it->second.seen ? &it->second : nullptr;
+        // ease the distance weight (entering range fades in, a speaker moving closer brightens smoothly)
+        lamp.shown += (lamp.weight - lamp.shown) * (1.0f - std::exp(-dt / 0.5f));
+        const bool settled = !st || (!st->active && st->env < kRest && st->pulse < kRest);
+        if (settled) P.Restore(lamp);
+        else P.Animate(lamp, *st);
+    }
+}
+
+void LampPulser::Clear() {
+    Impl& P = *p_;
+    for (Impl::Lamp& lamp : P.lamps) P.Drop(lamp);
+    if (!P.lamps.empty() || P.lastLogged != 0) SR2_INFO("slime_dj: lamps pulse stopped; lamps restored");
+    P.lamps.clear();
+    P.placed.clear();
+    P.channels.clear();
+    P.lastFind = 0;
+    P.lastLogged = 0;
+}
+
+}  // namespace sr2::modules::slime_dj

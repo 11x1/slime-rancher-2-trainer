@@ -28,6 +28,7 @@ reason. At most 2000 songs per folder.
 | `stream.cpp/.h` | one song decoded on a background thread into 0.5 s chunks (bounded queue) |
 | `beat.cpp/.h` | beat analysis of the decoded PCM on the decoder thread (bass level + onsets per 10 ms) |
 | `walls.cpp/.h` | "Walls dance to the music": beat ripples round the corral energy walls, walls and Air Net glow |
+| `lamps.cpp/.h` | "Lamps pulse to the music": Electric Pillar Lamps near a playing speaker pulse with its channel's beat |
 | `radio_menu.cpp/.h` | the Corral Radio playlist menu (runtime uGUI, game-styled), opened by the blue corral button |
 | `codecs.c/.h` | the only TU that compiles stb_vorbis, dr_mp3, dr_wav (CMake target `sr2_codecs`, C, `/W0`) behind a small streaming C API |
 | `ui/slime_dj_bridge.cpp/.h` | snapshot / request exchange with the overlay tab (same pattern as the sandbox) |
@@ -318,6 +319,46 @@ first change, the 4 ripple points); rebuilt when the active walls root or net ch
 setting goes off, or the module is disabled. Ripples in flight fade on their own. After a native fault the
 walls are left as they are.
 
+### Lamps pulse to the music (`dance_lamps`, default on; `lamp_range` 5-100 m, default 20 m)
+
+User idea: "maybe (insane idea) we can get the Electric pillar lamps to beat to the music aswell lol".
+`lamps.cpp`; the module only hands it data (`SyncLamps` in the box scan, `TickLamps` every frame).
+
+*The lamp* (prefab `decorElectricLampPillar`, definition `ElectricLampPillar`; full tree in
+`re/fabricator.md`) has **no Light component**. Its light is two big glow spheres ("Sphere Light",
+"Sphere Light (2)", material `SphereLightPillarLightning_02`: `_Color` warm yellow, `_BrightnessMultiplier`
+5) and the lightning meshes of `PillarLightningFX` (materials `LightningPillar_*`: HDR `_ColorCore` /
+`_ColorEdge`). No script animates them, so per-renderer property blocks are the whole look. Renderers are
+picked by property: `_BrightnessMultiplier` (spheres) or `_ColorCore` / `_ColorEdge` (lightning); the glass
+pillar, bronze bases and grass quads have none and are never touched.
+
+*Finding lamps* (no scene search): the lamp's `GadgetDefinition` (prefab name match in
+`LookupDirector._gadgetDefinitions` and its sub-groups, plus any definition whose `VariantOf` is it; found
+once, retried every 10 s until the groups are loaded, GC handles), then
+`GameModel.identifiablesByIdent.TryGetValue(def)` = the `GadgetModel` of every placed lamp;
+`GadgetModel.transform` alive and active = loaded. This refresh runs at most every 4 s, during a box scan
+(2 s) while some speaker plays; between refreshes only the lamps already held are re-weighed. Up to 48
+lamps at once, nearest to a speaker first.
+
+*Sources* (`SyncLamps`): every live speaker playing its channel's current clip with volume > 0 (so a DJ
+Booth / Boombox that is switched off does not count): music boxes, DJ Booth speakers, speaker stacks, Slime
+Radios, plain Boomboxes, corral speakers of a Corral Radio. Each lamp takes its nearest source within
+`lamp_range` and that source's channel (global queue or a radio). Weight w = 1 up to 40 % of the range,
+fading linearly to 0 at the range, eased over 0.5 s (a lamp entering range fades in).
+
+*Beat* (`TickLamps`, every frame): per channel the same read as `TickDancer` (`base + playPos` minus 40 ms,
+`BeatTrack::Query(last, now)`; nothing while paused / buffering / pause menu / past the end) and the walls'
+smoothing: bass level attack 15 ms / release 100 ms, beat pulse to the onset strength decaying with
+0.15 s, energy smoothed 0.4 s scaling level and pulse to 0.15 + 0.85 x energy (calm parts stay calm), hue
++0.11 x that per beat. With e = w x level, p = w x pulse: `_BrightnessMultiplier` = base x (1 + 0.8 e +
+1.6 p); `_ColorCore` / `_ColorEdge` = base x (1 + 1.0 e + 2.5 p); every colour (also `_Color`) mixed towards
+the hue by 0.7 x max(e, p), keeping its brightness (max channel). No intensity slider (fixed look).
+
+*Restore*: `SetPropertyBlock(snapshot)` (the renderer's own block from `GetPropertyBlock` before the first
+change) when its channel settles (song paused / stopped), the lamp leaves range or is gone, its nearest
+source switches to another channel (restore, then the new song), the setting goes off, no song is loaded,
+or the module is disabled. A lamp whose scene unloaded is simply dropped (its objects are gone).
+
 ## Settings
 
 | key | default | |
@@ -330,6 +371,8 @@ walls are left as they are.
 | `muffle_walls` | on | music from a corral with High Walls (and/or Air Net) sounds muffled from outside |
 | `dance_walls` | off | a ripple runs round the corral walls on every beat of the song the corral plays (queue or its Corral Radio); walls and Air Net glow and change colour (corrals within hearing range); speakers in the corral make it stronger |
 | `dance_intensity` | 1.0 (100 %) | 10-200 %, steeper above 100 % (shown while `dance_walls` is on) |
+| `dance_lamps` | on | Electric Pillar Lamps near a playing speaker pulse their glow and lightning with the beat |
+| `lamp_range` | 20 m | 5-100 m around a playing speaker; full strength to 40 % of it (shown while `dance_lamps` is on) |
 
 ## Log lines
 
@@ -348,6 +391,11 @@ All prefixed `slime_dj:`; grep for these when reading `sr2mods.log`:
   corral(s) (M to their Corral Radio, K boosted by speakers inside)`, `walls dance stopped (setting off|no
   song); walls restored`, `'Walls dance to the music' unavailable (…)`
 - mix: `N speaker(s) of '...' add up to X.XXx full scale here; turned down to stay clean (logged once)`
+- lamps: `lamps: Electric Pillar Lamp definition(s): …` (once), `lamps: no gadget definition with prefab
+  'decorElectricLampPillar' among N …`, `lamps: pulsing lamp at (x, y, z): N glowing renderer(s): '…'
+  brightness 5.00, '…' core (8.2, 4.5, 2.7), …` (first 8), `lamps pulse at N lamp(s) (M loaded lamp(s), S
+  playing speaker(s), range R m)` (on a change), `lamps pulse stopped; lamps restored`, `'Lamps pulse to the
+  music' unavailable (…)`
 - radio menu: `radio menu ready[; NOT available: ...]`, `radio menu for 'Corral NNNN' (plot '...')[: its radio is not
   found yet (scanning)]`, `radio menu opened (N rows per list, M song(s), font ..., header buttons cloned from the
   game's popup|own pills, rows in the game button's colours|in the menu palette)` (first), `radio menu rows in the
@@ -370,6 +418,9 @@ sell; walls dance ripples bulge and travel, `_Intensity` / `_Color` visible on b
 (40 ms lag), everything restored after Stop / Pause / setting off / leaving the ranch. Round 11: calm walls in
 quiet parts, Amplify above full volume (PCM gain, no clipping / pumping at chunk edges), the Corral Radio menu
 (build, input, input lock released on every close path).
+Lamps pulse: that `_BrightnessMultiplier` / `_ColorCore` / `_ColorEdge` in a property block visibly change the
+lamp (a shader could ignore blocks: SRP Batcher materials take them, but it was not tested), that the pulse
+looks in time and not too strong / weak, restore after Stop / Pause / out of range / setting off.
 
 ## History
 

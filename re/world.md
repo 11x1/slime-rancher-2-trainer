@@ -57,7 +57,7 @@ One `ResourceNodeDirector` per area owns many `ResourceNodeSpawner` points; on a
 
 ### Actors / spawning
 - `InstantiationHelpers.InstantiateActor` (as the sandbox spawner) - spawn a toy in front of the camera
-- `GameModel.identifiablesByIdent[type]` - per-type actor lists (stations, Boomboxes, Night Lights)
+- `GameModel.identifiablesByIdent[type]` - per-type actor lists (stations, Boomboxes, Night Lights, Electric Pillar Lamps: slime_dj `lamps.cpp`); a cheap alternative to a scene search for placed gadgets of one type (`GadgetModel.transform` +0x38 null / destroyed while its scene is unloaded)
 - `CellDirector.IsOnRanch(RegionMember)` 0x514EA0 (static) - any of member.Regions whose CellDirector is a ranch cell; member.Regions must not be null
 - mod: dj_buildables.cpp, drone_source.cpp, shadow_catcher.cpp
 
