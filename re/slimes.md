@@ -55,6 +55,28 @@ SR2's rare variant ("shiny"): a radiant slime is a normal slime actor with a rad
 - Natural spawns call `SetRadiant(def)`: `DirectedSlimeSpawner.OnActorSpawned`, `DirectedActorSpawner._Spawn_d__30`, `PeriodicActorSpawner.DoSpawn`, `SpawnActorActivity.Spawn` (weather), `RadiantLostAndFound.Spawn`, `GordoRewardsBase.GiveRewards`, `SlimeEat.EatAndTransform` (largo from a radiant keeps the base). Chance: `RadiantSlimeDirector` (SceneContext +0x100) shuffle bags per type (`DrawFromRadiantShuffleBag`, `RadiantSlimeConfig._radiantShuffleBagSizes`), `DEBUG_ForceRadiantSpawn` +0x60, `DirectedActorSpawner._onlySpawnRadiant` / `_radiantChanceOverride`. `GameModel.shinyChance` +0x150 (float) exists; its use was not traced.
 - Vacpack: `AmmoSlot.Radiant` +0x40, `AmmoSlot.AmmoMetadata` {Id +0, Emotions float4 +8, Radiant +0x18} (32 bytes), saved as `AmmoDataV02.Radiant`.
 
+## Plort prefabs and shaders (data)
+
+Read with UnityPy from the identifiabletypes bundle (game 1.3.0); used by slime_dj `plorts.cpp` ("Plorts glow to
+the music").
+- Prefab `plort<Name>` (plortPink, plortCrystal, ...): root = body MeshRenderer + Rigidbody + SphereCollider +
+  MonoBehaviours; child "Shield" (material `plortShield`, shader `SR/Actor, Vac (Glass)`: `_Color` alpha 0.42,
+  `_RefractionColor`, no gradient); "DelaunchTrigger"; "EnvIntEntity Small" (EnvInt billboard quad). Extras on
+  some: Crystal "rocks" (`SR/AMP/Slime/Crystal Attachment_NoWobble`, has `_TopColor` ...), Rock spike crown
+  (`Body_NoWobble`), Tangle flower (`Slime/Body`), Angler lure (`Slime/Body`, `_EnablePhosCore` 1, HDR
+  `_GlowTop`), auras: Gold / Phosphor `SR/AMP/Slime/FX/PhosCore Aura`, Fire `ToonFire Billboard`, Hyper
+  `HyperSlimeAura` + `Plort Outline`, Shadow `ShadowAuraLight`, Unstable `Labyrinth/UnstableResourceAura`;
+  Stable has an HDRP/Lit glass.
+- Body shaders: `SR/AMP/Slime/Plort` (most; also `_AlbedoIntensity` 1, `_PulseGlowIntensity`, twin and Sloomber
+  colours), `Plort (Glow)` (Phosphor: `_GlowTop`, `_GlowSpeed` / `_GlowMin` / `_GlowMax` / `_GlowStrength`),
+  `Plort MatCap` (Gold), `Plort (Boom)` (Boom, Fire: `_CrackColor`, `_BoomCoreMin/Max`), `Plort Unstable`
+  (Unstable, Stable: `_PulseIntensity`, `_InfillColor`), `Plort Shadow` (`_PulseGlowColor`,
+  `_PulseGlowIntensity` 5000). Every one declares `_TopColor` / `_MiddleColor` / `_BottomColor` (the body
+  gradient) and `_EmissionColor` (HDRP template GI colour, white on every plort material: no real emission
+  input). Example plortPinkBase: top (1, 0.43, 0.65), middle (1, 0.24, 0.31), bottom (0.23, 0.24, 0.65).
+- Types: `GameModel.plortGroup` (+0x1A8, IdentifiableTypeGroup); loose plorts are actors in
+  `GameModel.identifiablesByIdent[type]` (re/world.md).
+
 ## Chickens
 
 Hen groups and coop breeding: re/world.md (groups), re/plots.md (Reproduce, density).

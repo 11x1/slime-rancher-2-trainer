@@ -29,6 +29,7 @@ reason. At most 2000 songs per folder.
 | `beat.cpp/.h` | beat analysis of the decoded PCM on the decoder thread (bass level + onsets per 10 ms) |
 | `walls.cpp/.h` | "Walls dance to the music": beat ripples round the corral energy walls, walls and Air Net glow |
 | `lamps.cpp/.h` | "Lamps pulse to the music": lamp decorations and Powderfall's glowing ice near a playing speaker pulse with its channel's beat |
+| `plorts.cpp/.h` | "Plorts glow to the music": loose plorts near a playing speaker brighten their body colours with its channel's beat |
 | `radio_menu.cpp/.h` | the Corral Radio playlist menu (runtime uGUI, game-styled), opened by the blue corral button |
 | `codecs.c/.h` | the only TU that compiles stb_vorbis, dr_mp3, dr_wav (CMake target `sr2_codecs`, C, `/W0`) behind a small streaming C API |
 | `ui/slime_dj_bridge.cpp/.h` | snapshot / request exchange with the overlay tab (same pattern as the sandbox) |
@@ -560,6 +561,44 @@ change) when its channel settles (song paused / stopped), the lamp leaves range 
 source switches to another channel (restore, then the new song), the setting goes off, no song is loaded,
 or the module is disabled. A lamp whose scene unloaded is simply dropped (its objects are gone).
 
+### Plorts glow to the music (`dance_plorts`, default on; `plort_range` 5-60 m, default 15 m)
+
+Round 16 note: "Plorts glow to music aswell pleaseeeeeee". `plorts.cpp`, its own file next to the lamps; the
+module hands it the lamps' data: the same sources (`LampSource`: every speaker playing its channel's clip,
+volume > 0) and the same per-channel play positions (`BeatChannels`, read like `TickLamps`), with its own
+setting and range. `SyncPlorts` runs in the box scan (2 s); `TickPlorts` every frame resyncs within 0.25 s
+when the playing speakers changed (`LampSignature`, its own last value) and then pulses.
+
+*The plort* (prefabs read with UnityPy, details in `re/slimes.md` "Plort prefabs and shaders"): one body
+MeshRenderer on the root (shaders `SR/AMP/Slime/Plort` and variants Glow / MatCap / Boom / Unstable /
+Shadow), a glass "Shield" child, sometimes an attachment (crystal spikes, rock crown, Tangle flower) or an aura
+FX. None of the plort shaders has a usable emission input (`_EmissionColor` is declared by the HDRP template
+and white everywhere), so the glow is the body gradient: `_TopColor` / `_MiddleColor` / `_BottomColor` (plus
+`_TwinTopColor` / `_TwinMiddleColor` / `_TwinBottomColor`, Phosphor's HDR `_GlowTop` and Shadow's
+`_PulseGlowColor` where present) x s, lifted in their own hue so dark plorts glow too:
+`c' = c x s + c / max(c) x 0.2 (s - 1)`, `s = 1 + 0.7 e + 1.5 p` (e = w x bass level, p = w x beat pulse; the
+lamps' smoothing and energy scaling; w = the lamps' speaker stacking, full strength to 40 % of the range).
+A renderer counts when its material has all three gradient colours (the shield, quads and auras do not).
+Base colours come from the renderer's own block when it has them (RecolorSlimeMaterial writes them through a
+block on slimes; an unset colour reads back as 0,0,0,0), else from the shared material. Colours keep their hue.
+
+*Finding plorts* (no scene search): the plort types are `GameModel.plortGroup` and its sub-groups (once,
+retried every 10 s); `GameModel.identifiablesByIdent[type]` lists the `ActorModel` of every loose plort
+(`GameModel.RegisterActor` adds every actor there); `ActorModel.transform` alive and active = loaded. One
+`TryGetValue` per type and one `get_position` per loaded plort (up to 1024), at most every 2 s (0.5 s after a
+speaker joined) while a speaker plays; between refreshes only the held plorts' positions are re-read (plorts
+roll and get carried). Up to 64 plorts glow at once, nearest to a speaker first. Silo and vac contents are
+counts, not actors, so they never glow.
+
+*Restore*: the renderer's own block (snapshot from `GetPropertyBlock` before the first change) when the song
+pauses / stops, the plort leaves range or its nearest speaker switches channel, the setting goes off, or the
+module is disabled. A plort that was vacuumed, sold, eaten or unloaded is just dropped (checked every frame).
+
+*Debug highlighter*: `slime_dj.plorts.glowing` (orange) and `slime_dj.plorts.idle` (grey, up to 96 loaded
+plorts that do not glow), boxes at the current positions, republished every 1 s; its own plort refresh every
+4 s, also without music. Log `plorts: highlighter: N glowing, M not glowing (K loose plort(s) loaded)` on a
+change.
+
 ## Settings
 
 | key | default | |
@@ -574,6 +613,8 @@ or the module is disabled. A lamp whose scene unloaded is simply dropped (its ob
 | `dance_intensity` | 1.0 (100 %) | 10-200 %, steeper above 100 % (shown while `dance_walls` is on) |
 | `dance_lamps` | on | lamps (Electric Pillar, Striped, Conservatory, Lava, Ice), Music Pillars / Tiles (plus a beat flash) and Powderfall's glowing ice near a playing speaker pulse their glow and lights with the beat |
 | `lamp_range` | 20 m | 5-100 m: the distance from a playing speaker within which lamps pulse (tooltip says so, round 14); full strength to 40 % of it (shown while `dance_lamps` is on) |
+| `dance_plorts` | on | loose plorts near a playing speaker glow brighter with the beat (up to 64, nearest first) |
+| `plort_range` | 15 m | 5-60 m: the distance from a playing speaker within which plorts glow; full strength to 40 % of it (shown while `dance_plorts` is on) |
 
 ## Log lines
 
@@ -600,6 +641,11 @@ All prefixed `slime_dj:`; grep for these when reading `sr2mods.log`:
   highlighter: …`, `lamps: glowing scene ice unavailable (…)`, `lamps pulse at N lamp(s) (M loaded lamp(s), S
   playing speaker(s), range R m)` (on a change), `lamps pulse stopped; lamps restored`, `'Lamps pulse to the
   music' unavailable (…)`
+- plorts: `plorts: N plort type(s): …` (once), `plorts: GameModel.plortGroup has no plort types yet …`, `plorts:
+  glowing plort 'plortPink(Clone)' at (x, y, z): 'plortPinkBase' top (1.00, 0.43, 0.65)[ +glow][ +twin]` (first 6),
+  `plorts glow: N plort(s) (M loose plort(s) loaded, S playing speaker(s), range R m)` (when plorts start or stop
+  glowing), `plorts: N plort(s) in range, only the 64 nearest to a speaker glow` (once), `plorts: highlighter: …`,
+  `plorts glow stopped; plorts restored`, `'Plorts glow to the music' unavailable (…)`
 - radio menu: `radio menu ready[; NOT available: ...]`, `radio menu: game buttons not available (...)`, `radio menu
   for 'Corral NNNN' (plot '...')[: no radio channel (no Music Box|corral not found yet)]`, `radio menu opened (N rows
   per list, M song(s), font ..., key bar the game's popup button (game_button)|own pills, rows in the game
@@ -627,6 +673,9 @@ lamp (a shader could ignore blocks: SRP Batcher materials take them, but it was 
 looks in time and not too strong / weak, restore after Stop / Pause / out of range / setting off. Round 13:
 the strength curve (one speaker gentle), the new lamps' Lights and emission (property blocks on HDRP Lit /
 custom shaders), the Ice Lamp's LightControl not fighting the pulse, the scene ice scan cost and matches.
+Plorts glow (round 16): that the plort shaders take the gradient colours from a property block and that
+colours above 1 read as a glow (not just a paler plort); the look of the lift on dark plorts (Ringtail,
+Shadow); cost with many loose plorts (the 1024-model refresh every 2 s).
 
 ## History
 

@@ -57,7 +57,7 @@ One `ResourceNodeDirector` per area owns many `ResourceNodeSpawner` points; on a
 
 ### Actors / spawning
 - `InstantiationHelpers.InstantiateActor` (as the sandbox spawner) - spawn a toy in front of the camera
-- `GameModel.identifiablesByIdent[type]` - per-type actor lists (stations, Boomboxes, Night Lights, lamp decorations and Music Pillars / Tiles: slime_dj `lamps.cpp`, which also watches the lists' `_size` / `_version` to notice a placement); a cheap alternative to a scene search for placed gadgets of one type (`GadgetModel.transform` +0x38 null / destroyed while its scene is unloaded)
+- `GameModel.identifiablesByIdent[type]` - per-type actor lists (stations, Boomboxes, Night Lights, lamp decorations and Music Pillars / Tiles: slime_dj `lamps.cpp`, which also watches the lists' `_size` / `_version` to notice a placement; loose plorts: slime_dj `plorts.cpp`, types from `GameModel.plortGroup` +0x1A8); a cheap alternative to a scene search for placed gadgets of one type (`GadgetModel.transform` +0x38 null / destroyed while its scene is unloaded)
 - `CellDirector.IsOnRanch(RegionMember)` 0x514EA0 (static) - any of member.Regions whose CellDirector is a ranch cell; member.Regions must not be null
 - mod: dj_buildables.cpp, drone_source.cpp, shadow_catcher.cpp
 
@@ -79,7 +79,7 @@ One `ResourceNodeDirector` per area owns many `ResourceNodeSpawner` points; on a
 ## From the minimap, map_tools, quick_travel, wall_markers, collectibles notes
 
 ### GameModel (MonomiPark.SlimeRancher.DataModel)
-- fields: `identifiablesByIdent` Dictionary<IdentifiableType, List<IdentifiableModel>> (lists of GadgetModels = every gadget; `GameModel.AllGadgets` does the same), `player` (PlayerModel : IdentifiableModel), `eventRecordModel` (the loaded save's event record) (dump)
+- fields: `identifiablesByIdent` Dictionary<IdentifiableType, List<IdentifiableModel>> (lists of GadgetModels = every gadget; `GameModel.AllGadgets` does the same; also every actor: `RegisterActor` 0xA97D20 adds the new `ActorModel` (IDA), so `identifiablesByIdent[plortType]` = the loose plorts, `ActorModel.transform` +0x38 the live object), `player` (PlayerModel : IdentifiableModel), `eventRecordModel` (the loaded save's event record) (dump)
 - methods: `GetGordoModel(string id)` - TryGetValue, null if never fed (IDA)
 - mod: MM
 
