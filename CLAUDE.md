@@ -7,7 +7,7 @@
 | note | about |
 |---|---|
 | `ideas.md` | unplanned ideas |
-| `round-14.md` | round 13 test feedback, split into agent tasks |
+| `round-15.md` | round 14 test feedback, split into agent tasks |
 | `custom-icons.md` | replacing script-drawn icons with the user's drawings; vanilla icons meanwhile |
 
 ## Where the documentation lives
