@@ -601,8 +601,8 @@ private:
         x.min = 0;
         x.max = 1;
         x.step = 1;
-        x.tooltip = "Lamps (Electric Pillar, Striped, Conservatory, Lava and Ice Lamps) and the glowing ice in "
-                    "Powderfall Bluffs near a music box, DJ Booth, speaker stack or radio that plays a song pulse "
+        x.tooltip = "Lamps (Electric Pillar, Striped, Conservatory, Lava and Ice Lamps), Music Pillars and Music "
+                    "Tiles (they also light up on the beat) and the glowing ice in Powderfall Bluffs near a music box, DJ Booth, speaker stack or radio that plays a song pulse "
                     "their light and glow with the beat in their own colour (the Electric Pillar Lamp also cycles "
                     "through colours): calm in quiet parts, flashing in loud ones. One speaker "
                     "gives a gentle pulse, more speakers a stronger one. They go back to normal when the song stops "
@@ -2248,7 +2248,7 @@ private:
         lampPoll_ -= std::isfinite(dt) ? dt : 0.0f;
         if (lampPoll_ > 0) return;
         lampPoll_ = kLampPollInterval;
-        if (LampSignature() != lampSig_) SyncLamps();
+        if (LampSignature() != lampSig_ || lamps_.Placed()) SyncLamps();  // Placed: a lamp was just put down
     }
 
     // Every frame: each channel's song position (read like TickDancer: kDanceLagSeconds behind).

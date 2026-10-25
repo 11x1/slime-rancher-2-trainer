@@ -1,7 +1,7 @@
 #pragma once
 // slime_dj: "Lamps pulse to the music". Placed lamp decorations (Electric Pillar Lamp, Pink Striped
-// Lamp, Conservatory Lamp, Blue Lava Lamp, Ice Lamp and their variants) and the glowing ice crystals of
-// Powderfall Bluffs near a speaker that plays a song (music box, DJ Booth, speaker stack, Slime Radio,
+// Lamp, Conservatory Lamp, Blue Lava Lamp, Ice Lamp and their variants, Music Pillar and Music Tile) and
+// the glowing ice crystals of Powderfall Bluffs near a speaker that plays a song (music box, DJ Booth, speaker stack, Slime Radio,
 // Corral Radio) pulse their glow, emission and Light components with that song's beat analysis
 // (beat.h), the same per-hop level / onset / energy the walls use (walls.cpp). Strength grows with the
 // number and loudness of the speakers in range (one close speaker = a gentle pulse).
@@ -50,6 +50,9 @@ public:
     // checks it every 0.25 s): the playing speakers and the lamp range (m). Finds the lamps at most every
     // kFindSeconds (kNewSourceSeconds when a speaker joined); lamps out of range are restored and dropped.
     void Sync(const std::vector<Source>& sources, float range);
+    // Cheap (memory reads, no game calls; the module asks every 0.25 s while a song plays): true when a
+    // lamp was placed or picked up since the last lamp list refresh. The next Sync then refreshes at once.
+    bool Placed();
     // Every frame. Channels not listed (or not playing) let their lamps settle and restore.
     void Tick(float dt, const std::vector<Channel>& channels);
     // Restores everything and forgets the lamps (setting off, no song, module disabled).
