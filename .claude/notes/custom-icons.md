@@ -28,7 +28,7 @@ The script-drawn PNGs were removed from `assets/icons/`. Each name below has not
 | `plort_door`, `shadow_door` | collectible tracker | the map marker sprites |
 | `ghost_drone` | collectible tracker (under the minimap) | sprite `iconExplorerDronePedia` (user's pick), else placeholder |
 | `research_drone` | collectible tracker | sprite `iconPediaDrone_small` / `iconPediaDrone`, else placeholder |
-| `map_node` | collectible tracker | sprite `iconPediaHomeWorld` / `pediaHomeWorld` (Slimepedia World tile, may not be loaded in game), else placeholder |
+| `map_node` | collectible tracker | sprite `pediaHomeWorld` (the user's pick), then `iconPediaHomeWorld` (Slimepedia World tile, may not be loaded in game), else placeholder |
 
 The tracker loads the game sprites by name (one `FindObjectsOfTypeAll(Sprite)` after a map page build, at most 3 per session; log line `collectibles: game sprites by name ...`). If one isn't loaded, `<name>_placeholder.png` (script-drawn, `make_icons.py`) shows for the three drone / node rows: these are the only script-drawn icons left. `collector_2/3`, `feeder_2` and `sell_all_now` belonged to retired upgrades and are gone.
 

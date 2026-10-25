@@ -1448,7 +1448,7 @@ private:
             case kGordos: return {"iconGordoPedia_small", "iconGordoPedia"};
             case kDrones: return {"iconPediaDrone_small", "iconPediaDrone"};
             case kGhostDrones: return {"iconExplorerDronePedia"};
-            case kMapNodes: return {"iconPediaHomeWorld", "pediaHomeWorld"};
+            case kMapNodes: return {"pediaHomeWorld", "iconPediaHomeWorld"};
             default: return {};
         }
     }
