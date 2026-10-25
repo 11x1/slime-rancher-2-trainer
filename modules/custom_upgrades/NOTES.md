@@ -40,10 +40,14 @@ key: `0x0002 silo_sell_all_now`, `0x0010 corral_collector_2`, `0x0011 corral_col
 
 Tier effects are applied by plot_upgrades through `Multiplier(obj, family)`. One card per chain
 (`Shown`); a chain that starts on a vanilla upgrade shows on that upgrade's card (`ChainVanillaRoot`).
-Icons: `ModIconName` uses `assets/icons/<name>.png` when embedded (`mod_icons::Has`), else `iconFrom` (a
-vanilla card's icon): Sprinkler II / III the Sprinkler's, Coop Air Net the corral Air Net's, Silo Capacity
-the Storage Capacity's, the Hen Collector `hen_collector_source.png`, the Corral Radio the Music Box's until
-a `corral_radio.png` exists. `growth_1` / `growth_2` stay embedded, unused.
+Icons: `ModIconName` uses the user's drawing `assets/icons/<name>.png` when embedded (`mod_icons::Has`),
+else `iconFrom` (a vanilla card's icon). Since round 11 no card has a script-drawn icon ("trying to move
+away from AI art"): Sell-All Button the Market Link's (`sell_all`), Music Box II and Corral Radio the Music
+Box's (`music_2`, `corral_radio`), Faster Hens I / II the Deluxe Coop's (`hens_1`, `hens_2`), Sprinkler II /
+III the Sprinkler's (`growth_1`, `growth_2`), Ash Booster the Ash Trough's (`ash_boost`), Coop Air Net the
+corral Air Net's (`coop_air_net`), Silo Capacity the Storage Capacity's. The Hen Collector has the user's
+`hen_collector_source.png`. A drawing under one of those names takes over at the next build
+(`.claude/notes/custom-icons.md`).
 
 Per-plot values: `hen_collector`, `hen_collector_keep_hens` / `_roosters` (plus other modules':
 sell_upgrades' Ash Trough fill, `slime_dj.radio`). Per-save values: `custom_upgrades.on` (gate mark),

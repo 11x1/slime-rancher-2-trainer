@@ -291,6 +291,7 @@ Unity's new Input System only, through a ScriptableObject event bus; gameplay su
 - `iconCategorySlimes` (pedia/shop UI scenes, single pink slime), `pediaHomeSlimes` (shared bundle), `iconLargoPedia_small` / `iconLargoPedia`, `iconCategoryUtilities` / `iconCategoryWarptech` / `iconCategoryDecorations` (loaded from start), `pin` (Fabricator scene only); decor sprites `iconDecorPinwheel...`, `iconDecorGreenPine1`
 - gotchas: `FindObjectsOfTypeAll(Sprite)` sees only currently loaded sprites
 - mod: sb EnsureNamedSprites
+- collectibles `FindNamedSprites` (unverified in game, see its log line `collectibles: game sprites by name`): `iconGordoPedia_small` / `iconGordoPedia` (gordos), `iconPediaDrone_small` / `iconPediaDrone` (research drones), `iconExplorerDronePedia` (ghostly drones), `iconPediaHomeWorld` / `pediaHomeWorld` (map data nodes; a Slimepedia home tile, may be unloaded in game)
 
 ## From the ui/ (overlay, Options tab, icons, input) notes
 

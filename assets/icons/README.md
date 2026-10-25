@@ -1,34 +1,23 @@
 # Mod icons
 
-Icons for the mod's own features. Most are drawn for this project by `src/make_icons.py`;
-the exception is the Hen Collector icon, which the user drew over the game's Plort Collector
-icon (so it contains game art). 256 x 256 RGBA PNGs, straight alpha, in the flat two-tone
-"sticker" style of the game's plot-upgrade icons (white outline, darker shadow band). They are
-embedded into the DLL (`ui/mod_icons_data.inc`) and turned into Unity sprites at run time by
-`ui/mod_icons.cpp`.
+Icons for the mod's own features: the user's own drawings, plus three script-drawn placeholders
+for collectible tracker rows the game has no sprite for. Since round 11 nothing else is
+script-drawn ("trying to move away from AI art"): mod features without a drawing show the
+game's own (vanilla) icon. 256 x 256 RGBA PNGs, straight alpha. They are embedded into the DLL
+(`ui/mod_icons_data.inc`) and turned into Unity sprites at run time by `ui/mod_icons.cpp`.
 
 | file | used for |
 |---|---|
-| `collector_2.png`, `collector_3.png` | Plort Collector II / III (corral) |
-| `feeder_2.png` | Auto-Feeder II (corral) |
-| `music_2.png` | Music Box II (corral) |
-| `hens_1.png`, `hens_2.png` | Faster Hens I / II (coop) |
-| `growth_1.png`, `growth_2.png` | Sprinkler II / III (garden; ids garden_growth_1 / 2) |
-| `ash_boost.png` | Ash Booster (incinerator) |
-| `sell_all.png` | Sell-All Button (silo) |
-| `sell_all_now.png` | Sell All Plorts Now (silo action) |
-| `coop_air_net.png` | unused: the Coop Air Net card shows the corral's own Air Net icon (user request) |
 | `hen_collector_source.png` | Hen Collector: the coop upgrade card and the drone program source (user's drawing, `source/roostercollector_custom.png`) |
 | `elder_collector_source.png` | Elder Collector drone source (user's drawing, `source/eldercollector_custom.png`); without it the source shows the elder hen |
 | `mods_tab.png` | the "Mods" tab of the in-game Options menu (user's drawing, `source/modstabicon_custom.png`, kept at its 128 x 128: the tab scales it to the stock category icon, which is 128 x 128 too) |
-| `map_node.png` | collectible tracker: map data nodes (the game has no sprite for them) |
-| `research_drone.png` | collectible tracker: research drones (no map / Slimepedia / HUD sprite in the game) |
-| `ghost_drone.png` | collectible tracker: ghostly drones (their IdentifiableType has no icon) |
-| `gordo.png` | collectible tracker: gordos (the map marker sprite is not recognisable at tracker size) |
-| `plort_door.png`, `shadow_door.png` | collectible tracker: plort doors / shadow plort doors (same reason) |
+| `map_node_placeholder.png`, `research_drone_placeholder.png`, `ghost_drone_placeholder.png` | collectible tracker, script-drawn (`src/make_icons.py`): shown only when neither a user drawing (`map_node.png` / `research_drone.png` / `ghost_drone.png`) nor the game sprite found by name (`iconPediaHomeWorld`, `iconPediaDrone(_small)`, `iconExplorerDronePedia`) is there |
 
-Tier icons share the object and carry a badge with the tier's Roman numeral (I green,
-II blue, III gold); the Ash Booster has an orange "boost" badge.
+Names a drawing can take over (nothing embedded under them now, the vanilla icon shows):
+`sell_all`, `music_2`, `corral_radio`, `hens_1`, `hens_2`, `growth_1`, `growth_2`, `ash_boost`,
+`coop_air_net` (plot upgrade cards, `modules/custom_upgrades` `ModIconName`) and `gordo`,
+`plort_door`, `shadow_door`, `map_node`, `research_drone`, `ghost_drone` (collectible tracker,
+`modules/collectibles` `IconFor`). See `.claude/notes/custom-icons.md`.
 
 `source/` keeps the user's hand-drawn originals untouched; they are not embedded (only
 `assets/icons/*.png` is).
@@ -53,14 +42,14 @@ embedded. The log says `drone source: Elder Collector icon = the mod icon
 Offline only (Python 3 with Pillow and numpy; nothing here goes into the game folder):
 
 ```sh
-python assets/icons/src/make_icons.py --sheet contact_sheet.png   # writes the drawn assets/icons/*.png
+python assets/icons/src/make_icons.py --sheet contact_sheet.png   # writes assets/icons/*_placeholder.png
 python assets/icons/src/gen_inc.py                                 # writes ui/mod_icons_data.inc
 ```
 
 `build.ps1` runs `gen_inc.py` before every build (stdlib only; the .inc is rewritten only when
 an icon changed; without Python the committed .inc is used). `src/iconkit.py` holds the drawing
 helpers (masks on a 1024 px canvas, shadow crescents, the sticker outline, tier badges);
-`src/make_icons.py` draws each icon; `src/pad_icon.py` prepares hand-drawn ones.
+`src/make_icons.py` draws the placeholders; `src/pad_icon.py` prepares hand-drawn ones.
 
 ## Browsing the extracted game icons
 

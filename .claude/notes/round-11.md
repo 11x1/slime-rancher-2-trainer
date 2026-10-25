@@ -51,7 +51,7 @@ Suggested agent split (one branch each, off develop). User quotes are verbatim.
 - "did plorts program, not starting w chickens after completed plorts, dropped another plort -> woke up, collected it -> to refinery like program said": after the plort program finishes, the drone rests instead of switching to the chicken program. The idle rule (Rest + no work from MaybeHasNextGatherBehavior) apparently never triggers the switch; read the log for the switch lines.
 - "keybind icons still look off, use the same look as for silo dialog menus": the dialog's key glyphs should match the silo receipt dialog's key glyphs (the mod's sell dialog).
 
-## 7. Plots
+## 7. Plots (done: chore/vanilla-card-icons; state in custom-icons.md)
 - Music Box II card: "use the default music box icon for the upgrade, leave a plan for me to make custom ones, trying to move away from AI art". Use vanilla icons for all mod upgrade cards that currently use script-drawn icons; see [custom-icons.md](custom-icons.md).
 
 ## Carry-over (untested, re-add to the round 11 checklist)

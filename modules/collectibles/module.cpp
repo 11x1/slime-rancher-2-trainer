@@ -53,12 +53,14 @@
 // the count ("show_labels"); list mode is one text line per category. Every
 // icon and text has a dark copy offset down-right as a drop shadow, so it
 // stays readable on bright terrain.
-// Icons: the game's own sprite where one exists and reads well (pod / shadow
-// depositor counter, teleporter and stabilizer markers); gordos and plort
-// doors use the mod's own icons (the map marker sprites were not recognisable
-// at tracker size), as do map data nodes, research drones and ghostly drones
-// (no game sprite; the ghostly drone's IdentifiableType has no icon): see
-// assets/icons, loaded via ui/mod_icons. The game sprite stays the fallback.
+// Icons (IconFor): a drawing by the user (assets/icons/<name>.png, loaded via
+// ui/mod_icons) wins; otherwise the game's own sprite: the pod / shadow
+// depositor counter icon, the page markers' sprites (gordos, plort doors,
+// teleporters, stabilizers), or a game sprite found by name (FindNamedSprites:
+// the Slimepedia's gordo and research drone icons, the explorer drone icon for
+// ghostly drones, the Slimepedia World tile for map data nodes). Only when the
+// game has no sprite, the script-drawn placeholder (<name>_placeholder.png),
+// else the text label.
 // Size: icon / count row 6.8 % of the minimap's size (list font 4.6 %) times
 // the "size" setting (60-160 %); the label line adds half of that.
 //
@@ -495,6 +497,8 @@ private:
     bool fogReady_ = false;              // last Tally: the save's event record was queryable
     bool pageHasZoneInfo_ = false;
     Ref catIcon_[kCatCount];
+    Ref namedIcon_[kCatCount];  // game sprites found by name (FindNamedSprites; assets, kept across pages)
+    int namedScans_ = 0;
     float scaleX_ = 0, scaleY_ = 0, offX_ = 0, offY_ = 0;
 
     // live state
@@ -566,6 +570,7 @@ private:
         }
         for (Ref& r : zonePins_) r.Abandon();
         for (Ref& r : catIcon_) r.Abandon();
+        for (Ref& r : namedIcon_) r.Abandon();
         for (auto& [id, g] : ghosts_) g.pod.Abandon();
         for (auto& [id, d] : drones_) d.ctrl.Abandon();
         ghostIcon_.Abandon();
@@ -911,6 +916,7 @@ private:
 
         ReadZoneGroups();
         LogTotals(byOwn, byPoly, byLabel, unassigned, fogAreas, fogNoEvent);
+        FindNamedSprites();
         recomputeAcc_ = 1e9f;
         shownSig_.clear();
     }
@@ -1421,21 +1427,86 @@ private:
         unity::SetActive(ui_.root.get(), v);
     }
 
-    // Gordos and plort doors: the mod's own icon (their map marker sprites were not recognisable
-    // at tracker size), the game's marker sprite as fallback. Otherwise the game's own sprite
-    // (counter / marker / identifiable icon) when it has one, else the mod's icon for categories
-    // without any game sprite (map data nodes, research drones, ghostly drones: ComponentAcqDrone
-    // has no icon), else nullptr (text label).
+    // The user's drawing for a category (assets/icons/<name>.png). "<name>_placeholder" is the
+    // script-drawn stand-in, used only where the game has no sprite.
+    static const char* ModIconName(int cat) {
+        switch (cat) {
+            case kGordos: return "gordo";
+            case kPlortDoors: return "plort_door";
+            case kShadowDoors: return "shadow_door";
+            case kMapNodes: return "map_node";
+            case kDrones: return "research_drone";
+            case kGhostDrones: return "ghost_drone";
+            default: return nullptr;
+        }
+    }
+
+    // Game sprites by name (best first) for categories whose page sprite is missing or not
+    // recognisable at tracker size. Names from the extracted game icons (assets/icons/game).
+    static std::vector<const char*> SpriteNames(int cat) {
+        switch (cat) {
+            case kGordos: return {"iconGordoPedia_small", "iconGordoPedia"};
+            case kDrones: return {"iconPediaDrone_small", "iconPediaDrone"};
+            case kGhostDrones: return {"iconExplorerDronePedia"};
+            case kMapNodes: return {"iconPediaHomeWorld", "pediaHomeWorld"};
+            default: return {};
+        }
+    }
+
+    // One Resources.FindObjectsOfTypeAll(Sprite) after a page index build while a wanted sprite is
+    // still missing, at most 3 per session (only sprites loaded at that moment are found; the
+    // Slimepedia's may come later than the first page).
+    void FindNamedSprites() {
+        bool missing = false;
+        for (int c = 0; c < kCatCount; ++c)
+            if (!SpriteNames(c).empty() && !namedIcon_[c].Alive()) missing = true;
+        if (!missing || namedScans_ >= 3) return;
+        ++namedScans_;
+        Step("named sprites");
+        std::unordered_map<std::string, Il2CppObject*> byName;
+        for (int c = 0; c < kCatCount; ++c)
+            for (const char* n : SpriteNames(c)) byName.emplace(n, nullptr);
+        const unsigned long long t0 = GetTickCount64();
+        size_t seen = 0;
+        for (Il2CppObject* spr : unity::FindObjectsOfTypeAll(ugui::SpriteClass())) {
+            if (!spr || !unity::IsAlive(spr)) continue;
+            ++seen;
+            auto it = byName.find(unity::GetName(spr));
+            if (it != byName.end() && !it->second) it->second = spr;
+        }
+        std::string found;
+        for (int c = 0; c < kCatCount; ++c) {
+            if (namedIcon_[c].Alive()) continue;
+            for (const char* n : SpriteNames(c))
+                if (Il2CppObject* spr = byName[n]) {
+                    namedIcon_[c].Reset(spr);
+                    found += std::format("{}{}={}", found.empty() ? "" : ", ", kCats[c].key, n);
+                    break;
+                }
+        }
+        SR2_INFO("collectibles: game sprites by name (scan {}, {} sprites, {} ms): {}", namedScans_, seen,
+                 GetTickCount64() - t0, found.empty() ? "none new" : found);
+        if (!found.empty()) shownSig_.clear();
+    }
+
+    // The user's drawing, else the game's sprite (gordos: the Slimepedia icon before the page
+    // marker, which is not recognisable at tracker size; ghostly drones: iconExplorerDronePedia,
+    // user request; otherwise counter / marker / identifiable icon, then by name), else the
+    // script-drawn placeholder, else nullptr (text label).
     Il2CppObject* IconFor(int cat) {
-        const char* preferred = cat == kGordos ? "gordo" : cat == kPlortDoors ? "plort_door"
-                              : cat == kShadowDoors ? "shadow_door" : nullptr;
-        if (preferred)
-            if (Il2CppObject* own = sr2::ui::mod_icons::Get(preferred)) return own;
+        namespace mi = sr2::ui::mod_icons;
+        const char* own = ModIconName(cat);
+        if (own && mi::Has(own))
+            if (Il2CppObject* spr = mi::Get(own)) return spr;
+        if ((cat == kGordos || cat == kGhostDrones) && namedIcon_[cat].Alive()) return namedIcon_[cat].get();
         if (catIcon_[cat].Alive()) return catIcon_[cat].get();
         if (cat == kGhostDrones && ghostIcon_.Alive()) return ghostIcon_.get();
-        const char* own = cat == kMapNodes ? "map_node" : cat == kDrones ? "research_drone"
-                        : cat == kGhostDrones ? "ghost_drone" : nullptr;
-        return own ? sr2::ui::mod_icons::Get(own) : nullptr;
+        if (namedIcon_[cat].Alive()) return namedIcon_[cat].get();
+        if (own) {
+            const std::string ph = std::string(own) + "_placeholder";
+            if (mi::Has(ph)) return mi::Get(ph);
+        }
+        return nullptr;
     }
 
     std::string Numbers(int cat) const {

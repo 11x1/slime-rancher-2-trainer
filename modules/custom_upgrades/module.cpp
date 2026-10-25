@@ -1709,24 +1709,27 @@ Il2CppObject* CustomUpgrades::MarketIcon() {
     return marketIcon_;
 }
 
-// The mod's own icon for a custom item (assets/icons, ui/mod_icons.h).
+// The user's drawing for a custom item (assets/icons/<name>.png, ui/mod_icons.h), or nullptr when
+// none is embedded: the card then shows the vanilla icon of iconFrom (Market Link for the Sell-All
+// Button). Round 11: no script-drawn card icons ("trying to move away from AI art"); a drawing
+// dropped in under one of these names takes over at the next build (.claude/notes/custom-icons.md).
 const char* ModIconName(int32_t id) {
+    const char* name = nullptr;
     switch (id) {
-        case SILO_SELL_ALL: return "sell_all";
-        case CORRAL_MUSIC_2: return "music_2";
-        // Placeholder: the vanilla Music Box icon (iconFrom) until assets/icons/corral_radio.png exists.
-        case CORRAL_RADIO: return sr2::ui::mod_icons::Has("corral_radio") ? "corral_radio" : nullptr;
-        case COOP_HENS_1: return "hens_1";
-        case COOP_HENS_2: return "hens_2";
-        // GARDEN_GROWTH_1 / _2 (Sprinkler II / III): none - the vanilla Sprinkler upgrade icon (iconFrom; round 10
-        // "use the default sprinkler upgrade icon"); growth_1 / growth_2 stay embedded but unused.
-        case INCIN_ASH_BOOST: return "ash_boost";
-        // COOP_AIR_NET: none - the corral's own Air Net icon (iconFrom, user request "use the air net icon
-        // from corrals"); assets/icons/coop_air_net.png stays embedded but unused.
+        case SILO_SELL_ALL: name = "sell_all"; break;          // vanilla: Market Link
+        case CORRAL_MUSIC_2: name = "music_2"; break;          // vanilla: Music Box
+        case CORRAL_RADIO: name = "corral_radio"; break;       // vanilla: Music Box
+        case COOP_HENS_1: name = "hens_1"; break;              // vanilla: Deluxe Coop
+        case COOP_HENS_2: name = "hens_2"; break;              // vanilla: Deluxe Coop
+        case GARDEN_GROWTH_1: name = "growth_1"; break;        // vanilla: Sprinkler
+        case GARDEN_GROWTH_2: name = "growth_2"; break;        // vanilla: Sprinkler
+        case INCIN_ASH_BOOST: name = "ash_boost"; break;       // vanilla: Ash Trough
+        case COOP_AIR_NET: name = "coop_air_net"; break;       // vanilla: the corral's Air Net
         // The user's drawing (the Plort Collector with a hen coming out), also the drone source's icon.
-        case COOP_HEN_COLLECTOR: return "hen_collector_source";
+        case COOP_HEN_COLLECTOR: name = "hen_collector_source"; break;  // vanilla: Deluxe Coop
         default: return nullptr;
     }
+    return sr2::ui::mod_icons::Has(name) ? name : nullptr;
 }
 Il2CppObject* CustomUpgrades::CloneItem(Il2CppObject* tpl, const UpgradeDef& d, Il2CppObject* iconSrc,
                                         Il2CppObject*& costEntry) {
