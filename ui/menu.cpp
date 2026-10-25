@@ -267,9 +267,11 @@ bool HasConsoleName(const std::string& text) {
     return false;
 }
 
-// Minimum tooltip widths (design px): plain text tips, and the Sandbox item / rich tips, which
-// are as wide as their key rows when they have some and were narrow without (a name and a tag).
-constexpr float kTipMinW = 160, kRichTipMinW = 230;
+// Minimum tooltip widths (design px): plain text tips, and the Sandbox item / rich tips. Those with
+// favourite rows come out about 260-300 px wide; the ones with only a name, a tag and the click rows
+// (an empty or locked slot, an item with no favourites) were 230 and still looked squeezed next to
+// them (round 11), so the minimum is about the width of a tip with favourite rows.
+constexpr float kTipMinW = 160, kRichTipMinW = 280;
 
 void Tooltip(const std::string& text) {
     if (text.empty()) return;
