@@ -46,8 +46,9 @@ public:
     bool Resolve(std::string& why);
     bool Ready() const;
 
-    // Every music box scan (2 s): the playing speakers and the lamp range (m). Finds the lamps at
-    // most every kFindSeconds; lamps out of range are restored and dropped.
+    // Every music box scan (2 s), and right away when the set of playing speakers changed (the module
+    // checks it every 0.25 s): the playing speakers and the lamp range (m). Finds the lamps at most every
+    // kFindSeconds (kNewSourceSeconds when a speaker joined); lamps out of range are restored and dropped.
     void Sync(const std::vector<Source>& sources, float range);
     // Every frame. Channels not listed (or not playing) let their lamps settle and restore.
     void Tick(float dt, const std::vector<Channel>& channels);

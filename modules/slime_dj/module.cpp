@@ -104,6 +104,7 @@ constexpr uint32_t kRingChunks = 16;     // 8 s ring at 0.5 s chunks
 constexpr uint32_t kStartChunks = 4;     // written before the first Play (2 s)
 constexpr int kWritesPerTick = 3;        // chunks copied per frame once playing
 constexpr float kBoxScanInterval = 2.0f;
+constexpr float kLampPollInterval = 0.25f;  // playing speakers changed (a song / speaker started): lamps resync now
 constexpr float kBusRetryInterval = 5.0f;
 constexpr float kPublishInterval = 0.2f;
 constexpr float kPerfLogInterval = 60.0f;  // box scan timing summary, at most once a minute
@@ -2223,9 +2224,31 @@ private:
         if (!cfg_.danceLamps || !lamps_.Ready()) return;
         std::vector<dj::LampPulser::Source> src;
         for (const Speaker& sp : speakers_)  // positions from UpdateBoost in this scan; silent = a switched-off booth / Boombox
-            if (Audible(sp) && sp.posOk && sp.ch && sp.ch->cur && sp.clipGen == sp.ch->cur->clipGen)
-                src.push_back({sp.pos.x, sp.pos.y, sp.pos.z, sp.ch, std::clamp(sp.volScale * sp.lpVol, 0.0f, 2.0f)});
+            if (LampSource(sp)) src.push_back({sp.pos.x, sp.pos.y, sp.pos.z, sp.ch, std::clamp(sp.volScale * sp.lpVol, 0.0f, 2.0f)});
+        lampSig_ = LampSignature();
         lamps_.Sync(src, cfg_.lampRange);
+    }
+    static bool LampSource(const Speaker& sp) {
+        return Audible(sp) && sp.posOk && sp.ch && sp.ch->cur && sp.clipGen == sp.ch->cur->clipGen;
+    }
+    // Which speakers play which channel's song now. A speaker joins its song in TickSong (sp.clipGen),
+    // up to a box scan (2 s) before SyncLamps would see it; round 14: "lamps take a bit to kick in with
+    // reacting to the music". Checked every kLampPollInterval (a loop over the speakers, no game calls).
+    uint64_t LampSignature() const {
+        uint64_t h = 1469598103934665603ull;
+        for (const Speaker& sp : speakers_)
+            if (LampSource(sp)) {
+                h = (h ^ reinterpret_cast<uintptr_t>(&sp)) * 1099511628211ull;
+                h = (h ^ reinterpret_cast<uintptr_t>(sp.ch)) * 1099511628211ull;
+            }
+        return h;
+    }
+    void PollLamps(float dt) {
+        if (!cfg_.danceLamps || !lamps_.Ready() || !AnySong()) return;
+        lampPoll_ -= std::isfinite(dt) ? dt : 0.0f;
+        if (lampPoll_ > 0) return;
+        lampPoll_ = kLampPollInterval;
+        if (LampSignature() != lampSig_) SyncLamps();
     }
 
     // Every frame: each channel's song position (read like TickDancer: kDanceLagSeconds behind).
@@ -2365,6 +2388,7 @@ private:
         TickMix(dt);
         TickMuffle(dt);
         TickDancer(dt);
+        PollLamps(dt);
         TickLamps(dt);
         lamps_.Debug(debug_marks::Wanted());
         if (!debug_marks::Wanted() || !AnySong()) RemoveSpeakerMarks();
@@ -2916,6 +2940,8 @@ private:
     unsigned emitterGen_ = 0;
     Il2CppGCHandle musicBus_ = nullptr, masterBus_ = nullptr, cueBus_ = nullptr;
     float boxScan_ = 0, busRetry_ = 0, publishAcc_ = 0;
+    float lampPoll_ = 0;     // PollLamps countdown
+    uint64_t lampSig_ = 0;   // LampSignature at the last SyncLamps
     std::mt19937_64 rng_{GetTickCount64()};
     // Real radio: seconds of unpaused play time (TickImpl), and where radios without a channel were on air.
     double radioTime_ = 0;
