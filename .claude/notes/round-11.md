@@ -1,6 +1,6 @@
 # Round 11 plan (feedback from the round 10 test, 2026-10-25)
 
-Build tested: cc71186 (develop). Results are in the checklist artifact https://claude.ai/artifact/LVUtmDa1e6KDWD2WpQfY3V (collection `results`, ids `r10*`; free-text notes in `misc/notes`). Start with [agent-context.md](agent-context.md): it cuts what every agent below spends on finding context.
+Build tested: cc71186 (develop). Results are in the checklist artifact https://claude.ai/artifact/LVUtmDa1e6KDWD2WpQfY3V (collection `results`, ids `r10*`; free-text notes in `misc/notes`). The agent context library (`re/INDEX.md`, `.claude/agent-brief.md`) is done: it cuts what every agent below spends on finding context.
 
 ## How to run this round (for the session that picks it up)
 The user's working rules are in the auto-memory (orchestrator mode, Opus subagents at medium effort, git workflow, no session link, plain commands, checklist conventions, read logs yourself). In short:
