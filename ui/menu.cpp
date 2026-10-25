@@ -273,6 +273,9 @@ bool HasConsoleName(const std::string& text) {
 // (an empty or locked slot, an item with no favourites) were 230 and still looked squeezed next to
 // them (round 11), so the minimum is about the width of a tip with favourite rows.
 constexpr float kTipMinW = 160, kRichTipMinW = 280;
+// The Sandbox grids' item tooltips (ItemTooltip): about this wide, the info line wrapping there (round 14: 280 px and
+// the info line at 260 px read as "insanely long" on a beach ball, resources, crates). Favourite rows may widen it.
+constexpr float kItemTipW = 200;
 
 // `minW` (design px): the minimum width; 0 = as wide as the text (a one-word tip, e.g. a filter tab's).
 void Tooltip(const std::string& text, float minW) {
@@ -1475,6 +1478,7 @@ uintptr_t g_ctxItem = 0;
 SbxGrid g_ctxGrid = SbxGrid::Vacpack;
 int g_ctxSlot = -1;  // the vacpack slot the menu was opened on (its Fill / Empty entries); -1: a grid tile
 ImVec2 g_ctxAt;      // where the menu opens (the right-click; item_grid::Result::menuAt for a grid tile)
+ImVec2 g_ctxSize;    // the menu's size as its last frame laid it out (what the next frame places it by)
 constexpr const char* kSbxCtx = "##sbx_item_ctx";
 constexpr const char* kCraftCtx = "##sbx_craft_ctx";  // the crafter's right-click menu (variants)
 uintptr_t g_craftCtx = 0;                             // the recipe it was opened on
@@ -1954,8 +1958,9 @@ void ItemTooltip(const sbx::Snapshot& s, const std::string& name, sbx::Kind kind
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(U(14), U(10)));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(6), U(4)));
     PushFloatingStyle();
-    // A sensible minimum width: a name with only its tag (no favourites, no key rows) looked squashed.
-    ImGui::SetNextWindowSizeConstraints(ImVec2(U(kRichTipMinW), 0), ImVec2(FLT_MAX, FLT_MAX));
+    // About kItemTipW wide (round 14: "shouldnt fit to text but like 200px max"): the minimum width, and the info
+    // line wraps there. Favourite rows, a long name or the cost lines may still make it wider.
+    ImGui::SetNextWindowSizeConstraints(ImVec2(U(kItemTipW), 0), ImVec2(FLT_MAX, FLT_MAX));
     if (ImGui::BeginTooltip()) {
         FloatingSurface(false);
         {
@@ -1999,7 +2004,7 @@ void ItemTooltip(const sbx::Snapshot& s, const std::string& name, sbx::Kind kind
         if (info && *info) {
             FontScope f(theme::Body(), theme::kSmallSize - 1);
             ImGui::PushStyleColor(ImGuiCol_Text, P.dim);
-            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + U(260));
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + U(kItemTipW) - ImGui::GetStyle().WindowPadding.x * 2.0f);
             ImGui::TextUnformatted(info);
             ImGui::PopTextWrapPos();
             ImGui::PopStyleColor();
@@ -2276,14 +2281,22 @@ void ItemContextMenu(const sbx::Snapshot& s) {
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(6), U(4)));
     PushFloatingStyle();
     {
-        // Anchored where it was opened, growing down and to the right, or up / left when there is more room on that
-        // side of the screen. Left to ImGui, a popup that does not fit below the cursor was clamped into the screen
-        // and could land far from the tile (round 13: Lucky Slime's menu opened under the search bar).
+        // Anchored where it was opened (round 14): down and to the right of it, up only when the menu does not fit
+        // below, left only when it does not fit to the right; fitting neither way, against the screen's far edge.
+        // Placed every frame from g_ctxSize (measured at the end of the last frame), not once with a pivot: a
+        // pivot is applied on the frame after opening with the size ImGui measured on the hidden first frame,
+        // and that frame lays out at width 0 (round 13: the wrapped "No favourites" line made Lucky Slime's menu
+        // that tall, so it opened near the top of the screen); which way it opened went by screen half, not room.
+        // The first frame is hidden, so the stale size it is placed by is never seen.
         const ImGuiViewport* vp = ImGui::GetMainViewport();
-        const ImVec2 at = g_ctxAt;
-        const ImVec2 pivot(at.x > vp->WorkPos.x + vp->WorkSize.x * 0.6f ? 1.0f : 0.0f,
-                           at.y > vp->WorkPos.y + vp->WorkSize.y * 0.5f ? 1.0f : 0.0f);
-        ImGui::SetNextWindowPos(at, ImGuiCond_Appearing, pivot);
+        auto place = [](float at, float size, float lo, float hi) {
+            if (at + size <= hi) return at;
+            if (at - size >= lo) return at - size;
+            return std::max(lo, hi - size);
+        };
+        ImGui::SetNextWindowPos(ImVec2(place(g_ctxAt.x, g_ctxSize.x, vp->WorkPos.x, vp->WorkPos.x + vp->WorkSize.x),
+                                       place(g_ctxAt.y, g_ctxSize.y, vp->WorkPos.y, vp->WorkPos.y + vp->WorkSize.y)),
+                                ImGuiCond_Always);
     }
     if (ImGui::BeginPopup(kSbxCtx)) {
         FloatingSurface(true);
@@ -2413,17 +2426,28 @@ void ItemContextMenu(const sbx::Snapshot& s) {
             }
             std::stable_sort(largos.begin(), largos.end(), [](const Give& a, const Give& b) { return a.sort < b.sort; });
             int row = 0;
+            // A row's width: the icon, its gap, the label and room for a submenu arrow, at least rowW.
+            auto rowWidth = [&](float textW) { return std::max(rowW, e + U(8) + textW + U(28)); };
+            // A BeginMenu row lays out only ImGui's menu columns (its label is empty, the text is drawn by hand), so a
+            // submenu of such rows alone came out ~44 px wide (round 14): its width is reserved here, before BeginMenu
+            // (after it, the current window is the submenu).
+            auto reserveRow = [&](const ImVec2& p, float textW) {
+                ImGuiWindow* w = ImGui::GetCurrentWindow();
+                w->DC.CursorMaxPos.x = std::max(w->DC.CursorMaxPos.x, p.x + rowWidth(textW));
+            };
             auto entry = [&](const Give& g) {
                 ImGui::PushID(++row);
                 const ImVec2 p = ImGui::GetCursorScreenPos();
                 const std::string& label = g.label;
+                const ImVec2 ts = TextSize(theme::Body(), fs, label.c_str());
+                // At least rowW, wider for a long label; the highlight spans the menu's width either way.
                 ImGui::BeginDisabled(!g.can);
-                const bool hit = ImGui::Selectable("##give", false, 0, ImVec2(rowW, e));
+                const bool hit = ImGui::Selectable("##give", false, ImGuiSelectableFlags_SpanAvailWidth,
+                                                   ImVec2(rowWidth(ts.x), e));
                 ImGui::EndDisabled();
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 item_grid::DrawIcons(dl, g.icon ? g.icon : g.it->icon, g.icon ? 0 : g.it->icon2, p, ImVec2(p.x + e, p.y + e),
                                      g.can ? IM_COL32_WHITE : IM_COL32(255, 255, 255, 90));
-                const ImVec2 ts = TextSize(theme::Body(), fs, label.c_str());
                 Text(dl, theme::Body(), fs, ImVec2(p.x + e + U(8), p.y + (e - ts.y) * 0.5f), g.can ? P.text : P.dim, label.c_str());
                 if (!g.can && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     Tooltip(g.why                            ? g.why
@@ -2439,7 +2463,8 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                 ImGui::PopID();
             };
             // The game's radiant (rare, glowing) form of a slime: "Spawn: Radiant Pink Slime"; a largo has one per
-            // base slime it can be radiant from: "Spawn: Radiant Pink Tabby Largo (radiant Pink)". Spawned in front of
+            // base slime it can be radiant from, named with that slime first: "Spawn: Radiant Tabby Pink Largo" (round
+            // 14: "use the name which they belong to first", instead of "... (radiant Tabby)"). Spawned in front of
             // you like the spawner's tiles (Op::SpawnRadiant), with the Slimepedia's radiant icon (round 13). Grayed
             // with the reason when the game has none.
             auto radiantEntries = [&](const sbx::Item* of) {
@@ -2458,8 +2483,12 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                 const uintptr_t bases[2] = {sp->radiantBase, sp->radiantBase2};
                 for (int i = 0; i < 2; ++i) {
                     if (!(sp->radiant & (i == 0 ? sbx::kRadiantBase0 : sbx::kRadiantBase1))) continue;
-                    entry({std::format("Spawn: Radiant {} (radiant {})", of->name, shortName(bases[i], "?")), it, can,
-                           true, {}, nullptr, i + 1, sp->radiantIcon[i + 1]});
+                    const uintptr_t otherId = sp->base == bases[i] ? sp->base2 : sp->base;
+                    const std::string first = shortName(bases[i], {}), other = shortName(otherId, {});
+                    std::string label = first.empty() || other.empty()
+                                            ? std::format("Spawn: Radiant {} (radiant {})", of->name, first.empty() ? "?" : first)
+                                            : std::format("Spawn: Radiant {} {} Largo", first, other);
+                    entry({std::move(label), it, can, true, {}, nullptr, i + 1, sp->radiantIcon[i + 1]});
                 }
             };
             // A largo row of the Largos submenu (round 13: "Clicking should result in crafting but another context menu
@@ -2479,11 +2508,12 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                 // hovered one (not the submenu over it) and the press inside the row.
                 const bool click = ImGui::IsWindowHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
                                    ImGui::IsMouseHoveringRect(p, ImVec2(p.x + ImGui::GetContentRegionAvail().x, p.y + e));
+                const ImVec2 ts = TextSize(theme::Body(), fs, g.label.c_str());
+                reserveRow(p, ts.x);
                 ImGui::PushFont(theme::Body(), 22.0f);  // the row is one font size high: as high as the entries
                 const bool open = ImGui::BeginMenu("##largo");
                 ImGui::PopFont();
                 item_grid::DrawIcons(dl, g.it->icon, g.it->icon2, p, ImVec2(p.x + e, p.y + e));
-                const ImVec2 ts = TextSize(theme::Body(), fs, g.label.c_str());
                 Text(dl, theme::Body(), fs, ImVec2(p.x + e + U(8), p.y + (e - ts.y) * 0.5f), P.text, g.label.c_str());
                 if (open) {
                     FloatingSurface(true);
@@ -2521,13 +2551,14 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                 // "Largos  >": the first largo's icon, the label and count, ImGui's submenu arrow.
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 const ImVec2 p = ImGui::GetCursorScreenPos();
+                const std::string label = std::format("Largos ({})", largos.size());
+                const ImVec2 ts = TextSize(theme::Body(), fs, label.c_str());
+                reserveRow(p, ts.x);
                 ImGui::PushFont(theme::Body(), 22.0f);  // the row is one font size high: as high as the entries
                 const bool open = ImGui::BeginMenu("##largos");
                 ImGui::PopFont();
                 const sbx::Item* first = largos.front().it;
                 item_grid::DrawIcons(dl, first->icon, first->icon2, p, ImVec2(p.x + e, p.y + e));
-                const std::string label = std::format("Largos ({})", largos.size());
-                const ImVec2 ts = TextSize(theme::Body(), fs, label.c_str());
                 Text(dl, theme::Body(), fs, ImVec2(p.x + e + U(8), p.y + (e - ts.y) * 0.5f), P.text, label.c_str());
                 if (open) {
                     FloatingSurface(true);
@@ -2535,10 +2566,25 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                     ImGui::EndMenu();
                 }
             }
-            if (gives.empty() && largos.empty() && self->kind != sbx::Kind::Largo)
-                DimText("No favourites or plorts known for this item.");
+            if (gives.empty() && largos.empty() && self->kind != sbx::Kind::Largo) {
+                // Wrapped at the row width, not at the window's edge: the hidden first frame lays out at width 0,
+                // where a wrapped line is as tall as its words (see the placement above).
+                FontScope f(theme::Body(), theme::kSmallSize);
+                ImGui::PushStyleColor(ImGuiCol_Text, P.dim);
+                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + rowW);
+                ImGui::TextUnformatted("No favourites or plorts known for this item.");
+                ImGui::PopTextWrapPos();
+                ImGui::PopStyleColor();
+            }
         }
         if (PopupCancelled()) ImGui::CloseCurrentPopup();
+        {
+            // This frame's layout, which ImGui's auto-fit sizes the window by next frame: the next frame's placement.
+            const ImGuiWindow* w = ImGui::GetCurrentWindow();
+            const ImVec2 pad = ImGui::GetStyle().WindowPadding;
+            g_ctxSize = ImVec2(std::max(w->DC.CursorMaxPos.x, w->DC.IdealMaxPos.x) - w->DC.CursorStartPos.x + pad.x * 2.0f,
+                               std::max(w->DC.CursorMaxPos.y, w->DC.IdealMaxPos.y) - w->DC.CursorStartPos.y + pad.y * 2.0f);
+        }
         ImGui::EndPopup();
     }
     PopFloatingStyle();
@@ -2547,6 +2593,7 @@ void ItemContextMenu(const sbx::Snapshot& s) {
 
 void OpenItemContext(uintptr_t id, SbxGrid grid, int slot = -1, const ImVec2* at = nullptr) {
     g_ctxAt = at ? *at : ImGui::IsMousePosValid() ? ImGui::GetMousePos() : ImGui::GetItemRectMin();
+    g_ctxSize = ImVec2(0, 0);  // measured on the menu's first (hidden) frame
     g_ctxItem = id;
     g_ctxGrid = grid;
     g_ctxSlot = slot;
