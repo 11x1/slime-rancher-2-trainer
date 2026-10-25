@@ -15,52 +15,26 @@ Half-Life 2 (Source SDK 2013) movement for the SR2 player, with uncapped bunnyho
 Ramp/jump checks: falling 64 u (3.4 m) onto a 30 degree down slope at 300 u/s lands with 442 u/s ground speed (the old horizontal-only model gave 260) and a hop on the landing tick keeps all of it; a flat landing keeps 300 exactly; a fast landing on a 30 degree up slope is launched (clipped z 431 > 140); 2 s on a 60 degree ramp (normal.z 0.5) never becomes ground, keeps the 1000 u/s along the ramp exactly and only gains from gravity, while the same slide on a walkable 30 degree slope is ground and friction stops it; the jump apex matches the height setting within 1 % for 1/2/4 m at gravity x0.5/x1/x2 in the 40 Hz tick model.
 The back-hop sim travels backwards at 300 u/s with the view facing away and no keys at take-off: uncapped keeps 300, the three ABH modes go 300 -> 315 -> 345 -> 405 -> 525 -> 765 -> 1245 -> 2205 -> 3500 (sv_maxvelocity 3500 in the test). The forward-hop sim is its mirror (travelling forwards at 300 u/s, view along the velocity, no keys): uncapped and Uncapped + ABH keep 300, vanilla clamp drops to 285, ABH both ways matches the back hop on every hop (checked hop by hop).
 
-## How KFCCharacterController.UpdateVelocity works (verified)
+## Game facts the design relies on
 
-This was verified by disassembling `UpdateVelocity` (RVA 0x5BEF50) in the 1.3.0 GameAssembly.dll with `dumpbin /disasm`. The vtable slots map onto the dump's method tokens in order.
+RE: `re/player.md` (UpdateVelocity structure and vtable slots, 40 Hz tick, jump timing, KCC velocity
+projection, HandleGravity, JumpAbilityBehavior.UpdateVelocity), `re/player.md` (offsets).
 
-```
-if (_motor == null) <init>
-if (_motor.GroundingStatus.IsStableOnGround)        // byte [motor+0x99]
-    HandleStablyGroundedVelocity(ref v, dt)          // slot 0x308
-    HandleStablyGroundedDrag(ref v, dt)              // slot 0x318
-else
-    HandleHorizontalAirborneMovement(ref v, dt, MovementVector)  // 0x328
-    HandleAirborneDrag(ref v, dt, MovementVector)                // 0x338
-    HandleGravity(ref v, dt)                                     // 0x348
-    ClampAirborneHorizontalVelocity(ref v, dt)                   // 0x358
-foreach (a in AbilityBehaviors) if (a.IsActive) a.UpdateVelocity(ref v, dt)
-tail-call UpdateVelocityWithExternalForces(ref v, dt)
-```
-
-`SRCharacterController` does not override `UpdateVelocity` or any of these `Handle*` methods except `HandleGroundOnAirborneMovement`. KCC keeps collision, grounding, steps and slope projection.
-
-## Tick rate and jump timing (verified, 1.3.0 disassembly + perf log)
-
-- KCC runs the player at a fixed **40 Hz** (dt 0.025): the perf summary shows `hook:hl2.UpdateVelocity` 400 calls per 10 s (the 236 in one summary was a loading screen). Each tick is split into `ceil(dt / 0.01)` equal substeps (3 x 0.00833 s), so simulated time always equals KCC time. The old fixed-0.01 accumulator alternated 2 and 3 substeps per tick (correct on average, jittery gravity/accel).
-- `KFCCharacterController.BeforeCharacterUpdate` (0x5BBD00) calls `UpdateAbilities`, so SR2 starts the jump **in the same KCC tick, before UpdateVelocity**, but before ground probing: `JumpAbilityBehavior.CanStart` (0xA77AF0) sees the previous tick's grounding.
-  - `CanStart`: base check `!IsActive && StartAbilityEventReceived`; ceiling check; grounded: `_landingTime + _recurrenceDelay <= now`; airborne: coyote via `_inAirTime` (only if `_landingTime` is set, i.e. never right after a jump).
-  - `StartAbilityEventReceived` (generic `AbilityBehavior<T>` field) is set on press (`StartInputEventPerformed`, ignored while the jump is active), cleared on release (`StartInputEventCanceled`) and by `Start()`. So a press during the falling half of a jump is buffered while held.
-  - The jump ability stops when `velocity.y <= _verticalVelocityStopThreshold` (`ShouldStop`) or on landing.
-  - Result before this fix: a Space hop landed on tick N with friction, `CanStart` failed on N+1 and N+2 (`_recurrenceDelay` 0.07 s) and passed on N+3: **3 friction ticks per hop = 27 % speed lost per hop** at 40 Hz. That was the main "feels capped". Now `_recurrenceDelay` is 0 whenever HL2 movement is on, and the landing tick of a queued jump skips friction, so the jump leaves on N+1 with no friction at all.
-- `JetpackAbilityBehavior.UpdateVelocity` (0xA76F00) only writes `velocity.y`; `Update` only calls `AddForce` with `Vector3.up/down`; `Start` sets `BypassGravity`. SR2's jetpack has no horizontal component in 1.3.0.
-- `HandleAirborneDrag` (0x5BC310) is horizontal-only (x and z divided by `1 + _airborneDrag*dt` when that axis of the movement input is 0). It is skipped whenever HL2 movement applies.
-- `UpdateVelocityWithExternalForces` (0x5BECC0) adds queued forces * dt. No clamp.
-
-## KCC collisions, slopes and SR2's jump (verified, 1.3.0 disassembly)
-
-- `KinematicCharacterMotor.HandleVelocityProjection(ref v, normal, stableOnHit)` (0x599AB0, virtual, called through the vtable from `InternalHandleVelocityProjection`; args rcx this, rdx &v, r8 &normal, r9b stable) is stock KCC 3.x:
-  - grounded and not `MustUnground` (`_mustUnground` 0x269, `_mustUngroundTimeCounter` 0x26C): stable hit -> tangent * |v|; unstable -> projection that follows the ground plane (wall).
-  - airborne: stable hit -> `ProjectOnPlane(v, up)` then tangent * |that| (**the vertical speed is dropped on landing**, horizontal magnitude kept along the slope); unstable hit -> `ProjectOnPlane(v, n)` (= ClipVelocity overbounce 1).
-- `IsStableOnNormal` (0x59B9B0): `Vector3.Angle(up, n) <= MaxStableSlopeAngle` (motor+0x44). Grounding of steeper surfaces: `FoundAnyGround` without `IsStableOnGround`, i.e. the airborne branch of UpdateVelocity.
-- `ForceUnground(time)` (0x598FD0, 16 bytes): `_mustUnground = true; _mustUngroundTimeCounter = time`. Time 0 = ungrounded for the next tick only.
-- `SRCharacterController.HandleGroundOnAirborneMovement` (0xA7E9F0) calls the KFC version (KCC's anti-air-climb projection of the added air velocity while `FoundAnyGround`) and then zeroes `v.y` for one ability state (an ability's IsActive at +0x30 and a threshold at +0x68; kept whenever the jetpack is on).
-- `KFC.HandleGravity` (0x5BC3D0): `GravityAmount = min(GravityAmount + g * _gravityAccumulationSharpness, g); v += down * GravityAmount * dt` (g = `_gravityMagnitude`, 17 m/s^2 in 1.3.0). Gravity ramps up per tick; where `GravityAmount` is reset was not traced.
-- `JumpAbilityBehavior.UpdateVelocity` (0xA782E0):
-  - take-off tick (`_jumpRequested`): `ForceUnground()`, vertical component replaced by `_jumpUpSpeed` (x `_sidewaysSpeedMultiplier` / `_backwardsSpeedMultiplier` blended by the input direction; 1 for forward / no input), `_holdForce = _initialHoldVelocity`.
-  - later ticks while active: `v.y /= 1 + dt * _airborneForceDamping`; unless released (bool at behaviour+0x19), `_holdForce /= 1 + dt * _holdVelocityDamping; v.y += _holdForce` (a per-tick velocity add, not * dt).
-  - `ShouldStop` (0xA77FB0): `velocity.y <= _verticalVelocityStopThreshold`.
-  - The data values live in the JumpAbilityData asset (not in the dump), so the vanilla apex is computed at runtime from the live values (log line "estimated vanilla apex", tap and held, assuming the gravity accumulator starts at 0) and measured in gravity mode "Vanilla SR2" (log line "measured jump", first jump per mode at Info). The ballistic 15^2 / (2*17) = 6.6 m is an upper bound only; the damping lowers it. The "Jump height (m)" default is 2.0 m until the logged values are known.
+- `KFCCharacterController.UpdateVelocity`: grounded -> HandleStablyGroundedVelocity + Drag; airborne ->
+  HandleHorizontalAirborneMovement, HandleAirborneDrag, HandleGravity, ClampAirborneHorizontalVelocity;
+  then active abilities' `UpdateVelocity`, then external forces (no clamp). `SRCharacterController`
+  overrides only `HandleGroundOnAirborneMovement`. KCC keeps collision, grounding, steps, slope projection.
+- KCC ticks the player at a fixed **40 Hz**; each tick is split into `ceil(dt / 0.01)` equal substeps.
+- SR2 starts a jump in `BeforeCharacterUpdate` of the same tick, before UpdateVelocity but with the previous
+  tick's grounding. Vanilla `_recurrenceDelay` 0.07 s gave 3 friction ticks per Space hop (~27 % speed lost
+  per hop): the main "feels capped". Fixed by `_recurrenceDelay` = 0 and the landing-tick friction skip.
+- The jetpack is vertical-only in 1.3.0; `HandleAirborneDrag` is horizontal-only.
+- KCC drops the vertical speed on an airborne stable hit (landing) and keeps |v| when re-tilting onto a new
+  slope; `ForceUnground(0)` = ungrounded for the next tick only.
+- Vanilla jump: `_jumpUpSpeed` 15 m/s with damping + hold force, gravity 17 m/s^2 ramped by
+  `_gravityAccumulationSharpness`. Data values live in the JumpAbilityData asset, so the vanilla apex is
+  computed at runtime (log "estimated vanilla apex", tap and held) and measured in gravity mode "Vanilla
+  SR2" (log "measured jump", first jump per mode).
 
 ## Resolved names (all in Assembly-CSharp)
 
@@ -163,13 +137,13 @@ All hooks call the original unchanged when `this` is not the player, during an u
 - The movement math (self-test).
 - The build is /W4 clean (Release and Debug).
 
-**Cross-checked with re/symbols.md (written by the IDA agent; mostly at dump level)**
+**Cross-checked with the old symbols notes (now re/player.md) (written by the IDA agent; mostly at dump level)**
 - Same hook targets and offsets.
 - Jump is press-edge: `StartInputEventPerformed` sets `_jumpRequested`, and `CanStart` gates on grounded/coyote and `_recurrenceDelay`.
 - The jetpack listens to the jump ability's start/stop events.
-- Sprint drain is inside `SprintAbilityBehavior.Update`. symbols.md infers this from property names.
+- Sprint drain is inside `SprintAbilityBehavior.Update`. The older notes infer this from property names.
 - `InputEventData` is 12 bytes, passed by hidden pointer, with POINTER = 1.
-- symbols.md advises against hooking `InputEvent.Perform*` because every input passes through it. This module hooks `StartInput`/`Cancel(InputEventData)` instead. Each detour is a pointer compare and then a pass-through.
+- re/ui.md advises against hooking `InputEvent.Perform*` because every input passes through it. This module hooks `StartInput`/`Cancel(InputEventData)` instead. Each detour is a pointer compare and then a pass-through.
 
 **Assumed, to verify in game**
 1. SR2 applies the jump impulse inside `JumpAbilityBehavior.UpdateVelocity` on the first tick after `Start`, KCC-example style with `_jumpRequested` (`Start` sets `_jumpRequested`; it writes no velocity itself - disassembly).

@@ -9,52 +9,13 @@ This module makes respawning after a knockout faster and removes the artificial 
 
 Every scene-group load is timed, from `SceneLoader.LoadSceneGroup` until `IsSceneLoadInProgress` turns false, and logged together with what was skipped.
 
-## Knockout flow (game 1.3.0, from the dump and a capstone disassembly of `re/input/GameAssembly.dll`)
+## Game flows (1.3.0)
 
-1. **`PlayerDeathHandler.OnDeath(source, go, stack)`**
-   - If `_isPlayerDead` is already set it returns; otherwise it sets the flag.
-   - Resets an active boss fight. In that case ammo is not cleared.
-   - Sends analytics and registers a music suppressor.
-   - Plays `_screenFadedCue`.
-   - Time penalty: `unlockWorldTime = max(GameModeSettings.HoursTilDawnOnDeath ? GetNextDawnAfterNextDusk() : HoursFromNow(HoursLostOnDeath), now + MinDeathTime)`, where `MinDeathTime = (_delayTime + 2*_fadeTime) * 60` game seconds.
-   - `LockOnDeath.Lock(unlockWorldTime)`: locks the player controller and items, and mutes SFX.
-   - `ResetPlayer(clearOutAmmo)`:
-     - `VacuumItem.DropAllVacced` and `AmbianceDirector.ExitAllLiquid`
-     - `SpendCurrency(PctCurrencyLostOnDeath * currency)`
-     - health set to max, rad set to 0, energy set to max
-     - if `clearOutAmmo`: ammo slots are cleared or reduced (slot guard), and radiant slimes are marked lost
-   - `TutorialDirector.SuppressTutorials`, `_deathEvent` and `_damageDeathEvent`.
-   - **`DeathObscurer.StartObscuring(true, _fadeTime, b__0)`**: fade to black.
-2. **`b__0` → `TeleportNetwork.Teleport_Death(player, _delayTime, b__1)`**. The target is `GetDefaultWakeUpDestination()`, or the default scene group's spawn point if there is none.
-   - If `SceneLoader.IsCurrentSceneGroupDefault()` is true (the player is in the ranch zone), the in-scene path runs these steps on the SceneLoader queue:
-     1. `EnqueueLoadDeathLoadingScene`: "Setup For Death Transition", the `_deathLoadingScene` addressable scene, and `LoadingScreenView.Init(DEATH)`
-     2. "Teleport Player": `TeleportablePlayer.TeleportTo(wake-up point)`
-     3. `EnqueueDelaySeconds("Wait For Min Delay On Death", _delayTime)`
-     4. "Before Death Screen Close": `b__1`
-     5. `EnqueueUnloadDeathLoadingScene`: "Notify Exit Death Loading Animation", then `EnqueueDelaySeconds("Wait for Death Loading Outro", 1.0)`, then the unload
-   - Otherwise it calls `LoadSceneGroup(defaultGameplaySceneGroup, {TeleportPlayer, PauseGame, TransitionType = DEATH, OnSceneGroupLoadedPhase2 = b__1})`. This is a real zone load: this is the "reload" the user sees. `_delayTime` is not used on this path.
-3. **`b__1`** opens the `RanchHouseUI` display with `RanchHouseOptions { SleepType = UNTIL_WORLD_TIME, TimeValue = unlockWorldTime, AfterSleepAction = b__2 }`.
-   - `RanchHouseUI.Sleep` → `SleepUntil`: `TimeDirector.Unpause`, Beatrix fade-out, then `LockOnDeath.LockUntil(unlockWorldTime, 0, cb)`, which runs `TimeDirector.FastForwardTo` while the time-passing cue plays. **This is the time skip.**
-   - `LockOnDeath.Update`: once `HasReached(unlockWorldTime)`: unlock, `PlayerItemController.ResetAfterDeath`, **`AutoSaveDirector.SaveGameAndFlush`**, then cb (`SleepUntil.b__0`).
-   - `SleepUntil.b__0`: `ForceFastForwardEnd`, fade-in, `TimeDirector.Pause`, `_sleeping = false`, music, then `b__2`.
-   - `b__2`: deregisters the music suppressor, `_isPlayerDead = false`, `UnsuppressTutorials`, `StartObscuring(false, _fadeTime)` (fade back in).
-4. **The house screen stays open until the player leaves it.**
-   - `Close()` / Esc → `OnCloseImpl`: door cue, `VacuumItem.ClearVac`, `PlayerDeathHandler.ResetPlayerLocation(close-display step)`.
-   - `ResetPlayerLocation` → `ResetPlayer(false)` + `TeleportNetwork.Teleport_ResetPlayer`, which in the ranch zone is an instant `TeleportTo` and then closes the display.
+Full call chains: RE: re/player.md (PlayerDeathHandler knockout flow), re/map.md (TeleportNetwork, TeleporterNode), re/world.md (SceneLoader queue). In short:
 
-## Teleporter flow
-
-- `TeleporterNode.OnTriggerEnter` checks for the player's main collider, that no load is in progress, and `CanTeleport()` (no unstable object in the tank). It then calls `TeleportNetwork.Teleport(player, source)`. There is no delay before the teleport.
-- `Teleport` finds the `TeleporterModel` and calls `TeleportToDestinationImpl(player, nodeId, destGroup, model.ForceSceneTransition, node.IsBoatRide)`.
-  - If the destination node is registered (its zone is loaded) and the teleporter is not forced, the teleport happens in-scene: `BeforeArrive`, `TeleportTo`, `OnArrive`. **This is already instant** (no fade, no wait). The FOV and arrive effects afterwards are cosmetic and do not block.
-  - Otherwise: `LoadSceneGroup(destGroup, {TeleportPlayer, PauseGame, delegates for position, rotation and arrive FX})`.
-- **`SceneLoader.EnqueueLoadSceneGroup`** queue (same for teleport, death, save load and menu):
-  1. "Block TriggerExitLoadingAnimation"
-  2. load `transitionScene`, then "Setup Loading Scene" (`LoadingScreenView.Init`)
-  3. **"Wait For Loading Scene Fade In" = `EnqueueDelaySeconds(1.0)`** (padding)
-  4. disable the camera, destroy dynamic actors, unload the old scenes, load the core scenes and the group's scenes, GC, unload unused assets, world population steps, scene-group-loaded delegates, `BeforeLoadScreenRemoved`, enable the camera (real work)
-  5. **"Loading Screen Fade to Black"**: `LoadingScreenView.FadeToBlack`, where alpha += `dt / _fadeOutTime` (padding)
-  6. "Mark Load Complete" (`IsSceneLoadInProgress = false`), "Stop Stopwatch" (the Unity log line), "Wait for Loading Outro". The outro waits 1.0 s only if `TriggerExitLoadingAnimation` is set, which only the death loading screen does. Then the `transitionScene` is unloaded.
+- **Knockout:** `PlayerDeathHandler.OnDeath` (penalties, `unlockWorldTime`, `LockOnDeath`, `ResetPlayer`) -> `DeathObscurer.StartObscuring(true, _fadeTime)` -> `TeleportNetwork.Teleport_Death(player, _delayTime)`. In the ranch zone an in-scene queue: death loading scene, `TeleportTo` wake-up point, "Wait For Min Delay On Death" (`_delayTime`), unload with "Wait for Death Loading Outro" (1 s). Elsewhere a real `LoadSceneGroup` of the default group (the "reload"). Then the `RanchHouseUI` sleeps until `unlockWorldTime` (`LockOnDeath.LockUntil` -> `TimeDirector.FastForwardTo`, **the time skip**), saves (`AutoSaveDirector.SaveGameAndFlush`), fades back in, and **stays open until the player leaves it** (`Close()` / Esc -> `ResetPlayerLocation`).
+- **Teleporter:** `TeleporterNode.OnTriggerEnter` -> `TeleportNetwork.Teleport` -> `TeleportToDestinationImpl`: destination registered and not `ForceSceneTransition` = in-scene and **already instant**; otherwise `LoadSceneGroup` with a loading screen.
+- **Loading queue padding** (`SceneLoader.EnqueueLoadSceneGroup`, every load): "Wait For Loading Scene Fade In" = `EnqueueDelaySeconds(1.0)` before the real work, `LoadingScreenView.FadeToBlack` (alpha += `dt / _fadeOutTime`) after it; the 1 s "Wait for Loading Outro" only for the death screen.
 
 ## Where the time goes (evidence)
 

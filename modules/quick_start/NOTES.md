@@ -9,32 +9,16 @@ This module shortens the time from launch to playing. It is native only and reso
 | `auto_continue_delay` | 0.5 s (0-5) | How long the main menu stays interactive before auto-continue fires. |
 | `skip_new_game_intro` | on | When a new save starts, ends the story intro (the text frames shown before the player gets control) right away through the game's own end-of-intro path. The main quest, tutorials and camera are set up exactly as after a watched intro. |
 
-## Boot flow (game 1.3.0, from the dump and a disassembly of `re/input/GameAssembly.dll`)
+## Boot flow
 
-1. **Unity / IL2CPP start-up**, then `level0` (bootstrap: `BootstrapCompanyLogoScene` fades the logo in while loading). `SceneLoader` loads the scene group **CompanyLogo**.
-2. **`CompanyLogoScene.Start`** queues the startup music and starts `StartUpCoroutine`. The coroutine has 16 states. Every wait in it is `WaitForSeconds(<serialized float>)` or a `Time.time` loop:
-   - company logo: fade in `logoFadeInTime`, hold `logoHoldTime` (the optional blink `logoBlinkTime` happens inside the hold), fade out `logoFadeOutTime`
-   - black screen: `logoBackgroundHoldTime`
-   - **warning screen**: fade in `warningFadeInTime`, then hold until `warningHoldTime` runs out or `_skipWarningScreen` is set. A key press sets it through `CompanyLogoScene.OnInteract`. Then fade out `warningFadeOutTime`.
-   - black screen again: `logoBackgroundHoldTime`
-   - game logo background: `splashFadeInWaitTime`; game logo: `splashFadeInTime`
-   - last step: `SceneLoader.LoadSceneGroup(PlatformInfoProvider.standaloneEngagementPrompt)`, which is the **StandaloneStart** group, with the LoadStep `OnMainMenuLoaded`.
+RE: `re/ui.md` (CompanyLogoScene coroutine, PlatformEngagementPrompt / StandaloneEngagementPrompt, main menu
+Continue, IntroSequenceUIRoot), `re/world.md` (SceneLoader, cumulative scene-transition stopwatch).
 
-   Nothing loads inside the coroutine. It is presentation only.
-3. **`CompanyLogoScene.OnMainMenuLoaded`** finds the `PlatformEngagementPrompt` and subscribes `AnimateOut` (to `OnSceneActivated`) and `StartLoadingIndicator` (to `BeforeAnimateOut`). It then calls **`PlatformEngagementPrompt.Onloaded()`**, which sets the texts and `RegisterInput()` (the submit action's `canceled` event). The game now waits for a key ("press any key").
-4. **`StandaloneEngagementPrompt.OnInteract(CallbackContext)`**:
-   - plays the click, unregisters input and disables the EventSystem
-   - `IUserManager` establishes the user, then `SystemContext.InitializePlatformForCurrentUser`, then `OnSuccessfullySetupUser`
-   - runs `BeforeAnimateOut`, then `Animate(AnimationDuration)` (scale/fade curve)
-   - `LoadSceneGroup(SceneGroupToLoad)`, which is **MainMenuFromBoot**, with LoadStep `OnSceneGroupLoad`. That step optionally fades the EA message (`EaMessageFadeTime`), then `OnSceneActivated` runs `CompanyLogoScene.AnimateOut`, which fades the overlay away and reveals the menu.
-
-   The context argument is never read. In the disassembly `rdx` is overwritten before any use.
-5. **Main menu**: `MainMenuLandingRootUI` builds `ButtonBehaviorModel`s from its `ButtonBehaviorConfiguration`. `OnSubmit` calls the selected model's `InvokeBehavior()`.
-   - **Continue** is `ContinueGameItemDefinition`. It creates a `ContinueGameBehaviorModel` (a `LoadGameBehaviorModel`) whose `GameDataSummary` is set to `AutoSaveDirector.GetSaveToContinue()`.
-   - `InvokeBehavior()` returns early if `SceneLoader.IsSceneLoadInProgress` is set. Otherwise it calls `AutoSaveDirector.BeginLoad(summary.SaveIdentifier, null)`.
-   - Visibility condition: `ButtonBehaviorConditionUtility.HasContinueGame()`, which calls `AutoSaveDirector.HasContinue()`.
-
-`StandaloneStartScreen` (which auto-loads its `defaultSceneGroup` on its second frame) is not part of this flow. In this build "StandaloneStart" is the engagement-prompt group.
+level0 -> scene group **CompanyLogo** -> `CompanyLogoScene.StartUpCoroutine` (logo, warning screen, game
+logo; presentation only, every wait a serialized float) -> group **StandaloneStart** ->
+`PlatformEngagementPrompt.Onloaded` ("press any key") -> `StandaloneEngagementPrompt.OnInteract` (user /
+platform init, `Animate(AnimationDuration)`) -> group **MainMenuFromBoot** -> main menu. Continue =
+`ContinueGameBehaviorModel.InvokeBehavior()` -> `AutoSaveDirector.BeginLoad(GetSaveToContinue())`.
 
 ## Where the time goes (evidence)
 
@@ -93,13 +77,10 @@ Caveat: anything the game does in the background during the logos (for example p
 
 **skip_new_game_intro**
 
-New-game flow (disassembly, 1.3.0):
-- `AutoSaveDirector.StartNewGame` adds a load step `<>c.<StartNewGame>b__29_2` (0x5E4150), which calls `CutsceneDirector.Instance.SpawnIntroSequence()` (0xAC4290). That is the only caller. `SpawnIntroSequence` activates the registered `IntroSequenceUIRoot` (it registers itself in `Awake`) and pushes it on `UIDirector`.
-- `IntroSequenceUIRoot.Start`: black screen on (alpha 1), `PauseNonUiSfx(true)`, `_cameraEnabled.Value = false`, starts `StartUpCoroutine`: queue `_introSequenceMusic`, wait `_fadeInWaitTime`, fade the black screen out over `_fadeInTime`, then `StartFrame(_frameIndex)`.
-- `StartFrame` tweens the cutscene camera to the frame's target; on completion the frame text is shown and `_isInputEnabled` set. The `_next` input calls `TryToIterateFrame`, which after the last frame does exactly what `EndSequence()` does: `_isInputEnabled = false`, `MusicController.Dequeue(_currentMusic)`, `StartCoroutine(EndCoroutine)`.
-- `EndCoroutine`: fade to black over `_fadeOutTime`, wait `_fadeOutWaitTime`, then the virtual close (the UI is popped and destroyed).
-- `IntroSequenceUIRoot.OnDestroy` applies the intro's state: `PauseNonUiSfx(false)`, destroy the cutscene camera, `_cameraEnabled.Value = true`, `MetaGameDirector.StartMainQuest(true)`, `FadeIntoGameplay()` (`TutorialDirector.SuppressTutorials(HudUI)`, `LockOnDeath.Freeze()`, `DeathObscurer.StartObscuring(false, _fadeOutTime, cb)` with cb = `LockOnDeath.Unfreeze()` + `UnsuppressTutorials`), then `CutsceneDirector.ClearIntroSequenceUIRoot()`.
-- `EndSequence` has no direct caller in the binary (probably the debug skip); its body is the same as the end branch of `TryToIterateFrame`.
+New-game flow (details in `re/ui.md`, IntroSequenceUIRoot): `AutoSaveDirector.StartNewGame` ->
+`CutsceneDirector.SpawnIntroSequence` -> `IntroSequenceUIRoot` (fade in, then `StartFrame` per text frame).
+After the last frame the game runs what `EndSequence()` does (music dequeued, `EndCoroutine` fades out and
+closes); `OnDestroy` applies the intro's state (camera, `StartMainQuest(true)`, `FadeIntoGameplay`).
 
 What the module does:
 - **Pre-hook `IntroSequenceUIRoot.Start` (0 args)**: class check + `IsAlive`, logs the vanilla fade values, then `_fadeInWaitTime = 0`, `_fadeInTime = 0.1 s`, `_fadeOutTime` at most 0.5 s, `_fadeOutWaitTime = 0`. The fades keep a short non-zero length because they also drive tweens, particles and the `DeathObscurer`.
