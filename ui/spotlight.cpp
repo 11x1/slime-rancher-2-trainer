@@ -187,7 +187,8 @@ void BuildIndex(const std::vector<Category>& cats, const std::vector<ModuleView>
             p.crumb = tab.title == "General" ? (oneTab ? std::string() : crumb) : (p.title == c.title ? std::string() : c.title);
             p.crumb = Join("Page", p.crumb);
             p.help = tab.help + " " + PageKeywords(tab);
-            if (mv && (tab.kind == TabKind::Module || tab.kind == TabKind::Sandbox || tab.kind == TabKind::SlimeDj)) {
+            if (mv && (tab.kind == TabKind::Module || tab.kind == TabKind::Sandbox || tab.kind == TabKind::SlimeDj ||
+                       tab.kind == TabKind::Cards)) {  // Cards: its own module (Ranch > Upgrades: Custom Upgrades)
                 const settings::Def* sw = !tab.masterKey.empty() ? FindDef(*mv, tab.masterKey) : mv->hasEnabled ? &mv->enabled : nullptr;
                 if (sw) {
                     p.hasDef = true;
@@ -212,7 +213,8 @@ void BuildIndex(const std::vector<Category>& cats, const std::vector<ModuleView>
                         for (const auto& m : col)
                             if (const ModuleView* cmv = FindView(views, m)) {
                                 const auto help = tab.cardHelp.find(m);
-                                b.AddSwitch(*cmv, base, crumb, help != tab.cardHelp.end() ? help->second : std::string());
+                                if (m != tab.module)  // the tab's own module: its switch is the page entry's
+                                    b.AddSwitch(*cmv, base, crumb, help != tab.cardHelp.end() ? help->second : std::string());
                                 const auto secs = tab.sections.find(m);
                                 if (secs == tab.sections.end()) {
                                     b.AddDefs(*cmv, nullptr, {}, base, Join(crumb, cmv->title), cmv->groups.size() > 1);

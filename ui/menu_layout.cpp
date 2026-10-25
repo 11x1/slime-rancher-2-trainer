@@ -42,6 +42,10 @@ std::vector<Category> Spec() {
     // subheadings". Sell Upgrades is a row of the Plot upgrades section, no heading of its own.
     // Round 14: "Plot and refinery should be different groups": each section is a card of its own with a
     // group heading, under the Custom Upgrades card (title and switch) in the same column.
+    // Round 15: "make the custom upgrades toggle show on the top right where the menu close button is, its supposed
+    // to be a subtab switch, plot upgrades group on the left refinery on the right". Custom Upgrades is the tab's
+    // module (its switch in the tab bar, no card of its own), the sections side by side.
+    upgrades.module = "custom_upgrades";
     CardSection plot;
     plot.title = "Plot upgrades";
     plot.modules = {"plot_upgrades", "sell_upgrades"};  // sell: works on the game's own plot upgrades too
@@ -58,10 +62,9 @@ std::vector<Category> Spec() {
         {"sell_upgrades", "Sell back for half price"},
         {"drone_price_limit", "Drone station price limit"},
     };
+    upgrades.help = "Custom Upgrades: adds extra plot upgrades and Fabricator upgrades to the game's menus. Stays on "
+                    "while a save that uses them is loaded.";
     upgrades.cardHelp = {
-        {"custom_upgrades",
-         "Adds extra plot upgrades and Fabricator upgrades to the game's menus. Stays on while a save that uses "
-         "them is loaded."},
         {"plot_upgrades",
          "Applies the effects of the plot upgrade tiers bought through Custom Upgrades: Music Box II, Faster Hens, "
          "Sprinkler II and III, Ash Booster."},
@@ -209,6 +212,7 @@ std::vector<Category> Build(const std::vector<ModuleView>& views) {
                 if (!find(t.module)) continue;
                 placed.insert(t.module);
             } else if (t.kind == TabKind::Cards) {
+                if (!t.module.empty() && !find(t.module)) continue;  // its module is the tab's switch
                 for (auto& col : t.columns) {
                     std::erase_if(col, [&](const std::string& m) { return !find(m); });
                     placed.insert(col.begin(), col.end());
