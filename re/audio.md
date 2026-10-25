@@ -26,6 +26,10 @@ Tags: **code** = decompiled; **data** = asset bundles; **assumed** = not verifie
 
 ## From the slime_dj, spawn_scaling, hl2_movement, quick_start, free_placement, misc_tweaks, plot_upgrades, drone_price_limit notes
 
+### Unity AudioSource volume above 1 (slime_dj Amplify)
+- `AudioSource.volume` is clamped to 0..1 (Unity docs; the setter clamps). slime_dj gets louder than full volume by scaling the PCM it writes into its own clip (`AudioClip.SetData`) and dividing every speaker's volume by that gain; samples are soft-limited (tanh knee at 0.89) so they never pass 1 (whether Unity would keep float samples > 1 in a created clip was not checked).
+- mod: slime_dj `module.cpp` (`Current::gain`, `chunkGain`, `ApplyGain`, `TickMix`)
+
 ### SECTR_AudioSource (global)  [: MonoBehaviour]
 - fields: `Cue` (SECTR_AudioCue) - offset by name (dump)
 - methods: `get_Volume()`, `set_Volume(float)` (dump)

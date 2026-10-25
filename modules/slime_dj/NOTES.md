@@ -70,10 +70,18 @@ speaker of a channel goes (you leave the ranch), the song pauses and resumes whe
 - *Clip kept through zone changes*: the clip gets `HideFlags.DontUnloadUnusedAsset` (32), otherwise the
   scene load's `Resources.UnloadUnusedAssets` destroyed it.
 
-**Amplify (`amplify`, default off).** Boxes in sync already add up physically where ranges overlap. The
-toggle adds: each other speaker within a speaker's hearing range (positions from `Transform.get_position`
-every box scan) adds 25 % to its volume and range, up to 2x. The volume part only helps below full volume
-(Unity clamps `AudioSource.volume` to 1); the range part always works.
+**Amplify (`amplify`, default off; round 11).** Boxes in sync already add up physically where ranges
+overlap. The toggle adds, per speaker, for each other speaker within its hearing range (positions from
+`Transform.get_position` every box scan): +15 % volume (up to 1.6x, +4 dB) and +10 % range (up to 1.3x).
+An amplified speaker has `minDistance` = a tenth of its range (instead of a fifth), so each speaker is
+loudest next to it and the song is heard from every speaker instead of one wide full-volume blob (round 10
+had +25 % range up to 2x, which made the full-volume zones overlap). Volume above 1 (Unity clamps
+`AudioSource.volume`): every channel has a PCM gain (`Current::gain`) baked into the chunks `Fill` writes,
+= the loudest wanted speaker volume of the channel (`vol x volScale x boost`, at most 1.6), moving at most
+0.05 per 0.5 s chunk, soft-limited above 0.89 (tanh knee); the gain per ring chunk is kept
+(`chunkGain[16]`) and every speaker's volume is divided by the gain of the chunk at the play head, so
+speakers that want less are not louder. Gain 1 (no change to the PCM) while Amplify is off or nothing wants
+more than full volume.
 
 **3D settings.** `maxDistance` = `range` (default 60 m, 10-200) x emitter `rangeScale` x Amplify boost;
 `minDistance` = a fifth of it; rolloff Linear (Logarithmic never reaches silence), `spatialBlend` 1,
@@ -190,7 +198,7 @@ inside and outside a corral). Why the cutoff can't be overridden by a distance c
 *Analysis* (`beat.cpp`, no libraries, no game calls; constants there and in `beat.h`). The decoder thread
 feeds every decoded chunk (after the down-mix) into the stream's `BeatTrack`, seconds ahead of the play
 head: mono mix, Hann window ~23 ms (1024 frames at 44.1/48 kHz), one radix-2 FFT per 10 ms hop, one 16-bit
-entry per hop (7 KB per minute, capped at 6 hours; after a seek `Reset(rate, startFrame)`): a 0..1 bass
+entry per hop (4 bytes: level, onset, energy; 24 KB per minute, capped at 6 hours; after a seek `Reset(rate, startFrame)`): a 0..1 bass
 level (35-160 Hz, adaptive peak / floor window, 0 in breaks) and an onset strength (spectral flux + bass
 rise above an adaptive threshold, at least 180 ms apart). Tuned offline on the user's hardtekk songs
 (170-205 onsets/min = the kick); a synthetic 120 BPM track gives every kick.
@@ -203,6 +211,16 @@ the end: the walls settle and are restored.
 *Which corrals* (`SyncDancer`, every box scan and when the setting goes on): music box speakers (not
 emitters) playing the global clip whose box is within hearing range (Amplify included) of the camera.
 Their `MusicBoxUpgrader` is the plot root, which also carries `WallUpgrader` / `AirNetUpgrader`. Max 12.
+
+*Calm parts* (round 11; "on a chill part of the songs, the walls still freak out like its a BANGER part").
+The bass level is relative (falling peak / rising floor), so a quiet part swung 0..1 like a drop. The
+analysis now also stores an energy per hop (byte 2 of the entry, entries are 4 bytes): bass (35-160 Hz) and
+broadband loudness, each a 1 s power average in dB, placed between 12 dB and 2 dB under a reference = the
+louder of the song's loudest part so far (falls 0.02 dB/s) and an absolute one (bass -8 dB, broadband
+-11 dB mean square: a quiet intro is calm before the drop has been heard); the lower of the two counts.
+`WallDancer::Tick` smooths it (0.4 s) and scales the level, the beat pulse and the colour step by
+0.15 + 0.85 x energy; below energy 0.35 no beat ripples. Checked offline (scratch harness over the user's
+songs): hardstyle drops 1.0, breakdowns / piano intros 0.0, quieter verses 0.3-0.7.
 
 *What is animated*: the active walls root's renderers named `corralField*` (4, or 8 with High Walls; other
 renderers skipped and named in the log) and the active Air Net's "NetTrigger" renderer (never moved or
@@ -236,7 +254,7 @@ walls are left as they are.
 |---|---|---|
 | `volume` | 1.0 (100 %) | 0-100 %, on top of the game's music volume |
 | `range` | 60 m | hearing range: full volume to a fifth of it, silent at it (10-200 m) |
-| `amplify` | off | each other speaker in range: +25 % volume and range, up to 2x |
+| `amplify` | off | each other speaker in range: +15 % volume (to 1.6x) and +10 % range (to 1.3x); speakers loudest up close |
 | `shuffle` | on | random songs when the queue is empty |
 | `mute_vanilla` | on | silence the music box's own tune while a song plays |
 | `muffle_walls` | on | music from a corral with High Walls (and/or Air Net) sounds muffled from outside |
@@ -282,3 +300,4 @@ sell; walls dance ripples bulge and travel, `_Intensity` / `_Color` visible on b
 - Round 9: beat analysis retuned for hardtekk; beat ripples through `CorralBarrierRipples`.
 - Perf round (2026-10-24): box scan from scene search every 2 s to the Apply-hook cache.
 - Corral Radio channels and Muffle behind High Walls (round 4 ideas).
+- Round 11: calm walls in quiet parts (energy), Amplify louder than full volume and spatial.

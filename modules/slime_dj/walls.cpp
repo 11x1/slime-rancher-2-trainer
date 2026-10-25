@@ -78,6 +78,11 @@ constexpr float kRippleGrow = 0.25f;                 // _RippleSize x (1 + D * l
 constexpr float kRippleInset = 1.0f;                 // ripple centre this far inside the wall (m)
 constexpr float kRippleHeight = 1.7f, kRippleHeightHigh = 3.4f;  // above the post base (m)
 constexpr float kRest = 0.004f;                      // below this the walls count as settled
+// Calm parts (round 11): the analysis' energy (0 chill .. 1 loud part of the song) scales the level,
+// the beat pulse and the colour step down to this share, and below kRippleEnergy no beat ripples.
+constexpr float kCalmShare = 0.15f;
+constexpr float kRippleEnergy = 0.35f;
+constexpr float kEnergyTime = 0.4f;                  // energy smoothing (s)
 
 struct Vec3 {
     float x, y, z;
@@ -174,6 +179,7 @@ struct WallDancer::Impl {
     ULONGLONG ripplesSearch = 0;       // last search (tick count), at most every 10 s
     bool ripplesLogged = false, ripplesMissingLogged = false;
     float env = 0, pulse = 0, rot = 0, rotTarget = 0, hue = 0;
+    float energy = 1;                  // smoothed BeatTrack energy
     float sinceBeat = 10, beatInterval = 0.5f;  // s; the tempo (smoothed gap between beats)
     size_t rippleNext = 0;             // round robin over plots when there are more than 4
     uint64_t ripplesSpawned = 0;
@@ -629,15 +635,17 @@ void WallDancer::Tick(float dt, const BeatTrack::Sample* beat, float intensity) 
     Impl& P = *p_;
     if (!P.ready || P.plots.empty()) return;
     dt = std::clamp(dt, 0.0f, 0.1f);
-    const float level = beat ? beat->level : 0.0f;
+    if (beat) P.energy += (beat->energy - P.energy) * (1.0f - std::exp(-dt / kEnergyTime));
+    const float gain = kCalmShare + (1.0f - kCalmShare) * P.energy;
+    const float level = beat ? beat->level * gain : 0.0f;
     P.env += (level - P.env) * (1.0f - std::exp(-dt / (level > P.env ? kAttack : kRelease)));
     P.pulse *= std::exp(-dt / kPulseDecay);
     P.sinceBeat += dt;
     const bool onBeat = beat && beat->beat > 0;
     if (onBeat) {
-        P.pulse = std::max(P.pulse, beat->beat);
+        P.pulse = std::max(P.pulse, beat->beat * gain);
         P.rotTarget += kPi / 2;
-        P.hue += kHueStep;
+        P.hue += kHueStep * gain;
         if (P.sinceBeat < 1.5f) P.beatInterval += (std::max(P.sinceBeat, 0.15f) - P.beatInterval) * 0.25f;
         P.sinceBeat = 0;
     }
@@ -652,7 +660,7 @@ void WallDancer::Tick(float dt, const BeatTrack::Sample* beat, float intensity) 
         if (settled) P.Restore(plot);
         else P.Animate(plot, std::clamp(intensity, 0.0f, 2.0f));
     }
-    if (onBeat) P.SpawnRipples();  // after Animate: the new ripple starts with this frame's push / fade
+    if (onBeat && P.energy >= kRippleEnergy) P.SpawnRipples();  // after Animate: the new ripple starts with this frame's push / fade
 }
 
 void WallDancer::Clear() {
@@ -660,6 +668,7 @@ void WallDancer::Clear() {
     for (Impl::Plot& plot : P.plots) P.Drop(plot);
     P.plots.clear();
     P.env = P.pulse = 0;
+    P.energy = 1;
     P.sinceBeat = 10;
 }
 
