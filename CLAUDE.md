@@ -8,6 +8,7 @@
 |---|---|
 | `ideas.md` | unplanned ideas |
 | `round-16.md` | round 15 test feedback, split into agent tasks |
+| `autotest.md` | automated in-game tests of skipped cases (harness in the DLL, Python client) |
 | `custom-icons.md` | replacing script-drawn icons with the user's drawings; vanilla icons meanwhile |
 
 ## Where the documentation lives
