@@ -240,6 +240,41 @@ void FabDestroyDetour(Il2CppObject* self, const MethodInfo* mi) {
     g_origFabDestroy(self, mi);
 }
 
+// ---- the game's gadget-mode menu (NewGadgetSelectionUI instance) ----
+// Round 11: FindObjectOfType(NewGadgetSelectionUI) never found the open menu in the user's test (no
+// "open gadget menu refreshed" line after a craft; the same as FabricatorUI above and the main menu in
+// quick_start), so it is tracked by two hooks: OnEnable (1.3.0 RVA 0x7880E0, post) hands over the
+// instance, OnDestroy (0x787530, pre) drops it. The OnEnable hook only stores the raw pointer; Tick takes
+// a GC handle on the next frame (no handle work inside a hook). Always on (module "sandbox_gadget_menu"),
+// so a menu enabled before Sandbox was turned on is known too. Main thread only.
+constexpr const char* kGadgetMenuHooks = "sandbox_gadget_menu";
+Il2CppObject* g_gmPending = nullptr;  // from OnEnable, taken by Tick
+Il2CppObject* g_gmUi = nullptr;       // identity of the held instance (only compared)
+Il2CppGCHandle g_gmHandle = nullptr;
+using GadgetMenuFn = void (*)(Il2CppObject*, const MethodInfo*);
+GadgetMenuFn g_origGmEnable = nullptr, g_origGmDestroy = nullptr;
+sr2::core::DetourGuard g_gmEnableGuard{kGadgetMenuHooks, "NewGadgetSelectionUI.OnEnable"};
+sr2::core::DetourGuard g_gmDestroyGuard{kGadgetMenuHooks, "NewGadgetSelectionUI.OnDestroy"};
+
+void GadgetMenuEnableDetour(Il2CppObject* self, const MethodInfo* mi) {
+    g_origGmEnable(self, mi);
+    g_gmEnableGuard.Run([&] {
+        if (self && main_thread::IsMainThread()) g_gmPending = self;
+    });
+}
+
+void GadgetMenuDestroyDetour(Il2CppObject* self, const MethodInfo* mi) {
+    g_gmDestroyGuard.Run([&] {
+        if (!main_thread::IsMainThread()) return;
+        if (g_gmPending == self) g_gmPending = nullptr;
+        if (g_gmUi != self) return;
+        if (Il2CppGCHandle h = g_gmHandle) main_thread::Post([h] { unity::FreeGCHandle(h); });  // not inside the hook
+        g_gmHandle = nullptr;
+        g_gmUi = nullptr;
+    });
+    g_origGmDestroy(self, mi);
+}
+
 class Sandbox final : public sr2::core::Module {
 public:
     const char* Name() const override { return kModule; }
@@ -652,7 +687,12 @@ private:
     const MethodInfo* catUpdateItems_ = nullptr;       // GadgetCategoryRuntime.UpdateItemList()
     const MethodInfo* catListSelected_ = nullptr;      // NewGadgetCategoryList.get_SelectedCategory
     const MethodInfo* selCategorySelected_ = nullptr;  // NewGadgetSelectionUI.OnCategorySelected(category, cause)
-    void RefreshGadgetMenu();
+    bool RefreshGadgetMenu(bool scan);                 // true = an open menu was refreshed
+    Il2CppObject* OpenGadgetMenu(bool scan);           // the open NewGadgetSelectionUI, or nullptr
+    void GadgetMenuTick(unsigned long long now);
+    bool gadgetMenuHooked_ = false;
+    bool gadgetMenuDirty_ = false;                     // a craft happened; refresh the menu once it is open
+    unsigned long long gadgetMenuTry_ = 0;
 
     Il2CppObject* OpenFabricator();                    // the open FabricatorUI, or nullptr
     Il2CppObject* FabricatorItem(Il2CppObject* ui, Il2CppObject** content, Il2CppObject** details);
@@ -1030,6 +1070,39 @@ void Sandbox::SetupExtras(sr2::il2cpp::Resolver& R) {
             if (!gw.empty()) {
                 gadgetSelUiClass_ = nullptr;
                 SR2_WARN("[{}] crafter: an open gadget menu is not refreshed after a craft ({})", kModule, gw);
+            }
+            if (gadgetSelUiClass_ && !gadgetMenuHooked_) {
+                // The two always-on hooks that track the menu instance (see GadgetMenuEnableDetour).
+                auto& hm = sr2::core::HookManager::Get();
+                struct H {
+                    const char* name;
+                    void* detour;
+                    void** original;
+                };
+                const H hs[] = {
+                    {"OnEnable", reinterpret_cast<void*>(&GadgetMenuEnableDetour), reinterpret_cast<void**>(&g_origGmEnable)},
+                    {"OnDestroy", reinterpret_cast<void*>(&GadgetMenuDestroyDetour), reinterpret_cast<void**>(&g_origGmDestroy)}};
+                std::string hw, hooked;
+                for (const H& h : hs) {
+                    std::string err;
+                    const MethodInfo* m = R.Method(gadgetSelUiClass_, h.name, 0, &err);
+                    void* target = m ? R.MethodPointer(m, &err) : nullptr;
+                    const std::string full = std::format("{}.NewGadgetSelectionUI.{}", kGadgetMenuHooks, h.name);
+                    if (!target || !hm.Create(kGadgetMenuHooks, full, target, h.detour, h.original, &err) ||
+                        !hm.Enable(full, &err)) {
+                        hw = std::format("hook NewGadgetSelectionUI.{}: {}", h.name, err.empty() ? "method not found" : err);
+                        break;
+                    }
+                    hooked += std::format("{}NewGadgetSelectionUI.{} +0x{:X}", hooked.empty() ? "" : ", ", h.name,
+                                          Resolver::Rva(target));
+                }
+                if (hw.empty()) {
+                    gadgetMenuHooked_ = true;
+                    SR2_INFO("[{}] crafter: gadget menu tracked by hooks {}", kModule, hooked);
+                } else {
+                    if (!hooked.empty()) hm.DisableModule(kGadgetMenuHooks);  // OnEnable without OnDestroy
+                    SR2_WARN("[{}] crafter: gadget menu not tracked ({}); falling back to FindObjectOfType", kModule, hw);
+                }
             }
         }
         // Optional: the Fabricator's order within a category, its Pinned category icon and the pinned recipe.
@@ -2883,6 +2956,7 @@ void Sandbox::TopUpEnergy() {
 }
 
 void Sandbox::Tick(float dt) {
+    GadgetMenuTick(GetTickCount64());
     if (!Live()) {
         if (fabHint_.Exists()) DropFabricatorHint();  // Sandbox off: the key bar entry goes
         if (pinPreload_ && !sr2::core::ModuleFaulted(kModule)) PinPreloadRelease("Sandbox off");
@@ -3085,7 +3159,10 @@ void Sandbox::Handle(const bridge::Action& a) {
     if (a.op == bridge::Op::AddMaterial || a.op == bridge::Op::Craft || a.op == bridge::Op::SetNewbucks ||
         a.op == bridge::Op::AddNewbucks)
         RefreshFabricator();
-    if (a.op == bridge::Op::Craft) RefreshGadgetMenu();  // an open gadget-mode menu lists the new gadgets
+    if (a.op == bridge::Op::Craft) {  // an open gadget-mode menu lists the new gadgets
+        gadgetMenuDirty_ = !RefreshGadgetMenu(/*scan=*/true);
+        gadgetMenuTry_ = GetTickCount64();
+    }
     Refresh();
 }
 
@@ -3160,15 +3237,16 @@ void Sandbox::RefreshPurchaseMenus() {
 // the selected category is shown again through NewGadgetSelectionUI.OnCategorySelected(category,
 // PROGRAMMATIC) with the grid's _category cleared first (SetCategory returns early for the same category):
 // empty / non-empty display, page count, page 1 refilled (NewGadgetItemButton.SetData reads the counts).
-// One FindObjectOfType per craft request, nothing otherwise.
-void Sandbox::RefreshGadgetMenu() {
-    if (!gadgetSelUiClass_) return;
-    Il2CppObject* ui = unity::FindObjectOfType(gadgetSelUiClass_);
-    if (!ui || !unity::IsAlive(ui) || !IsA(ui, gadgetSelUiClass_) || !unity::ActiveInHierarchy(unity::GameObjectOf(ui)))
-        return;
+// The menu is the instance the OnEnable hook handed over (see GadgetMenuEnableDetour). When it is not open
+// at the craft (menu closed, or hidden behind another screen), the refresh waits in GadgetMenuTick until it
+// is, so the player never has to switch tabs.
+bool Sandbox::RefreshGadgetMenu(bool scan) {
+    if (!gadgetSelUiClass_) return false;
+    Il2CppObject* ui = OpenGadgetMenu(scan);
+    if (!ui) return false;
     auto* list = unity::Field<Il2CppObject*>(ui, offSelCatList_);
     auto* grid = unity::Field<Il2CppObject*>(ui, offSelGrid_);
-    if (!list || !grid || !unity::IsAlive(list) || !unity::IsAlive(grid)) return;
+    if (!list || !grid || !unity::IsAlive(list) || !unity::IsAlive(grid)) return false;
     void* buttons = unity::Field<void*>(list, offCatListButtons_);
     int updated = 0;
     for (size_t i = 0, n = unity::ArrayLength(buttons); i < n; ++i) {
@@ -3187,6 +3265,32 @@ void Sandbox::RefreshGadgetMenu() {
     }
     SR2_INFO("[{}] crafter: open gadget menu refreshed ({} categor{} re-read, selected one {})", kModule, updated,
              updated == 1 ? "y" : "ies", shown ? "shown again" : "not shown again");
+    return true;
+}
+
+// The open gadget-mode menu: the held instance while alive and active in the hierarchy. scan = also one
+// FindObjectOfType when no instance is held (the OnEnable hook is missing); never per frame.
+Il2CppObject* Sandbox::OpenGadgetMenu(bool scan) {
+    Il2CppObject* ui = g_gmHandle ? unity::GCHandleTarget(g_gmHandle) : nullptr;
+    if (!ui && scan && !gadgetMenuHooked_) ui = unity::FindObjectOfType(gadgetSelUiClass_);
+    if (!ui || !unity::IsAlive(ui) || !IsA(ui, gadgetSelUiClass_)) return nullptr;
+    return unity::ActiveInHierarchy(unity::GameObjectOf(ui)) ? ui : nullptr;
+}
+
+// Every frame (also with Sandbox off): takes a GC handle on the menu the OnEnable hook handed over, and
+// runs a refresh that waited for the menu to be open (checked every 0.25 s, two cheap calls).
+void Sandbox::GadgetMenuTick(unsigned long long now) {
+    if (Il2CppObject* p = g_gmPending) {
+        g_gmPending = nullptr;
+        if (p != g_gmUi && gadgetSelUiClass_ && IsA(p, gadgetSelUiClass_) && unity::IsAlive(p)) {
+            if (g_gmHandle) unity::FreeGCHandle(g_gmHandle);
+            g_gmHandle = unity::NewGCHandle(p);
+            g_gmUi = g_gmHandle ? p : nullptr;
+        }
+    }
+    if (!gadgetMenuDirty_ || now - gadgetMenuTry_ < 250) return;
+    gadgetMenuTry_ = now;
+    if (RefreshGadgetMenu(/*scan=*/false)) gadgetMenuDirty_ = false;
 }
 
 // Count of what a slot holds, clamped to [0, GetSlotMaxCount]: up through

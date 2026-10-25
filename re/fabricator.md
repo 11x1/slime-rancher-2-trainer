@@ -211,7 +211,9 @@ Scientist Desk (DJ Booth base), Boombox (`model_boombox`, `Collision` ball, benc
 - gotchas: the menu is rebuilt each time it opens; an open one does not pick up new inventory without the refresh below
 - chains: refresh = `UpdateItemList()` per category button `_category`, clear grid `_category`, `OnCategorySelected(SelectedCategory, PROGRAMMATIC)` -> SetCategory -> SetNumberOfPages -> SetPage(0, force) -> OnPageChanged -> SetData
 - gotchas (spec): GadgetFabricateCategory.GetItems inlined - not observed in these sources (the sandbox notes cite GadgetCategory.GetItems for the gadget-mode menu only)
-- mod: sb RefreshGadgetMenu (after every Op::Craft)
+- methods: `NewGadgetSelectionUI.OnCategorySelected(cat, cause)` 0x787440 (IDA): `_itemList._size == 0` -> `_nonEmptyCategoryDisplay` off, `_emptyCategoryDisplay` on; else the reverse and `_itemGrid.SetCategory(cat)`; then `UpdateInputLegendStates`. `OnEnable` 0x7880E0 subscribes events, `UpdateFadersImpl`, `NewGadgetItemGrid.SetCategory`
+- gotchas: `FindObjectOfType(NewGadgetSelectionUI)` did not find the open menu in the round 10 test (no refresh log line after a craft), like FabricatorUI and MainMenuLandingRootUI: track the instance with the OnEnable / OnDestroy hooks
+- mod: sb RefreshGadgetMenu (after every Op::Craft; waits in GadgetMenuTick until the menu is open); hooks `sandbox_gadget_menu` OnEnable / OnDestroy (always on)
 
 ### Gadget (charge-up)  [ib]
 - fields/methods: `Gadget.CooldownTimeGameHrs` (formerly WaitTimeGameHrs); `Gadget.InitModel` sets `model.waitForChargeupTime = TimeDirector.HoursFromNow(hrs)` when unset (|v| < 0.1) and hrs > 0; saved via `GadgetModel.PushBase/PullBase`
