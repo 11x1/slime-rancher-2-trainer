@@ -4,7 +4,9 @@
 
 #include <atomic>
 #include <cstddef>
+#include <format>
 #include <string>
+#include <vector>
 
 #include "core/log.h"
 #include "core/unity.h"
@@ -28,6 +30,13 @@ struct Api {
     const MethodInfo* mapEnable = nullptr;
     const MethodInfo* mapDisable = nullptr;
     bool mapOk = false;
+    // The menu map is held off action by action (InputActionMap.m_Actions, InputAction.enabled / Enable /
+    // Disable): in gameplay only the EventSystem module's actions of that map are on, and a whole-map Enable()
+    // afterwards also turned on CloseMap (M) and the rest of the menu map in gameplay (round 14).
+    size_t mapActionsOffset = 0;
+    const MethodInfo* actGetEnabled = nullptr;
+    const MethodInfo* actEnable = nullptr;
+    const MethodInfo* actDisable = nullptr;
     // EventSystem input module (the game's UI pointer)
     const MethodInfo* esCurrent = nullptr;      // EventSystem.get_current (static)
     const MethodInfo* esModule = nullptr;       // EventSystem.get_currentInputModule
@@ -50,7 +59,15 @@ Api g_api;
 bool g_active = false;          // lock applied
 bool g_weDisabledMap = false;
 Il2CppObject* g_map = nullptr;  // InputActionMap we disabled (kept alive by InputDirector)
-Il2CppObject* g_pausedMap = nullptr;  // the menu map we disabled (pointer over the overlay)
+// Menu map actions we disabled (pointer over the overlay / typing); the InputDirector's asset keeps them alive.
+// `inMenu`: the game had a menu open when we took the action (its CursorManager wanted the cursor free).
+struct HeldAction {
+    Il2CppObject* action;
+    bool inMenu;
+};
+std::vector<HeldAction> g_heldActions;
+bool g_menuBlocked = false;
+bool g_heldLogged = false;
 Il2CppObject* g_module = nullptr;     // the EventSystem input module we disabled
 int g_prevLock = kCursorNone;
 bool g_prevVisible = true;
@@ -80,6 +97,20 @@ void Resolve() {
         if (g_api.mapOk && !il::FieldOffset(g_api.inputDirector, "_paused", g_api.pausedOffset, &perr)) {
             g_api.pausedOffset = 0;
             SR2_WARN("ui: menu input map unavailable ({}); game menus behind the overlay may react to its input", perr);
+        }
+        if (g_api.mapOk && g_api.pausedOffset) {
+            Il2CppClass* act = il::Class("Unity.InputSystem", "UnityEngine.InputSystem", "InputAction", &perr);
+            if (act && il::FieldOffset(map, "m_Actions", g_api.mapActionsOffset, &perr)) {
+                g_api.actGetEnabled = il::Method(act, "get_enabled", 0, &perr);
+                g_api.actEnable = il::Method(act, "Enable", 0, &perr);
+                g_api.actDisable = il::Method(act, "Disable", 0, &perr);
+            }
+            if (!g_api.actGetEnabled || !g_api.actEnable || !g_api.actDisable) {
+                g_api.pausedOffset = 0;  // a whole-map Disable / Enable would leave menu actions on in gameplay
+                SR2_WARN("ui: menu input actions unavailable ({}); game menus behind the overlay may react to its "
+                         "input",
+                         perr);
+            }
         }
     }
     if (!g_api.mapOk)
@@ -157,6 +188,61 @@ bool MapEnabled(Il2CppObject* m) {
     return il::UnboxTo(r, en) && en;
 }
 
+bool ActionEnabled(Il2CppObject* a) {
+    bool en = false;
+    return il::UnboxTo(il::Invoke(g_api.actGetEnabled, a, {}), en) && en;
+}
+
+// The game itself wants a menu (CursorManager.LockState not Locked: pause menu, full map, ...). Without
+// CursorManager: assumed true, so a held menu action is always handed back.
+bool GameWantsMenu() {
+    int want = kCursorNone;
+    if (!g_api.cmGetLock || !il::UnboxTo(il::Invoke(g_api.cmGetLock, nullptr, {}), want)) return true;
+    return want != kCursorLocked;
+}
+
+// Disables every action of the menu map that is on and remembers each one. Runs every tick while blocking, so
+// actions the game turns on meanwhile (it opened a menu) are taken too.
+void HoldMenuActions(Il2CppObject* m) {
+    void* arr = core::unity::Field<void*>(m, g_api.mapActionsOffset);
+    size_t n = core::unity::ArrayLength(arr);
+    bool menu = GameWantsMenu();
+    for (size_t i = 0; i < n; ++i) {
+        auto* a = static_cast<Il2CppObject*>(core::unity::ArrayAt(arr, i));
+        if (!a || !ActionEnabled(a)) continue;
+        il::Invoke(g_api.actDisable, a, {});
+        bool known = false;
+        for (const HeldAction& h : g_heldActions) known |= h.action == a;
+        if (!known) g_heldActions.push_back({a, menu});
+    }
+}
+
+// Hands back exactly the actions we took. If the game left its menu meanwhile (its own
+// InputDirector.UpdateInputMaps(false) -> _paused.Disable() found them already off), the ones taken during that
+// menu stay off: on in gameplay they arm CloseMap on M, and the next M opened the map and its release closed it
+// again (round 14 "map closed instantly after 1-5 frames").
+void ReleaseMenuActions() {
+    if (g_heldActions.empty()) return;
+    bool menu = GameWantsMenu();
+    int back = 0, kept = 0;
+    if (core::unity::IsAlive(g_director)) {
+        for (const HeldAction& h : g_heldActions) {
+            if (h.inMenu && !menu) {
+                ++kept;
+                continue;
+            }
+            il::Invoke(g_api.actEnable, h.action, {});
+            ++back;
+        }
+    }
+    if (!g_heldLogged || kept) {
+        SR2_INFO("ui: menu input map: {} action(s) handed back after the overlay held them off{}", back,
+                 kept ? std::format(", {} left off (the game closed its menu meanwhile)", kept) : std::string());
+        g_heldLogged = true;
+    }
+    g_heldActions.clear();
+}
+
 int GetLock() {
     int v = kCursorNone;
     il::UnboxTo(il::Invoke(g_api.getLockState, nullptr, {}), v);
@@ -172,13 +258,13 @@ void BlockMenus(bool pointer, bool typing) {
     if (g_api.mapOk && g_api.pausedOffset) {
         if (pointer || typing) {
             if (Il2CppObject* m = DirectorMap(g_api.pausedOffset, "_paused"); m && MapEnabled(m)) {
-                il::Invoke(g_api.mapDisable, m, {});
-                if (!g_pausedMap) SR2_DEBUG("ui: menu input map disabled (pointer on the overlay)");
-                g_pausedMap = m;
+                HoldMenuActions(m);
+                if (!g_menuBlocked) SR2_DEBUG("ui: menu input map held off (pointer on the overlay)");
+                g_menuBlocked = true;
             }
-        } else if (g_pausedMap) {
-            if (core::unity::IsAlive(g_director)) il::Invoke(g_api.mapEnable, g_pausedMap, {});
-            g_pausedMap = nullptr;
+        } else if (g_menuBlocked) {
+            ReleaseMenuActions();
+            g_menuBlocked = false;
         }
     }
     if (!g_api.moduleOk) return;

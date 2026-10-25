@@ -388,10 +388,14 @@ Unity's new Input System only, through a ScriptableObject event bus; gameplay su
 
 ### InputDirector (MP.SR.Input)
 - fields (by name): `_mainGame` (InputActionMapReference: gameplay map), `_paused` (menu map: full map, pause menu, Slimepedia)
-- methods: `OnPausedChanged` - swaps `_mainGame` for `_paused` while a game menu is open (dump/inferred)
+- methods: `OnPausedChanged` = `UpdateInputMaps(bool uiMode)` 0x9DBB00 (folded x3 with ForceUpdateInputMaps): uiMode -> `_mainGame.Disable()` + `_paused.Enable()`, else `_mainGame.Enable()` + `_paused.Disable()`. Subscribed to `TimeDirector.OnPausedChanged` in `OnSceneGroupLoaded` 0x9DD8A0 (TimeDirector `_pauserCount` +0x8C, `isPaused()` 0x54FD70) (IDA)
+- methods: `OnEnable` / `OnDisable` enable / disable the whole `_inputActions` asset (IDA)
 - methods: `InputActionMapReference.op_Implicit(InputActionMapReference)` -> `InputActionMap`
+- data: the asset is `PlayControls` (bundle `duplicateassetisolation_assets_group_input_*`, UnityPy). Maps `MainGame`, `Paused`, `Debug`, `EnableDevice`. M is bound twice: `MainGame/Open Map` and `Paused/CloseMap` (both Button, no initial state check); Esc: `MainGame/Menu`, `Paused/Cancel`, `Paused/Unmenu`; Tab: `Paused/Debug Menu`
+- data: the gamecore EventSystem's `InputSystemUIInputModule` uses `Paused/Point`, `Menu Move`, `Submit`, `Cancel`, `Left Click`, `Right Click`, `Scoll Wheel` (sic) (gamecore_scenes, UnityPy). The module enables those single actions in OnEnable, so `_paused.enabled` (any action on) can be true in gameplay
+- gotchas: a whole-map `_paused.Enable()` in gameplay arms `CloseMap`: the M press that opens the map also starts CloseMap, and its release (MapUI binds CloseMap on *canceled*) closes the map a few frames later. Hold and restore single actions instead (round 14 bug, ui/game_input.cpp)
 - gotchas: the game re-enables maps itself -> re-assert Disable each tick; no InputDirector on title screen / loading (FindObjectOfType retried at most 1/s: running it every tick cost 1-2 ms/frame)
-- mod: ui/game_input.cpp (`InputActionMap.get_enabled/Enable/Disable`, Unity.InputSystem)
+- mod: ui/game_input.cpp (`InputActionMap.get_enabled/Enable/Disable`, `InputActionMap.m_Actions` +0x28, `InputAction.get_enabled` 0x2C782B0 / `Enable` 0x2C76AF0 / `Disable` 0x2C76970, Unity.InputSystem)
 
 ### EventSystem (UnityEngine.EventSystems, UnityEngine.UI)
 - methods: `get_current` (static), `get_currentInputModule`; the module is `InputSystemUIInputModule` (reads the Input System, not window messages); disable via `Behaviour.set_enabled(false)`
