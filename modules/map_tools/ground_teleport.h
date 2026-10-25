@@ -55,6 +55,12 @@ bool Resolved();
 bool Start(const char* owner, float x, float z, Done done, std::string* why);
 bool Busy();
 
+// Main thread. Moves the player to exactly `pos` (no ground search, no region loading: the caller knows the
+// spot is valid, e.g. a position read in game earlier), facing `euler` when given (else the rotation is kept),
+// through the same TeleportablePlayer.TeleportTo. For tools (modules/autotest). False (+ why) when it can't:
+// not resolved, a ground teleport running, no player, knocked out, scene loading, the call failed.
+bool TeleportExact(const char* owner, Vec3f pos, const Vec3f* euler, std::string* why);
+
 // Main thread. True (+ a short reason) while no teleport may run: the player is knocked out / respawning
 // (`knockedOut` true), or a scene load is in progress. False also when this cannot be told (not resolved).
 bool PlayerUnavailable(std::string* why, bool* knockedOut = nullptr);

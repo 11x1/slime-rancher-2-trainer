@@ -1009,7 +1009,10 @@ Il2CppObject* ReplaceDetour(Il2CppObject* location, Il2CppObject* oldPlot, Il2Cp
     return r;
 }
 
+std::atomic<custom_upgrades::SaveVeto> g_saveVeto{nullptr};
+
 Il2CppObject* SaveImplDetour(Il2CppObject* self, bool ignoreDebug, Il2CppObject* modify, const MethodInfo* mi) {
+    if (auto veto = g_saveVeto.load(); veto && veto(self)) return nullptr;  // autotest save guard (guards itself)
     const bool on = g_self && g_self->On();
     if (on) g_saveGuard.Run([&] { g_self->BeforeSave(); });
     Il2CppObject* r = g_origSave(self, ignoreDebug, modify, mi);
@@ -4126,6 +4129,8 @@ bool Owns(Il2CppObject* landPlot, int32_t upgrade) {
     g_hasGuard.Run([&] { r = g_self->Owns(landPlot, upgrade); });
     return r;
 }
+
+void SetSaveVeto(SaveVeto fn) { g_saveVeto.store(fn); }
 
 std::string PlotKey(Il2CppObject* landPlot) {
     if (!Active() || !main_thread::IsMainThread()) return {};
