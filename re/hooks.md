@@ -150,6 +150,7 @@ Hook groups (HookManager "module"): the module name for `ctx.Hook*` and `ctx.hoo
 | PlayerState.Damage(1) | 0x87AEB0 | sandbox.PlayerState.Damage | sandbox/player_extras.cpp | infinite health (opt, toggles with sandbox) |
 | PlayerState.InitModel(1) | 0x87B4F0 | custom_upgrades.PlayerState.InitModel | custom_upgrades/vacpack_upgrades.cpp | apply vacpack tiers |
 | PlayerState.Reset(1) | 0x87BC70 | custom_upgrades.PlayerState.Reset | custom_upgrades/vacpack_upgrades.cpp | apply vacpack tiers |
+| PlayerUpgradeDetails.Show(1) | 0x82AAF0 | custom_upgrades.PlayerUpgradeDetails.Show | custom_upgrades/fabricator_levels.cpp | "Next:" label of mod levels (post; opt) |
 | PlayerUpgradeFabricateCategoryRuntime..ctor(2) | 0x82BE90 | custom_upgrades.PlayerUpgradeFabricateCategoryRuntime..ctor | custom_upgrades/vacpack_upgrades.cpp | add upgrade cards (own ctor, no parent walk) |
 | PlortCollectorActivator.Activate(0) | 0x52DD60 | custom_upgrades.PlortCollectorActivator.Activate | custom_upgrades/module.cpp | silo Sell-All, Corral Radio + Hen Collector buttons (silo_world, coop_world) (opt) |
 | ProducePlortsOnHit.ProducePlort(0) | 0x885CA0 | custom_upgrades.ProducePlortsOnHit.ProducePlort | custom_upgrades/shadow_catcher.cpp | lift hit-plort despawn limit (opt) |

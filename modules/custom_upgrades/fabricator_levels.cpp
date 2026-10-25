@@ -9,6 +9,7 @@
 #include <cmath>
 #include <format>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "core/detour_guard.h"
@@ -17,6 +18,7 @@
 #include "core/main_thread.h"
 #include "core/module.h"
 #include "core/resolver.h"
+#include "core/text_override.h"
 #include "core/unity.h"
 
 namespace sr2::modules::custom_upgrades::fabricator {
@@ -39,6 +41,8 @@ using ShowFn = void (*)(Il2CppObject*, int32_t, int32_t, const MethodInfo*);
 using ArrayNewFn = Il2CppArray* (*)(Il2CppClass*, uintptr_t);
 using ElementClassFn = Il2CppClass* (*)(Il2CppClass*);
 using WBarrierFn = void (*)(Il2CppObject*, void**, void*);
+using DetailsShowFn = void (*)(Il2CppObject*, Il2CppObject*, const MethodInfo*);
+using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
 
 // One row of circles / grid of pips as the prefab laid it out (read from the live objects once).
 struct Layout {
@@ -63,6 +67,19 @@ struct State {
     const MethodInfo* getParent = nullptr;  // Transform.get_parent
     ShowFn origShow = nullptr;
     ShowFn origPips = nullptr;
+    // PlayerUpgradeDetails.Show: the "Next:" label of a level whose title is ours (DetailsShowDetour).
+    DetailsShowFn origDetails = nullptr;
+    ObjectNewFn objectNew = nullptr;
+    size_t offDetNext = 0, offDetNextString = 0;  // PlayerUpgradeDetails._nextUpgrade / _nextUpgradeString
+    size_t offLevelTitle = 0;                     // UpgradeDefinition.UpgradeLevelDefinition.Title (lazy)
+    Il2CppClass* stringVarClass = nullptr;        // SmartFormat.PersistentVariables.StringVariable
+    const MethodInfo* nextExists = nullptr;       // PlayerUpgradeFabricatableItem.get_NextUpgradeLevelExists
+    const MethodInfo* nextLevel = nullptr;        // PlayerUpgradeFabricatableItem.get_NextUpgradeLevelDefinition
+    const MethodInfo* svCtor = nullptr;           // StringVariable..ctor
+    const MethodInfo* svSetValue = nullptr;       // Variable<string>.set_Value
+    const MethodInfo* lsSetItem = nullptr;        // LocalizedString.set_Item(string, IVariable)
+    const MethodInfo* lseRefresh = nullptr;       // LocalizeStringEvent.RefreshString
+    std::unordered_set<std::string> loggedNext;   // titles logged once
     std::unordered_map<Il2CppObject*, Layout> layouts;  // per UpgradeChain / FabricatorItemButtonPips
     bool loggedChain = false, loggedPips = false, failed = false;
 };
@@ -70,6 +87,7 @@ struct State {
 State g;
 sr2::core::DetourGuard g_chainGuard{"custom_upgrades", "UpgradeChain.Show"};
 sr2::core::DetourGuard g_pipsGuard{"custom_upgrades", "FabricatorItemButton.ConfigurePips"};
+sr2::core::DetourGuard g_detailsGuard{"custom_upgrades", "PlayerUpgradeDetails.Show"};
 
 template <class T>
 T Unbox(Il2CppObject* boxed, T def = T{}) {
@@ -263,6 +281,89 @@ void PipsDetour(Il2CppObject* self, int32_t unlocked, int32_t total, const Metho
     g.origPips(self, unlocked, total, mi);
 }
 
+// PlayerUpgradeDetails.Show(item) (0x82AAF0) sets "Next: {next_upgrade_name}" with the next level's
+// Title LocalizedString as a nested variable. Smart format resolves a nested LocalizedString from its
+// table directly, never through LocalizeStringEvent.UpdateString, so the text_override registered on
+// our cloned levels' titles does not apply there: the label showed the template's entry (Tank Booster
+// IV on Slime Launcher, V on Tank Booster IX; round 15). After the original: when the next level's
+// title is one of ours, the variable becomes a StringVariable with our text and the label refreshes.
+// The "Next:" around it stays the game's; the next Show puts the level's own title back.
+void DetailsShowDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo* mi) {
+    g.origDetails(self, item, mi);
+    if (!self || !item || !main_thread::IsMainThread() || !sr2::core::text_override::Any()) return;
+    g_detailsGuard.Run([&] {
+        bool ok = false;
+        const bool exists =
+            Unbox<bool>(Call(g.nextExists, item, nullptr, "PlayerUpgradeFabricatableItem.get_NextUpgradeLevelExists", &ok));
+        if (!ok || !exists) return;
+        Il2CppObject* level =
+            Call(g.nextLevel, item, nullptr, "PlayerUpgradeFabricatableItem.get_NextUpgradeLevelDefinition");
+        if (!level) return;
+        if (!g.offLevelTitle) {
+            auto o = Resolver::Get().FieldOffset(unity::ClassOf(level), "Title");
+            if (!o) return;
+            g.offLevelTitle = *o;
+        }
+        std::string text;
+        if (!sr2::core::text_override::Lookup(unity::Field<Il2CppObject*>(level, g.offLevelTitle), text)) return;
+        Il2CppObject* ls = unity::Field<Il2CppObject*>(self, g.offDetNextString);
+        Il2CppObject* lse = unity::Field<Il2CppObject*>(self, g.offDetNext);
+        if (!ls || !unity::IsAlive(lse)) return;
+        Il2CppObject* var = g.objectNew(g.stringVarClass);
+        if (!var) return;
+        Call(g.svCtor, var, nullptr, "StringVariable..ctor", &ok);
+        if (!ok) return;
+        void* valueArgs[] = {unity::NewString(text)};
+        Call(g.svSetValue, var, valueArgs, "StringVariable.set_Value", &ok);
+        if (!ok) return;
+        void* itemArgs[] = {unity::NewString("next_upgrade_name"), var};
+        Call(g.lsSetItem, ls, itemArgs, "LocalizedString.set_Item", &ok);
+        if (!ok) return;
+        Call(g.lseRefresh, lse, nullptr, "LocalizeStringEvent.RefreshString");
+        if (g.loggedNext.insert(text).second)
+            SR2_INFO("[{}] fabricator levels: details panel 'Next:' label shows '{}'", g.module, text);
+    });
+}
+
+// Optional: without it the "Next:" label of our levels shows the template's title (logged).
+void SetupNextLabel(sr2::core::ModuleContext& ctx, Resolver& R, std::string& report) {
+    std::string err;
+    constexpr const char* kLoc = "Unity.Localization";
+    Il2CppClass* details = R.Class(kImage, kFabNs, "PlayerUpgradeDetails", &err);
+    Il2CppClass* item = R.Class(kImage, kFabNs, "PlayerUpgradeFabricatableItem", &err);
+    Il2CppClass* ls = R.Class(kLoc, "UnityEngine.Localization", "LocalizedString", &err);
+    Il2CppClass* lse = R.Class(kLoc, "UnityEngine.Localization.Components", "LocalizeStringEvent", &err);
+    g.stringVarClass = R.Class(kLoc, "UnityEngine.Localization.SmartFormat.PersistentVariables", "StringVariable", &err);
+    g.objectNew = reinterpret_cast<ObjectNewFn>(GetProcAddress(api().module, "il2cpp_object_new"));
+    auto off = [&](const char* name, size_t& out) {
+        if (!details) return;
+        if (auto o = R.FieldOffset(details, name, &err)) out = *o;
+    };
+    off("_nextUpgrade", g.offDetNext);
+    off("_nextUpgradeString", g.offDetNextString);
+    if (item) {
+        g.nextExists = R.Method(item, "get_NextUpgradeLevelExists", 0, &err);
+        g.nextLevel = R.Method(item, "get_NextUpgradeLevelDefinition", 0, &err);
+    }
+    if (g.stringVarClass) {
+        g.svCtor = R.Method(g.stringVarClass, ".ctor", 0, &err);
+        g.svSetValue = R.Method(g.stringVarClass, "set_Value", 1, &err);  // inherited from Variable<string>
+    }
+    if (ls) g.lsSetItem = R.Method(ls, "set_Item", 2, &err);
+    if (lse) g.lseRefresh = R.Method(lse, "RefreshString", 0, &err);
+    const MethodInfo* showMi = details ? R.Method(details, "Show", 1, &err) : nullptr;
+    void* showP = showMi ? R.MethodPointer(showMi, &err) : nullptr;
+    if (!g.objectNew || !g.offDetNext || !g.offDetNextString || !g.nextExists || !g.nextLevel || !g.svCtor ||
+        !g.svSetValue || !g.lsSetItem || !g.lseRefresh || !showP ||
+        !ctx.HookAddress("PlayerUpgradeDetails.Show", showP, reinterpret_cast<void*>(&DetailsShowDetour),
+                         reinterpret_cast<void**>(&g.origDetails))) {
+        SR2_WARN("[{}] fabricator levels: PlayerUpgradeDetails.Show not hooked ({}) - the details panel's 'Next:' label "
+                 "shows the template's title for mod levels", g.module, err.empty() ? "lookups failed" : err);
+        return;
+    }
+    report += std::format(" PlayerUpgradeDetails.Show@0x{:X}", Resolver::Rva(showP));
+}
+
 }  // namespace
 
 bool FabricatorLevels::Setup(sr2::core::ModuleContext& ctx, const char* module, bool& chainOk, std::string& why,
@@ -322,6 +423,7 @@ bool FabricatorLevels::Setup(sr2::core::ModuleContext& ctx, const char* module, 
     else
         SR2_WARN("[{}] fabricator levels: FabricatorItemButton.ConfigurePips not hooked ({}) - grid buttons show at most "
                  "their prefab's pips", module, err);
+    SetupNextLabel(ctx, R, report);
     return chainOk;
 }
 
