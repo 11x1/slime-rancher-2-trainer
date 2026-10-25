@@ -58,6 +58,19 @@ sell_upgrades' Ash Trough fill, `slime_dj.radio`). Per-save values: `custom_upgr
 `custom_upgrades.vacpack.*`, `drone_*_source.stations`, `drone_programs.station.<id>`, `quantum_link.*`,
 `dj.*`, `buildables.unlock.<id>`; formats in the sections below.
 
+## Per-frame work (perf)
+
+One frame callback (`FrameCheck`; `gadget_look.cpp` adds a second, cheap one for card art). Each part is
+timed with `SR2_PERF_DETAIL` (`custom_upgrades.gate (0.5 s)`, `.battery saver`, `.world: <part>`, ...), so
+the perf 10 s summary and the "> 2 ms" warnings in sr2mods.log name the slow part.
+- The ~1 Hz world tick (`WorldStep`, round 13) runs one part per frame in the old order: coops, quantum
+  links, DJ buildables, radio shop, drone sources, drone programs, silo buttons, radio buttons, plot props,
+  silo capacity, shadow catcher, vacpack. Missing parts take no frame. Before, all of it ran in one frame
+  (2-3.5 ms, ~230 warnings a session). `worldAccum_ = kWorldTickSeconds` still asks for a tick at once; it
+  starts when the running one is done (at most 12 frames later).
+- The ~20 ms hitches in round 12 were `drone_programs`' idle line scanning for incinerators (now cached,
+  "Several programs per drone").
+
 ## Hooks owned here
 
 MinHook allows one hook per address; other modules must not hook these:
@@ -236,7 +249,9 @@ while custom upgrades are on and the save owns the **Drone Program Scheduler** (
   `program 1 -> 2 (nothing to do: program 1 (target .. source .. sink ..) - <reason>)`. For an Incinerator
   destination the reason counts the incinerators with room in their Ash Trough (a drone only burns into
   one whose Ash Trough is built and not full: re/drones.md "Incinerator sink"); otherwise "the game finds
-  nothing to gather that the destination has room for".
+  nothing to gather that the destination has room for". The incinerators come from one
+  `FindObjectsOfTypeAll(Incinerate)` kept as GC handles, rescanned at most every 5 min when one is gone or
+  none was found (round 13: the scan per line cost ~20 ms and a resting drone logs this every ~1.5 min).
 - Round 10 "after the plort program it rests instead of doing the chicken program": the log had the
   switches (`program 2 -> 1 (nothing to do)` every ~40 s); program 1 was Meats / Outside Plots ->
   Incinerator and had nothing to do by the game's own rule (`MaybeHasNextGatherBehavior` false), most

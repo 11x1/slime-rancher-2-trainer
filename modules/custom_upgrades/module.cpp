@@ -230,6 +230,7 @@
 #include "core/main_thread.h"
 #include "core/module.h"
 #include "core/paths.h"
+#include "core/perf.h"
 #include "core/settings.h"
 #include "core/text_override.h"
 #include "core/unity.h"
@@ -294,6 +295,7 @@ constexpr int32_t kUpgStorageCapacity = 20;  // template preference
 constexpr int32_t kUpgStorageSections[] = {3, 4, 5};
 constexpr unsigned long long kTierCacheFrames = 900;
 constexpr float kWorldTickSeconds = 1.0f;  // coop world objects: create / fit / remove
+constexpr int kWorldSteps = 12;            // WorldStep parts, one per frame (round 13: all in one frame took 2-3.5 ms)
 
 using custom_upgrades::Family;
 constexpr int kFamilies = static_cast<int>(Family::kCount);
@@ -604,7 +606,7 @@ public:
     void ResetState(const char* why);
     void FrameCheck(float dt);
     void GateTick();
-    void WorldTick();
+    bool WorldStep(int step);  // one part of the ~1 Hz world tick; false: that part is not there (no frame spent)
     bool OnSiloButton(Il2CppObject* activator);
     bool OnHenButton(Il2CppObject* activator);
     bool OnRadioButton(Il2CppObject* activator);
@@ -718,6 +720,7 @@ private:
     void SetLocked(bool on);
     void SwitchModule(bool on, const char* why);
     float worldAccum_ = 0.0f;
+    int worldStep_ = -1;  // next WorldStep of the running world tick (-1: none running)
     Il2CppObject* LookupDirector();
     std::map<int32_t, Il2CppObject*> globalUpgItems_;  // vanilla upgrade -> menu item of any plot menu (icons)
     bool globalUpgItemsTried_ = false;
@@ -2268,29 +2271,53 @@ void CustomUpgrades::FrameCheck(float dt) {
     }
     if (!On() && receipt_.IsOpen()) CloseReceipt("module off");
     if (std::isfinite(dt) && dt > 0.0f) gateAccum_ += std::min(dt, 1.0f);
+    // Round 13: the parts are timed on their own (perf "custom_upgrades.*" lines in the 10 s summary and the
+    // > 2 ms warnings), so the log names the slow one.
     if (gateAccum_ >= kGateTickSeconds) {
+        SR2_PERF_DETAIL("custom_upgrades.gate (0.5 s)");
         gateAccum_ = 0.0f;
         g_gateGuard.Run([&] { GateTick(); });
     }
-    if (On() && SliderActive()) g_sliderGuard.Run([&] { SliderTick(dt); });
-    if (On() && silo_.Ready()) g_siloGuard.Run([&] { silo_.Frame(); });  // button message (cheap when none)
-    if (On() && radioButtons_.Ready()) g_siloGuard.Run([&] { radioButtons_.Frame(); });
-    if (On() && notices_.Ready()) g_siloGuard.Run([&] { notices_.Frame(dt); });  // queued sale notices
-    if (On() && receipt_.IsOpen()) g_siloGuard.Run([&] { ReceiptTick(dt); });   // Sell-All receipt input
-    if (On() && vacpack_.Ready()) vacpack_.Frame();  // extra vacpack slots' number keys
-    if (On() && quantum_.Ready()) quantum_.Frame();  // the Quantum Storage Links' glow glitch
-    if (On() && dj_.Ready()) dj_.Frame();  // Slime Radios held in the vacuum: rotation free while held
+    if (On() && SliderActive()) {
+        SR2_PERF_DETAIL("custom_upgrades.plot menu slider");
+        g_sliderGuard.Run([&] { SliderTick(dt); });
+    }
+    if (On()) {
+        SR2_PERF_DETAIL("custom_upgrades.silo / radio / notices / receipt");
+        if (silo_.Ready()) g_siloGuard.Run([&] { silo_.Frame(); });  // button message (cheap when none)
+        if (radioButtons_.Ready()) g_siloGuard.Run([&] { radioButtons_.Frame(); });
+        if (notices_.Ready()) g_siloGuard.Run([&] { notices_.Frame(dt); });  // queued sale notices
+        if (receipt_.IsOpen()) g_siloGuard.Run([&] { ReceiptTick(dt); });   // Sell-All receipt input
+    }
+    if (On()) {
+        SR2_PERF_DETAIL("custom_upgrades.vacpack / quantum / dj frame");
+        if (vacpack_.Ready()) vacpack_.Frame();  // extra vacpack slots' number keys
+        if (quantum_.Ready()) quantum_.Frame();  // the Quantum Storage Links' glow glitch
+        if (dj_.Ready()) dj_.Frame();  // Slime Radios held in the vacuum: rotation free while held
+    }
     if (battery_.Ready()) {  // drone battery refunds (every ~2 s); off: forget the last looks
+        SR2_PERF_DETAIL("custom_upgrades.battery saver");
         if (On()) g_batteryGuard.Run([&] { battery_.Tick(dt); });
         else battery_.Reset();
     }
     if (!On() || (!world_.Ready() && !silo_.Ready() && !props_.Ready() && !capacityOk_ && !vacpack_.Ready() &&
-                  !quantum_.Ready() && !drones_.Ready()))
+                  !quantum_.Ready() && !drones_.Ready())) {
+        worldStep_ = -1;
         return;
+    }
     if (std::isfinite(dt) && dt > 0.0f) worldAccum_ += std::min(dt, 1.0f);
-    if (worldAccum_ < kWorldTickSeconds) return;
-    worldAccum_ = 0.0f;
-    g_worldGuard.Run([&] { WorldTick(); });
+    // The ~1 Hz world tick, spread over frames: one part per frame, in the old order, so no frame carries all
+    // of it. A tick asked for early (worldAccum_ = kWorldTickSeconds) starts once the running one is done.
+    if (worldStep_ < 0) {
+        if (worldAccum_ < kWorldTickSeconds) return;
+        worldAccum_ = 0.0f;
+        worldStep_ = 0;
+    }
+    g_worldGuard.Run([&] {
+        while (worldStep_ >= 0 && worldStep_ < kWorldSteps)
+            if (WorldStep(worldStep_++)) break;
+    });
+    if (worldStep_ >= kWorldSteps || sr2::core::ModuleFaulted(kModule)) worldStep_ = -1;
 }
 
 // ---------------------------------------------------------------- gate ------
@@ -2417,41 +2444,113 @@ bool CustomUpgrades::WorldQuery(Il2CppObject* plot, custom_upgrades::world::Coop
     return true;
 }
 
-void CustomUpgrades::WorldTick() {
-    if (!main_thread::IsMainThread() || !EnsureLoaded()) return;  // no save game: nothing to build
+// Part `step` (0 .. kWorldSteps-1) of the world tick; FrameCheck runs one part per frame, in this order.
+// Returns false (and spends no frame) when the part is not there. No save game: the tick ends at once.
+bool CustomUpgrades::WorldStep(int step) {
+    if (!main_thread::IsMainThread() || !EnsureLoaded()) {  // no save game: nothing to build
+        worldStep_ = kWorldSteps;
+        return true;
+    }
+    if (sr2::core::ModuleFaulted(kModule)) return false;
     cleaned_ = false;
-    if (world_.Ready())
-        world_.Tick([&](Il2CppObject* plot, custom_upgrades::world::CoopRequest& req) { return WorldQuery(plot, req); },
-                    [&]() { return LookupDirector(); });
-    if (quantum_.Ready() && !sr2::core::ModuleFaulted(kModule)) quantum_.Tick();
-    if (dj_.Ready() && !sr2::core::ModuleFaulted(kModule)) dj_.Tick();
-    if (radioShop_.Ready() && !sr2::core::ModuleFaulted(kModule)) radioShop_.Tick();
-    if (drones_.Ready() && !sr2::core::ModuleFaulted(kModule))
-        drones_.Tick(world_.Ready() ? world_.HenStorages() : std::vector<Il2CppObject*>{}, custom_upgrades::quantum::Available(),
-                     custom_upgrades::quantum::Placed());
-    if (programs_.Ready() && !sr2::core::ModuleFaulted(kModule)) programs_.Tick();  // after the sources
-    if (silo_.Ready() && !sr2::core::ModuleFaulted(kModule)) {
+    switch (step) {
+    case 0:
+        if (!world_.Ready()) return false;
+        {
+            SR2_PERF_DETAIL("custom_upgrades.world: coops");
+            world_.Tick([&](Il2CppObject* plot, custom_upgrades::world::CoopRequest& req) { return WorldQuery(plot, req); },
+                        [&]() { return LookupDirector(); });
+        }
+        return true;
+    case 1:
+        if (!quantum_.Ready()) return false;
+        {
+            SR2_PERF_DETAIL("custom_upgrades.world: quantum links");
+            quantum_.Tick();
+        }
+        return true;
+    case 2:
+        if (!dj_.Ready()) return false;
+        {
+            SR2_PERF_DETAIL("custom_upgrades.world: dj buildables");
+            dj_.Tick();
+        }
+        return true;
+    case 3:
+        if (!radioShop_.Ready()) return false;
+        {
+            SR2_PERF_DETAIL("custom_upgrades.world: radio shop");
+            radioShop_.Tick();
+        }
+        return true;
+    case 4:
+        if (!drones_.Ready()) return false;
+        {
+            SR2_PERF_DETAIL("custom_upgrades.world: drone sources");
+            drones_.Tick(world_.Ready() ? world_.HenStorages() : std::vector<Il2CppObject*>{},
+                         custom_upgrades::quantum::Available(), custom_upgrades::quantum::Placed());
+        }
+        return true;
+    case 5:
+        if (!programs_.Ready()) return false;
+        {
+            SR2_PERF_DETAIL("custom_upgrades.world: drone programs");
+            programs_.Tick();  // after the sources
+        }
+        return true;
+    case 6: {
+        if (!silo_.Ready()) return false;
+        SR2_PERF_DETAIL("custom_upgrades.world: silo buttons");
         // Silos that own the Sell-All Button (the button checks the plot type itself).
         const UpgradeDef* d = FindDef(SILO_SELL_ALL);
         std::vector<std::string> wanted;
         for (const auto& [id, ps] : state_.plots)
             if (d && ps.type == kPlotSilo && ps.owned.count(d->key)) wanted.push_back(id);
         silo_.Tick(wanted, [&]() { return LookupDirector(); });
+        return true;
     }
-    if (radioButtons_.Ready() && !sr2::core::ModuleFaulted(kModule)) {
+    case 7: {
+        if (!radioButtons_.Ready()) return false;
+        SR2_PERF_DETAIL("custom_upgrades.world: radio buttons");
         // Corrals that own the Corral Radio (round 11: a blue button on the free corner opens its playlist).
         const UpgradeDef* d = FindDef(CORRAL_RADIO);
         std::vector<std::string> wanted;
         for (const auto& [id, ps] : state_.plots)
             if (d && ps.type == kPlotCorral && ps.owned.count(d->key)) wanted.push_back(id);
         radioButtons_.Tick(wanted, [&]() { return LookupDirector(); });
+        return true;
     }
-    if (props_.Ready() && !sr2::core::ModuleFaulted(kModule))
-        props_.Tick(WantedProps(), [&]() { return LookupDirector(); });
-    if (capacityOk_ && !sr2::core::ModuleFaulted(kModule)) CapacityTick();
-    // Shadow Catcher first: it finds the Shadow slime the vacpack tick's card and stash need.
-    if (shadow_.Ready() && !sr2::core::ModuleFaulted(kModule)) shadow_.Tick();
-    if (vacpack_.Ready() && !sr2::core::ModuleFaulted(kModule)) vacpack_.Tick();
+    case 8:
+        if (!props_.Ready()) return false;
+        {
+            SR2_PERF_DETAIL("custom_upgrades.world: plot props");
+            props_.Tick(WantedProps(), [&]() { return LookupDirector(); });
+        }
+        return true;
+    case 9:
+        if (!capacityOk_) return false;
+        {
+            SR2_PERF_DETAIL("custom_upgrades.world: silo capacity");
+            CapacityTick();
+        }
+        return true;
+    case 10:  // Shadow Catcher before the vacpack: it finds the Shadow slime the vacpack tick's card and stash need.
+        if (!shadow_.Ready()) return false;
+        {
+            SR2_PERF_DETAIL("custom_upgrades.world: shadow catcher");
+            shadow_.Tick();
+        }
+        return true;
+    case 11:
+        if (!vacpack_.Ready()) return false;
+        {
+            SR2_PERF_DETAIL("custom_upgrades.world: vacpack");
+            vacpack_.Tick();
+        }
+        return true;
+    default:
+        return false;
+    }
 }
 
 // Plots whose owned tiers have props: Faster Hens I / II (hay; II adds nests), Sprinkler II / III
