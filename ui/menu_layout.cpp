@@ -47,8 +47,8 @@ std::vector<Category> Spec() {
     sell.modules = {"sell_upgrades"};  // works on the game's own plot upgrades too
     CardSection refinery;
     refinery.title = "Refinery upgrades";
-    refinery.note = "Bought at the Fabricator: Tank Booster IX-XII, Extra Tank III-IV, Drone Battery Saver, Shadow "
-                    "Catcher.";
+    // Generic on purpose: the list of Fabricator upgrades grows (round 12 G: drone programs).
+    refinery.note = "The vacpack and drone upgrades Custom Upgrades adds to the Fabricator.";
     refinery.groups = {"Vacpack"};             // the Extra Tank III / IV slot keys
     refinery.modules = {"drone_price_limit"};  // the drone station menu: price limit, Programs
     upgrades.sections["custom_upgrades"] = {plot, sell, refinery};
