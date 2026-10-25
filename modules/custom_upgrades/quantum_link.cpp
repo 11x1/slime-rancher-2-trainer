@@ -149,9 +149,15 @@ constexpr double kTakeFxSeconds = 1.5;
 constexpr float kLinkTint = 0.3f;        // colours this far towards kPurple (was 0.6)
 constexpr double kQuantumMin = 14.0;     // a quantum moment (phase-through + glow jitter) every 14-32 s
 constexpr double kQuantumMax = 32.0;
-constexpr double kPhaseMin = 0.9;        // ... the phase-through shows this long
-constexpr double kPhaseMax = 1.6;
-constexpr float kGhostScale = 0.97f;     // the phase ghost: the link's model this much smaller, inside it
+// Round 16 ("the 'glitch' effect has a 'chams' look white, not very transparent, just feels like a model copy
+// glitching"): shorter (was 0.9-1.6 s), deeper inside the link (was 0.97: the pass's intersection edge, HDR cyan that
+// reads white, covered the whole copy hugging the link's surface), its own dim cyan materials (GhostMaterials), and it
+// flickers (on kGhostOnChance of the 30-80 ms flips) instead of showing solid.
+constexpr double kPhaseMin = 0.6;        // ... the phase-through shows this long
+constexpr double kPhaseMax = 1.1;
+constexpr float kGhostScale = 0.90f;     // the phase ghost: the link's model this much smaller, inside it
+constexpr float kGhostOnChance = 0.45f;  // ... visible on this share of the flips while it phases
+constexpr float kGhostEmission = 0.35f;  // its emission properties: kCyan times this
 // DronePhaseThroughCustomPass (core scene volume 'DronePhaseThroughCustomPass', data): draws renderers on layer 27
 // (the Refinery Link's model is on it already) whose renderingLayerMask has this bit, and overlays the parts hidden
 // behind other geometry with scanlines and a cyan intersection edge. 1 << 16 = "Ranch Drone Phase Through Custom
@@ -165,14 +171,15 @@ constexpr int32_t kTeleporterType = 1;  // GadgetDefinition.Types.TELEPORTER
 // The teleporter FX on top (round 9: "the portal effect is too big"; round 11: "teleport effect too big"). Its child
 // particle systems simulate in Local scaling mode, so the root's scale never reached them: each of those gets the
 // factor on its own transform too (ScaleParticles). Round 15 ("make the quantum blue effect bigger by a medium amount
-// that's coming from the top of it"): 0.22 -> 0.30.
-constexpr float kGlowScale = 0.30f;
+// that's coming from the top of it"): 0.22 -> 0.30. Round 16 ("The blue effect could be doubled"): 0.30 -> 0.60.
+constexpr float kGlowScale = 0.60f;
 constexpr float kGlowHeight = 1.0f;
 constexpr double kUseCooldown = 1.5;    // Use on a link: the cloud menu / notices at most this often
 constexpr double kCloudOpenSeconds = 10.0;  // the Quantum Cloud menu must load within this time
 constexpr double kCloudSettleSeconds = 0.15;  // ... then be active this long before it is filled (and between tries)
 constexpr int kCloudTries = 3;               // UpdateShowData(null) tries before the legends are set anyway
 constexpr int kUseLines = 5;            // cloud types listed by Use
+constexpr double kRowsSeconds = 0.25;   // the link's open menu: new drone rows lose their Go To hint this often
 
 struct Vec3 {
     float x, y, z;
@@ -185,6 +192,7 @@ struct Color {
 };
 constexpr Color kPurple{0.50f, 0.20f, 1.00f, 1.0f};
 constexpr Color kCyan{0.15f, 0.85f, 1.00f, 1.0f};
+constexpr Color kGhostColor{0.03f, 0.16f, 0.24f, 0.25f};  // the phase ghost's colour properties (dark cyan, low alpha)
 
 double Now() {
     using namespace std::chrono;
@@ -275,6 +283,8 @@ struct Impl {
     const MethodInfo* smCtor = nullptr, *cloudGet = nullptr, *cloudSet = nullptr, *getCloudModel = nullptr;
     const MethodInfo* spawnFx = nullptr, *rendGetMaterials = nullptr, *rendGetShared = nullptr, *rendSetShared = nullptr;
     const MethodInfo* matPropNames = nullptr, *matGetColor = nullptr, *matSetColor = nullptr, *matGetShader = nullptr;
+    Il2CppClass* materialClass = nullptr;
+    const MethodInfo* matCopyCtor = nullptr;  // Material..ctor(Material) (optional: the phase ghost's own materials)
     const MethodInfo* fabItemCtor = nullptr, *fabCheck = nullptr, *spend = nullptr, *addItem = nullptr;
     const MethodInfo* setFavorite = nullptr, *setHeld = nullptr, *hasBp = nullptr, *lsGetString = nullptr;
     using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
@@ -381,6 +391,12 @@ struct Impl {
     std::string cloudDisplay;          // the drone station menu's display name (from the station prefab)
     bool cloudDisplayLooked = false;
     Il2CppGCHandle cloudReq = nullptr; // UIDisplayRequestHandle of the menu being opened
+    // Round 16: the drone rows' own "magnifier + [SPACE]" (DroneListButton > AnimateInRoot > FocusedContent), hidden
+    // while the link's menu is open (RowsFrame); the drone list page watched here
+    Il2CppClass* listButtonClass = nullptr;  // DroneListButton (optional)
+    Il2CppGCHandle rowsList = nullptr;
+    double rowsNext = 0.0;
+    std::unordered_set<Il2CppObject*> rowsDone;  // rows handled during this open
     double cloudReqAt = 0.0;
     double cloudActiveAt = 0.0;        // when the loaded menu was first seen active (0 = not yet)
     int cloudTries = 0;                // UpdateShowData(null) calls that threw for this request
@@ -633,6 +649,7 @@ struct Impl {
     Il2CppObject* NamedChild(Il2CppObject* tr, std::string_view prefix);
     int SwapPortMesh(Il2CppObject* root, Rec* rec);
     void BuildGhost(Rec& rec, Il2CppObject* rootTr, Il2CppObject* holderTr);
+    int GhostMaterials(Il2CppObject* ghost);
     Il2CppObject* PassVolume();
     void PhaseOn(Rec& rec);
     void PhaseOff(Rec& rec);
@@ -642,6 +659,9 @@ struct Impl {
     std::string HideListHints(Il2CppObject* menu);
     std::string HideHints(Il2CppObject* legend, const std::vector<Il2CppObject*>& configs);
     void EndCloudRequest();
+    int HideRowHints(Il2CppObject* list, int* rows);
+    void RowsFrame();
+    void EndRows(bool restore);
     bool OnUse(Il2CppObject* interactable);
     std::string NameOf(Il2CppObject* type);
     // ---- slots ----
@@ -1467,6 +1487,14 @@ void Impl::Undecorate(Rec& rec, bool restore) {
                     unity::IsAlive(m) && unity::GetName(m).find(kMatTag) != std::string::npos)
                     Destroy(m);
         }
+        if (unity::IsAlive(rec.ghost))  // the ghost's own instances (GhostMaterials; named after the link's tagged ones)
+            for (Il2CppObject* r : AllInChildren(rec.ghost, rendererClass)) {
+                Il2CppObject* inst = Call(rendGetShared, r, {}, "Renderer.get_sharedMaterials", &ok);
+                for (size_t i = 0, n = ok && inst ? unity::ArrayLength(inst) : 0; i < n && i < 16; ++i)
+                    if (auto* m = static_cast<Il2CppObject*>(unity::ArrayAt(inst, i));
+                        unity::IsAlive(m) && unity::GetName(m).find(kMatTag) != std::string::npos)
+                        Destroy(m);
+            }
         Destroy(rec.holder);
     }
     FreeLater(std::move(rec.handles));
@@ -1531,7 +1559,8 @@ void Impl::MakeLook() {
 
 // A quantum moment every kQuantumMin-Max s (round 14; it was every 3.5-8 s, the user found the effects "too
 // quick"): the glow jitters in place and size (every 30-80 ms) for about half a second, and the phase ghost shows
-// for kPhaseMin-Max s, nudged a little at every flip so its edges cross the link's surface. The glow used to drop
+// for kPhaseMin-Max s, nudged a little at every flip (round 16: and shown on kGhostOnChance of the flips only, a
+// flicker). The glow used to drop
 // out too (SetActive off / on), which restarted its particle systems ("disappear in like 6-7 s intervals", round 11).
 void Impl::Glitch(Rec& rec, double now) {
     auto rnd = [&rec] {
@@ -1574,6 +1603,9 @@ void Impl::Glitch(Rec& rec, double now) {
         Call(trSetLocalScale, tr, {&glowScale}, "Transform.set_localScale");
     }
     if (gtr && rec.phasing) {
+        const bool on = rnd() < kGhostOnChance;  // round 16: flickers instead of a solid copy
+        unity::SetActive(rec.ghost, on);
+        if (!on) return;
         const float k = kGhostScale + (rnd() - 0.5f) * 0.04f;
         Vec3 pos{(rnd() - 0.5f) * 0.05f, (rnd() - 0.5f) * 0.04f, (rnd() - 0.5f) * 0.05f};
         Vec3 scale{rec.ghostScale.x * k, rec.ghostScale.y * k, rec.ghostScale.z * k};
@@ -1655,14 +1687,63 @@ void Impl::BuildGhost(Rec& rec, Il2CppObject* modelTr, Il2CppObject* holderTr) {
         DestroyNow(ghost);
         return;
     }
+    const int mats = GhostMaterials(ghost);
     rec.ghost = ghost;
     if (Il2CppGCHandle h = unity::NewGCHandle(ghost)) rec.handles.push_back(h);
     if (!loggedGhost) {
         loggedGhost = true;
         SR2_INFO("[{}] quantum link: phase ghost = a copy of '{}' at {:.2f} size, {} renderer(s) in rendering layer 0x{:X} "
-                 "(the ranch drones' phase-through pass); quantum moments every {:.0f}-{:.0f} s",
-                 module, unity::GetName(model), kGhostScale, rends, kRanchDronePhaseBit, kQuantumMin, kQuantumMax);
+                 "(the ranch drones' phase-through pass), {} dim cyan material(s); quantum moments every {:.0f}-{:.0f} s, "
+                 "the ghost flickers for {:.1f}-{:.1f} s",
+                 module, unity::GetName(model), kGhostScale, rends, kRanchDronePhaseBit, mats, kQuantumMin, kQuantumMax,
+                 kPhaseMin, kPhaseMax);
     }
+}
+
+// Round 16 ("'chams' look white, not very transparent"): the ghost's renderers get their own materials (new
+// Material(copy) of the link's tinted instances, which the Instantiate'd copy shared; set as its shared materials, so
+// the link's are never touched), colour properties dark cyan with a low alpha and emission properties a dim cyan, so
+// whatever the phase-through pass takes from the ghost's own surface is dark, not the link's near-white. Property
+// names as in Tint; the copies keep kMatTag in their names (Undecorate destroys them). Returns the materials made.
+int Impl::GhostMaterials(Il2CppObject* ghost) {
+    if (!matCopyCtor || !materialClass || !rendGetShared || !rendSetShared || !matPropNames || !matSetColor) return 0;
+    int mats = 0;
+    for (Il2CppObject* r : AllInChildren(ghost, rendererClass)) {
+        bool ok = false;
+        Il2CppObject* shared = Call(rendGetShared, r, {}, "Renderer.get_sharedMaterials", &ok);
+        const size_t n = ok && shared ? std::min<size_t>(unity::ArrayLength(shared), 16) : 0;
+        Il2CppObject* arr = n ? arrayNew(materialClass, n) : nullptr;
+        if (!arr) continue;
+        for (size_t i = 0; i < n; ++i) {
+            auto* src = static_cast<Il2CppObject*>(unity::ArrayAt(shared, i));
+            Il2CppObject* m = unity::IsAlive(src) ? objectNew(materialClass) : nullptr;
+            if (m) Call(matCopyCtor, m, {src}, "Material..ctor(Material)", &ok);
+            if (!m || !ok || !unity::IsAlive(m)) {
+                SetElem(arr, i, src);
+                continue;
+            }
+            const std::string name = unity::GetName(src);
+            unity::SetName(m, name.find(kMatTag) != std::string::npos ? name : name + kMatTag);
+            SetElem(arr, i, m);
+            ++mats;
+            int32_t vec = 2;  // MaterialPropertyType.Vector
+            Il2CppObject* names = Call(matPropNames, m, {&vec}, "Material.GetPropertyNames", &ok);
+            for (size_t j = 0, nn = ok ? unity::ArrayLength(names) : 0; j < nn && j < 64; ++j) {
+                auto* s = static_cast<Il2CppString*>(unity::ArrayAt(names, j));
+                const std::string low = Lower(unity::ToUtf8(s));
+                const bool emission = low.find("emiss") != std::string::npos || low.find("glow") != std::string::npos;
+                const bool color = !emission && (low.find("color") != std::string::npos ||
+                                                 low.find("tint") != std::string::npos || low.find("albedo") != std::string::npos);
+                if (!emission && !color) continue;
+                Color out = emission ? Color{kCyan.r * kGhostEmission, kCyan.g * kGhostEmission, kCyan.b * kGhostEmission, 1.0f}
+                                     : kGhostColor;
+                Call(matSetColor, m, {s, &out}, "Material.SetColor", &ok);
+            }
+        }
+        Call(rendSetShared, r, {arr}, "Renderer.set_sharedMaterials", &ok);
+        if (Faulted()) break;
+    }
+    return mats;
 }
 
 // The drone phase-through pass volume (cached; looked up again at most every 30 s while missing).
@@ -1874,9 +1955,70 @@ void Impl::CloudFrame() {
     Il2CppObject* cloud = unity::IsAlive(menu) ? unity::Field<Il2CppObject*>(menu, offMenuCloud) : nullptr;
     const std::string hints = unity::IsAlive(cloud) ? HideCloudHints(cloud) : std::string("no cloud page");
     const std::string listHints = unity::IsAlive(menu) ? HideListHints(menu) : std::string("no menu");
-    SR2_INFO("[{}] quantum link: Quantum Cloud menu open ({}; cloud legend: {}; drone list legend: {})", module,
+    std::string rowHints = "DroneListButton not found";
+    if (Il2CppObject* list = unity::IsAlive(menu) && listButtonClass ? unity::Field<Il2CppObject*>(menu, offMenuList) : nullptr;
+        unity::IsAlive(list)) {
+        EndRows(false);
+        int rows = 0;
+        const int hid = HideRowHints(list, &rows);
+        rowHints = std::format("{} row(s), {} hint part(s) hidden", rows, hid);
+        rowsList = unity::NewGCHandle(list);
+        rowsNext = Now() + kRowsSeconds;
+    }
+    SR2_INFO("[{}] quantum link: Quantum Cloud menu open ({}; cloud legend: {}; drone list legend: {}; drone rows' Go To "
+             "hint: {})", module,
              err.empty() ? std::format("view only, no station, filled on try {}", cloudTries + 1) : std::string("not filled"), hints,
-             listHints);
+             listHints, rowHints);
+}
+
+// Round 16 ("On drone rows i still see '(Magnifying icon) [SPACE]'"): each drone row (DroneListButton, data:
+// menulayer_dronestationmenu scene, the ListView's _itemPrefab) has AnimateInRoot > FocusedContent (inactive) with
+// GoToIcon (the magnifier) and InputEventDisplay (the Submit key); the row's FocusEventTriggers SetActive the
+// FocusedContent itself on focus received / lost, so its children are switched off instead and stay off. Only rows
+// under the link's menu (never the prefab: the map's drone panel uses Go To). Returns the parts newly hidden.
+int Impl::HideRowHints(Il2CppObject* list, int* rows) {
+    int hid = 0;
+    for (Il2CppObject* btn : AllInChildren(list, listButtonClass)) {
+        if (rows) ++*rows;
+        if (!rowsDone.insert(btn).second) continue;
+        Il2CppObject* anim = NamedChild(unity::TransformOf(btn), "AnimateInRoot");
+        Il2CppObject* focused = anim ? NamedChild(anim, "FocusedContent") : nullptr;
+        if (!focused) continue;
+        for (Il2CppObject* child : ChildTransforms(focused)) {
+            Il2CppObject* go = unity::GameObjectOf(child);
+            bool ok = false;
+            if (!unity::IsAlive(go)) continue;
+            if (goActiveSelf && (!Value<bool>(Call(goActiveSelf, go, {}, "GameObject.get_activeSelf", &ok)) || !ok)) continue;
+            unity::SetActive(go, false);
+            ++hid;
+        }
+        if (Faulted()) break;
+    }
+    return hid;
+}
+
+// Every kRowsSeconds while the link's menu is open: rows added since (the list repopulates) lose the hint too.
+// The menu closed (gone or inactive): the watch ends; rows still alive get their hint parts back.
+void Impl::RowsFrame() {
+    if (Now() < rowsNext) return;
+    rowsNext = Now() + kRowsSeconds;
+    Il2CppObject* list = unity::GCHandleTarget(rowsList);
+    if (!unity::IsAlive(list) || !unity::ActiveInHierarchy(unity::GameObjectOf(list))) return EndRows(true);
+    HideRowHints(list, nullptr);
+}
+
+void Impl::EndRows(bool restore) {
+    Il2CppObject* list = rowsList ? unity::GCHandleTarget(rowsList) : nullptr;
+    if (restore && unity::IsAlive(list) && listButtonClass)  // a menu kept for later (a station's) gets them back
+        for (Il2CppObject* btn : AllInChildren(list, listButtonClass)) {
+            Il2CppObject* anim = NamedChild(unity::TransformOf(btn), "AnimateInRoot");
+            Il2CppObject* focused = anim ? NamedChild(anim, "FocusedContent") : nullptr;
+            for (Il2CppObject* child : focused ? ChildTransforms(focused) : std::vector<Il2CppObject*>{})
+                unity::SetActive(unity::GameObjectOf(child), true);
+        }
+    if (rowsList) FreeLater({rowsList});
+    rowsList = nullptr;
+    rowsDone.clear();
 }
 
 // Round 12: "the row shows to press [SPACE] and a magnifying glass, #watdatmean". Without a station
@@ -2576,6 +2718,8 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
     p->matGetColor = byParams(material, "GetColor", {"System.String"});
     p->matSetColor = byParams(material, "SetColor", {"System.String", "UnityEngine.Color"});
     p->matGetShader = method(material, "get_shader", 0);
+    p->materialClass = material;
+    p->matCopyCtor = R.MethodByParams(material, ".ctor", {"UnityEngine.Material"});
     p->fabItemCtor = R.Method(p->fabItemClass, ".ctor", 4, nullptr);
     p->fabCheck = suffix(p->fabItemClass, ".CheckCanFabricate", 1);
     p->spend = byParams(spendable, "Spend", {"MonomiPark.SlimeRancher.Economy.PurchaseCost", "System.Int32"});
@@ -2592,6 +2736,7 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
         constexpr const char* kControls = "MonomiPark.SlimeRancher.UI.Framework.CommonControls";
         p->legendClass = R.Class(kImage, kControls, "InputLegend", nullptr);
         p->registrarClass = R.Class(kImage, kControls, "InputLegendFocusRegistrar", nullptr);
+        p->listButtonClass = R.Class(kImage, kDroneUi, "DroneListButton", nullptr);
         std::string sufErr;
         const MethodInfo* show = nullptr;
         if (p->droneUiClass && api().il2cpp_class_get_methods && api().il2cpp_method_get_name && api().il2cpp_method_get_param_count) {  // IDisplayShowDataHandler<IDroneTaskAssignable>.UpdateShowData (explicit)
@@ -2724,6 +2869,7 @@ bool QuantumLink::Setup(sr2::core::ModuleContext& ctx, Host host, std::string& w
 void QuantumLink::Frame() {
     if (!ready_ || !g || !main_thread::IsMainThread() || g->Faulted()) return;
     if (g->cloudReq) g_guard.Run([] { g->CloudFrame(); });
+    if (g->rowsList && !g->Faulted()) g_guard.Run([] { g->RowsFrame(); });
     if (g->recs.empty() || g->Faulted()) return;
     const double now = Now();
     for (auto& [id, rec] : g->recs) {
@@ -2758,6 +2904,7 @@ void QuantumLink::Cleanup(const char* why) {
     if (!ready_ || !g || !main_thread::IsMainThread()) return;
     Impl& p = *g;
     const bool calls = !p.Faulted();
+    p.EndRows(calls);  // an open menu's drone rows get their hint back
     int links = 0;
     for (auto& [id, rec] : p.recs) {
         p.Undecorate(rec, calls);

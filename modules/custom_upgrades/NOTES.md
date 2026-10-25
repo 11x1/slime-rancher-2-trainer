@@ -351,8 +351,8 @@ GadgetItem, Fabricator categories), re/save.md (GetPersistenceId, `_reverseIndex
   quantum <-> plain in place.
 - **Look** (tick): materials instanced, colours 30 % purple (round 14, was 60 %: "the purple is too strong";
   the placement preview too), emission cyan, tagged ` [sr2q]` (originals back when plain). Holder
-  `sr2qlink#<gen>`: a teleporter `_activeFX` clone (0.30 size, round 15: was 0.22, "make the quantum blue effect
-  bigger by a medium amount"; 1 m up; its green `Point light` and green `Waves` particles destroyed, round 15:
+  `sr2qlink#<gen>`: a teleporter `_activeFX` clone (0.60 size; round 15: 0.22 -> 0.30, "make the quantum blue effect
+  bigger by a medium amount"; round 16: 0.30 -> 0.60, "The blue effect could be doubled"; 1 m up; its green `Point light` and green `Waves` particles destroyed, round 15:
   "Remove the green halo coming from the center of it", `DropGreen`, re/fabricator.md "Teleporter FX"; its child particle systems in Local scaling
   mode get the factor on their own transforms, `ScaleParticles`) that never switches off (round 11: the old
   drop-out restarted the particles, "disappears in like 6-7s intervals"). Icon: a purple copy of the Refinery Link
@@ -370,6 +370,14 @@ GadgetItem, Fabricator categories), re/save.md (GetPersistenceId, `_reverseIndex
     (`DroneCustomPassController._phaseThroughCustomPassVolume`, looked up with FindObjectsOfTypeAll at most every
     30 s while missing). Logs `phase ghost = a copy of ...`, `drone phase-through pass volume '...' (on|off now ...)`.
     Not seen in game: how strong the overlay looks on a ghost fully inside its occluder.
+    Round 16 ("the 'glitch' effect has a 'chams' look white, not very transparent, just feels like a model copy
+    glitching"): the pass's fullscreen material is shared with the drones, so the ghost itself changed: 0.90 of the
+    model (was 0.97; the intersection edge, HDR cyan ~350 within `_DepthDifference` 1.8 m, likely covered the whole
+    copy hugging the surface), shown 0.6-1.1 s (was 0.9-1.6), visible on 45 % of the 30-80 ms flips only (a flicker,
+    `kGhostOnChance`), and its own materials (`GhostMaterials`: `new Material(copy)` of the link's tinted ones set as
+    the ghost's shared materials; colour properties dark cyan alpha 0.25, emission cyan x0.35; destroyed in
+    `Undecorate`). Assumed, not proven: the pass's overlay takes something from the ghost's own GBuffer colour (if not,
+    the flicker and depth do the work). Log: `phase ghost = ... N dim cyan material(s) ... flickers for 0.6-1.1 s`.
   - **No idle ping**: the cloud-withdraw FX no longer pulses every ~7 s, only at a take (1.5 s cooldown).
   - **No suction**: the Refinery Link's vac particles at the port (`model_refineryLink/Dust ` with `Rings`) are
     switched off ("has a suction effect on the output").
@@ -420,6 +428,13 @@ GadgetItem, Fabricator categories), re/save.md (GetPersistenceId, `_reverseIndex
   `SetInputHints(InputHintConfiguration[], true)`, so the others are not shown at all (on the registrar the list
   survives focus changes; RE: re/ui.md "Hiding a hint"); `SetItemEnabled` stays the fallback when no hint is kept
   or the call is missing. The log says `hid 'Go To' [Submit] (removed from the legend)` or `(greyed out only: ...)`.
+  Round 16 ("Go to hint is gone from the bottom, nice / On drone rows i still see '(Magnifying icon) [SPACE]'"): each
+  drone row has its own focus prompt, `DroneListButton > AnimateInRoot > FocusedContent` (GoToIcon + InputEventDisplay;
+  re/drones.md). The row's FocusEventTriggers activate FocusedContent on focus, so `HideRowHints` switches its two
+  children off instead (they stay off). Rows under the link's menu only, never the prefab (the map's drone panel uses
+  Go To); `RowsFrame` re-checks every 0.25 s while the menu is open (repopulated rows) and, once the list is gone or
+  inactive, turns the parts back on for a menu kept alive. Log: `drone rows' Go To hint: N row(s), M hint part(s)
+  hidden` in the `Quantum Cloud menu open` line.
 - **Drone source** (`0x53520110`, after Silo, every target, while a link with a drone port is built):
   `GetSources` returns hidden storages (`sr2qstore`: `SiloStorage`, 8 slots, no type group, 999 each,
   own `AmmoModel`, active in hierarchy); catcher = the link's own `SiloCatcher`. Accepted cloud types
