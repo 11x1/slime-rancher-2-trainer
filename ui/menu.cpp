@@ -2243,7 +2243,8 @@ void StowItem(int sel, uintptr_t id, int amount, bool replace) {
 // way (vacpack: into a slot that holds it or an empty one, the slot's maximum, nothing is replaced;
 // spawner: spawn in front of you, SpawnAmount). A slime (not a largo) gets "Give: <slime>" (round 8:
 // into the vacpack, Op::StowItem, a slot that holds it and has room or an empty one; grayed with the
-// reason when none can take it), in the vacpack also "Spawn: <slime>" before it. Opened on a vacpack
+// reason when none can take it), in the vacpack also "Spawn: <slime>" before it, and "Spawn: Radiant <slime>" (round 12:
+// the game's rare radiant form; a largo in the spawner gets one per base slime it can be radiant from). Opened on a vacpack
 // slot (g_ctxSlot), the menu starts with that slot's Fill and Empty (the buttons under the slots). Largos (of a slime, of a plort, or loving a food) are always spawned (SpawnAmount), since
 // the vacpack can't hold them, and read
 // "Spawn: <this item's slime> <other> Largo". They are not listed directly: one "Largos" row opens
@@ -2316,6 +2317,7 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                 bool spawn;        // spawned in front of the player (largos always: the vacpack can't hold them)
                 std::string sort;  // largos: the other slime's short name
                 const char* why = nullptr;  // grayed out: the tooltip (else the default reason)
+                int radiant = -1;  // >= 0: spawns a radiant form (Op::SpawnRadiant, slot = this)
             };
             std::vector<Give> gives, largos;
             auto spawnable = [&](uintptr_t id) -> const sbx::Item* {
@@ -2409,11 +2411,35 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                                                        : "No unlocked vacpack slot has room for this (holding it, not full, or "
                                                          "empty). Empty a slot first.");
                 if (hit && g.can) {
-                    if (g.spawn) SbxRequest(sbx::Op::Spawn, SpawnAmount(g.it->id), -1, g.it->id);
+                    if (g.radiant >= 0) SbxRequest(sbx::Op::SpawnRadiant, SpawnAmount(g.it->id), g.radiant, g.it->id);
+                    else if (g.spawn) SbxRequest(sbx::Op::Spawn, SpawnAmount(g.it->id), -1, g.it->id);
                     else StowItem(g_sbxSlot, g.it->id, 0, false);
                 }
                 ImGui::PopID();
             };
+            // The game's radiant (rare, glowing) form of this slime: "Spawn: Radiant Pink Slime"; a largo has one per
+            // base slime it can be radiant from: "Spawn: Radiant Pink Tabby Largo (radiant Pink)". Spawned in front of
+            // you like the spawner's tiles (Op::SpawnRadiant). Grayed with the reason when the game has none.
+            auto radiantEntries = [&] {
+                const sbx::Item* sp = spawnable(self->id);
+                const sbx::Item* it = sp ? sp : self;
+                const bool can = sp && !(sp->tarr && s.tarrsOff);
+                const char* why = !sp ? "Not in the spawn list." : nullptr;
+                if (self->kind == sbx::Kind::Slime || !sp || !sp->radiant) {
+                    Give g{"Spawn: Radiant " + self->name, it, can && (sp->radiant & sbx::kRadiantSelf) != 0, true, {}, why, 0};
+                    if (g.can) g.why = nullptr;
+                    else if (!g.why && can) g.why = "The game has no radiant form of this slime.";
+                    entry(g);
+                    return;
+                }
+                const uintptr_t bases[2] = {sp->radiantBase, sp->radiantBase2};
+                for (int i = 0; i < 2; ++i) {
+                    if (!(sp->radiant & (i == 0 ? sbx::kRadiantBase0 : sbx::kRadiantBase1))) continue;
+                    entry({std::format("Spawn: Radiant {} (radiant {})", self->name, shortName(bases[i], "?")), it, can,
+                           true, {}, nullptr, i + 1});
+                }
+            };
+            if (self->kind == sbx::Kind::Largo && !vac) radiantEntries();
             if (self->kind == sbx::Kind::Slime) {
                 // The slime itself: spawned in front of you (vacpack; the spawner's click does that), then given
                 // into the vacpack like the Give entries.
@@ -2422,6 +2448,7 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                     const bool can = sp && !(sp->tarr && s.tarrsOff);
                     entry({"Spawn: " + self->name, sp ? sp : self, can, true, {}});
                 }
+                radiantEntries();
                 const sbx::Item* ci = nullptr;
                 if (s.catalog)
                     for (const sbx::Item& c : *s.catalog)
@@ -2450,7 +2477,8 @@ void ItemContextMenu(const sbx::Snapshot& s) {
                     ImGui::EndMenu();
                 }
             }
-            if (gives.empty() && largos.empty()) DimText("No favourites or plorts known for this item.");
+            if (gives.empty() && largos.empty() && self->kind != sbx::Kind::Largo)
+                DimText("No favourites or plorts known for this item.");
         }
         if (PopupCancelled()) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
