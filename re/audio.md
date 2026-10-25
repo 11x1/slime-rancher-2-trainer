@@ -35,6 +35,11 @@ Tags: **code** = decompiled; **data** = asset bundles; **assumed** = not verifie
 - methods: `get_Volume()`, `set_Volume(float)` (dump)
 - gotchas: the corral music box's vanilla tune is assumed to come from a SECTR_AudioSource under `MusicBoxUpgrader.MusicBox`; `Volume = 0` assumed to silence it (not verified in game; slime_dj logs how many it finds)
 - mod: slime_dj `module.cpp` (speaker parent = the box's first SECTR_AudioSource; mute_vanilla sets Volume 0, restores the old value)
+- fields (dump): +0x20 volume, +0x24 pitch, +0x28 Cue, +0x30 Loop, +0x31 PlayOnStart, +0x32 RestartLoopsOnEnabled; SECTR_PointSource +0x38 instance (SECTR_AudioCueInstance)
+- `Start` 0x4EE4E0 (**IDA**): `Application.isPlaying && PlayOnStart && !IsPlaying` -> `Play()` (vtable)
+- `OnEnable` 0x4EE180 (**IDA**): while playing, `Cue != null && RestartLoopsOnEnabled && (Cue.Loops (+0x58) || Loop)` -> `Play()` at once, or, while the SceneLoader is loading (+0x130), subscribes `PostSceneLoad` (0x4EE380: `Play()` if not playing, then unsubscribes). `OnDisable` 0x4EDFF0 unsubscribes.
+- `SECTR_PointSource.Play` 0x505910 (**IDA**): stops a playing loop first; only plays while `isActiveAndEnabled` with a Cue; `SECTR_AudioSystem.Play(cue, transform, zero, Loop, ...)` then sets the instance's Volume / Pitch
+- gotcha: a source added at runtime with `Loop` + `RestartLoopsOnEnabled` plays every time its GameObject goes active, whatever `PlayOnStart` says (round 12: the switched-off DJ Booth's standby tune played when placed / loaded). dj_buildables sets `RestartLoopsOnEnabled = false` and calls Play / Stop itself.
 
 ### SECTR_AudioCue (global)
 - fields: `MinDistance`, `MaxDistance`, `Falloff`, `bus` (SECTR_AudioBus) - by name (dump)

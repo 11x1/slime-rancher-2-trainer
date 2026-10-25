@@ -295,9 +295,13 @@ ToggleVariant, stacking), re/audio.md (GadgetMusicPlayer, corral Music Box), re/
 
 - **DJ Booth** = Scientist Desk variant. Faces +z, DJ behind (-z). Clutter and its sound off; a boombox
   upright in the middle facing the audience (round 11: the old face-up "deck" was "looking up"); two small ones on the front corners (x +-0.8, z 0.3, 0.4 size); two big
-  ones on the floor at x +-1.75 (emitters, kind Booth); behind (z -1.8) the Boombox's bench with the
+  ones on the floor at x +-1.75; behind (z -1.8) the Boombox's bench with the
   Flower Pillow's mesh, colliders and `SlimeAttachmentPoint` with its scripts (largos: `_allowLargo` before
-  Awake, trigger 1.5x). Other clones script-free. E: a `GadgetMusicPlayer` then a `GadgetUIInteractable`
+  Awake, trigger 1.5x; round 12, "Tarrs should be able to go behind the DJ table": `_allowTarr` too, a
+  Tarr sits on the largo joint and counts as the DJ). Round 12 ("only the right speaker is playing",
+  "pretty quiet for the table's size"): all five boomboxes are emitters (kind Booth); floor speakers
+  1.5x range / 1.4x volume (`kBoothFloor`), desk ones 0.6x volume (`kBoothDesk`); `Rec::scales` keeps the
+  factors per emitter for every re-register (`ScaleOf`; radios 0.6x range). Other clones script-free. E: a `GadgetMusicPlayer` then a `GadgetUIInteractable`
   (copied from the Boombox) on the desk root; undress destroys both (`DestroyImmediate`).
 - **DJ Speaker Stack** (`SlimeDJSpeaker`) = Boombox variant: bench, `model_boombox`, `Collision` off; two
   boombox clones stacked (1.3, 0.85 on top at 1 m), one `BoxCollider` 1.2 x 1.7 x 0.9 on layer 27, base =
@@ -310,7 +314,9 @@ ToggleVariant, stacking), re/audio.md (GadgetMusicPlayer, corral Music Box), re/
   - on + a song loaded (booth: and a slime on the pillow): the song; boomboxes dance (`_gadgetActive`) and
     show `FX_MusicalNotes`; the seat spins (`SlimeAttachPoint._rotationSpeed`, 0 otherwise);
   - on otherwise: booth -> the corral Music Box tune (`sr2dj_standby`, a copy of its `SECTR_AudioSource`,
-    loop; fallback the Boombox track); stack / Boombox -> the Boombox track via the original `OnInteract`.
+    loop, `RestartLoopsOnEnabled` off: round 12 "At spawn, when deactived, plays the default sound" was
+    `SECTR_AudioSource.OnEnable` playing the looping copy when the holder went active; fallback the
+    Boombox track); stack / Boombox -> the Boombox track via the original `OnInteract`.
     One gadget track at a time: when the game stops ours, the record switches off.
   Logs `dj buildables: <label> actor N switched on|off (interact)`, `... plays the Slime DJ song|the
   Boombox's own track (...)|nothing`, `standby tune = the corral music box's '<cue>'`, `DJ Booth actor N: a
