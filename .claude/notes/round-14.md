@@ -29,6 +29,7 @@ The user's main complaint: our buttons are not the game's. Clone the game's own 
 - "cant use wasd/arrowkeys (so probably gamepad aswell)". Still broken after round 13: find out why from the game's navigation (EventSystem / FocusManager / Selectable navigation) and make it work.
 - "'[SPACE] Add program' can be renamed to '[SPACE] Add', use the game's key icons please".
 - "Next program mode selection doesnt align with options menu, rough style is there but the ingame select component looks different". Clone the game's own options-menu selector (the `< value >` component in the game's Settings), not ours.
+- Added while running: "rename 'Start Program' to 'Save Program' makes more sense imo how the button actually functions". The station page's [X] Start Program key bar entry (and the button, if there is one) reads "Save Program" while custom upgrades are on.
 - Key bar entry: "Move it to the leftmost position, its grayed out by default, even at 'program 1/2'". The [P] entry goes first in the key bar and must look enabled.
 
 ## C. Fabricator preview pictures still pixelated (`fix/card-pictures-r14`)
