@@ -57,7 +57,7 @@ One `ResourceNodeDirector` per area owns many `ResourceNodeSpawner` points; on a
 
 ### Actors / spawning
 - `InstantiationHelpers.InstantiateActor` (as the sandbox spawner) - spawn a toy in front of the camera
-- `GameModel.identifiablesByIdent[type]` - per-type actor lists (stations, Boomboxes, Night Lights, Electric Pillar Lamps: slime_dj `lamps.cpp`); a cheap alternative to a scene search for placed gadgets of one type (`GadgetModel.transform` +0x38 null / destroyed while its scene is unloaded)
+- `GameModel.identifiablesByIdent[type]` - per-type actor lists (stations, Boomboxes, Night Lights, lamp decorations: slime_dj `lamps.cpp`); a cheap alternative to a scene search for placed gadgets of one type (`GadgetModel.transform` +0x38 null / destroyed while its scene is unloaded)
 - `CellDirector.IsOnRanch(RegionMember)` 0x514EA0 (static) - any of member.Regions whose CellDirector is a ranch cell; member.Regions must not be null
 - mod: dj_buildables.cpp, drone_source.cpp, shadow_catcher.cpp
 
@@ -130,6 +130,13 @@ One `ResourceNodeDirector` per area owns many `ResourceNodeSpawner` points; on a
 - gotchas: proxied regions: Root (terrain, rocks, colliders) deactivated, only a collider-less proxy mesh drawn: raycasts over far spots hit nothing; objects inside stay registered but inactive (e.g. DiscordantWall)
 - gotchas: unverified: Region.Bounds is world space
 - mod: GT
+
+### LightControl (MonomiPark.SlimeRancher.VFX.Lights) : MonoBehaviour  -- animated lights (glowing ice)
+- fields (dump): `thisLight` +0x20, `lightData` (HDAdditionalLightData) +0x28, `controlFloat` (ScriptedFloat) +0x30, `isAnimated` +0x38, `loopAnimation` +0x39, `sampleGradientByTime` +0x3A, `gradient` +0x40, `gradientSampleSpeed` +0x48, `lerpIntensity` +0x4C, `intensityLerp0/1` +0x50/+0x54, `life` +0x60, `materialRenderer` +0x80, `materialToColor` +0x88, `shaderPropertyID` +0x90, `updateTick` +0xA4, `updateClock` +0xA8, `intensityValue` +0xB0
+- `Update` 0xB851D0 (IDA): only while `thisLight.enabled`; intensityValue = intensityLerp1 (or lerp0..1 by controlFloat between transitionMin/Max); if animated: updateClock += dt, and once it reaches updateTick (and `materialRenderer` is visible, if set): gradient colour (by time with a random timeOffset, or by life) -> `HDAdditionalLightData.set_color`, `Material.SetColor(materialToColor, shaderPropertyID)` (the `_LightControlColor` of the ice material), intensityValue x gradient alpha, then `LightExtensions.SetIntensity(light, intensityValue)` 0x633920 (converts from the light's own unit to the native one, `Light.set_intensity`). Not animated: SetIntensity every frame. Static `CanUpdateThisFrame` throttles updates per frame.
+- gotchas: intensityLerp0/1 are in the light's unit (EV100 for the ice lights: logarithmic), so scaling them is wrong; scale `Light.intensity` (native, linear) and accept LightControl's own writes as the new base.
+- Powderfall Bluffs glowing ice (data, `powderfallbluffs_scenes` bundle, UnityPy): scene objects `iceCube03_light` / `iceCube04_light` (material `objIce_IceCube01_lightGradient` / `_lightGreen` / `_lightPurple`, HDR `_InnerEmission`) each with child "Point Light Gradient" (point Light 8192, range 5, (0, 0.99, 0.55), LightControl + CullablePointLight); ~136 "Point Light Gradient" lights among the scene's 602 Lights. The Ice Lamp decoration has the same cube.
+- mod: slime_dj `lamps.cpp` (one `FindObjectsOfTypeAll(LightControl)` per scene group, keeps `iceCube*` parents without a Gadget above them).
 
 ### DiscordantWall (MonomiPark.SlimeRancher.Labyrinth) : MonoBehaviour, IDisruptable  (TypeDefIndex 4768)
 - fields: `_wallVfx` +0x20, `_harmonizerDetectionCollider` +0x28 MeshCollider, `_prismaDirector` +0x30, `_currentLevel` +0x38, `_disruptionRegion` +0x40, `_disharmonizedCollisionObject` +0x48, `_harmonizedCollisionObject` +0x50, `_transitionCollisionObject` +0x58, `_harmonizersToCheck` +0x70, `_relevantHarmonizers` +0x78, `_harmonizationTween` +0x80, `_currentHarmonizationAmount` +0x88 float, `_targetHarmonizationAmount` +0x8C float, static `_activeWalls` List<DiscordantWall> (dump)

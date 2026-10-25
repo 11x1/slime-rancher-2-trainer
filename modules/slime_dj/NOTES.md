@@ -28,7 +28,7 @@ reason. At most 2000 songs per folder.
 | `stream.cpp/.h` | one song decoded on a background thread into 0.5 s chunks (bounded queue) |
 | `beat.cpp/.h` | beat analysis of the decoded PCM on the decoder thread (bass level + onsets per 10 ms) |
 | `walls.cpp/.h` | "Walls dance to the music": beat ripples round the corral energy walls, walls and Air Net glow |
-| `lamps.cpp/.h` | "Lamps pulse to the music": Electric Pillar Lamps near a playing speaker pulse with its channel's beat |
+| `lamps.cpp/.h` | "Lamps pulse to the music": lamp decorations and Powderfall's glowing ice near a playing speaker pulse with its channel's beat |
 | `radio_menu.cpp/.h` | the Corral Radio playlist menu (runtime uGUI, game-styled), opened by the blue corral button |
 | `codecs.c/.h` | the only TU that compiles stb_vorbis, dr_mp3, dr_wav (CMake target `sr2_codecs`, C, `/W0`) behind a small streaming C API |
 | `ui/slime_dj_bridge.cpp/.h` | snapshot / request exchange with the overlay tab (same pattern as the sandbox) |
@@ -378,11 +378,41 @@ once, retried every 10 s until the groups are loaded, GC handles), then
 (2 s) while some speaker plays; between refreshes only the lamps already held are re-weighed. Up to 48
 lamps at once, nearest to a speaker first.
 
+*More lamps* (round 13: "Add support for 'Pink Striped Lamp', 'Conservatory Lamp', 'Blue Lava Lamp', 'Ice
+Lamp' and the glowing ice things in the snow map if possible"). Lamp kinds by gadget prefab:
+`decorElectricLampPillar`, `decorPinkStripedLamp` (+ Blue / Mint / Prismatic variants),
+`decorConservatoryLamp`, `decorSlimeLampBlue` (Blue Lava Lamp; Violet / Gold / Green / Grey / Red variants
+come along), `decorIceLamp`. Unlike the pillar these have real HDRP Lights (structure in `re/fabricator.md`).
+Per lamp the pulse touches:
+- renderers with a glowing property: `_BrightnessMultiplier` (glow spheres, the striped lamp's bulb),
+  `_IntensityDay` / `_IntensityNight` (lava lamp glow quad), `_ColorCore` / `_ColorEdge` (lightning),
+  `_EmissiveColor` / `_InnerEmission` only when brighter than 0.01 (striped lamp bulb and stripes, ice cube;
+  black emission on lamp bodies, snow and the conservatory cone is left alone). `_Color` is tinted only on
+  glow volumes / lightning (elsewhere it is the albedo).
+- up to 4 `Light` components: `Light.intensity` and `Light.color` (HDRP forwards to these, `re/unity.md`).
+  The Ice Lamp's light is run by a `LightControl` (gradient colour, writes the light on its own update
+  ticks). So each frame the pulse reads the light; a value it did not write itself becomes the new base,
+  and restore only puts the base back while the light still shows the pulse's last value. If the
+  LightControl runs after the mod's frame callback on its tick, that frame shows the plain light (a
+  short dip at most; not seen in game yet).
+
+*Glowing scene ice* (Powderfall Bluffs): the crystals are scene objects `iceCube0N_light` (material
+`objIce_IceCube01_lightGradient*`, HDR `_InnerEmission`) with a child "Point Light Gradient" (point Light
+8192, range 5, green-cyan, `LightControl` + `CullablePointLight`), the same as the Ice Lamp's cube. Found
+with one `FindObjectsOfTypeAll(LightControl)` per scene group: `RegionRegistry.CurrentSceneGroup` is
+checked at each lamp refresh (4 s) while a speaker plays; 5 s after it changed the scan keeps every
+LightControl whose parent is named `iceCube*` and that has no `Gadget` above it (Ice Lamps are placed
+lamps), as a GC handle + position (static geometry; up to 512). Candidates are then the crystals that
+are active now (proxied regions are off). The scan is logged with its time.
+
 *Sources* (`SyncLamps`): every live speaker playing its channel's current clip with volume > 0 (so a DJ
 Booth / Boombox that is switched off does not count): music boxes, DJ Booth speakers, speaker stacks, Slime
 Radios, plain Boomboxes, corral speakers of a Corral Radio. Each lamp takes its nearest source within
-`lamp_range` and that source's channel (global queue or a radio). Weight w = 1 up to 40 % of the range,
-fading linearly to 0 at the range, eased over 0.5 s (a lamp entering range fades in).
+`lamp_range` and that source's channel (global queue or a radio). Strength (round 13: "lamps shouldnt be
+as bright when only one speaker close and playing"): every speaker of that channel in range adds its
+closeness (1 up to 40 % of the range, fading linearly to 0 at the range) x its loudness (emitter volume
+scale x muffle factor); w = 1 - exp(-0.45 x sum), so one close speaker gives 0.36 (a gentle pulse), two
+0.59, three 0.74, four 0.83. w is eased over 0.5 s (a lamp entering range fades in).
 
 *Beat* (`TickLamps`, every frame): per channel the same read as `TickDancer` (`base + playPos` minus 40 ms,
 `BeatTrack::Query(last, now)`; nothing while paused / buffering / pause menu / past the end) and the walls'
@@ -409,7 +439,7 @@ or the module is disabled. A lamp whose scene unloaded is simply dropped (its ob
 | `muffle_walls` | on | music from a corral with High Walls (and/or Air Net) sounds muffled from outside |
 | `dance_walls` | off | a ripple runs round the corral walls on every beat of the song the corral plays (queue or its Corral Radio); walls and Air Net glow and change colour (corrals within hearing range); speakers in the corral make it stronger |
 | `dance_intensity` | 1.0 (100 %) | 10-200 %, steeper above 100 % (shown while `dance_walls` is on) |
-| `dance_lamps` | on | Electric Pillar Lamps near a playing speaker pulse their glow and lightning with the beat |
+| `dance_lamps` | on | lamps (Electric Pillar, Striped, Conservatory, Lava, Ice) and Powderfall's glowing ice near a playing speaker pulse their glow and lights with the beat |
 | `lamp_range` | 20 m | 5-100 m around a playing speaker; full strength to 40 % of it (shown while `dance_lamps` is on) |
 
 ## Log lines
@@ -429,9 +459,11 @@ All prefixed `slime_dj:`; grep for these when reading `sr2mods.log`:
   corral(s) (M to their Corral Radio, K boosted by speakers inside)`, `walls dance stopped (setting off|no
   song); walls restored`, `'Walls dance to the music' unavailable (…)`
 - mix: `N speaker(s) of '...' add up to X.XXx full scale here; turned down to stay clean (logged once)`
-- lamps: `lamps: Electric Pillar Lamp definition(s): …` (once), `lamps: no gadget definition with prefab
-  'decorElectricLampPillar' among N …`, `lamps: pulsing lamp at (x, y, z): N glowing renderer(s): '…'
-  brightness 5.00, '…' core (8.2, 4.5, 2.7), …` (first 8), `lamps pulse at N lamp(s) (M loaded lamp(s), S
+- lamps: `lamps: N lamp definition(s) (K of 5 lamp kinds found): …` (once), `lamps: no gadget definition with
+  a lamp prefab ('decorElectricLampPillar', ...) among N …`, `lamps: pulsing lamp '…' at (x, y, z): N glowing
+  renderer(s), M light(s): '…' brightness 5.00, '…' core (8.2, 4.5, 2.7), light 1200, …` (first 8), `lamps: N
+  glowing ice crystal(s) in this scene group (M LightControl(s) looked at, X ms)` (per scene group while music
+  plays), `lamps: glowing scene ice unavailable (…)`, `lamps pulse at N lamp(s) (M loaded lamp(s), S
   playing speaker(s), range R m)` (on a change), `lamps pulse stopped; lamps restored`, `'Lamps pulse to the
   music' unavailable (…)`
 - radio menu: `radio menu ready[; NOT available: ...]`, `radio menu: game buttons not available (...)`, `radio menu
@@ -458,7 +490,9 @@ quiet parts, Amplify above full volume (PCM gain, no clipping / pumping at chunk
 (build, input, input lock released on every close path).
 Lamps pulse: that `_BrightnessMultiplier` / `_ColorCore` / `_ColorEdge` in a property block visibly change the
 lamp (a shader could ignore blocks: SRP Batcher materials take them, but it was not tested), that the pulse
-looks in time and not too strong / weak, restore after Stop / Pause / out of range / setting off.
+looks in time and not too strong / weak, restore after Stop / Pause / out of range / setting off. Round 13:
+the strength curve (one speaker gentle), the new lamps' Lights and emission (property blocks on HDRP Lit /
+custom shaders), the Ice Lamp's LightControl not fighting the pulse, the scene ice scan cost and matches.
 
 ## History
 
