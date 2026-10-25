@@ -2527,7 +2527,22 @@ private:
                 }
                 b.op = bridge::Op::RadioAdd;
                 b.song = a.song;
-                menu_.Note("Added " + s->name, true);
+                menu_.Note("Queued " + s->name, true);
+                break;
+            }
+            case dj::MenuOp::kPlayNow: {  // round 14: inserted after the playing entry and played from its start
+                const dj::SongInfo* s = FindSong(a.song);
+                if (!s) return;
+                if (r->playlist.size() >= kMaxPlaylist) {
+                    menu_.Note(std::format("The playlist is full ({} songs).", kMaxPlaylist), false);
+                    return;
+                }
+                const int n = static_cast<int>(r->playlist.size());
+                const int at = r->index >= 0 && r->index < n ? r->index + 1 : n;
+                r->playlist.insert(r->playlist.begin() + at, s->file);  // after `index`: it stays on its entry
+                b.op = bridge::Op::RadioPlayAt;
+                b.index = at;
+                menu_.Note("Playing " + s->name, true);
                 break;
             }
             case dj::MenuOp::kRemove: b.op = bridge::Op::RadioRemove; break;
