@@ -39,3 +39,21 @@ Not seen in game: the look of the labels (IMGUI default font, drawn over the gam
   whether the player's Identifiable sits on the `SceneContext.Player` object (if not, its capsule shows round the
   camera).
 - Not seen in game: frame cost with many slimes near (about 2 game calls per collider per frame), capsule directions on scaled objects.
+
+## Highlight what the mod touches (`highlight`, default off)
+
+`highlight.cpp` (round 14: "maybe add a debug menu to highlight what you want me to check, which
+entities/buildables/map parts"). A registry, `modules/common/debug_marks.h`: modules publish categories of
+world boxes (key, label, colour, boxes with an optional ground ring) while `Wanted()` is true; a category not
+republished for 6 s is dropped. debug_tools sets `Wanted` from the option, and every frame draws each box as 12
+edges (rings as 48 segments) through `ui/hud.h` lines, and the category label above each box as a text-only hud
+frame per category (owner `debug_tools.highlight.<key>`). Boxes within 250 m, labels within 80 m, 600 boxes at
+most. Camera matrices from `hitboxes::CameraFrame` (shared with the hitbox view). Hidden while the settings
+window is open; publishers keep running. Log: `highlight on|off`, `highlight: N <key>, ...` on a change (at most
+every 10 s).
+
+Publishers now: slime_dj (`slime_dj.lamps.pulsing|idle|ice`, `slime_dj.speakers.playing|silent`; see
+modules/slime_dj/NOTES.md "Debug highlighter"). Another module adds a category by calling
+`debug_marks::Publish` on the main thread while `Wanted()`, and `Remove` when it stops.
+Not seen in game: label clutter with many crystals, box sizes from renderer bounds (the pillar's glow spheres
+are big).
