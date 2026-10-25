@@ -18,6 +18,10 @@
 // Light, glow quad _IntensityDay / _IntensityNight), Ice Lamp (ice cube with HDR _InnerEmission and a
 // point Light run by a LightControl). The glowing ice crystals of Powderfall Bluffs are the same ice
 // cube + LightControl Light as scene geometry ("iceCube0N_light").
+// Music Pillar / Music Tile (round 16; re/world.md MusicTile): a light-up ice mesh (_InnerEmission,
+// _LightControlColor), a glow mesh shown only during a hit, a point Light, and the game's MusicTile script
+// that flashes the tile when something lands on it. Pulsed like the lamps, plus a beat restarts the
+// script's own hit animation (MusicTile._effectAnimationTime moved back; its Update draws the flash).
 // Lights are pulsed through Light.intensity / color (HDRP forwards to these). A LightControl writes the
 // light in its Update (every frame when not animated, else on its ticks), in the same Update phase as
 // the mod's tick (EventSystem.Update), so it overwrote the pulse (round 14 test: the ice did not pulse).
@@ -83,6 +87,8 @@ constexpr const char* kLampPrefabs[] = {
     "decorConservatoryLamp",    // Conservatory Lamp: spot Light (+ cone mesh)
     "decorSlimeLampBlue",       // Blue Lava Lamp (+ the other colours): point Light, glow quad
     "decorIceLamp",             // Ice Lamp: glowing ice cube (inner emission) + point Light run by a LightControl
+    "decorMusicPillar",         // Music Pillar (round 16): light-up ice pillar + point Light, MusicTile flash on a hit
+    "decorMusicTile",           // Music Tile (round 16): light-up floor tile, same parts as the pillar
 };
 constexpr float kFindSeconds = 4.0f;          // lamp list refresh (identifiablesByIdent), at most this often
 constexpr float kNewSourceSeconds = 0.5f;     // a speaker started playing: refresh now, but at most this often
@@ -90,7 +96,7 @@ constexpr float kIceScanDelay = 5.0f;         // glowing scene ice: one scan thi
 constexpr size_t kMaxIce = 512;               // glowing scene ice crystals cached per scene
 constexpr size_t kMaxLights = 4;              // Light components per lamp
 constexpr float kDefRetrySeconds = 10.0f;     // definition not found yet (groups not loaded)
-constexpr size_t kMaxLamps = 48;              // pulsing at once (nearest to a speaker first)
+constexpr size_t kMaxLamps = 96;              // pulsing at once (nearest to a speaker first; a tile dance floor is many)
 constexpr size_t kMaxModels = 2048;           // placed lamps read per refresh
 constexpr size_t kMaxRends = 16;              // per lamp (the prefab has 8 glowing renderers)
 constexpr float kFullShare = 0.4f;            // full closeness up to this share of the range, then fading to 0
@@ -110,6 +116,17 @@ constexpr float kLightLevel = 1.0f, kLightBeat = 2.0f;  // Light.intensity, same
 constexpr float kMinEmission = 0.01f;                // an emission colour dimmer than this does not glow: left alone
 constexpr float kColourMix = 0.7f;                   // hue share at full level / pulse
 constexpr float kRest = 0.004f;                      // below this a channel counts as settled
+constexpr float kFadeIn = 0.25f;                     // a lamp's strength eases to its distance weight with this time constant (s)
+// Music Pillar / Tile flash (MusicTile._effectAnimationTime, re/world.md): a beat restarts the tile's own
+// hit animation (curve: 0.5 at t 0, peak 3.37 at t 0.076, 0 at t 0.49; time units of _effectDuration).
+// A weaker beat starts it further down the decay, so its flash is dimmer.
+constexpr float kFlashPeak = 0.076f, kFlashEnd = 0.49f;
+constexpr float kFlashMin = 0.12f;                   // beat strength (x lamp weight) below this does not flash
+constexpr float kFlashGain = 1.4f;                   // beat strength x this = flash share (1 = the peak)
+// Lamp placed / picked up (round 16: "on initial place it still takes time"): the lamp definitions' model
+// lists (List._size / _version) and identifiablesByIdent._count are watched (Placed(), memory reads only);
+// a change refreshes now and once more this much later (the GadgetModel's transform may come a frame late).
+constexpr ULONGLONG kPlacedRecheckMs = 400;
 constexpr const char* kRainbowPrefab = "decorElectricLampPillar";  // the one lamp that shifts hue with the beat
 // Debug highlighter (modules/common/debug_marks.h)
 constexpr float kDebugPublishSeconds = 1.0f;         // boxes republished this often while it is on
@@ -204,9 +221,15 @@ struct LampPulser::Impl {
     const MethodInfo* lcUpdate = nullptr;     // LightControl.Update (private, called from the pulse)
     M<bool (*)(Il2CppObject*, const MethodInfo*)> behGetEnabled;
     M<void (*)(Il2CppObject*, bool, const MethodInfo*)> behSetEnabled;
+    // Music Pillar / Tile: their MusicTile's hit animation clock (optional: without it they only glow)
+    Il2CppClass* musicTileClass = nullptr;
+    size_t offTileAnimTime = 0;  // MusicTile._effectAnimationTime
     // the live Dictionary<IdentifiableType, List<IdentifiableModel>> class (generic: looked up on it)
     Il2CppClass* dictClass = nullptr;
     const MethodInfo* dictTryGet = nullptr;
+    size_t offDictCount = 0;                  // Dictionary._count (0 = unknown: not watched)
+    Il2CppClass* listClass = nullptr;         // List<IdentifiableModel>
+    size_t offListSize = 0, offListVersion = 0;
     // _BrightnessMultiplier, _IntensityDay, _IntensityNight (floats: glow); _Color (tint only);
     // _ColorCore, _ColorEdge, _EmissiveColor, _InnerEmission (HDR colours: scaled and tinted);
     // _LightControlColor (the ice glow: LightControl animates it on the material, so it is read back
@@ -235,6 +258,7 @@ struct LampPulser::Impl {
         Vec3 pos{};
         std::vector<RendRec> rends;
         std::vector<LightRec> lights;
+        std::vector<Il2CppGCHandle> tiles;  // MusicTile components (Music Pillar / Tile): beat flash
         const void* channel = nullptr;  // nearest playing speaker's channel
         float weight = 0;               // 0..1 from its distance to that speaker
         float shown = 0;                // weight eased in (a lamp entering range fades in)
@@ -247,6 +271,7 @@ struct LampPulser::Impl {
         uint64_t last = 0;
         unsigned gen = 0;
         float env = 0, pulse = 0, energy = 1, hue = 0;
+        float beatNow = 0;    // strength of a beat that arrived this frame (0 = none)
         bool active = false;  // has a beat sample this frame
         bool seen = false;    // listed this frame
     };
@@ -260,9 +285,20 @@ struct LampPulser::Impl {
     size_t placedLamps = 0;            // Find: the first placedLamps of `placed` are lamps, the rest scene ice
     size_t loaded = 0;                 // lamps loaded at the last refresh (for the log)
     size_t lastLogged = 0;
-    int builtLogs = 0, iceLogs = 0;
+    int builtLogs = 0, iceLogs = 0, tileLogs = 0;
     bool lcLogged = false;
     std::vector<std::pair<const void*, Vec3>> lastSources;  // the previous Sync's sources (a new one refreshes now)
+    // placement watch (Placed): the dictionary and each definition's model list as of the last Find
+    struct Watch {
+        Il2CppGCHandle list = nullptr;  // nullptr = the definition had no list then
+        int size = 0, version = 0;
+    };
+    std::vector<Watch> watch;
+    Il2CppGCHandle watchDict = nullptr;
+    int watchCount = 0;
+    bool forceFind = false;     // Placed saw a change: the next Sync refreshes the lamp list now
+    ULONGLONG recheckAt = 0;    // a second refresh after a change (0 = none)
+    int placedLogs = 0;
     // glowing scene ice of the current scene group: the crystal's Transform + position (static geometry)
     std::vector<std::pair<Il2CppGCHandle, Vec3>> ice;
     std::vector<Bounds> iceBox;      // same index as `ice`: renderer bounds (debug highlighter; extents 0 = not measured)
@@ -407,8 +443,11 @@ struct LampPulser::Impl {
         if (Il2CppClass* k = unity::ClassOf(dict); k != dictClass) {
             dictClass = k;
             dictTryGet = k ? Resolver::Get().Method(k, "TryGetValue", 2, nullptr) : nullptr;
+            const auto count = k ? Resolver::Get().FieldOffset(k, "_count", nullptr) : std::nullopt;
+            offDictCount = count ? *count : 0;
         }
         if (!dictTryGet) return;
+        std::vector<Il2CppObject*> lists;  // per definition (placement watch)
         for (Il2CppGCHandle h : defs) {
             Il2CppObject* def = Target(h);
             if (!def) continue;
@@ -416,6 +455,7 @@ struct LampPulser::Impl {
             Il2CppObject* boxed = Invoke(dictTryGet, dict, {def, &list}, "identifiablesByIdent.TryGetValue", &ok);
             if (!ok) return;
             const bool found = boxed && *reinterpret_cast<bool*>(reinterpret_cast<char*>(boxed) + 2 * sizeof(void*));
+            lists.push_back(found ? list : nullptr);  // a managed List (no m_CachedPtr, so no IsAlive)
             for (size_t i = 0, n = found && list ? unity::ListCount(list) : 0; i < n && placed.size() < kMaxModels; ++i) {
                 auto* m = static_cast<Il2CppObject*>(unity::ListAt(list, i));
                 if (!m || !IsA(m, gadgetModelClass)) continue;
@@ -427,12 +467,60 @@ struct LampPulser::Impl {
             }
         }
         placedLamps = placed.size();
+        Rewatch(dict, lists);
         // glowing scene ice that is loaded now (positions from the scan: scene geometry does not move)
         for (const auto& [h, p] : ice) {
             if (placed.size() >= kMaxModels) break;
             Il2CppObject* tr = Target(h);
             if (tr && unity::ActiveInHierarchy(unity::GameObjectOf(tr))) placed.emplace_back(tr, p);
         }
+    }
+
+    // ---- placement watch: remembers the dictionary's key count and each lamp definition's model list
+    // (size + version) as Find saw them; Changed compares them with plain memory reads.
+    void FreeWatch() {
+        for (Watch& w : watch) Free(w.list);
+        watch.clear();
+        Free(watchDict);
+        watchCount = 0;
+    }
+    void Rewatch(Il2CppObject* dict, const std::vector<Il2CppObject*>& lists) {
+        if (Changed()) forceFind = true;  // a Find of the debug highlighter must not swallow a placement
+        FreeWatch();
+        if (!offDictCount) return;
+        for (Il2CppObject* l : lists) {
+            if (l && unity::ClassOf(l) != listClass) {
+                listClass = unity::ClassOf(l);
+                const auto size = Resolver::Get().FieldOffset(listClass, "_size", nullptr);
+                const auto version = Resolver::Get().FieldOffset(listClass, "_version", nullptr);
+                offListSize = size ? *size : 0;
+                offListVersion = version ? *version : 0;
+            }
+            if (l && (!offListSize || !offListVersion)) return;  // not watchable: the timers alone refresh
+        }
+        watchDict = unity::NewGCHandle(dict);
+        if (!watchDict) return;
+        watchCount = unity::Field<int>(dict, offDictCount);
+        for (Il2CppObject* l : lists) {
+            Watch w;
+            w.list = l ? unity::NewGCHandle(l) : nullptr;
+            if (w.list) {
+                w.size = unity::Field<int>(l, offListSize);
+                w.version = unity::Field<int>(l, offListVersion);
+            }
+            watch.push_back(w);
+        }
+    }
+    // managed collections (not UnityEngine.Object): the handle's target as is
+    static Il2CppObject* Managed(Il2CppGCHandle h) { return h ? unity::GCHandleTarget(h) : nullptr; }
+    bool Changed() {
+        Il2CppObject* dict = Managed(watchDict);
+        if (!dict) return false;
+        if (unity::Field<int>(dict, offDictCount) != watchCount) return true;
+        for (const Watch& w : watch)
+            if (Il2CppObject* l = Managed(w.list))
+                if (unity::Field<int>(l, offListSize) != w.size || unity::Field<int>(l, offListVersion) != w.version) return true;
+        return false;
     }
 
     // ---- glowing scene ice (Powderfall Bluffs "iceCube0N_light"): a LightControl-driven point Light
@@ -617,10 +705,15 @@ struct LampPulser::Impl {
                                     rec.lc ? " (LightControl)" : "");
             lamp.lights.push_back(rec);
         }
-        if (lamp.rends.empty() && lamp.lights.empty()) return false;
-        if (lamp.ice ? iceLogs++ < 4 : builtLogs++ < 8)
-            SR2_INFO("slime_dj: lamps: pulsing lamp '{}' at ({:.0f}, {:.0f}, {:.0f}): {} glowing renderer(s), {} light(s): {}",
-                     unity::GetName(tr), lamp.pos.x, lamp.pos.y, lamp.pos.z, lamp.rends.size(), lamp.lights.size(), glow);
+        // Music Pillar / Tile: the MusicTile whose hit animation a beat restarts
+        if (musicTileClass && offTileAnimTime)
+            for (Il2CppObject* t : Children(tr, musicTileClass, 2))
+                if (Il2CppGCHandle h = unity::NewGCHandle(t)) lamp.tiles.push_back(h);
+        if (lamp.rends.empty() && lamp.lights.empty() && lamp.tiles.empty()) return false;
+        if (lamp.ice ? iceLogs++ < 4 : !lamp.tiles.empty() ? tileLogs++ < 4 : builtLogs++ < 8)
+            SR2_INFO("slime_dj: lamps: pulsing lamp '{}' at ({:.0f}, {:.0f}, {:.0f}): {} glowing renderer(s), {} light(s){}: {}",
+                     unity::GetName(tr), lamp.pos.x, lamp.pos.y, lamp.pos.z, lamp.rends.size(), lamp.lights.size(),
+                     lamp.tiles.empty() ? "" : ", beat flash (MusicTile)", glow);
         return true;
     }
 
@@ -689,6 +782,8 @@ struct LampPulser::Impl {
             Free(r.lc);
         }
         lamp.lights.clear();
+        for (Il2CppGCHandle& h : lamp.tiles) Free(h);
+        lamp.tiles.clear();
         Free(lamp.tr);
     }
 
@@ -744,6 +839,21 @@ struct LampPulser::Impl {
             lightSetIntensity.fn(o, r.wrote, lightSetIntensity.mi);
             if (lamp.rainbow) lightSetColor.fn(o, r.wroteCol, lightSetColor.mi);  // the others' own colour is left alone
         }
+        // Music Pillar / Tile: a beat restarts the tile's own hit animation (MusicTile.Update then brightens
+        // the tile material and shows the glow renderer, as when something bounces on it; no sound). A
+        // weaker beat (or a lamp further away) starts it further down the decay. Only ever moves the clock
+        // back (brighter), so a hit by the player or a slime still plays out in full.
+        if (!lamp.tiles.empty() && ch.beatNow > 0) {
+            const float s = std::min(1.0f, ch.beatNow * w * kFlashGain);
+            if (s >= kFlashMin) {
+                const float t = kFlashPeak + (kFlashEnd - kFlashPeak) * (1.0f - s);
+                for (Il2CppGCHandle h : lamp.tiles)
+                    if (Il2CppObject* tile = Target(h)) {
+                        float& clock = unity::Field<float>(tile, offTileAnimTime);
+                        if (!std::isfinite(clock) || clock > t) clock = t;
+                    }
+            }
+        }
     }
 };
 
@@ -752,6 +862,24 @@ LampPulser::~LampPulser() = default;  // never runs for the module's instance (l
 
 bool LampPulser::Ready() const { return p_->ready; }
 size_t LampPulser::Lamps() const { return p_->lamps.size(); }
+
+bool LampPulser::Placed() {
+    Impl& P = *p_;
+    if (!P.ready) return false;
+    if (P.forceFind) return true;  // still pending (a Find of the debug highlighter saw the change)
+    const ULONGLONG now = GetTickCount64();
+    if (P.recheckAt && now >= P.recheckAt) {  // the second refresh after a change
+        P.recheckAt = 0;
+        P.forceFind = true;
+        return true;
+    }
+    if (!P.Changed()) return false;
+    P.FreeWatch();  // the refresh watches again; nothing more until then
+    P.forceFind = true;
+    P.recheckAt = now + kPlacedRecheckMs;
+    if (P.placedLogs++ < 3) SR2_INFO("slime_dj: lamps: a lamp was placed or picked up; lamp list refreshed now");
+    return true;
+}
 
 bool LampPulser::Resolve(std::string& why) {
     Impl& P = *p_;
@@ -834,6 +962,13 @@ bool LampPulser::Resolve(std::string& why) {
     if (!why.empty()) return false;
     Impl::Bind(P.rendGetBounds, R.MethodByParams(P.rendererClass, "get_bounds", {}, nullptr));  // optional (debug boxes)
     P.ready = true;
+    // Music Pillar / Tile beat flash: optional (without it they still glow and their light pulses).
+    {
+        std::string tileWhy;
+        P.musicTileClass = R.Class(kImage, "MonomiPark.SlimeRancher", "MusicTile", &tileWhy);
+        if (auto o = P.musicTileClass ? R.FieldOffset(P.musicTileClass, "_effectAnimationTime", &tileWhy) : std::nullopt) P.offTileAnimTime = *o;
+        if (!P.offTileAnimTime) SR2_WARN("slime_dj: lamps: Music Pillar / Tile beat flash unavailable ({})", tileWhy);
+    }
     // Glowing scene ice: optional (placed lamps pulse without it).
     {
         std::string iceWhy;
@@ -897,8 +1032,10 @@ void LampPulser::Sync(const std::vector<Source>& sources, float range) {
     P.placed.clear();
     if (sources.empty()) {
         P.lastFind = 0;
-    } else if (!P.lastFind || now - P.lastFind >= every) {
+        P.forceFind = false;
+    } else if (P.forceFind || !P.lastFind || now - P.lastFind >= every) {  // forceFind: a lamp was placed (Placed)
         P.lastFind = now;
+        P.forceFind = false;
         P.IceCheck();
         P.Find();
         P.loaded = P.placed.size();
@@ -985,7 +1122,10 @@ void LampPulser::Tick(float dt, const std::vector<Channel>& channels) {
     Impl& P = *p_;
     if (!P.ready) return;
     dt = std::clamp(dt, 0.0f, 0.1f);
-    for (auto& [key, st] : P.channels) st.seen = st.active = false;
+    for (auto& [key, st] : P.channels) {
+        st.seen = st.active = false;
+        st.beatNow = 0;
+    }
     for (const Channel& c : channels) {
         Impl::ChannelState& st = P.channels[c.key];
         st.seen = true;
@@ -1005,6 +1145,7 @@ void LampPulser::Tick(float dt, const std::vector<Channel>& channels) {
         st.pulse *= std::exp(-dt / kPulseDecay);
         if (beat && beat->beat > 0) {
             st.pulse = std::max(st.pulse, beat->beat * gain);
+            st.beatNow = beat->beat * gain;
             st.hue += kHueStep * gain;
             st.hue -= std::floor(st.hue);
         }
@@ -1016,7 +1157,7 @@ void LampPulser::Tick(float dt, const std::vector<Channel>& channels) {
         auto it = P.channels.find(lamp.channel);
         Impl::ChannelState* st = it != P.channels.end() && it->second.seen ? &it->second : nullptr;
         // ease the distance weight (entering range fades in, a speaker moving closer brightens smoothly)
-        lamp.shown += (lamp.weight - lamp.shown) * (1.0f - std::exp(-dt / 0.5f));
+        lamp.shown += (lamp.weight - lamp.shown) * (1.0f - std::exp(-dt / kFadeIn));
         const bool settled = !st || (!st->active && st->env < kRest && st->pulse < kRest);
         if (settled) P.Restore(lamp);
         else P.Animate(lamp, *st);
@@ -1112,8 +1253,8 @@ void LampPulser::Debug(bool want) {
         P.debugLogged = summary;
         SR2_INFO("slime_dj: lamps: highlighter: {}", summary);
     }
-    dm::Publish("slime_dj.lamps.pulsing", "pulsing lamp", kColPulsing, std::move(pulsing));
-    dm::Publish("slime_dj.lamps.idle", "lamp (no playing speaker near)", kColIdle, std::move(idle));
+    dm::Publish("slime_dj.lamps.pulsing", "pulsing lamp / music tile", kColPulsing, std::move(pulsing));
+    dm::Publish("slime_dj.lamps.idle", "lamp / music tile (no playing speaker near)", kColIdle, std::move(idle));
     dm::Publish("slime_dj.lamps.ice", "glowing ice", kColIce, std::move(ice));
 }
 
@@ -1127,6 +1268,9 @@ void LampPulser::Clear() {
     P.lastSources.clear();
     P.lastFind = 0;
     P.lastLogged = 0;
+    P.FreeWatch();
+    P.forceFind = false;
+    P.recheckAt = 0;
 }
 
 }  // namespace sr2::modules::slime_dj

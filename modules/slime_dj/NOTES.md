@@ -441,14 +441,24 @@ pillar, bronze bases and grass quads have none and are never touched.
 once, retried every 10 s until the groups are loaded, GC handles), then
 `GameModel.identifiablesByIdent.TryGetValue(def)` = the `GadgetModel` of every placed lamp;
 `GadgetModel.transform` alive and active = loaded. This refresh runs at most every 4 s, during a box scan
-(2 s) while some speaker plays; between refreshes only the lamps already held are re-weighed. Up to 48
-lamps at once, nearest to a speaker first.
+(2 s) while some speaker plays; between refreshes only the lamps already held are re-weighed. Up to 96
+lamps at once (48 before round 16), nearest to a speaker first.
 *Faster start* (round 14: "lamps take a bit to kick in with reacting to the music"): a speaker joins its
 song in `TickSong` (`sp.clipGen`), up to one box scan (2 s) before `SyncLamps` saw it, and a new speaker
 next to ones already playing waited for the 4 s refresh. Now `PollLamps` (every 0.25 s, a loop over the
 speakers, no game calls) compares a signature of the playing speakers (speaker, channel) with the one of
 the last `SyncLamps` and resyncs on a change, and `LampPulser::Sync` refreshes the lamp list within 0.5 s
 (`kNewSourceSeconds`) when a source (channel + position) joined that the previous call did not have.
+*Placing a lamp* (round 16, round 15 test: "on initial place it still takes time, otherwise toggling music is
+rly fast w it"): a lamp put down near a playing speaker waited for the 4 s refresh (plus up to a box scan).
+Now each Find remembers `identifiablesByIdent._count` and, per lamp definition, its model list's `_size` and
+`_version` (GC handles to the dictionary and lists; `List._version` counts every Add / Remove).
+`LampPulser::Placed()`, asked by `PollLamps` every 0.25 s while a song plays, compares them with plain memory
+reads (no game calls, no hook); a change forces a refresh at once and a second one 0.4 s later (in case the
+`GadgetModel.transform` is set a frame after the model is listed). A new lamp's strength eases in with 0.25 s
+(was 0.5 s). Picking a lamp up refreshes the same way. Logged (first 3): `lamps: a lamp was placed or picked
+up; lamp list refreshed now`. No hook on `GadgetItem.PlaceGadgetEvent` (custom_upgrades holds that one, and
+placement by other paths, e.g. free_placement, goes through the same model lists).
 
 *More lamps* (round 13: "Add support for 'Pink Striped Lamp', 'Conservatory Lamp', 'Blue Lava Lamp', 'Ice
 Lamp' and the glowing ice things in the snow map if possible"). Lamp kinds by gadget prefab:
@@ -497,6 +507,24 @@ Powderfall itself. The debug highlighter (below) now runs the scene group check 
 the log line names the scene group, the LightControls on placed Ice Lamps and, when 0 crystals match, up to 8
 other LightControl parent names (to see whether the crystals are named differently in game).
 
+*Music Pillar and Music Tile* (round 16, user: "Make music pillars and tiles also pulse their color to music
+if possible"). Definitions `MusicPillar` -> `decorMusicPillar`, `MusicTile` -> `decorMusicTile` (no
+variants); both have a "Tile" child with the game's `MusicTile` script (plays a note and flashes when the
+player walks on it or something bounces off it), a point Light (no LightControl), a light-up ice mesh
+`lightUp*_light` (material `objIce_lightUpPillar`: HDR `_InnerEmission`, `_LightControlColor`,
+`_SUVBrightness`) and a glow mesh `lightUp*_glow` (`LightUpTiles`: `_LightControlColor`, `_EffectOpacity`;
+renderer off while idle). Structure and the script in `re/world.md` (MusicTile). Pulsed like the lamps (own
+colour): `_InnerEmission` / `_LightControlColor` (read back from the material every frame: the script sets
+it on a hit) and `Light.intensity`. On top, a beat restarts the tile's own hit animation: the pulse writes
+`MusicTile._effectAnimationTime` (a plain field, no call), and the script's Update then brightens the tile
+(`_SUVBrightness`) and shows the glow renderer as on a hit, without the sound. Strength s = beat x gain x
+lamp weight x 1.4 (capped at 1; below 0.12 no flash) picks the start on the curve: s 1 = the peak (t
+0.076), weaker = further down the decay (towards t 0.49, where the flash ends). The clock is only moved back
+(brighter), so a real hit still plays out. Lamp cap raised 48 -> 96 (a tile dance floor is many lamps).
+The highlighter shows them in the lamp categories ("pulsing lamp / music tile").
+Untested: how bright `_InnerEmission` x up to 4.5 looks on the ice shader with `_USELIGHTCONTROLCOLOR_ON`,
+and whether a flash on every beat feels too busy on a fast song (then raise `kFlashMin`).
+
 *Own colours* (round 14: "pulse lamps (electric pillar can stay rgb) in their own color light"): only the
 Electric Pillar Lamp (`decorElectricLampPillar*` by name) mixes towards the beat hue; every other lamp and
 the scene ice pulse brightness only (k = 0, `Light.color` not written at all).
@@ -544,7 +572,7 @@ or the module is disabled. A lamp whose scene unloaded is simply dropped (its ob
 | `muffle_walls` | on | music from a corral with High Walls (and/or Air Net) sounds muffled from outside |
 | `dance_walls` | off | a ripple runs round the corral walls on every beat of the song the corral plays (queue or its Corral Radio); walls and Air Net glow and change colour (any distance while the plot is loaded, nearest 12); speakers in the corral make it stronger |
 | `dance_intensity` | 1.0 (100 %) | 10-200 %, steeper above 100 % (shown while `dance_walls` is on) |
-| `dance_lamps` | on | lamps (Electric Pillar, Striped, Conservatory, Lava, Ice) and Powderfall's glowing ice near a playing speaker pulse their glow and lights with the beat |
+| `dance_lamps` | on | lamps (Electric Pillar, Striped, Conservatory, Lava, Ice), Music Pillars / Tiles (plus a beat flash) and Powderfall's glowing ice near a playing speaker pulse their glow and lights with the beat |
 | `lamp_range` | 20 m | 5-100 m: the distance from a playing speaker within which lamps pulse (tooltip says so, round 14); full strength to 40 % of it (shown while `dance_lamps` is on) |
 
 ## Log lines
