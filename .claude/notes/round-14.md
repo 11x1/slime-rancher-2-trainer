@@ -2,6 +2,9 @@
 
 Build tested: 5acbad3 (develop). Results are in the work-account checklist https://claude.ai/artifact/12HrkuKyWbJs1PtsufwVvE (collection `results`, ids `r13*`; free text in `misc/notes`). User quotes are verbatim.
 
+## Status (2026-10-25)
+All tasks A-K are merged and deployed (082aeda, DLL 4d99d18c; one build for the round). Checklist: round 14 is published to https://claude.ai/artifact/12HrkuKyWbJs1PtsufwVvE (37 new cases in `.claude/checklist/r14-cases.json`, carried-over cases under Skipped; r12ml6 and r12dj6 were retired, replaced by r14ug2 and r14bw2). Open questions for the user: song rows as real cloned game buttons (A kept our pills and moved the hints to a bottom bar), and whether the Upgrades & Blueprints tooltips should be 200 px too (E kept them at 280).
+
 ## How to run this round
 The same as round 13 (see the auto-memory: orchestrator mode, Opus subagents at medium effort in worktrees, git workflow, no session link, plain commands, checklist conventions, read logs yourself, deploy once per round):
 1. One agent per task below, up to 9 at a time. Each prompt is "Read `.claude/agent-brief.md` and follow it", the task's section from this file, and the branch name.
