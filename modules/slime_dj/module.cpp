@@ -598,9 +598,11 @@ private:
         x.min = 0;
         x.max = 1;
         x.step = 1;
-        x.tooltip = "Electric Pillar Lamps near a music box, DJ Booth, speaker stack or radio that plays a song "
-                    "pulse their light and glow with the beat: calm in quiet parts, flashing in loud ones. They go "
-                    "back to normal when the song stops or pauses.";
+        x.tooltip = "Lamps (Electric Pillar, Striped, Conservatory, Lava and Ice Lamps) and the glowing ice in "
+                    "Powderfall Bluffs near a music box, DJ Booth, speaker stack or radio that plays a song pulse "
+                    "their light and glow with the beat: calm in quiet parts, flashing in loud ones. One speaker "
+                    "gives a gentle pulse, more speakers a stronger one. They go back to normal when the song stops "
+                    "or pauses.";
         settings::Register(x);
         x.key = "lamp_range";
         x.label = "Lamp range";
@@ -2185,7 +2187,7 @@ private:
         std::vector<dj::LampPulser::Source> src;
         for (const Speaker& sp : speakers_)  // positions from UpdateBoost in this scan; silent = a switched-off booth / Boombox
             if (Audible(sp) && sp.posOk && sp.ch && sp.ch->cur && sp.clipGen == sp.ch->cur->clipGen)
-                src.push_back({sp.pos.x, sp.pos.y, sp.pos.z, sp.ch});
+                src.push_back({sp.pos.x, sp.pos.y, sp.pos.z, sp.ch, std::clamp(sp.volScale * sp.lpVol, 0.0f, 2.0f)});
         lamps_.Sync(src, cfg_.lampRange);
     }
 
