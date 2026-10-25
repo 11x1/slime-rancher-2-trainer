@@ -96,6 +96,7 @@ struct Result {
     bool tabChanged = false;
     bool clearSelection = false;            // right-click on the grid outside the tiles (the caller clears its selection)
     const ImGuiPayload* dropped = nullptr;  // Options::dropType payload dropped on the grid this frame
+    bool dropByRelease = false;             // `dropped` came from the release check, not ImGui's drop target (for logs)
 };
 
 // Amount step of one wheel notch with the current modifiers: +-10 with Ctrl, +-1

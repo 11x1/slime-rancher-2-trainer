@@ -2777,6 +2777,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     const float e = std::max(U(24), std::floor(std::min(U(92), (avail - gap * static_cast<float>(n - 1)) / static_cast<float>(n))));
     uintptr_t slotMenu = 0;  // right-clicked slot's item: its give menu opens after the loop (popup id outside the slot's id)
     int slotMenuIdx = -1;    // that slot
+    bool slotDropped = false;  // a dragged slot was let go on another slot this frame (logs)
     nav::TabGroup slotNav("##slotnav");  // the slots are one Tab stop, the arrows move between them
     // Each slot's item is its padded cell: the tile plus half the gap to each neighbour, so the cells
     // touch and the tooltip does not flicker between slots (round 12). The tile is drawn inside it.
@@ -2841,6 +2842,7 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
                     const int from = *static_cast<const int*>(p->Data);
                     if (from != i) SbxRequest(sbx::Op::MoveSlot, i, from);
                     g_sbxSlot = i;
+                    slotDropped = true;
                 }
                 ImGui::EndDragDropTarget();
             }
@@ -2912,6 +2914,14 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
             item_grid::DrawTile(ImGui::GetForegroundDrawList(), ga, ImVec2(ga.x + U(58), ga.y + U(58)), ghost, true, false, g_scale);
         }
     }
+    // Round 18: dragging a slot onto the item list did not empty it in the game; the start and the end of a slot
+    // drag are logged, so the log shows whether the drag started and where it was let go (or that it ended early).
+    static int s_dragLogged = -1;
+    if (draggedSlot >= 0 && draggedSlot != s_dragLogged) SR2_INFO("[sandbox] tab: dragging slot {}", draggedSlot + 1);
+    if (draggedSlot < 0 && s_dragLogged >= 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        SR2_INFO("[sandbox] tab: the drag of slot {} ended while the button was still held (Esc, or ImGui lost it)", s_dragLogged + 1);
+    s_dragLogged = draggedSlot;
+    const bool slotLetGo = draggedSlot >= 0 && !slotDropped && ImGui::IsMouseReleased(ImGuiMouseButton_Left);
 
     const sbx::Slot& sl = s.slots[static_cast<size_t>(g_sbxSlot)];
     if (!sl.unlocked) {
@@ -3035,9 +3045,16 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     if (r.dropped && r.dropped->DataSize == sizeof(int)) {
         const int from = *static_cast<const int*>(r.dropped->Data);
         if (from >= 0 && from < n && s.slots[static_cast<size_t>(from)].item) {
+            SR2_INFO("[sandbox] tab: slot {} dropped on the item list ({}): emptying it", from + 1,
+                     r.dropByRelease ? "release over the list" : "ImGui drop target");
             SetSlotPending(from, 0, 0);
             SbxRequest(sbx::Op::SetSlotCount, 0, from);
         }
+    } else if (slotLetGo) {
+        const ImGuiWindow* hw = GImGui->HoveredWindow;
+        const ImVec2 m = ImGui::GetMousePos();
+        SR2_INFO("[sandbox] tab: slot {} let go at ({:.0f}, {:.0f}) over '{}', not on a slot or the item list", draggedSlot + 1,
+                 m.x, m.y, hw ? hw->Name : "no window");
     }
     if (r.wheelStep != 0 && r.hovered >= 0 && holdable[static_cast<size_t>(r.hovered)]) {
         // Shift / Ctrl + wheel on an item: its amount (adds it to the selection; 0 removes it). Up to

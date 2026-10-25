@@ -504,11 +504,22 @@ Result Draw(const char* id, const std::vector<Tile>& tiles, State& st, const Opt
             dl->AddText(f, size, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), P.text, o.dropHint);
         }
     }
+    const ImRect gridVisible = ImGui::GetCurrentWindow()->OuterRectClipped;  // the grid as far as it is on screen
     ImGui::EndChild();
     tileNav.End();
     if (o.dropType && ImGui::BeginDragDropTarget()) {  // the child window is the last item
         if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(o.dropType)) res.dropped = p;
         ImGui::EndDragDropTarget();
+    }
+    // Round 18 ("Dropping to inventory selection doesnt work, doesnt empty slot"): the target above did not deliver
+    // in the game (it does in a standalone ImGui test of the same layout; the cause wasn't found), so a payload let
+    // go over the grid's visible area counts too, by rectangle, without ImGui's hover rules. The payload lives
+    // through the release frame. No popup in front; one drop per release (both deliver only on that frame).
+    if (o.dropType && !res.dropped && drag && drag->IsDataType(o.dropType) &&
+        ImGui::IsMouseReleased(GImGui->DragDropMouseButton >= 0 ? GImGui->DragDropMouseButton : ImGuiMouseButton_Left) &&
+        gridVisible.Contains(ImGui::GetMousePos()) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) {
+        res.dropped = drag;
+        res.dropByRelease = true;
     }
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();
