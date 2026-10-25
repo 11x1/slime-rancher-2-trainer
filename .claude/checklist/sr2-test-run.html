@@ -147,7 +147,7 @@ body { padding-bottom: 260px; }
 <div class="wrap">
   <header>
     <h1>SR2 Mods Test Run</h1>
-    <p class="sub">Round 13: new and carried-over cases. Use the build whose Insert menu footer shows commit <code>5acbad3</code> or later. Mark each case; use Note to write something down. Results save as you go, and Claude can read them.</p>
+    <p class="sub">Round 14: new and carried-over cases. Use the build whose Insert menu footer shows commit <code>082aeda</code> or later. Mark each case; use Note to write something down. Results save as you go, and Claude can read them.</p>
   </header>
 
   <div class="summary" aria-live="polite">
@@ -183,57 +183,67 @@ body { padding-bottom: 260px; }
 <script>
 const SECTIONS = [
   { name: "Menu only", cases: [
-    ["r13ug1", "Ranch > Upgrades: two sections", ["Open the overlay, Ranch > Upgrades: the Custom Upgrades card has two headings, \"Plot upgrades\" and \"Refinery upgrades\", and no \"Sell upgrades\".", "Under Plot upgrades: \"Tier effects\", then \"Sell back for half price\".", "Turn Custom Upgrades off: Tier effects dims; Sell back can still be switched."]],
+    ["r14ug1", "Upgrades as separate cards", ["Ranch > Upgrades: left column shows a Custom Upgrades card (title and switch), then a \"Plot upgrades\" card, then a \"Refinery upgrades\" card.", "Plot upgrades: \"Tier effects\", then \"Sell back for half price\".", "Refinery upgrades: the dim note, the Extra Tank III / IV keys, then \"Drone station price limit\".", "Turn Custom Upgrades off: Tier effects and the Extra Tank keys dim; Sell back and Drone station price limit can still be switched."]],
+    ["r14ug2", "Search paths", ["Ctrl+Space, type \"sell back\": the path reads Ranch > Upgrades > Plot upgrades.", "Enter: the page opens and the row pulses.", "Search \"drone price\": Ranch > Upgrades > Refinery upgrades; Enter pulses the row.", "Search \"extra tank\": Ranch > Upgrades > Refinery upgrades."]],
+    ["r14lp0", "Lamp range tooltip", ["Ranch > Slime DJ: hover \"Lamp range\": it says it's the distance from a speaker."]],
   ]},
-  { name: "Menu only (Sandbox on, save loaded)", cases: [
-    ["r13sp6", "Short filter tooltips", ["Hover the Slimes filter tab in the spawner: a small \"Slimes\" box, not a wide panel.", "Same in the Vacpack picker."]],
-    ["r13nc1", "Noclip card: key only", ["Sandbox > General: the Noclip card has no switch, only a status line and the key row (your Mouse 4 stays bound).", "Unbind the key and close the overlay: nothing toggles noclip; the card says to bind a key.", "Bind it again, close the overlay, press it: \"Noclip on\".", "Press it again: \"Noclip off\", you fall and land.", "Noclip on, open the overlay, turn Sandbox off: noclip ends, you fall, collision works."]],
-  ]},
-  { name: "Ranch: anywhere", cases: [
-    ["r13bd2", "Hitboxes stay up close", ["Debug > Show entity hitboxes, range 17 m.", "Walk right up to a slime, a toy and a placed gadget: their wireframes stay visible, no flicker on refresh.", "Turn on Show triggers and stand within 5 m of a toy: its big yellow trigger sphere stays drawn.", "Look down at yourself: no wireframe of the player around the camera."]],
+  { name: "Main menu -> load a save", cases: [
+    ["r14mp1", "First M stays open", ["Load a save.", "Tap M once: the map opens and stays open; icons and the \"[RMB] Teleport\" hint appear within about a third of a second.", "Close it, press M again: opens normally."]],
   ]},
   { name: "Ranch: anywhere (Sandbox on)", cases: [
-    ["r13sp1", "Spawn the plain slime", ["Sandbox > Spawn & Craft > Spawner, Slimes tab: right-click Pink Slime: \"Spawn: Pink Slime\" and \"Spawn: Radiant Pink Slime\" are listed.", "Click \"Spawn: Pink Slime\": a normal Pink Slime appears in front of you."]],
-    ["r13sp2", "Largo radiant submenu", ["Right-click Pink Slime, hover \"Largos (N)\": the largo list opens.", "Click the Pink Tabby row: that largo spawns and the menus close.", "Reopen and hover the Pink Tabby row without clicking: a submenu with \"Spawn: Pink Tabby Largo\", \"(radiant Pink)\", \"(radiant Tabby)\".", "Click \"(radiant Tabby)\": a radiant largo with the Tabby look spawns."]],
-    ["r13sp3", "Radiant icons", ["Right-click Pink Slime: the radiant row shows the Slimepedia's radiant Pink icon, not the plain one.", "Right-click a largo in the Largos tab: the \"(radiant X)\" rows show radiant icons."]],
-    ["r13sp4", "Menu at the cursor", ["Spawner, Slimes tab: scroll so a row is half cut off at the bottom of the grid.", "Right-click Lucky Slime: the menu opens right at the cursor, never up under the search bar.", "Right-click a tile on the half-hidden bottom row: same, growing upward near the bottom of the screen."]],
-    ["r13sp5", "Gold, Lucky, Tarr greyed in the Vacpack picker", ["Sandbox > Vacpack, Slimes tab: Gold Slime, Lucky Slime and Tarr are in the grid, greyed out.", "Hover Gold Slime: the tooltip says the vacpack can't hold it.", "Click it: only a status line; nothing goes into a slot.", "Right-click it: the menu opens with \"Spawn: Gold Slime\" and a greyed \"Give\"."]],
+    ["r14sp1", "Menu opens down-right", ["Sandbox > Vacpack picker: right-click Lucky Slime with room below: the menu opens down-right at the cursor.", "Spawner: right-click a tile in the upper or middle part of the screen: down-right.", "Right-click a tile near the bottom edge: it opens upward, its bottom at the cursor.", "Right-click a tile near the right edge: it opens to the left.", "Same rules on the Vacpack slots."]],
+    ["r14sp2", "Largo submenu and radiant names", ["Right-click Pink Slime, hover \"Largos (n)\": the submenu is at least as wide as the main menu and every label fits.", "Hover Pink Tabby: \"Spawn: Pink Tabby Largo\", \"Spawn: Radiant Pink Tabby Largo\", \"Spawn: Radiant Tabby Pink Largo\", no \"(radiant ...)\".", "Click a radiant row: it spawns; the status says \"Spawned 1 x Radiant Tabby Pink Largo\"."]],
+    ["r14sp3", "200 px tooltips", ["Hover Beach Ball, a resource and a crate: the tooltip is about 200 px wide and the text wraps.", "Hover a food or slime with a \"Favourite of\" row: it can still be wider."]],
   ]},
   { name: "Ranch: Fabricator", cases: [
-    ["r13cp1", "Sharp DJ pictures", ["Open the Fabricator, go to the DJ cards.", "Select DJ Booth: the big picture on the right is sharp, crisp lines like a vanilla gadget's.", "Select DJ Speaker Stack, then Slime Radio: both sharp, your drawings, never a grey box.", "Select the Boombox and compare: about the same sharpness.", "The small grid tiles look as before, no shimmer."]],
-    ["r13cp2", "Quantum Storage Link picture", ["Select the Quantum Storage Link card and wait about 1 s: the Refinery Link's big picture in purple, sharp, not a stretched small icon or a grey box.", "Close and reopen the Fabricator, select it again: the purple picture shows at once."]],
+    ["r14cp1", "DJ pictures smooth", ["Select DJ Booth: the right-hand picture looks as smooth as the PNG in an image viewer.", "Select DJ Speaker Stack, then Slime Radio: same."]],
+    ["r14cp2", "Quantum Link shows its own picture", ["Select DJ Booth.", "Then select Quantum Storage Link: a purple Refinery Link picture, never the DJ Booth drawing.", "Close and reopen the Fabricator, select the Link: the purple picture shows at once."]],
+    ["r14cp3", "Compare with vanilla", ["Select a vanilla gadget, e.g. the Refinery Link: looks normal.", "Compare with the DJ Booth picture: about the same sharpness."]],
   ]},
   { name: "Ranch: open ground", cases: [
-    ["r13bd1", "Slime Radio tips and rolls", ["Fabricate a Slime Radio: it spawns upright, the stack standing on the ground.", "Debug > Show entity hitboxes: a box at the bottom and a tall egg-shaped capsule around it, no round ball.", "Walk into it or shoot it lightly: it tips over and rolls on its side, doesn't snap back upright.", "Vacuum it up and let go: it drops normally.", "Leave it near a slope: it may roll down slowly, without sliding far."]],
-    ["r13lp1", "Lamp brightness grows with speakers", ["Place an Electric Pillar Lamp and one Music Box or Slime Radio about 3 m away, play a song: the lamp pulses gently, clearly weaker than last round.", "Add 2-3 more speakers near the lamp: the pulse gets clearly stronger and more colourful.", "Remove the extra speakers: within a few seconds it's back to the gentle pulse."]],
-    ["r13lp2", "New lamps pulse", ["Place a Pink Striped Lamp, a Conservatory Lamp, a Blue Lava Lamp and an Ice Lamp within about 8 m of a playing speaker: each one's light and glow pulse with the beat and shift colour.", "Place another colour of lava lamp (or a Blue / Mint / Prismatic striped lamp): it pulses too.", "Pause the song: all go back to normal; the Ice Lamp keeps its own slow colour shift.", "Turn off \"Lamps pulse to the music\" while a song plays: all lamps go back to normal."]],
+    ["r14bd1", "Slime Radio doesn't hang on an edge", ["Debug > Show entity hitboxes on. Fabricate a Slime Radio: the egg is slimmer and shorter, the small base sits inside its bottom.", "Walk gently into it: it stays standing, or tips past a small angle.", "Push or shoot it over: it falls on its side and rolls, never propped on the base's edge.", "Vac it up and drop it: lands normally.", "Put it on a slope or ledge: it rolls or slides off, doesn't hang on an edge."]],
+    ["r14lp1", "Lamps in their own colour", ["Place a Pink Striped, Lava, Conservatory or Ice Lamp and an Electric Pillar Lamp near a Music Box, play a song.", "The lamps pulse in their own colour; only the Electric Pillar cycles colours."]],
+    ["r14hl1", "Highlighter", ["Misc > Developer tools: turn on \"Highlight what the mod touches\", close the menu: grey labelled boxes on placed lamps.", "Play a song on a Music Box: a green box on each speaker with a range circle on the ground; lamps inside turn pink (\"pulsing lamp\").", "Stop the song: speaker boxes go, lamps back to grey.", "Open the overlay: the boxes hide while it's open."]],
   ]},
   { name: "Ranch: placed Quantum Storage Link", cases: [
-    ["r13bd3", "Link opens on the Quantum Cloud tab", ["Press E on a Quantum Storage Link: the menu opens on the Quantum Cloud tab.", "Hint row: no \"[SPACE] Go To\", no magnifier.", "Close it and press E again: Quantum Cloud tab again.", "Open a real drone station: its programming tab and normal hints are all there."]],
+    ["r14ql1", "Opens on the Drones tab, no Go To", ["Press E on the link: the menu opens on the Drones tab.", "Key bar: no \"[SPACE] Go To\"; Close is still there.", "Space on a drone row: nothing happens.", "Switch to Quantum Cloud: contents as before, only Close in the key bar.", "Close and press E again 2-3 times: Drones tab each time.", "Open a real Drone Station: its tabs and hints are normal."]],
+    ["r14qv1", "Softer look, drone shimmer", ["Look at the link: lighter purple, cyan glow, no vac-dust swirl at the port, port arrows pointing outward.", "Watch it for about a minute: every 15-30 s, for about a second, the glow jitters and the drone pass-through look shows (scanlines, cyan edges). No ping every 7 s in between.", "Let a drone take from the link: a small star burst at the port."]],
+    ["r14qv2", "Name and preview in gadget mode", ["Gadget mode, nothing held, aim at the placed link: the label reads \"Quantum Storage Link\".", "Hold a Refinery Link, Variant to Quantum Storage Link: the preview is lighter purple with outward arrows.", "Turn a placed link plain (Variant toggle): vanilla colours, dust swirl and inward arrows come back."]],
   ]},
-  { name: "Ranch: corral with Corral Radio", cases: [
-    ["r13ra1", "Notification without parentheses", ["Turn Slime DJ off in the overlay.", "Press the blue radio button: \"Corral Radio: Slime DJ is off, turn it on in the overlay under Ranch > Slime DJ\", no parentheses.", "Turn Slime DJ back on."]],
-    ["r13ra2", "Radio menu: game buttons, readable playing row", ["Open the radio menu with songs in the playlist and the radio on: no \"Now playing\" line; the header buttons are the game's pink buttons with key caps R, F, C.", "Look at the playing song without hovering: teal row, white name, a pink \">\" outside the row on its left.", "Hover it: dark blue row, white text.", "Press F: Shuffle toggles. Press C twice: Clear asks once, then empties the playlist.", "Click Radio: it switches on and off."]],
-    ["r13ra3", "No Music Box: greyed playlist with a warning", ["Sell the corral's Music Box (keep the Corral Radio).", "Open the radio menu: the saved playlist shows greyed (not empty), an orange \"No Music Box on this corral...\" pill at the top, header buttons grey.", "Click a song: the same warning shows as the note under the lists."]],
-    ["r13ra4", "Real radio keeps playing", ["With the radio playing, note the song and where it is.", "Sell the Music Box, wait about 1 minute, buy it again: the radio comes back about 1 minute further on (or a later song), not from the start.", "Walk away until the speaker stops, wait about 30 s, come back: the song is about 30 s further on.", "Leave the ranch for a few minutes and return: further along the playlist, mid-song."]],
+  { name: "Ranch: corral with Corral Radio and Music Box", cases: [
+    ["r14ra1", "Notification: Slime DJ is off", ["Turn Slime DJ off in the overlay.", "Press the blue button: the notification says only \"Slime DJ is off\".", "Turn Slime DJ back on."]],
+    ["r14ra2", "Spamming R", ["Open the radio menu on a radio with songs.", "Press R quickly about 10 times: it flips on and off, the \"4 radios\" pill never shows; after an odd count it plays."]],
+    ["r14ra3", "Off and on keeps the song", ["Let a song play about 30 s, close the menu.", "Open it, press R twice, close: the song continues near where it was.", "Press R (off), close, wait about 20 s in game, open, press R: about 20 s further on, not from the start."]],
+    ["r14ra4", "Clear? disarms", ["Press C once: the button reads \"Clear?\" and a note says press again.", "Press W, another key, or click a row: back to \"Clear\", note gone.", "Press C twice in a row: the playlist empties."]],
+    ["r14ra5", "Long names scroll", ["Move to a song whose name ends in \"...\": after about 1 s it scrolls to its end, pauses, jumps back.", "Move to another row: the first shows \"...\" again."]],
+    ["r14ra6", "Key bar at the bottom", ["Open the menu: a bar at the bottom, \"[ESC] Close\" on the left; \"[SPACE] Queue\", \"[ENTER] Play now\", \"[R] Radio\", \"[F] Shuffle\", \"[C] Clear\" on the right, with the game's key caps.", "Move to a playlist entry: the middle pair becomes \"[DEL] Remove\" and \"[ENTER] Play now\".", "Click \"[ESC] Close\": the menu closes and the game unpauses."]],
+    ["r14ra7", "Row actions", ["On a song, press Space: added at the end (\"Queued ...\").", "On a song, press Enter: inserted after the playing entry, plays from its start.", "On a playlist entry, press Delete: removed.", "Press S past the last row: focus moves into the bar; W returns to the list."]],
+    ["r14ra8", "Taller warning pill", ["Sell the Music Box (keep the radio), open the menu: the orange \"No Music Box\" pill is taller, with room above the list headings.", "Buy the Music Box back."]],
+    ["r14bw1", "Walls dance from far away", ["Walls dance on, Hearing range about 30 m. Play a song, stand in the corral: walls ripple and glow.", "Walk or jetpack away until you can't hear it, corral in sight: the walls keep dancing in time.", "Walk back: still in time, no jump.", "Pause the song from far away: the walls settle.", "Go to another zone and come back: the walls dance again within about 2 s."]],
+    ["r14bw2", "Two corrals, each its own song", ["Global queue playing and this corral's radio playing its own playlist; a second corral with only a Music Box.", "Stand far from both with both in view: each corral's walls dance to its own song."]],
   ]},
-  { name: "Ranch: silo", cases: [
-    ["r13ug2", "Sell-All Button still appears", ["Buy the Sell-All Button on a silo: the button appears within about a second, as before."]],
+  { name: "Ranch: coop with Hen Collector", cases: [
+    ["r14hc1", "Vacuum after a teleport", ["Go somewhere the coop is unloaded (another zone).", "Map-teleport back to the ranch.", "Have more adult hens in the coop than the limit, press the Hen Collector's Activate button: the chickens are pulled in by the vacuum, then stored; they don't just vanish."]],
+    ["r14hc2", "Vacuum every time", ["Teleport away and back twice more.", "Press Activate with more chickens than the limits: the vacuum works each time.", "Wait for a 6-hour collection: vacuum as before."]],
   ]},
   { name: "Ranch: drone station", cases: [
-    ["r13dp1", "Programs entry in the key bar", ["Open a station (Scheduler bought, custom upgrades on) on the Programming page: \"[P] Programs\" sits in the bottom key bar between \"[Z] Clear All\" and \"[ESC] Close\"; no pill next to Change.", "Click the entry: the programs dialog opens.", "Close it, press P: it opens again.", "With 2 programs: the bar reads \"Program 1/2\"."]],
-    ["r13dp2", "Program rows as long buttons", ["Open the dialog with 2 programs: one long row each, \"[SPACE] Edit\" on the left, \"[Z] Delete\" on the right; the running row tinted, active icon, teal frame.", "Press Down / S / Up / W and the arrow keys: the frame moves row by row (programs, Add program, Next program).", "Move the mouse over another row: the frame jumps to it.", "Press Space on the non-running row: the dialog closes, the page shows that program, the bar reads \"Program 2/2\".", "Reopen, focus a row, press Z: that program is deleted and the dialog rebuilds.", "Click \"[Z] Delete\" on a row: that program is deleted.", "With a gamepad: d-pad moves, A edits, the Clear All button deletes."]],
-    ["r13dp3", "Add program and the limit", ["With 1 or 2 programs, focus \"[SPACE] Add program\" and press Space (or click it): the dialog closes and there is one more program.", "With 3 programs, open the dialog: the line \"A station can have up to 3 programs.\" instead of the button."]],
-    ["r13dp4", "Next program selector, footer", ["With 2+ programs, focus the Next program row, press Left / Right: it toggles \"When idle\" / \"After each delivery\".", "Press Space on it: the value steps. Click < and >: it changes.", "Close and reopen: the choice is kept.", "Footer: no \"Arrows: choose ...\" line, only \"[P] Close\".", "P, Esc and a click on the backdrop each close the dialog."]],
+    ["r14dp1", "Key bar: Programs first, Save Program", ["Open a station's Programming page (Scheduler owned): \"[P] Programs\" is the leftmost entry and not grey, also at \"Program 1/2\".", "The [X] entry reads \"Save Program\".", "Turn custom upgrades off, reopen: \"Start Program\" again. Turn them back on."]],
+    ["r14dp2", "Dialog with the game's buttons", ["Press P with 2+ programs: each row starts with pink game buttons \"[Space] Edit\" and \"[Z] Delete\", the game's key icons, Space as a wide key.", "Below them a \"[Space] Add\" game button.", "\"Next program\" uses the same < value > selector as the game's Settings."]],
+    ["r14dp3", "Keyboard and pad navigation", ["Open the dialog: the running program's Edit is blue (hover look).", "S / Down: the next row's Edit turns blue.", "D / Right: Delete turns blue.", "Move down to Next program: a teal ring; A / D or Left / Right change the value.", "Same with the d-pad or stick."]],
+    ["r14dp4", "Buttons work", ["Space on Edit: that program runs, the dialog closes.", "Z on a row (2+ programs): that program is deleted.", "Click a selector arrow: the value steps.", "Hover a button: focus moves to it.", "With one program: Delete is grey; Left / Right stay on Edit."]],
+    ["r14dp5", "Price-limit dialog focus", ["Destination Plort Market, press C.", "Up / Down: a light teal box with a teal border moves between the mode row and the slider."]],
   ]},
-  { name: "Ranch: coast (Sandbox on)", cases: [
-    ["r13nc2", "Noclip under the slime sea", ["Turn noclip on at the ranch's edge.", "Fly down into the slime sea and stay under it a few seconds: no knockout, no fade, no respawn.", "Fly back up above ground and turn noclip off: you land normally.", "With noclip off, jump into the sea: the normal knockout."]],
+  { name: "Ranch: drone station in Explorer mode", cases: [
+    ["r14dp6", "Programs in Explorer mode", ["Set an explorer target, press Save Program.", "Press P, then Add: the dialog closes, the bar reads \"Program 2/2\".", "Pick another target, Save Program.", "Press P: two rows showing target + \"Explorer drone\", no Next program row.", "Edit on program 1: it runs, the page shows target 1."]],
   ]},
   { name: "Powderfall Bluffs", cases: [
-    ["r13lp3", "Glowing ice pulses", ["Carry a Slime Radio next to the glowing green-cyan ice crystals and play a song.", "Wait about 10 s: the nearby crystals pulse their glow and light with the beat.", "Stop the song: the crystals go back to their normal glow.", "Walk around for a minute with the song playing: no stutter."]],
+    ["r14hl2", "Glowing ice found", ["Keep the highlighter on, travel to Powderfall, wait about 10 s: cyan \"glowing ice\" boxes on the glowing crystals, no music needed.", "Optional: place a speaker and play a song: crystals in range turn pink and pulse in their own colour."]],
   ]},
-  { name: "Grey Labyrinth (Sandbox on)", cases: [
-    ["r13nc3", "Noclip under the cloud ocean", ["Turn noclip on by the clouds.", "Fly down below the cloud surface: no knockout.", "Fly back onto solid ground and turn noclip off: you stand there normally."]],
+  { name: "Grey Labyrinth", cases: [
+    ["r14mp2", "Walls only on their own map page", ["Open the full map: the Labyrinth page shows the Nullifier wall icons.", "Switch the map tab to Rainbow Island: no wall icons.", "Switch back: the walls show again."]],
+  ]},
+  { name: "Back at the ranch (after the Labyrinth)", cases: [
+    ["r14mp3", "Remembered walls stay on the Labyrinth page", ["Open the full map on Rainbow Island: no wall icons.", "Switch to the Labyrinth tab: the remembered walls show.", "Save, reload, repeat: the walls show there and only there."]],
   ]},
   { name: "Game launch", group: "Skipped", cases: [
     ["r11qs2", "Manual Continue click", ["With auto-continue on, restart.", "Click Continue yourself as soon as the menu shows.", "The save loads once: no fault, no second load."]],
@@ -241,7 +251,6 @@ const SECTIONS = [
     ["r11qs4", "Submenu pauses the countdown", ["Set Auto-continue delay to 5 s and restart.", "While it counts down, open Load Game.", "Nothing loads while the submenu is open.", "Go back to the main menu: it continues after the delay."]],
   ]},
   { name: "Menu and saves", group: "Skipped", cases: [
-    ["r12ml6", "Search finds the sections", ["Ctrl+Space, type \"sell upgrades\": path reads Ranch > Upgrades > Custom Upgrades > Sell upgrades.", "Enter: the page opens and the row pulses.", "Same with \"drone price\"."]],
     ["r12pg4", "Per save", ["Load a save that doesn't own the upgrade: no [P] pill on any station.", "Load the save that owns it: the pill is back."]],
   ]},
   { name: "Sandbox", group: "Skipped", cases: [
@@ -251,7 +260,6 @@ const SECTIONS = [
     ["r9wx4", "All zones and other zones", "All zones + Clear skies + Lock: every zone clear, still clear after travelling. All zones with a zone-specific pattern: status line names skipped zones. Set weather for another zone via the dropdown, travel there: shown on arrival."],
   ]},
   { name: "Corral radio and Slime DJ", group: "Skipped", cases: [
-    ["r12dj6", "Walls follow the corral's radio", ["Walls dance on; put songs in the radio playlist, radio on, stop the global queue.", "Stand next to the corral: walls ripple and glow to the radio's song.", "Play a different global song with a second corral nearby (no radio): each corral follows its own song."]],
     ["r12lp4", "Lamp follows the corral radio", ["Lamp next to a corral whose radio plays its own playlist, global queue playing a different song elsewhere: the lamp follows the radio's beat.", "Switch the radio off: the lamp returns to normal."]],
     ["r11cr3", "Radio playlist survives a reload", ["Build a playlist with the blue button's menu.", "Save, quit to the menu and reload.", "Press the button: the playlist is kept."]],
     ["r10cr3", "Corral radio playlist", ["Overlay Ranch > Slime DJ: \"Corral radios\" lists \"Corral NNNN\" with its distance, Off.", "Add songs, press + on 3 songs: they join the radio's playlist (queue unchanged); Done.", "Switch the radio on: its song plays from that corral only.", "Play another song on the global queue: other corrals play it; the radio corral keeps its own.", "Skip, Shuffle, click a row, move up/down, remove all work. Switch off: vanilla tune there."]],
