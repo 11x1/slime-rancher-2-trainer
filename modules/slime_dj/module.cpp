@@ -71,6 +71,7 @@
 #include "core/unity.h"
 #include "modules/custom_upgrades/api.h"
 #include "modules/slime_dj/emitters.h"
+#include "modules/slime_dj/lamps.h"
 #include "modules/slime_dj/library.h"
 #include "modules/slime_dj/radio_menu.h"
 #include "modules/slime_dj/stream.h"
@@ -176,6 +177,8 @@ struct Cfg {
     bool danceWalls = false;
     float danceIntensity = 1.0f;
     bool muffle = true;
+    bool danceLamps = true;
+    float lampRange = 20.0f;  // m around a playing speaker
 };
 
 struct Channel;
@@ -364,6 +367,8 @@ public:
         std::string danceWhy;
         if (!dancer_.Ready() && !dancer_.Resolve(danceWhy))
             SR2_WARN("slime_dj: 'Walls dance to the music' unavailable ({})", danceWhy);
+        if (std::string lampWhy; !lamps_.Ready() && !lamps_.Resolve(lampWhy))
+            SR2_WARN("slime_dj: 'Lamps pulse to the music' unavailable ({})", lampWhy);
         if (std::string menuWhy; !menu_.Ready() && !menu_.Setup(Resolver::Get(), menuWhy))
             SR2_WARN("slime_dj: Corral Radio playlist menu unavailable ({}); playlists only in the Slime DJ tab", menuWhy);
         SR2_INFO("slime_dj: resolved (AudioClip/AudioSource, MusicBoxUpgrader; SECTR source {}, cue {}, bus {}, system {}; "
@@ -560,6 +565,36 @@ private:
         return why.empty();
     }
 
+    // "Lamps pulse to the music" (lamps.cpp), shown right after the walls dance settings.
+    static void RegisterLampSettings() {
+        using settings::Kind;
+        settings::Def x;
+        x.module = kModule;
+        x.key = "dance_lamps";
+        x.label = "Lamps pulse to the music";
+        x.kind = Kind::Bool;
+        x.def = 1;
+        x.min = 0;
+        x.max = 1;
+        x.step = 1;
+        x.tooltip = "Electric Pillar Lamps near a music box, DJ Booth, speaker stack or radio that plays a song "
+                    "pulse their light and glow with the beat: calm in quiet parts, flashing in loud ones. They go "
+                    "back to normal when the song stops or pauses.";
+        settings::Register(x);
+        x.key = "lamp_range";
+        x.label = "Lamp range";
+        x.kind = Kind::Float;
+        x.def = 20.0;
+        x.min = 5.0;
+        x.max = 100.0;
+        x.step = 5.0;
+        x.parent = "dance_lamps";
+        x.tooltip = "How far from a playing speaker a lamp pulses. Strongest close to the speaker, fading out "
+                    "towards this distance.";
+        settings::Register(x);
+        settings::SetDisplay(kModule, "lamp_range", " m");
+    }
+
     static void RegisterSettings() {
         using settings::Kind;
         auto def = [](const char* key, const char* label, Kind kind, double d, double mn, double mx, double step,
@@ -613,6 +648,7 @@ private:
         settings::SetDisplay(kModule, "volume", "%", {}, 100);
         settings::SetDisplay(kModule, "dance_intensity", "%", {}, 100);
         settings::SetDisplay(kModule, "range", " m");
+        RegisterLampSettings();
     }
 
     static Cfg LoadCfg() {
@@ -627,6 +663,9 @@ private:
         c.danceIntensity = std::clamp(settings::GetFloat(kModule, "dance_intensity"), 0.0f, 2.0f);
         if (!std::isfinite(c.danceIntensity)) c.danceIntensity = 1.0f;
         c.muffle = settings::GetBool(kModule, "muffle_walls");
+        c.danceLamps = settings::GetBool(kModule, "dance_lamps");
+        c.lampRange = std::clamp(settings::GetFloat(kModule, "lamp_range"), 5.0f, 100.0f);
+        if (!std::isfinite(c.lampRange)) c.lampRange = 20.0f;
         return c;
     }
 
@@ -2017,6 +2056,51 @@ private:
         }, cfg_.danceIntensity);
     }
 
+    // -------------------------------------------------------- lamps pulse ----
+    // Box scan: every speaker that plays its channel's song now (music boxes, emitters: DJ Booth,
+    // speaker stacks, Slime Radios, Corral Radio corrals); lamps.cpp pulses the lamps near them.
+    void SyncLamps() {
+        if (!cfg_.danceLamps || !lamps_.Ready() || !trGetPosition_) return;
+        std::vector<dj::LampPulser::Source> src;
+        for (const Speaker& sp : speakers_) {
+            // volume 0 = an emitter that is switched off (a DJ Booth / Boombox not playing the song)
+            if (!sp.live || !sp.ch || !sp.ch->cur || sp.clipGen != sp.ch->cur->clipGen || sp.volScale <= 0.01f) continue;
+            Il2CppObject* go = Target(sp.go);
+            Il2CppObject* tr = go ? unity::TransformOf(go) : nullptr;
+            if (!unity::IsAlive(tr)) continue;
+            const Vec3 p = trGetPosition_.fn(tr, trGetPosition_.mi);
+            if (Finite(p)) src.push_back({p.x, p.y, p.z, sp.ch});
+        }
+        lamps_.Sync(src, cfg_.lampRange);
+    }
+
+    // Every frame: each channel's song position (read like TickDancer: kDanceLagSeconds behind).
+    void TickLamps(float dt) {
+        if (!lamps_.Ready()) return;
+        if (!cfg_.danceLamps || !AnySong()) {
+            if (lamps_.Lamps()) lamps_.Clear();
+            return;
+        }
+        const bool gamePaused = GamePaused();
+        std::vector<dj::LampPulser::Channel> chs;
+        auto add = [&](const Channel& ch) {
+            if (!ch.cur) return;
+            const Current& c = *ch.cur;
+            dj::LampPulser::Channel x;
+            x.key = &ch;
+            x.track = c.stream ? &c.stream->beats() : nullptr;
+            x.gen = c.clipGen;
+            x.playing = c.started && c.rate && c.stream && !c.userPaused && !c.buffering && !gamePaused &&
+                        !(c.endFrame && c.playPos >= c.endFrame);
+            const uint64_t lag = static_cast<uint64_t>(kDanceLagSeconds * c.rate), pos = c.base + c.playPos;
+            x.frame = pos > lag ? pos - lag : 0;
+            chs.push_back(x);
+        };
+        add(global_);
+        for (const auto& r : radios_) add(*r);
+        lamps_.Tick(dt, chs);
+    }
+
     // One line a minute while box scans ran: their cost, and how often the scene was searched.
     void LogPerf(float dt) {
         perf_.acc += std::isfinite(dt) && dt > 0 ? std::min(dt, 1.0f) : 0.0f;
@@ -2041,9 +2125,10 @@ private:
 
     void TickImpl(float dt) {
         if (cfgDirty_.exchange(false)) {
-            const bool danced = cfg_.danceWalls;
+            const bool danced = cfg_.danceWalls, lamped = cfg_.danceLamps;
             cfg_ = LoadCfg();
             if (cfg_.danceWalls && !danced) boxScan_ = 0;  // walls dance turned on: find the corrals now
+            if (cfg_.danceLamps && !lamped) boxScan_ = 0;  // lamps turned on: find them now
         }
         const bool viewed = bridge::WantsSnapshot();
         boxScan_ -= dt;
@@ -2085,6 +2170,7 @@ private:
                 Resync(global_);
                 for (auto& r : radios_) Resync(*r);
                 SyncDancer();
+                SyncLamps();
             }
             perf_.Scan(Qpc() - scan0);
         }
@@ -2096,6 +2182,7 @@ private:
         TickMix(dt);
         TickMuffle(dt);
         TickDancer(dt);
+        TickLamps(dt);
         TickMenu(dt);
         const Current* g = global_.cur.get();
         dj::emitters::SetPlaying(g && g->started && !g->userPaused &&
@@ -2113,6 +2200,7 @@ private:
         menuKey_.clear();
         dancer_.Clear();
         danceState_ = {0, 0, 0};
+        lamps_.Clear();
         StopAll();
         DropRadios();
         DestroySpeakers();
@@ -2577,6 +2665,7 @@ private:
     bool hooked_ = false, fullScan_ = true, dropApplied_ = false, wasActive_ = false, probe_ = false;
     ScanPerf perf_;
     dj::WallDancer dancer_;
+    dj::LampPulser lamps_;          // "Lamps pulse to the music" (lamps.h)
     dj::RadioMenu menu_;            // Corral Radio playlist menu (radio_menu.h)
     std::string menuKey_;           // plot key of the radio the menu is for ("" = no menu)
     bool menuPending_ = false;      // requested, opens in the next tick
