@@ -10,6 +10,9 @@ Every "Merge <branch> into develop" commit in <since>..<until> becomes a "### <b
 with that branch's own commit subjects under it (<merge>^1..<merge>^2, no merges). Commits that
 came through no branch go under "Other". Other merges (develop into master, develop into a
 branch) are left out. Only subjects are printed, so trailers like Co-Authored-By never appear.
+Only commits that change the DLL count (BUILD_PATHS; notes, docs, the checklist and the test harness
+don't), so a branch that only touched docs is left out. Keep BUILD_PATHS in step with the `paths:`
+filter in release.yml, which skips the whole run for such pushes.
 Newest branch first. Stdlib only; needs git on PATH and the full history (fetch-depth: 0).
 """
 
@@ -21,6 +24,12 @@ import sys
 MERGE_RE = re.compile(r"^Merge (?:branch |remote-tracking branch )?'?([^' ]+)'? into '?develop'?$")
 MAX_GROUPS = 80      # a first release (no previous tag) would otherwise list the whole history
 MAX_PER_GROUP = 40
+# what goes into version.dll (git pathspecs); the same list as release.yml's `paths:` filter
+BUILD_PATHS = [
+    "core", "modules", "ui", "proxy", "third_party", "cmake", "CMakeLists.txt", "build.ps1",
+    "assets/icons/*.png", "assets/icons/src/gen_inc.py",
+    ":(exclude)*.md", ":(exclude)modules/autotest", ":(exclude)ui/autotest_view.*",
+]
 
 
 def git(*args):
@@ -50,6 +59,7 @@ def log(rev_args):
 def notes(since, until):
     rng = [f"{since}..{until}"] if since else [until]
     commits = log(rng)
+    touching = {c[0] for c in log(rng + ["--no-merges", "--", *BUILD_PATHS])}
     seen = set()
     groups = []          # (branch, [subjects])
     for sha, parents, subject in commits:
@@ -62,13 +72,15 @@ def notes(since, until):
         own = [c for c in log(["--no-merges", parents[1], *excl]) if c[0] not in seen]
         seen.update(c[0] for c in own)
         seen.add(sha)
-        subjects = [c[2] for c in own]
+        subjects = [c[2] for c in own if c[0] in touching]
+        if not subjects:
+            continue         # docs / notes / harness only: nothing in the DLL changed
         prev = next((g for g in groups if g[0] == m.group(1)), None)   # merged more than once
         if prev:
             prev[1].extend(subjects)
         else:
             groups.append((m.group(1), subjects))
-    other = [s for sha, parents, s in commits if sha not in seen and len(parents) < 2]
+    other = [s for sha, parents, s in commits if sha not in seen and len(parents) < 2 and sha in touching]
 
     lines = []
     for branch, subjects in groups[:MAX_GROUPS]:

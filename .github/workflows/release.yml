@@ -21,6 +21,23 @@ name: release
 on:
   push:
     branches: [develop, master]
+    # only pushes that change what goes into version.dll build and release (keep in step with
+    # BUILD_PATHS in .github/scripts/release_notes.py); notes, docs, the test harness and CI changes
+    # don't (try a workflow change with a manual run: Actions > release > Run workflow)
+    paths:
+      - 'core/**'
+      - 'modules/**'
+      - 'ui/**'
+      - 'proxy/**'
+      - 'third_party/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'build.ps1'
+      - 'assets/icons/*.png'
+      - 'assets/icons/src/gen_inc.py'
+      - '!**/*.md'
+      - '!modules/autotest/**'
+      - '!ui/autotest_view.*'
   workflow_dispatch:
     inputs:
       autotest:

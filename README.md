@@ -55,7 +55,7 @@ Prebuilt DLLs are on the repository's [Releases](https://github.com/11x1/slime-r
 | `master` | a numbered release, marked latest | `v0.<N>`, one more than the newest `v0.*` tag (`v0.1` first) |
 | `develop` | a pre-release per push (untested in game), old ones are kept | `dev-<yyyyMMdd-HHmm>-<sha7>`, the commit time in UTC |
 
-The notes list the branches merged into `develop` since the previous tag of the same kind, each with its own commit subjects; commits made directly on `develop` go under "Other". Preview them before a push with `python .github/scripts/release_notes.py` (develop; `--kind master` for the next numbered release, `--since <ref>` for any start).
+Only pushes that change what goes into `version.dll` build and release (source, CMake, build.ps1, the embedded icons); a push of notes, docs, the test harness or CI changes alone runs nothing. The notes list the branches merged into `develop` since the previous tag of the same kind that changed the DLL, each with its own commit subjects; commits made directly on `develop` go under "Other". Preview them before a push with `python .github/scripts/release_notes.py` (develop; `--kind master` for the next numbered release, `--since <ref>` for any start).
 
 Icons that exist only in a local checkout (not in git) are not in a release build: the mod shows the game's own icon there.
 
