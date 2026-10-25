@@ -1,0 +1,409 @@
+[
+[
+"Ranch: corral",
+"r11ic1",
+"Vanilla icons: corral cards",
+[
+"Open a corral's upgrade menu.",
+"Music Box II and Corral Radio both show the vanilla Music Box icon (no drawn \"II\" badge)."
+]
+],
+[
+"Ranch: coop",
+"r11ic2",
+"Vanilla icons: coop cards",
+[
+"Open a coop's upgrade menu.",
+"Faster Hens shows the Deluxe Coop icon.",
+"Coop Air Net shows the corral's Air Net icon.",
+"Hen Collector still shows your hen drawing."
+]
+],
+[
+"Ranch: incinerator",
+"r11ic3",
+"Vanilla icons: Ash Booster",
+[
+"Open an incinerator's upgrade menu.",
+"Ash Booster shows the Ash Trough icon."
+]
+],
+[
+"Ranch: silo",
+"r11ic4",
+"Vanilla icons: Sell-All Button",
+[
+"Open a silo's upgrade menu.",
+"Sell-All Button shows the Market Link icon."
+]
+],
+[
+"Ranch: garden",
+"r11ic5",
+"Vanilla icons: Sprinklers",
+[
+"Open a garden's upgrade menu.",
+"Sprinkler II / III show the Sprinkler icon."
+]
+],
+[
+"Open world: tracker under the minimap",
+"r11ic6",
+"Tracker uses game sprites",
+[
+"Turn on the gordo, plort door, research drone, ghostly drone and map node rows.",
+"Go to a zone that has them.",
+"Gordos: the small Slimepedia gordo face (iconGordoPedia_small).",
+"Ghostly drones: the blue explorer drone (iconExplorerDronePedia).",
+"Research drones: the Slimepedia drone.",
+"Plort doors: their map marker sprites.",
+"Map nodes: the pediaHomeWorld tile (or the old drawn map if that sprite isn't loaded)."
+]
+],
+[
+"Menu only",
+"r11ic7",
+"Mods tab icon",
+[
+"Open Options.",
+"The Mods tab still shows your drawing."
+]
+],
+[
+"Game launch (main menu)",
+"r11qs1",
+"Auto-continue loads the last save",
+[
+"Turn on Auto-continue last save.",
+"Restart the game and touch nothing.",
+"The last save loads by itself; no FAILED / faulted notice."
+]
+],
+[
+"Game launch (main menu)",
+"r11qs2",
+"Manual Continue click",
+[
+"With auto-continue on, restart.",
+"Click Continue yourself as soon as the menu shows.",
+"The save loads once: no fault, no second load."
+]
+],
+[
+"Game launch (main menu)",
+"r11qs3",
+"Hold Shift to stay",
+[
+"Restart and hold Shift until the main menu is up.",
+"You stay in the main menu; \"Staying in the main menu\" shows briefly."
+]
+],
+[
+"Game launch (main menu)",
+"r11qs4",
+"Submenu pauses the countdown",
+[
+"Set Auto-continue delay to 5 s and restart.",
+"While it counts down, open Load Game.",
+"Nothing loads while the submenu is open.",
+"Go back to the main menu: it continues after the delay."
+]
+],
+[
+"Ranch: gadget mode (Sandbox on)",
+"r11sb1",
+"Gadget menu refreshes after a craft",
+[
+"Open the gadget-mode menu on a category (e.g. Decor).",
+"Open the mod menu > Sandbox > Fabricator and craft 5 of a decoration in that category.",
+"Close the mod menu.",
+"The new count / item shows without switching tabs or reopening."
+]
+],
+[
+"Ranch: gadget mode (Sandbox on)",
+"r11sb2",
+"Gadget menu closed at craft",
+[
+"With the gadget menu closed, craft a gadget in Sandbox.",
+"Close the mod menu and open the gadget menu.",
+"The gadget shows with its new count."
+]
+],
+[
+"Ranch: anywhere (Sandbox on)",
+"r11sb3",
+"\"Fill\" label",
+[
+"Sandbox > Vacpack: right-click a slot that holds an item.",
+"Buttons read \"Fill\" and \"Empty\", no amount in brackets.",
+"Hover Fill: the tooltip shows count / max."
+]
+],
+[
+"Ranch: incinerator + drone station",
+"r11dp1",
+"Chicken program with a full Ash Trough",
+[
+"Station with 2 programs: Plorts -> Refinery, and Meats / Outside Plots -> Incinerator.",
+"Fill the incinerator's Ash Trough completely, with chickens running outside the plots.",
+"Let the plort program finish: within ~10 s the drone switches to the chicken program and rests (no room to burn).",
+"Empty the Ash Trough: within ~40 s the drone starts collecting chickens and burns them."
+]
+],
+[
+"Ranch: drone station",
+"r11dp2",
+"Key glyphs like the silo receipt",
+[
+"Open a drone station menu: the [P] Programs pill's key glyph looks like the silo Sell-All receipt's.",
+"Select Plort Market: the [C] Limit pill has the same look.",
+"Press P: the dialog's Close shows P with the same look; Edit / Remove / Add program / mode buttons have no glyph.",
+"Click the pills and Close with the mouse: they still open and close."
+]
+],
+[
+"Menu only",
+"r11mn1",
+"Tab order with focus ring",
+[
+"Open the overlay (F8) and press Tab repeatedly.",
+"Focus goes through sidebar entries, Dark/Light, build stamp, top-bar tabs, reset, switch, (?) and close, then every row control on the page; each gets a blue rounded ring.",
+"Press Shift+Tab repeatedly: same stops in reverse, never stuck between the search box and a grid."
+]
+],
+[
+"Menu only",
+"r11mn2",
+"Space / Enter on focused controls",
+[
+"On a page with switches (e.g. Movement), Tab to a switch and press Space: it toggles and its tooltip shows.",
+"Tab to a sidebar entry or top-bar tab and press Enter: that page opens."
+]
+],
+[
+"Menu only",
+"r11mn3",
+"Sandbox Upgrades: arrows and +/-",
+[
+"Sandbox > Upgrades: Tab into the entries: one stop, first entry ringed.",
+"Arrow keys move entry by entry across both columns.",
+"+ / - change the focused upgrade's level.",
+"Enter opens the Upgrade/Downgrade/Max menu.",
+"Tab leaves the entries."
+]
+],
+[
+"Menu only",
+"r11mn4",
+"Blueprint grid by keyboard",
+[
+"Blueprint sub-tab: Tab past the search box into the grid: one stop.",
+"Arrows move tile by tile and scroll the grid.",
+"Space on a tile unlocks / locks it.",
+"Tab, then Shift+Tab: focus leaves the grid each way."
+]
+],
+[
+"Ranch: anywhere (Sandbox on)",
+"r11mn5",
+"Vacpack slots and picker by keyboard",
+[
+"Sandbox > Vacpack: Tab to the slot row, Left/Right moves slot by slot, Space selects.",
+"On a slot with an item press the Menu key (or Shift+F10): the give menu opens.",
+"Tab into the picker grid, use arrows: the focused tile shows its tooltip; Enter puts the item in the slot.",
+"Hover an empty slot and a locked slot: tooltips as wide as a slime with favourites."
+]
+],
+[
+"Menu only",
+"r11mn6",
+"Slime DJ lists by keyboard",
+[
+"Slime DJ: Tab into the song list: one stop.",
+"Up/Down moves song by song.",
+"Right focuses that song's +; Enter queues it.",
+"Tab leaves the list for the Now playing buttons."
+]
+],
+[
+"Menu only",
+"r11mn7",
+"Sidebar icons",
+[
+"Sandbox icon: same size as the others, round tips, no sharp spikes.",
+"Profiles icon: three lines with round ends."
+]
+],
+[
+"Menu only",
+"r11mn8",
+"Ranch > General layout",
+[
+"Open Ranch > General: Custom Upgrades full width on top, Plot Upgrades and Sell Upgrades side by side under it.",
+"Toggle each card's switch: each works.",
+"Turn Custom Upgrades off: its card greys out."
+]
+],
+[
+"Ranch: corral with a Music Box",
+"r11dj1",
+"Walls calm in quiet parts",
+[
+"Overlay Slime DJ: turn on \"Walls dance to the music\".",
+"Play a song with a quiet intro or breakdown (e.g. AVE MARIA (HARDSTYLE), ANOTHER LOVE HARDSTYLE) next to the corral.",
+"Quiet intro: walls glow faintly, no ripples, slow colour changes.",
+"Drop: ripples and strong colour changes on every kick, as snappy as before.",
+"Breakdown: walls calm down again within ~1 s."
+]
+],
+[
+"Ranch: 2+ corrals with Music Boxes close together",
+"r11dj2",
+"Amplify louder, every speaker heard",
+[
+"Slime DJ volume 100 % and game music volume 100 %.",
+"Amplify off: play a song between the corrals, note the loudness.",
+"Amplify on: a bit louder (~+4 dB with 4+ speakers), no crackle or jumps every half second.",
+"Walk from one music box to the other: the sound clearly comes from the box you're next to."
+]
+],
+[
+"Ranch: corral",
+"r11cr1",
+"Blue Corral Radio button",
+[
+"Buy the Music Box and the Corral Radio for a corral.",
+"Within ~1 s a blue button appears outside the free corner post (the auto-feeder corner).",
+"Press E: press animation and click, the \"Corral Radio\" menu opens, game paused, cursor free.",
+"Sell the Corral Radio from the plot menu: the button disappears at once."
+]
+],
+[
+"Ranch: corral",
+"r11cr2",
+"Radio menu: build a playlist",
+[
+"Open the menu from the blue button.",
+"Click a song on the left: it's added at the end of the playlist, \"Added …\" shows.",
+"Press Radio: \"Radio: on\", status \"Now playing: …\"; Shuffle toggles the same way.",
+"Select an entry: Up, Down, Remove and Play move it, remove it, or make it the pink playing entry.",
+"Clear once: orange \"Press Clear again…\"; again: playlist empty, radio off.",
+"Add songs, radio on, Done: menu closes, game unpauses, the corral plays the playlist; the overlay's Corral radios card shows the same list."
+]
+],
+[
+"Ranch: corral",
+"r11cr3",
+"Radio playlist survives a reload",
+[
+"Build a playlist with the blue button's menu.",
+"Save, quit to the menu and reload.",
+"Press the button: the playlist is kept."
+]
+],
+[
+"Ranch: corral",
+"r11cr4",
+"Radio menu by keyboard / mouse",
+[
+"Up/Down (W/S), Left/Right, Tab, Page Up/Down: a teal cursor moves through songs, playlist and buttons; holding Down scrolls.",
+"Enter on a song adds it.",
+"On a playlist entry: Shift+Down moves it down, Delete removes it.",
+"R toggles the radio, F toggles shuffle.",
+"Mouse wheel scrolls the list under it.",
+"Esc closes; clicking the dark area outside the panel closes too."
+]
+],
+[
+"Ranch: corral",
+"r11cr5",
+"Button with Slime DJ off",
+[
+"Turn the Slime DJ module off in the overlay.",
+"Press the blue button: orange \"Slime DJ is off (overlay: Ranch > Slime DJ)\" above it, no menu.",
+"Turn Slime DJ on, press again: the menu opens."
+]
+],
+[
+"Ranch: Fabricator",
+"r11bd1",
+"DJ card icons",
+[
+"Open the Fabricator > Decorations.",
+"DJ Booth, DJ Speaker Stack and Slime Radio cards: pink desk, orange boombox, cyan boombox icons, on the tile and the details picture."
+]
+],
+[
+"Ranch: Fabricator",
+"r11bd2",
+"Shadow Catcher card picture",
+[
+"Open the Fabricator > Upgrades and select Shadow Catcher.",
+"The details picture is the shadow slime, not the vac tank art."
+]
+],
+[
+"Ranch: placing DJ buildables",
+"r11bd3",
+"Dressed at once on placement",
+[
+"Hold a Scientist Desk with a DJ Booth kit, press Variant until it shows DJ Booth, place it: the dressed booth appears at once, no vanilla desk first.",
+"The middle boombox stands upright facing forward, like the corner ones.",
+"Hold a Boombox with a speaker kit, toggle to DJ Speaker Stack, place it: the stack appears at once.",
+"Aim at a placed plain Boombox (kit left) and press Variant: it turns into a stack immediately."
+]
+],
+[
+"Ranch: Slime Radio",
+"r11bd4",
+"Radio grip and hold",
+[
+"Spawn or fabricate a Slime Radio and switch on a Slime DJ song.",
+"Walk into it and let slimes play with it: it moves a little and stops, no long sliding.",
+"Vac it and hold it at the nozzle 5+ s: it stays visible and keeps playing.",
+"Shoot it out / let go: it lands upright and keeps playing."
+]
+],
+[
+"Ranch: anywhere",
+"r11bd5",
+"Show entity hitboxes",
+[
+"Options > Misc > Debug Tools: switch on \"Show entity hitboxes\".",
+"Close the menu, look at slimes, toys and gadgets: green wireframes on solid colliders, blue boxes on mesh colliders.",
+"Switch on \"Include trigger zones\": yellow trigger volumes appear too.",
+"Look at a Slime Radio: the box matches the little speaker stack (note any mismatch).",
+"Hitbox range 4 m: only nearby colliders drawn.",
+"Switch it off: wireframes gone."
+]
+],
+[
+"Ranch: placed Quantum Storage Link",
+"r11bd6",
+"Smaller, steady glow",
+[
+"Look at a placed link for 20 s.",
+"A smaller glow that never disappears; only an occasional brief jitter."
+]
+],
+[
+"Ranch: placed Quantum Storage Link",
+"r11bd7",
+"[E] opens the Quantum Cloud menu",
+[
+"Press E on the link: the drone station menu opens on the Quantum Cloud tab with cloud amounts, no programming tab.",
+"Esc closes it; controls work normally.",
+"Open a real drone station: it still has the programming tab and works as before."
+]
+],
+[
+"Ranch: drone station",
+"r11bd8",
+"Quantum Link source icon width",
+[
+"Open a drone station > Programming > Source.",
+"The Quantum Storage Link icon is not wider than the other source icons."
+]
+]
+]

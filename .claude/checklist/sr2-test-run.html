@@ -147,7 +147,7 @@ body { padding-bottom: 260px; }
 <div class="wrap">
   <header>
     <h1>SR2 Mods Test Run</h1>
-    <p class="sub">Round 10: new and carried-over cases. Use the build whose Insert menu footer shows commit <code>eda6ffb</code> or later. Mark each case; use Note to write something down. Results save as you go, and Claude can read them.</p>
+    <p class="sub">Round 11: new and carried-over cases. Use the build whose Insert menu footer shows commit <code>b39d2e5</code> or later. Mark each case; use Note to write something down. Results save as you go, and Claude can read them.</p>
   </header>
 
   <div class="summary" aria-live="polite">
@@ -182,132 +182,118 @@ body { padding-bottom: 260px; }
 
 <script>
 const SECTIONS = [
+  { name: "Game launch (main menu)", cases: [
+    ["r11qs1", "Auto-continue loads the last save", ["Turn on Auto-continue last save.", "Restart the game and touch nothing.", "The last save loads by itself; no FAILED / faulted notice."]],
+    ["r11qs2", "Manual Continue click", ["With auto-continue on, restart.", "Click Continue yourself as soon as the menu shows.", "The save loads once: no fault, no second load."]],
+    ["r11qs3", "Hold Shift to stay", ["Restart and hold Shift until the main menu is up.", "You stay in the main menu; \"Staying in the main menu\" shows briefly."]],
+    ["r11qs4", "Submenu pauses the countdown", ["Set Auto-continue delay to 5 s and restart.", "While it counts down, open Load Game.", "Nothing loads while the submenu is open.", "Go back to the main menu: it continues after the delay."]],
+  ]},
   { name: "Menu only", cases: [
-    ["r10mp1", "Fabricator purchases options", ["Misc > General, Misc Tweaks card: no \"Fabricator\" / \"Vacpack\" headings, just rows.", "Open \"Fabricator purchases\": Normal, Skip animation, Instant each have a dim description line (like Surf slope limit).", "Pick Instant: the box reads \"Instant\"."]],
-    ["r10mp2", "No group headings", ["Ranch > General: the Custom Upgrades card shows no \"Vacpack\" heading; the Extra Tank III/IV key rows sit among the other rows.", "Plot Upgrades and Sell Upgrades cards: no headings inside."]],
-    ["r10mp3", "\"Context menu\" wording", ["Sandbox: hover a vacpack slot: the hints end with \"RMB context menu\".", "Hover a picker and a spawner item: \"RMB context menu / clear\"; the tooltip's key row says \"RMB context menu\".", "Upgrades and Blueprints tabs: hints end with \"RMB context menu\"."]],
-    ["r10mp4", "Tooltip widths", ["Blueprints tab: hover a tile with a short name: the tooltip isn't squeezed (~160 px+).", "Hover a crate in the spawner: tooltip ~230 px wide.", "Hover a setting with a short help text: not squeezed."]],
-    ["r10mp5", "Search clear (×)", ["Spawner search: type \"pink\": an × appears at the right end.", "Click ×: box empties, grid shows everything, you can type at once.", "Same in the vacpack picker, crafter, Slime DJ song search and Ctrl+Space search. Empty box: no ×."]],
-    ["r10mc6", "Middle-click reset (from round 9)", ["Change a slider, a dropdown, a switch and a key bind.", "Middle-click each row: each goes back to its default.", "Middle-click a row in a locked (module-off) card: nothing changes.", "Key bind waiting for a key + middle button: binds the middle button."]],
-    ["r10st1", "Sandbox in the sidebar", ["Open F8: a Sandbox entry (sparkle icon) below Misc; Misc shows only General.", "Click Sandbox: tabs General, Vacpack, Spawn & Craft, Upgrades, Weather.", "No save / Sandbox off: every tab shows the Enable sandbox card; Enable -> Cancel keeps it off.", "Ctrl+Space \"weather\": a Weather result under Page > Sandbox opens that tab; \"newbucks\" opens General."]],
-    ["r10so1", "Shift+Tab vs Steam (third try)", ["In a save, press F8.", "Shift+Tab several times, both orders: the Steam overlay does not open.", "Close F8, Shift+Tab: the Steam overlay opens.", "Reopen F8, wait ~10 s, Shift+Tab: still no Steam overlay."]],
-    ["r10so2", "Tab focus", ["Open F8 on a settings page, press Tab a few times: a focus frame moves through sidebar, top bar and cards.", "Shift+Tab: moves back, no Steam overlay.", "In the Ctrl+Space search box, Tab: nothing breaks."]],
-    ["r10dj5", "Brighter mod icons", ["Sandbox crafter / Mod buildables tab: mod icons clearly brighter; speaker and radio icons show a stack; booth shows deck, monitors and bench."]],
-    ["r10sh6", "Slimepedia sunlight note", ["English, Shadow Catcher owned: Slimepedia > Shadow Slime > Rancher Risks has the sunlight note after the vanilla text."]],
-  ]},
-  { name: "Title screen", cases: [
-    ["r10qs1", "Continue automatically", ["Quick Start \"Continue automatically\" on; restart the game, touch nothing: ~0.5-3 s after the main menu appears the latest save loads.", "Restart holding Shift: you stay in the main menu with the \"Staying in the main menu\" note.", "Restart, open F8 at the main menu, press Shift, close F8: still loads automatically.", "Restart and click Continue yourself first: loads once, no second load."]],
-  ]},
-  { name: "Main menu -> load a save", cases: [
-    ["r10ti6", "Pinned icon without the Fabricator", ["Load a save and open the Sandbox crafter at once: within a few seconds Pinned shows the game's pin icon.", "Open the Fabricator afterwards: works normally."]],
-  ]},
-  { name: "Ranch: anywhere (Sandbox on)", cases: [
-    ["r10st2", "Sandbox tabs and hint bar", ["General: banner, Newbucks and Player; no hint bar.", "Vacpack: a floating bar at the bottom, slightly wider than the cards (\"Point at a grid...\").", "Hover a slot, then the item grid: the bar shows their hints; moving onto the bar keeps them.", "Spawn & Craft: Spawner and Crafter side by side, taller grids, each with its own hints.", "Upgrades: hints for upgrades and blueprints. Weather: no hint bar.", "Scroll Upgrades, switch tabs and back, close/reopen F8: each tab keeps its scroll."]],
-    ["r10st3", "Slot context menu", ["Right-click a slot with an item: name, then one row with \"Fill (n/max)\" and \"Empty\", then Give/Spawn; no Upgrade/Downgrade/Max/Reset.", "Fill on a non-full slot: fills, menu closes. On a full slot: Fill disabled.", "Empty: empties. Right-click an empty or locked slot: nothing opens.", "Upgrades tab: changing Extra Tank still changes the slot count."]],
-    ["r10ti1", "Time of day: skip", ["Sandbox > Weather: the clock shows today's day and time.", "Click 18:00: \"skipping ahead to 18:00 ...\", the sky moves fast, stops at 18:00.", "Start a skip ~12 h ahead, click Stop skipping: stops at once."]],
-    ["r10ti2", "Time of day: rewind and pause", ["Slider to 30 min ago, Rewind: confirmation; Cancel changes nothing.", "Rewind and confirm: clock 30 min earlier.", "Pause time on, wait a minute: clock stopped, \"paused\". Off: runs again.", "Pause on, Sandbox off and on: clock runs.", "Rewind 30 min, save, reload: the rewound time."]],
-    ["r10ti3", "Weather zone at the ranch", ["Open the zone dropdown at the ranch: \"Where you are (The Conservatory: no weather)\" is greyed out with a tooltip, can't be picked."]],
+    ["r11ic7", "Mods tab icon", ["Open Options.", "The Mods tab still shows your drawing."]],
+    ["r11mn1", "Tab order with focus ring", ["Open the overlay (F8) and press Tab repeatedly.", "Focus goes through sidebar entries, Dark/Light, build stamp, top-bar tabs, reset, switch, (?) and close, then every row control on the page; each gets a blue rounded ring.", "Press Shift+Tab repeatedly: same stops in reverse, never stuck between the search box and a grid."]],
+    ["r11mn2", "Space / Enter on focused controls", ["On a page with switches (e.g. Movement), Tab to a switch and press Space: it toggles and its tooltip shows.", "Tab to a sidebar entry or top-bar tab and press Enter: that page opens."]],
+    ["r11mn3", "Sandbox Upgrades: arrows and +/-", ["Sandbox > Upgrades: Tab into the entries: one stop, first entry ringed.", "Arrow keys move entry by entry across both columns.", "+ / - change the focused upgrade's level.", "Enter opens the Upgrade/Downgrade/Max menu.", "Tab leaves the entries."]],
+    ["r11mn4", "Blueprint grid by keyboard", ["Blueprint sub-tab: Tab past the search box into the grid: one stop.", "Arrows move tile by tile and scroll the grid.", "Space on a tile unlocks / locks it.", "Tab, then Shift+Tab: focus leaves the grid each way."]],
+    ["r11mn6", "Slime DJ lists by keyboard", ["Slime DJ: Tab into the song list: one stop.", "Up/Down moves song by song.", "Right focuses that song's +; Enter queues it.", "Tab leaves the list for the Now playing buttons."]],
+    ["r11mn7", "Sidebar icons", ["Sandbox icon: same size as the others, round tips, no sharp spikes.", "Profiles icon: three lines with round ends."]],
+    ["r11mn8", "Ranch > General layout", ["Open Ranch > General: Custom Upgrades full width on top, Plot Upgrades and Sell Upgrades side by side under it.", "Toggle each card's switch: each works.", "Turn Custom Upgrades off: its card greys out."]],
   ]},
   { name: "Ranch: anywhere", cases: [
-    ["r10dj3", "Slime Radio", ["Fabricate a radio: a small upright two-boombox stack appears in front of you.", "Vacuum it: stays visible at the nozzle.", "Shoot it out: still a radio."]],
+    ["r11bd5", "Show entity hitboxes", ["Options > Misc > Debug Tools: switch on \"Show entity hitboxes\".", "Close the menu, look at slimes, toys and gadgets: green wireframes on solid colliders, blue boxes on mesh colliders.", "Switch on \"Include trigger zones\": yellow trigger volumes appear too.", "Look at a Slime Radio: the box matches the little speaker stack (note any mismatch).", "Hitbox range 4 m: only nearby colliders drawn.", "Switch it off: wireframes gone."]],
+  ]},
+  { name: "Ranch: anywhere (Sandbox on)", cases: [
+    ["r11sb3", "\"Fill\" label", ["Sandbox > Vacpack: right-click a slot that holds an item.", "Buttons read \"Fill\" and \"Empty\", no amount in brackets.", "Hover Fill: the tooltip shows count / max."]],
+    ["r11mn5", "Vacpack slots and picker by keyboard", ["Sandbox > Vacpack: Tab to the slot row, Left/Right moves slot by slot, Space selects.", "On a slot with an item press the Menu key (or Shift+F10): the give menu opens.", "Tab into the picker grid, use arrows: the focused tile shows its tooltip; Enter puts the item in the slot.", "Hover an empty slot and a locked slot: tooltips as wide as a slime with favourites."]],
+  ]},
+  { name: "Ranch: gadget mode (Sandbox on)", cases: [
+    ["r11sb1", "Gadget menu refreshes after a craft", ["Open the gadget-mode menu on a category (e.g. Decor).", "Open the mod menu > Sandbox > Fabricator and craft 5 of a decoration in that category.", "Close the mod menu.", "The new count / item shows without switching tabs or reopening."]],
+    ["r11sb2", "Gadget menu closed at craft", ["With the gadget menu closed, craft a gadget in Sandbox.", "Close the mod menu and open the gadget menu.", "The gadget shows with its new count."]],
   ]},
   { name: "Ranch: Fabricator", cases: [
-    ["r10ql1", "Quantum link card", ["Fabricator > Warp Tech, the card after the Refinery Link: purple-tinted icon.", "Select it: purple details picture, description starts \"A Refinery Link wired to your Quantum Cloud...\".", "Select the Refinery Link card: vanilla picture and text."]],
-    ["r10dj4", "DJ cards", ["Decorations: \"DJ Speaker Stack\" and \"Slime DJ Booth\" show their own descriptions."]],
-    ["r10sh1", "Shadow Catcher warning", ["Open the Shadow Catcher card: the description ends with the sunlight warning."]],
+    ["r11bd1", "DJ card icons", ["Open the Fabricator > Decorations.", "DJ Booth, DJ Speaker Stack and Slime Radio cards: pink desk, orange boombox, cyan boombox icons, on the tile and the details picture."]],
+    ["r11bd2", "Shadow Catcher card picture", ["Open the Fabricator > Upgrades and select Shadow Catcher.", "The details picture is the shadow slime, not the vac tank art."]],
   ]},
-  { name: "Ranch: gadget mode", cases: [
-    ["r10ql2", "Quantum link placement", ["Hold a Refinery Link: label \"Refinery Link\", normal preview.", "Press the Variant key to Quantum Storage Link: label \"Quantum Storage Link\", purple preview.", "Place it: purple hotbar icon; aiming at it shows \"Quantum Storage Link\"; a plain link shows \"Refinery Link\"."]],
-    ["r10ti5", "Gadget menu refresh", ["Open the place-gadget menu on a category (e.g. Decorations).", "In the Sandbox crafter craft a gadget from it you have none of; close the overlay: it's in the open menu with its count.", "Same with a DJ Booth / Quantum Storage Link: the base gadget's count goes up."]],
-    ["r10dj2", "DJ items in placement mode", ["Hold a Boombox, Variant until \"DJ Speaker Stack\": that label, ghost shows two stacked boomboxes, no tilted variants.", "Hold a Scientist Desk, Variant to Slime DJ Booth: that label, ghost shows the dressed booth.", "Place both and aim at each: the mod names show."]],
+  { name: "Ranch: placing DJ buildables", cases: [
+    ["r11bd3", "Dressed at once on placement", ["Hold a Scientist Desk with a DJ Booth kit, press Variant until it shows DJ Booth, place it: the dressed booth appears at once, no vanilla desk first.", "The middle boombox stands upright facing forward, like the corner ones.", "Hold a Boombox with a speaker kit, toggle to DJ Speaker Stack, place it: the stack appears at once.", "Aim at a placed plain Boombox (kit left) and press Variant: it turns into a stack immediately."]],
+  ]},
+  { name: "Ranch: Slime Radio", cases: [
+    ["r11bd4", "Radio grip and hold", ["Spawn or fabricate a Slime Radio and switch on a Slime DJ song.", "Walk into it and let slimes play with it: it moves a little and stops, no long sliding.", "Vac it and hold it at the nozzle 5+ s: it stays visible and keeps playing.", "Shoot it out / let go: it lands upright and keeps playing."]],
   ]},
   { name: "Ranch: placed Quantum Storage Link", cases: [
-    ["r10ql3", "Quantum link glow and Use", ["Look at it: a small purple/cyan glow ~1 m up.", "Watch 10 s: every few seconds it flickers and jumps for ~0.5 s, then returns.", "Press E: no refinery screen; HUD notices with up to 5 cloud types and counts (or \"The Quantum Cloud is empty\"). E again at once: no second burst.", "E on a plain Refinery Link: normal refinery screen."]],
-  ]},
-  { name: "Ranch: DJ Booth placed", cases: [
-    ["r10dj1", "Booth standby and dancing", ["With a song loaded, switch the booth on (E) with no slime behind it: the corral music box tune plays, boomboxes dance.", "Let a slime sit on the pillow: the tune stops, the Slime DJ song plays, the slime turns on the seat.", "Switch it off (E): silence; the slime stays but stops turning."]],
-  ]},
-  { name: "Ranch: corral with a Music Box", cases: [
-    ["r10bw1", "Walls ripple to the beat", ["Slime DJ on, \"Walls dance to the music\" at 100 %, play a hardtekk song, stand near the corral.", "Every kick: one wall side bulges outwards like a vacpack shot, moving round the corral each beat; walls no longer stretch taller.", "200 %: much bigger pumping bulges, stronger glow. 10 %: small ripples.", "A ~120 BPM song: one slower, longer ripple per beat."]],
-    ["r10bw2", "Walls back to normal", ["Pause the song: ripples stop within ~1 s, walls vanilla.", "Play, then turn the setting off: vanilla within ~1 s.", "While dancing, shoot a chicken through the wall: vanilla ripple (stronger); after stopping, exactly vanilla.", "Buy High Walls while dancing: ripples continue, centred higher. Teleport away and back: resumes within ~2 s."]],
-  ]},
-  { name: "Ranch: corral radio (build cc71186, deploys when you close the game)", cases: [
-    ["r10cr1", "Muffle behind High Walls", ["Corral with High Walls + Music Box, a song playing: inside it's clear.", "Walk out over the wall: within ~1 s muffled and quieter.", "Buy the Air Net: even more muffled from outside.", "Walk back in: clear. Turn \"Muffle behind High Walls\" off: clear from outside too.", "Corral with only a Music Box: no change walking in and out. With Music Box II: both speakers muffled outside."]],
-    ["r10cr2", "Corral Radio card", ["Corral without a Music Box: no Corral Radio card.", "Buy the Music Box: a \"Corral Radio\" card appears (1500).", "Buy it: greyed with a checkmark. Try selling the Music Box: refused, naming Corral Radio."]],
-    ["r10cr3", "Corral radio playlist", ["Overlay Ranch > Slime DJ: \"Corral radios\" lists \"Corral NNNN\" with its distance, Off.", "Add songs, press + on 3 songs: they join the radio's playlist (queue unchanged); Done.", "Switch the radio on: its song plays from that corral only.", "Play another song on the global queue: other corrals play it; the radio corral keeps its own.", "Skip, Shuffle, click a row, move up/down, remove all work. Switch off: vanilla tune there."]],
-    ["r10cr4", "Corral radio save and limits", ["Leave a radio on with a playlist, save, quit to title, load: near the corral it starts by itself, playlist intact.", "5 radio corrals on: 4 play, the farthest shows \"Waiting...\"; switch one off: the waiting one starts within 2 s.", "Custom Upgrades off: the card explains it needs Custom Upgrades; the global queue still works."]],
+    ["r11bd6", "Smaller, steady glow", ["Look at a placed link for 20 s.", "A smaller glow that never disappears; only an occasional brief jitter."]],
+    ["r11bd7", "[E] opens the Quantum Cloud menu", ["Press E on the link: the drone station menu opens on the Quantum Cloud tab with cloud amounts, no programming tab.", "Esc closes it; controls work normally.", "Open a real drone station: it still has the programming tab and works as before."]],
   ]},
   { name: "Ranch: corral", cases: [
-    ["r10pl5", "Music Box sell button", ["On a newly bought corral: buy Music Box, then Music Box II.", "Sell Music Box II: the card shows Purchase (Music Box II) with \"Sell +175\" on its left.", "Close and reopen: Sell still there. Press it: Music Box sold.", "Repeat on an older corral."]],
+    ["r11ic1", "Vanilla icons: corral cards", ["Open a corral's upgrade menu.", "Music Box II and Corral Radio both show the vanilla Music Box icon (no drawn \"II\" badge)."]],
+    ["r11cr1", "Blue Corral Radio button", ["Buy the Music Box and the Corral Radio for a corral.", "Within ~1 s a blue button appears outside the free corner post (the auto-feeder corner).", "Press E: press animation and click, the \"Corral Radio\" menu opens, game paused, cursor free.", "Sell the Corral Radio from the plot menu: the button disappears at once."]],
+    ["r11cr2", "Radio menu: build a playlist", ["Open the menu from the blue button.", "Click a song on the left: it's added at the end of the playlist, \"Added …\" shows.", "Press Radio: \"Radio: on\", status \"Now playing: …\"; Shuffle toggles the same way.", "Select an entry: Up, Down, Remove and Play move it, remove it, or make it the pink playing entry.", "Clear once: orange \"Press Clear again…\"; again: playlist empty, radio off.", "Add songs, radio on, Done: menu closes, game unpauses, the corral plays the playlist; the overlay's Corral radios card shows the same list."]],
+    ["r11cr3", "Radio playlist survives a reload", ["Build a playlist with the blue button's menu.", "Save, quit to the menu and reload.", "Press the button: the playlist is kept."]],
+    ["r11cr4", "Radio menu by keyboard / mouse", ["Up/Down (W/S), Left/Right, Tab, Page Up/Down: a teal cursor moves through songs, playlist and buttons; holding Down scrolls.", "Enter on a song adds it.", "On a playlist entry: Shift+Down moves it down, Delete removes it.", "R toggles the radio, F toggles shuffle.", "Mouse wheel scrolls the list under it.", "Esc closes; clicking the dark area outside the panel closes too."]],
+    ["r11cr5", "Button with Slime DJ off", ["Turn the Slime DJ module off in the overlay.", "Press the blue button: orange \"Slime DJ is off (overlay: Ranch > Slime DJ)\" above it, no menu.", "Turn Slime DJ on, press again: the menu opens."]],
   ]},
-  { name: "Ranch: corral with a Solar Shield (day)", cases: [
-    ["r10sh2", "Shaded shadow slime", ["Shoot a shadow slime in: it stays, no scared face; wait 2 min: still there.", "Throw 10+ fruits at it: no plorts from the hits; at most one plort from eating while hungry, then mischievous face."]],
+  { name: "Ranch: corral with a Music Box", cases: [
+    ["r11dj1", "Walls calm in quiet parts", ["Overlay Slime DJ: turn on \"Walls dance to the music\".", "Play a song with a quiet intro or breakdown (e.g. AVE MARIA (HARDSTYLE), ANOTHER LOVE HARDSTYLE) next to the corral.", "Quiet intro: walls glow faintly, no ripples, slow colour changes.", "Drop: ripples and strong colour changes on every kick, as snappy as before.", "Breakdown: walls calm down again within ~1 s."]],
   ]},
-  { name: "Ranch: corral without a Solar Shield", cases: [
-    ["r10sh3", "Shadow slime in the sun", ["Daytime (07:00-17:00): shoot one in: scared face; ~15-30 s later it hops about and vanishes.", "Again, but vac it within ~10 s and shoot it into the shielded corral: normal face, stays.", "At night (after 18:00): stays, no scared face; at daybreak the scared face appears and it fades unless shaded."]],
-  ]},
-  { name: "Ranch: any corral", cases: [
-    ["r10sh4", "Shadow hunger rhythm", ["While hungry, feed one food: one Shadow plort, then mischievous face.", "Feed more: eaten, no plorts.", "Wait a few game hours (Sandbox time skip helps): the next food makes a plort again."]],
+  { name: "Ranch: 2+ corrals with Music Boxes close together", cases: [
+    ["r11dj2", "Amplify louder, every speaker heard", ["Slime DJ volume 100 % and game music volume 100 %.", "Amplify off: play a song between the corrals, note the loudness.", "Amplify on: a bit louder (~+4 dB with 4+ speakers), no crackle or jumps every half second.", "Walk from one music box to the other: the sound clearly comes from the box you're next to."]],
   ]},
   { name: "Ranch: coop", cases: [
-    ["r10pl3", "Plush hen in the corner", ["Coop with Faster Hens II: the plush hen sits upright in the corner diagonal from the elder collector, slightly turned (if it faces the wall, say so)."]],
+    ["r11ic2", "Vanilla icons: coop cards", ["Open a coop's upgrade menu.", "Faster Hens shows the Deluxe Coop icon.", "Coop Air Net shows the corral's Air Net icon.", "Hen Collector still shows your hen drawing."]],
   ]},
   { name: "Ranch: garden", cases: [
-    ["r10pl4", "Sprinkler tier icons", ["Garden menu with the Sprinkler owned: Sprinkler II shows the vanilla Sprinkler icon.", "Buy it: Sprinkler III also shows it."]],
+    ["r11ic5", "Vanilla icons: Sprinklers", ["Open a garden's upgrade menu.", "Sprinkler II / III show the Sprinkler icon."]],
   ]},
   { name: "Ranch: silo", cases: [
-    ["r10pl2", "Sell-All button", ["Empty the silo, press the gold button: receipt opens with no rows, \"There are no plorts in this silo.\", Sell greyed; no text floats over the button.", "Cancel. Put plorts in, press, Sell: they sell, still no text over the button."]],
+    ["r11ic4", "Vanilla icons: Sell-All Button", ["Open a silo's upgrade menu.", "Sell-All Button shows the Market Link icon."]],
   ]},
-  { name: "Ranch: expansion door", cases: [
-    ["r10pl1", "Expansion purchase popup", ["Interact with a locked expansion's purchase terminal: Cancel left, Purchase right.", "Cancel: nothing bought.", "Open again and buy: unlocks normally."]],
+  { name: "Ranch: incinerator", cases: [
+    ["r11ic3", "Vanilla icons: Ash Booster", ["Open an incinerator's upgrade menu.", "Ash Booster shows the Ash Trough icon."]],
+  ]},
+  { name: "Ranch: incinerator + drone station", cases: [
+    ["r11dp1", "Chicken program with a full Ash Trough", ["Station with 2 programs: Plorts -> Refinery, and Meats / Outside Plots -> Incinerator.", "Fill the incinerator's Ash Trough completely, with chickens running outside the plots.", "Let the plort program finish: within ~10 s the drone switches to the chicken program and rests (no room to burn).", "Empty the Ash Trough: within ~40 s the drone starts collecting chickens and burns them."]],
   ]},
   { name: "Ranch: drone station", cases: [
-    ["r10dp1", "Programs switch", ["Station with 2 programs (e.g. plorts -> refinery, chickens -> incinerator); close the menu and watch.", "When the plort program has nothing left, the drone switches and starts the chicken program.", "If it keeps scanning without picking up a chicken: ~90 s later it switches back.", "Chickens in a coop: set that program's source to Coop, Start Program: it carries chickens to the incinerator."]],
-    ["r10dp2", "Programs dialog look", ["Open a station, press P: buttons look like the game's cyan pills, Close shows a P key, the running row has the active icon and a teal \"Running\" pill.", "Edit on the other program: dialog closes, the page shows it, button reads Program 2/2.", "Close the station menu without changes: no \"discard\" prompt."]],
-    ["r10dp3", "No switching while the menu is open", ["Open the station menu, switch to the Drone List tab, wait 30 s: no program switch.", "Close the menu from there: no discard prompt.", "Change the target without Start Program and close: the game's discard prompt appears (vanilla)."]],
-    ["r10ql4", "Quantum source icon", ["Program menu, choose a source: \"Quantum Storage Link\" shows the purple icon."]],
+    ["r11dp2", "Key glyphs like the silo receipt", ["Open a drone station menu: the [P] Programs pill's key glyph looks like the silo Sell-All receipt's.", "Select Plort Market: the [C] Limit pill has the same look.", "Press P: the dialog's Close shows P with the same look; Edit / Remove / Add program / mode buttons have no glyph.", "Click the pills and Close with the mouse: they still open and close."]],
+    ["r11bd8", "Quantum Link source icon width", ["Open a drone station > Programming > Source.", "The Quantum Storage Link icon is not wider than the other source icons."]],
   ]},
-  { name: "Shop", cases: [
-    ["r10dj6", "Radio in the daily toy rotation", ["Daily Deals over several restocks: usually a vanilla toy; about one in four the Slime Radio takes its place (Boombox picture, 1000).", "Buy it: Newbucks spent once, entry sold out, a radio arrives.", "Range Exchange: no Slime Radio."]],
-  ]},
-  { name: "Full map (Reveal everything off)", cases: [
-    ["r10tp1", "Teleport refusal message", ["Open the full map.", "Right-click a fogged spot: fail sound, the key bar reads \"Teleport refused: that spot is not on your map yet\" for ~3 s, then \"Teleport\".", "Right-click a clear spot: you teleport, HUD shows \"Teleported to ...\".", "Close the map after a refusal: no late pile of pop-ups."]],
-  ]},
-  { name: "Rainbow Fields", cases: [
-    ["r10ti4", "Weather zone in a weather zone", ["Zone dropdown: \"Where you are (Rainbow Fields)\" can be picked; the card follows you.", "Walk back to the ranch: the card says the Conservatory has no weather."]],
-  ]},
-  { name: "Grey Labyrinth", cases: [
-    ["r10sh5", "Wild shadow slimes unchanged", ["Hit wild shadow slimes with plorts: plorts drop, they scatter as in vanilla."]],
-  ]},
-  { name: "Menu and settings", group: "Skipped", cases: [
-    ["r8dt2", "Overlay over time", "With it on, main menu -> save and zone travel keep it (no new \"start #N\" in the log); no hitch or error spam in a busy UI scene."],
-    ["r9nr3", "Error stack frames", "Any failing game call's warning line now ends with \"(at ...; at ...)\" frames (report if empty)."],
+  { name: "Open world: tracker under the minimap", cases: [
+    ["r11ic6", "Tracker uses game sprites", ["Turn on the gordo, plort door, research drone, ghostly drone and map node rows.", "Go to a zone that has them.", "Gordos: the small Slimepedia gordo face (iconGordoPedia_small).", "Ghostly drones: the blue explorer drone (iconExplorerDronePedia).", "Research drones: the Slimepedia drone.", "Plort doors: their map marker sprites.", "Map nodes: the pediaHomeWorld tile (or the old drawn map if that sprite isn't loaded)."]],
   ]},
   { name: "Sandbox", group: "Skipped", cases: [
     ["r7sb8", "Toggles per save", "Infinite energy/health on, save, reload: still on; an unmarked save loads with both off; tooltips say \"Kept per save.\""],
     ["r9wx3", "Lock and reload", "Lock on, Start Thunderstorm: stays across a forecast change (log \"re-applied\"), map indicator shows it. Save, title, reload: lock back (log \"applied from the save's lock\"). Back to natural: lock gone, forecast weather returns."],
     ["r9wx4", "All zones and other zones", "All zones + Clear skies + Lock: every zone clear, still clear after travelling. All zones with a zone-specific pattern: status line names skipped zones. Set weather for another zone via the dropdown, travel there: shown on arrival."],
   ]},
+  { name: "Corral radio (overlay card)", group: "Skipped", cases: [
+    ["r10cr3", "Corral radio playlist", ["Overlay Ranch > Slime DJ: \"Corral radios\" lists \"Corral NNNN\" with its distance, Off.", "Add songs, press + on 3 songs: they join the radio's playlist (queue unchanged); Done.", "Switch the radio on: its song plays from that corral only.", "Play another song on the global queue: other corrals play it; the radio corral keeps its own.", "Skip, Shuffle, click a row, move up/down, remove all work. Switch off: vanilla tune there."]],
+    ["r10cr4", "Corral radio save and limits", ["Leave a radio on with a playlist, save, quit to title, load: near the corral it starts by itself, playlist intact.", "5 radio corrals on: 4 play, the farthest shows \"Waiting...\"; switch one off: the waiting one starts within 2 s.", "Custom Upgrades off: the card explains it needs Custom Upgrades; the global queue still works."]],
+  ]},
   { name: "Fabricator and buildables", group: "Skipped", cases: [
     ["r7bd6", "Saving", "Save + reload: everything dressed again. Custom upgrades off: plain desks/boomboxes. The Sandbox crafter doesn't list them."],
     ["r9rs3", "Radio shop edge cases", "Buy, save before all are dispensed, reload: the rest still come out as radios. No Boombox blueprint: entry missing (Sandbox unlock makes it appear). Custom upgrades off: entry gone. Daily toy is the Night Light: both work independently. Mod-free load: Night Lights, no errors."],
+    ["r10dj6", "Radio in the daily toy rotation", ["Daily Deals over several restocks: usually a vanilla toy; about one in four the Slime Radio takes its place (Boombox picture, 1000).", "Buy it: Newbucks spent once, entry sold out, a radio arrives.", "Range Exchange: no Slime Radio."]],
   ]},
-  { name: "Drones and shadow slimes", group: "Skipped", cases: [
+  { name: "Drones", group: "Skipped", cases: [
+    ["r10dp3", "No switching while the menu is open", ["Open the station menu, switch to the Drone List tab, wait 30 s: no program switch.", "Close the menu from there: no discard prompt.", "Change the target without Start Program and close: the game's discard prompt appears (vanilla)."]],
     ["r9dp4", "Remove, save and reload", "Remove the running program: the other runs; one left: pill \"Programs\". Save while program 2 runs, reload: \"2 programs restored\", program 1 runs. Without the mod / custom upgrades off: program 1. Hen Collector / Quantum source as program 1: restored after reload."],
     ["r9dp5", "Station gone, upgrades off", "Pick the station up: \"extra programs dropped\". Custom upgrades off while program 2 runs: back to program 1; on: restored. Price-limit pill / dialog (C) still work."],
-    ["r9sh4", "Shadow slimes in the vacpack save", "Save with shadow slimes in the vacpack (log \"kept in the sidecar\"), reload: back (log \"back in the vacpack from the sidecar\"); the corral one still there."],
-    ["r9sh5", "Off and mod-free", "Custom upgrades off: ranch shadow slimes vanish when approached; with some in the vacpack a WARN appears. Mod-free load: loads fine, no shadow slimes in the vacpack."],
-    ["r9sh7", "Feeding over time", "Corral with a garden/feeder: keeps eating, plorts about once per N game hours. Off the ranch / custom upgrades off: normal face, no eating when full. Save + reload with a full one: fine, hunger kept."],
     ["r7dr2", "Elder Collector", "An Elder Collector drone empties only the elder collector. Save + reload restores both sources; Drone List shows the right names/icons. Selling the deluxe coop: falls back to Coop."],
     ["r4dr3", "Hen source and saves", "Save + reload: still Hen Collector (log \"restored from the sidecar\"). Selling all collectors or turning custom upgrades off -> Coop with a log line, no errors; back on -> restored. Re-placed station -> Coop. Optional: without the mod the save loads and shows Coop."],
   ]},
+  { name: "Shadow slimes", group: "Skipped", cases: [
+    ["r10sh2", "Shaded shadow slime", ["Shoot a shadow slime in: it stays, no scared face; wait 2 min: still there.", "Throw 10+ fruits at it: no plorts from the hits; at most one plort from eating while hungry, then mischievous face."]],
+    ["r10sh3", "Shadow slime in the sun", ["Daytime (07:00-17:00): shoot one in: scared face; ~15-30 s later it hops about and vanishes.", "Again, but vac it within ~10 s and shoot it into the shielded corral: normal face, stays.", "At night (after 18:00): stays, no scared face; at daybreak the scared face appears and it fades unless shaded."]],
+    ["r10sh4", "Shadow hunger rhythm", ["While hungry, feed one food: one Shadow plort, then mischievous face.", "Feed more: eaten, no plorts.", "Wait a few game hours (Sandbox time skip helps): the next food makes a plort again."]],
+    ["r10sh5", "Wild shadow slimes unchanged", ["Hit wild shadow slimes with plorts: plorts drop, they scatter as in vanilla."]],
+    ["r9sh4", "Shadow slimes in the vacpack save", "Save with shadow slimes in the vacpack (log \"kept in the sidecar\"), reload: back (log \"back in the vacpack from the sidecar\"); the corral one still there."],
+    ["r9sh5", "Off and mod-free", "Custom upgrades off: ranch shadow slimes vanish when approached; with some in the vacpack a WARN appears. Mod-free load: loads fine, no shadow slimes in the vacpack."],
+    ["r9sh7", "Feeding over time", "Corral with a garden/feeder: keeps eating, plorts about once per N game hours. Off the ranch / custom upgrades off: normal face, no eating when full. Save + reload with a full one: fine, hunger kept."],
+  ]},
   { name: "Map", group: "Skipped", cases: [
     ["r8tp3", "After a map node", "Activate a map data node, reopen the map: the cleared area teleports."],
-    ["r8tp4", "Fog art log", "First click logs \"fog art '...' read (... peak SDF ...)\", not \"not readable\" / \"read back empty\". Reveal on: clouded spots still teleport."],
     ["r4mm4", "Performance", "sr2mods.log has \"minimap: perf (30 s)\" lines; standing still it says the page transform was set in 0 frames. Note the frame:minimap avg/max (before: 0.03-0.05 ms avg, 0.4-2.5 ms max)."],
   ]},
   { name: "Vacpack, plots and upgrades", group: "Skipped", cases: [
-    ["r7vu2", "Battery Saver log", "The \"active\" log line shows e.g. \"0.40 instead of 0.80 energy per game hour\"."],
     ["r6vu4", "Saving", "Fill extra slots and water, save, reload: water still in the water slot, extra slots refilled (log \"spread into the extended layout\", \"refilled from the sidecar\"); Tank Booster X comes back as 150 (log \"level 8 -> 10\"). Old save: Extra Tank IV carries over; old IX logs \"not applied yet\" until VIII is owned."],
     ["hc4", "Selling mid-flight", "Sell the Hen Collector while chickens are flying in: none stay frozen."],
     ["p7", "Per-save upgrades", "Buy a tier, save, then load an older autosave from before the purchase: the tier is not there."],
