@@ -14,6 +14,7 @@
 #include <cstring>
 #include <format>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -1058,50 +1059,51 @@ void DrawNested(const Host& h, const ModuleView& nmv) {
     ImGui::EndDisabled();
 }
 
-// A small heading inside a card, a faint rule from its end to the card's right edge.
-void SectionHeading(const char* text, bool first) {
-    const Palette& P = theme::Colors();
-    if (!first) ImGui::Dummy(ImVec2(0, U(6)));
-    const float avail = ImGui::GetContentRegionAvail().x;
-    {
-        FontScope f(theme::Display(), theme::kSmallSize + 1);
-        ImGui::PushStyleColor(ImGuiCol_Text, P.soft);
-        ImGui::TextUnformatted(text);
-        ImGui::PopStyleColor();
-    }
-    const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
-    const float y = std::round((a.y + b.y) * 0.5f), x0 = b.x + U(8), x1 = a.x + avail;
-    if (x1 > x0) ImGui::GetWindowDrawList()->AddLine(ImVec2(x0, y), ImVec2(x1, y), ImGui::GetColorU32(P.line), std::max(1.0f, U(1)));
+// A card module's sections (Tab::sections; Ranch > Upgrades), drawn after its card. Round 14: "Plot and
+// refinery should be different groups": each section is a card of its own with a group heading, as on a
+// module's tab, under the card that holds the module's title and switch. A section card has an optional
+// note, the card module's groups for it (grayed while the card's module is off) and other modules, each as
+// its switch row and then its own rows (grayed while that module is off, and while the card's module is off
+// if listed in needCard). The card module's groups no section names stay in its own card (DrawUnplacedGroups).
+struct CardSections {
+    std::vector<const GroupView*> all;
+    Nesting n;
+    std::set<std::string> named;
+};
+
+CardSections PrepareCardSections(const ModuleView& card, const std::vector<layout::CardSection>& secs) {
+    CardSections cs;
+    for (const auto& g : card.groups) cs.all.push_back(&g);
+    cs.n = BuildNesting(cs.all, {});
+    for (const auto& sec : secs) cs.named.insert(sec.groups.begin(), sec.groups.end());
+    return cs;
 }
 
-// A card with sections (Tab::sections; Ranch > Upgrades): each a heading, an optional note, the card module's
-// groups for it (grayed while the card's module is off) and other modules, each as its switch row and then
-// its own rows (grayed while that module is off, and while the card's module is off if listed in needCard).
-// The card module's groups no section names follow at the end.
-void DrawCardSections(const Host& h, const Tab& tab, const ModuleView& card, bool cardOn,
-                      const std::vector<layout::CardSection>& secs, const std::vector<ModuleView>& views) {
+void DrawUnplacedGroups(const Host& h, const ModuleView& card, bool cardOn, const CardSections& cs) {
+    ImGui::BeginDisabled(!cardOn);
+    for (const auto* g : cs.all)
+        if (!cs.named.count(g->name)) DrawGroupRows(h, card, *g, cs.n, {}, {});
+    ImGui::EndDisabled();
+}
+
+void DrawSectionCards(const Host& h, const Tab& tab, const ModuleView& card, bool cardOn,
+                      const std::vector<layout::CardSection>& secs, const CardSections& cs,
+                      const std::vector<ModuleView>& views, float w) {
     const Palette& P = theme::Colors();
-    std::vector<const GroupView*> all;
-    for (const auto& g : card.groups) all.push_back(&g);
-    const Nesting n = BuildNesting(all, {});
-    auto anyShown = [](const ModuleView& mv, const GroupView& g, const Nesting& nest) {
-        return std::any_of(g.defs.begin(), g.defs.end(), [&](const settings::Def& d) { return RowShown(mv, d, nest, {}); });
+    auto anyShown = [&](const GroupView& g) {
+        return std::any_of(g.defs.begin(), g.defs.end(), [&](const settings::Def& d) { return RowShown(card, d, cs.n, {}); });
     };
-    std::set<std::string> named;
-    bool first = true;
     for (const auto& sec : secs) {
         std::vector<const GroupView*> groups;
-        for (const auto& name : sec.groups) {
-            named.insert(name);
-            for (const auto* g : all)
-                if (g->name == name && anyShown(card, *g, n)) groups.push_back(g);
-        }
+        for (const auto& name : sec.groups)
+            for (const auto* g : cs.all)
+                if (g->name == name && anyShown(*g)) groups.push_back(g);
         std::vector<const ModuleView*> mods;
         for (const auto& m : sec.modules)
             if (const ModuleView* mv = FindView(views, m)) mods.push_back(mv);
         if (groups.empty() && mods.empty()) continue;
-        SectionHeading(sec.title.c_str(), first);
-        first = false;
+        BeginCard(("section/" + sec.title).c_str(), w);
+        CardHeading(sec.title.c_str(), P.head);
         if (!sec.note.empty()) {
             FontScope f(theme::Body(), theme::kSmallSize);
             ImGui::PushTextWrapPos(0.0f);
@@ -1111,7 +1113,7 @@ void DrawCardSections(const Host& h, const Tab& tab, const ModuleView& card, boo
             ImGui::PopTextWrapPos();
         }
         ImGui::BeginDisabled(!cardOn);
-        for (const auto* g : groups) DrawGroupRows(h, card, *g, n, {}, {});
+        for (const auto* g : groups) DrawGroupRows(h, card, *g, cs.n, {}, {});
         ImGui::EndDisabled();
         for (const ModuleView* mv : mods) {
             const bool needsCard = std::find(sec.needCard.begin(), sec.needCard.end(), mv->module) != sec.needCard.end();
@@ -1144,17 +1146,14 @@ void DrawCardSections(const Host& h, const Tab& tab, const ModuleView& card, boo
             ImGui::EndDisabled();
             ImGui::PopID();
         }
+        EndCard();
+        ImGui::Dummy(ImVec2(0, U(kGap) - ImGui::GetStyle().ItemSpacing.y));
     }
-    // Groups the layout does not place yet: after the sections, without a heading.
-    ImGui::BeginDisabled(!cardOn);
-    for (const auto* g : all)
-        if (!named.count(g->name)) DrawGroupRows(h, card, *g, n, {}, {});
-    ImGui::EndDisabled();
 }
 
 // Misc > General, Ranch > Upgrades: one card per module, the module's switch in the card header, in two
 // columns. A stacked tab has its first column full width and the next two side by side under it (unused since
-// round 12). A card with Tab::sections draws them (DrawCardSections).
+// round 12). A card with Tab::sections has them as cards of their own under it (DrawSectionCards).
 void DrawCardsPage(const Host& h, const Tab& tab, const std::vector<ModuleView>& views) {
     const Palette& P = theme::Colors();
     const float w = ColumnWidth();
@@ -1196,8 +1195,11 @@ void DrawCardsPage(const Host& h, const Tab& tab, const std::vector<ModuleView>&
                 ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.err), "Failed: %s", status.c_str());
                 ImGui::PopTextWrapPos();
             }
-            if (const auto secs = tab.sections.find(m); secs != tab.sections.end()) {
-                DrawCardSections(h, tab, *mv, on, secs->second, views);
+            const auto secs = tab.sections.find(m);
+            std::optional<CardSections> cs;
+            if (secs != tab.sections.end()) {
+                cs = PrepareCardSections(*mv, secs->second);
+                DrawUnplacedGroups(h, *mv, on, *cs);
             } else {
                 std::vector<const GroupView*> groups;
                 for (const auto& g : mv->groups) groups.push_back(&g);
@@ -1210,6 +1212,7 @@ void DrawCardsPage(const Host& h, const Tab& tab, const std::vector<ModuleView>&
             }
             EndCard();
             ImGui::Dummy(ImVec2(0, U(kGap) - ImGui::GetStyle().ItemSpacing.y));
+            if (cs) DrawSectionCards(h, tab, *mv, on, secs->second, *cs, views, cw);
             ImGui::PopID();
         }
         ImGui::EndGroup();

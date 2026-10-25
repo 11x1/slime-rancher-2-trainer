@@ -213,18 +213,31 @@ void BuildIndex(const std::vector<Category>& cats, const std::vector<ModuleView>
                             if (const ModuleView* cmv = FindView(views, m)) {
                                 const auto help = tab.cardHelp.find(m);
                                 b.AddSwitch(*cmv, base, crumb, help != tab.cardHelp.end() ? help->second : std::string());
-                                b.AddDefs(*cmv, nullptr, {}, base, Join(crumb, cmv->title), cmv->groups.size() > 1);
-                                // Modules drawn inside this card (Tab::sections): their switch and rows.
                                 const auto secs = tab.sections.find(m);
-                                if (secs == tab.sections.end()) continue;
+                                if (secs == tab.sections.end()) {
+                                    b.AddDefs(*cmv, nullptr, {}, base, Join(crumb, cmv->title), cmv->groups.size() > 1);
+                                    continue;
+                                }
+                                // Tab::sections are cards of their own (round 14), named by the section: the
+                                // card module's groups placed in one, then the modules drawn there (switch and rows).
+                                Tab rest;  // the groups no section places stay in the module's card
                                 for (const auto& sec : secs->second)
+                                    rest.skipGroups.insert(rest.skipGroups.end(), sec.groups.begin(), sec.groups.end());
+                                b.AddDefs(*cmv, &rest, {}, base, Join(crumb, cmv->title), false);
+                                for (const auto& sec : secs->second) {
+                                    const std::string sc = Join(crumb, sec.title);
+                                    if (!sec.groups.empty()) {
+                                        Tab only;
+                                        only.onlyGroups = sec.groups;
+                                        b.AddDefs(*cmv, &only, {}, base, sc, false);
+                                    }
                                     for (const auto& sm : sec.modules)
                                         if (const ModuleView* smv = FindView(views, sm)) {
-                                            const std::string sc = Join(Join(crumb, cmv->title), sec.title);
                                             const auto sh = tab.cardHelp.find(sm);
                                             b.AddSwitch(*smv, base, sc, sh != tab.cardHelp.end() ? sh->second : std::string());
                                             b.AddDefs(*smv, nullptr, {}, base, sc, false);
                                         }
+                                }
                             }
                     break;
                 case TabKind::Settings:

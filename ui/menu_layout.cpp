@@ -40,6 +40,8 @@ std::vector<Category> Spec() {
     upgrades.columns = {{"custom_upgrades"}};
     // Round 13: "move to 2 segments 'Plot upgrades' and 'Refinery upgrades', whis way we can remove thew
     // subheadings". Sell Upgrades is a row of the Plot upgrades section, no heading of its own.
+    // Round 14: "Plot and refinery should be different groups": each section is a card of its own with a
+    // group heading, under the Custom Upgrades card (title and switch) in the same column.
     CardSection plot;
     plot.title = "Plot upgrades";
     plot.modules = {"plot_upgrades", "sell_upgrades"};  // sell: works on the game's own plot upgrades too
