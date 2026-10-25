@@ -496,10 +496,17 @@ Per lamp the pulse touches:
 `objIce_IceCube01_lightGradient*`, HDR `_InnerEmission`) with a child "Point Light Gradient" (point Light
 8192, range 5, green-cyan, `LightControl` + `CullablePointLight`), the same as the Ice Lamp's cube. Found
 with one `FindObjectsOfTypeAll(LightControl)` per scene group: `RegionRegistry.CurrentSceneGroup` is
-checked at each lamp refresh (4 s) while a speaker plays; 5 s after it changed the scan keeps every
+checked every 1 s while a song is loaded (round 17; before: at lamp refreshes with a speaker playing); 3 s
+after it changed the scan keeps every
 LightControl whose parent is named `iceCube*` and that has no `Gadget` above it (Ice Lamps are placed
 lamps), as a GC handle + position (static geometry; up to 512). Candidates are then the crystals that
 are active now (proxied regions are off). The scan is logged with its time.
+Round 17 (round 16 test: "ice boxes on powderfall still take time"): the scene group was only checked inside a
+lamp refresh with a speaker playing, and the scan ran at a refresh 5 s or more after the change, so the ice
+joined 5-8 s after a speaker started in a new zone. Now `LampPulser::Placed()` (every 0.25 s while a song is
+loaded) checks the scene group every 1 s, music near or not; the scan runs 3 s after the change, and a scan that
+found crystals while speakers play refreshes the lamps on that poll. One scan per zone visit while a song is
+loaded (24 ms on the ranch in the round 16 log).
 Round 14 (round 13 test: "didnt see"): the log had two scans, both on the ranch (`0 glowing ice crystal(s)
 ... (20 LightControl(s) looked at)`: the ranch has no scene ice; the placed Ice Lamp is skipped as a gadget).
 While the player was in Powderfall no speaker played (minute line `0 corral(s) known, 0 speaker(s)`), so no
@@ -587,8 +594,32 @@ retried every 10 s); `GameModel.identifiablesByIdent[type]` lists the `ActorMode
 (`GameModel.RegisterActor` adds every actor there); `ActorModel.transform` alive and active = loaded. One
 `TryGetValue` per type and one `get_position` per loaded plort (up to 1024), at most every 2 s (0.5 s after a
 speaker joined) while a speaker plays; between refreshes only the held plorts' positions are re-read (plorts
-roll and get carried). Up to 64 plorts glow at once, nearest to a speaker first. Silo and vac contents are
-counts, not actors, so they never glow.
+roll and get carried). Up to 256 plorts glow at once (64 in round 16), nearest to a speaker first. Silo and
+vac contents are counts, not actors, so they never glow.
+
+*Instant start* (round 17, round 16 test: "not instantly"): the log showed plorts and lamps syncing in the same
+poll, so the delay was the look: the strength eased in with 0.5 s (now 0.25 s, the lamps' fade-in) under the
+plort's own pulsing glow. Plorts made near a speaker (or shot out of the vac) waited for the next 2 s refresh,
+which slipped to 4 s against the 2 s box scan. Now Find keeps the plort lists it looked up (GC handles, one
+TryGetValue round only when `identifiablesByIdent._count` changed, a type went away, or 10 s passed) and
+`PlortPulser::Changed()`, asked every 0.25 s with the speaker signature while a speaker plays, compares their
+`List._version` and the key count with plain memory reads; a change refreshes on that poll.
+
+*Own glow replaced* (round 17: "they still have their default glow"): the plort shaders' property lists (shaders
+bundle, UnityPy) have one glow input each: `_PulseGlowIntensity` ("Pulse Glow Intensity"; SR/AMP/Slime/Plort,
+Plort Unstable, Plort Shadow: 1 on most plorts, 5000 on Shadow with a dark `_PulseGlowColor`) and Phosphor's
+"Plort (Glow)" animation (`_GlowSpeed` 0.8, `_GlowMin` 0, `_GlowMax` 1, `_GlowStrength` 1, `_GlowTop`). While a
+plort pulses `_PulseGlowIntensity` = material value x (1 - fade) (fade = eased strength / target strength, so it
+crosses over in 0.25 s), and Phosphor's animation is frozen (`_GlowSpeed` 0) with `_GlowMin` = `_GlowMax` =
+min + (max - min) x clamp((s - 1) / 0.8) (its `_GlowTop` is no longer scaled). Restore sets the renderer's own
+block back, so the game's glow returns. Untested: that `_PulseGlowIntensity` is the visible idle pulse and
+that the Phosphor glow is a lerp between min and max (if it is a smoothstep, it shows as on / off).
+
+*Cost* (round 17: "why not all?"): per glowing plort and frame one GetPropertyBlock, up to 9 Set* and one
+SetPropertyBlock per body renderer (native calls); skipped when the beat factor and fade moved less than 0.002
+since the last write (the block stays on the renderer). Round 16 had frame:slime_dj at 0.05-0.1 ms with 64
+plorts and the lamps. The perf summary now lists `slime_dj.plorts.tick` (every frame) and
+`slime_dj.plorts.find` (each refresh) as detail lines; the setting's tooltip names the 256 cap.
 
 *Restore*: the renderer's own block (snapshot from `GetPropertyBlock` before the first change) when the song
 pauses / stops, the plort leaves range or its nearest speaker switches channel, the setting goes off, or the
@@ -613,7 +644,7 @@ change.
 | `dance_intensity` | 1.0 (100 %) | 10-200 %, steeper above 100 % (shown while `dance_walls` is on) |
 | `dance_lamps` | on | lamps (Electric Pillar, Striped, Conservatory, Lava, Ice), Music Pillars / Tiles (plus a beat flash) and Powderfall's glowing ice near a playing speaker pulse their glow and lights with the beat |
 | `lamp_range` | 20 m | 5-100 m: the distance from a playing speaker within which lamps pulse (tooltip says so, round 14); full strength to 40 % of it (shown while `dance_lamps` is on) |
-| `dance_plorts` | on | loose plorts near a playing speaker glow brighter with the beat (up to 64, nearest first) |
+| `dance_plorts` | on | loose plorts near a playing speaker glow brighter with the beat, their own glow replaced (up to 256, nearest first) |
 | `plort_range` | 15 m | 5-60 m: the distance from a playing speaker within which plorts glow; full strength to 40 % of it (shown while `dance_plorts` is on) |
 
 ## Log lines
@@ -642,9 +673,10 @@ All prefixed `slime_dj:`; grep for these when reading `sr2mods.log`:
   playing speaker(s), range R m)` (on a change), `lamps pulse stopped; lamps restored`, `'Lamps pulse to the
   music' unavailable (…)`
 - plorts: `plorts: N plort type(s): …` (once), `plorts: GameModel.plortGroup has no plort types yet …`, `plorts:
-  glowing plort 'plortPink(Clone)' at (x, y, z): 'plortPinkBase' top (1.00, 0.43, 0.65)[ +glow][ +twin]` (first 6),
+  glowing plort 'plortPink(Clone)' at (x, y, z): 'plortPinkBase' top (1.00, 0.43, 0.65)[ pulse glow 1 off][ +glow to the
+  beat][ +twin]` (first 6),
   `plorts glow: N plort(s) (M loose plort(s) loaded, S playing speaker(s), range R m)` (when plorts start or stop
-  glowing), `plorts: N plort(s) in range, only the 64 nearest to a speaker glow` (once), `plorts: highlighter: …`,
+  glowing), `plorts: N plort(s) in range, only the 256 nearest to a speaker glow` (once), `plorts: highlighter: …`,
   `plorts glow stopped; plorts restored`, `'Plorts glow to the music' unavailable (…)`
 - radio menu: `radio menu ready[; NOT available: ...]`, `radio menu: game buttons not available (...)`, `radio menu
   for 'Corral NNNN' (plot '...')[: no radio channel (no Music Box|corral not found yet)]`, `radio menu opened (N rows

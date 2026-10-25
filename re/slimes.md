@@ -74,6 +74,13 @@ the music").
   `_PulseGlowIntensity` 5000). Every one declares `_TopColor` / `_MiddleColor` / `_BottomColor` (the body
   gradient) and `_EmissionColor` (HDRP template GI colour, white on every plort material: no real emission
   input). Example plortPinkBase: top (1, 0.43, 0.65), middle (1, 0.24, 0.31), bottom (0.23, 0.24, 0.65).
+- The plort's own glow (shader property lists in `shaders_assets_*.bundle`, UnityPy `m_ParsedForm.m_PropInfo`):
+  `_PulseGlowIntensity` "Pulse Glow Intensity" is the only glow input of `SR/AMP/Slime/Plort` (default 1; Plort
+  Unstable has it too, next to `_PulseIntensity` "Progress Towards Burst" / `_PulseSpeedMin/Max` /
+  `_PulseStrength`; Plort Shadow pairs it with `_PulseGlowColor`, material value 5000). `Plort (Glow)`: `_GlowTop`
+  "Glow Color", `_GlowSpeed` 0.8, `_GlowMin` 0, `_GlowMax` 1, `_GlowStrength` 1 (all `[_ENABLEPHOSCORE_ON]`).
+  `Plort Eye`: `_PulseIntensity` 5. MatCap, Boom, Rad, Outline: no glow input. slime_dj turns these down while a
+  plort pulses to the music (plorts.cpp).
 - Types: `GameModel.plortGroup` (+0x1A8, IdentifiableTypeGroup); loose plorts are actors in
   `GameModel.identifiablesByIdent[type]` (re/world.md).
 

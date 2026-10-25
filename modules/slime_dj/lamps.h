@@ -51,7 +51,9 @@ public:
     // kFindSeconds (kNewSourceSeconds when a speaker joined); lamps out of range are restored and dropped.
     void Sync(const std::vector<Source>& sources, float range);
     // Cheap (memory reads, no game calls; the module asks every 0.25 s while a song plays): true when a
-    // lamp was placed or picked up since the last lamp list refresh. The next Sync then refreshes at once.
+    // lamp was placed or picked up since the last lamp list refresh, or the zone's glowing ice was just
+    // scanned while speakers play (the scene group is checked here every second, music near or not). The
+    // next Sync then refreshes at once.
     bool Placed();
     // Every frame. Channels not listed (or not playing) let their lamps settle and restore.
     void Tick(float dt, const std::vector<Channel>& channels);

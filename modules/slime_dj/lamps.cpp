@@ -92,7 +92,11 @@ constexpr const char* kLampPrefabs[] = {
 };
 constexpr float kFindSeconds = 4.0f;          // lamp list refresh (identifiablesByIdent), at most this often
 constexpr float kNewSourceSeconds = 0.5f;     // a speaker started playing: refresh now, but at most this often
-constexpr float kIceScanDelay = 5.0f;         // glowing scene ice: one scan this long after the scene group changed
+constexpr float kIceScanDelay = 3.0f;         // glowing scene ice: one scan this long after the scene group changed
+// Round 17 ("ice boxes on powderfall still take time"): the scene group is checked this often while a song
+// is loaded (Placed), not only at a lamp refresh with a speaker playing, so the zone's ice is scanned soon
+// after arriving and a speaker started there finds it at once; a finished scan refreshes the lamps now.
+constexpr ULONGLONG kIceWatchMs = 1000;
 constexpr size_t kMaxIce = 512;               // glowing scene ice crystals cached per scene
 constexpr size_t kMaxLights = 4;              // Light components per lamp
 constexpr float kDefRetrySeconds = 10.0f;     // definition not found yet (groups not loaded)
@@ -304,6 +308,7 @@ struct LampPulser::Impl {
     std::vector<Bounds> iceBox;      // same index as `ice`: renderer bounds (debug highlighter; extents 0 = not measured)
     const void* iceGroup = nullptr;  // scene group the cache belongs to (compared only, never dereferenced)
     ULONGLONG iceScanAt = 0;         // pending scan time (0 = none)
+    ULONGLONG iceWatchAt = 0;        // Placed: next scene group check
     std::string iceGroupName;        // for the log
     // debug highlighter
     bool debugOn = false;
@@ -531,22 +536,23 @@ struct LampPulser::Impl {
     // 20 LightControls, the placed Ice Lamp skipped as a gadget); in Powderfall no speaker played (0 speakers
     // in the minute line), so no lamp refresh ran there and the zone was never scanned. The highlighter now
     // scans without music, and the log names the scene group (and, with 0 found, some LightControl parents).
-    void IceCheck() {
-        if (!iceReady) return;
+    // True when it scanned (the crystal list is new).
+    bool IceCheck() {
+        if (!iceReady) return false;
         bool ok = false;
         Il2CppObject* sc = Invoke(sceneCtxInst, nullptr, {}, "SceneContext.Instance", &ok);
         Il2CppObject* regions = ok && unity::IsAlive(sc) ? unity::Field<Il2CppObject*>(sc, offScRegions) : nullptr;
         Il2CppObject* group = unity::IsAlive(regions) ? Invoke(currentGroup, regions, {}, "RegionRegistry.CurrentSceneGroup", &ok) : nullptr;
-        if (!ok || !group) return;
+        if (!ok || !group) return false;
         const ULONGLONG now = GetTickCount64();
         if (group != iceGroup) {
             iceGroup = group;
             iceGroupName = unity::GetName(group);
             FreeIce();
             iceScanAt = now + static_cast<ULONGLONG>(kIceScanDelay * 1000);
-            return;
+            return false;
         }
-        if (!iceScanAt || now < iceScanAt) return;
+        if (!iceScanAt || now < iceScanAt) return false;
         iceScanAt = 0;
         const LARGE_INTEGER t0 = Now();
         size_t seen = 0, gadgets = 0;
@@ -564,7 +570,7 @@ struct LampPulser::Impl {
             }
             bool inactive = true;
             Il2CppObject* gadget = Invoke(compInParent, lc, {unity::TypeOf(gadgetClass), &inactive}, "GetComponentInParent", &ok);
-            if (!ok) return;
+            if (!ok) return false;
             if (unity::IsAlive(gadget)) {  // an Ice Lamp decoration: pulsed as a placed lamp
                 ++gadgets;
                 continue;
@@ -583,6 +589,7 @@ struct LampPulser::Impl {
         SR2_INFO("slime_dj: lamps: {} glowing ice crystal(s) in scene group '{}' ({} LightControl(s) looked at, {} on placed Ice "
                  "Lamps, {:.2f} ms{})",
                  ice.size(), iceGroupName, seen, gadgets, Ms(t0), other);
+        return true;
     }
     void FreeIce() {
         for (auto& [h, p] : ice) Free(h);
@@ -872,6 +879,15 @@ bool LampPulser::Placed() {
         P.recheckAt = 0;
         P.forceFind = true;
         return true;
+    }
+    // the zone's glowing ice (round 17): scene group checked every kIceWatchMs, scanned kIceScanDelay after
+    // it changed; crystals found while speakers play join now
+    if (now >= P.iceWatchAt) {
+        P.iceWatchAt = now + kIceWatchMs;
+        if (P.IceCheck() && !P.ice.empty() && !P.lastSources.empty()) {
+            P.forceFind = true;
+            return true;
+        }
     }
     if (!P.Changed()) return false;
     P.FreeWatch();  // the refresh watches again; nothing more until then

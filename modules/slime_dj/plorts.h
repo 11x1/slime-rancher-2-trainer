@@ -6,10 +6,12 @@
 //
 // Main thread only, inside the module's guarded tick (no hooks). Plorts come from
 // GameModel.identifiablesByIdent[plort type] (one dictionary lookup per type of GameModel.plortGroup, no
-// scene search) at most every kFindSeconds while a speaker plays; up to kMaxPlorts nearest to a speaker
-// pulse, through a property block on each plort's body renderer(s). The renderer's own block is put back
-// when the song stops or pauses, the plort leaves range, the setting goes off, or the module is disabled;
-// a plort that was vacuumed, sold or eaten is simply dropped. See NOTES.md "Plorts glow to the music".
+// scene search; the lists are kept and re-read while the dictionary's key count stays the same) at most
+// every kFindSeconds while a speaker plays, and right away when a plort list changed (Changed); up to
+// kMaxPlorts nearest to a speaker pulse, through a property block on each plort's body renderer(s). While a
+// plort pulses its own glow (the shader's pulse glow) is turned down, so the beat glow replaces it. The
+// renderer's own block is put back when the song stops or pauses, the plort leaves range, the setting goes
+// off, or the module is disabled; a plort that was vacuumed, sold or eaten is simply dropped. See NOTES.md "Plorts glow to the music".
 
 #include <cstdint>
 #include <memory>
@@ -35,6 +37,10 @@ public:
     // plort range (m). Finds the loaded plorts at most every kFindSeconds (sooner when a speaker joined),
     // otherwise re-reads the positions of the plorts it holds (plorts roll and get carried).
     void Sync(const std::vector<Source>& sources, float range);
+    // Cheap (memory reads, no game calls; the module asks every 0.25 s while a song plays): true when a
+    // loose plort appeared or went away (a slime made one, one was vacuumed, shot, sold or eaten) since the
+    // last plort list refresh. The next Sync then refreshes at once (round 17: "not instantly").
+    bool Changed();
     // Every frame. Channels not listed (or not playing) let their plorts settle and restore.
     void Tick(float dt, const std::vector<Channel>& channels);
     // Restores everything and forgets the plorts (setting off, no song, module disabled).

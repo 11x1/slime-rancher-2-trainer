@@ -2301,7 +2301,8 @@ private:
         for (const auto& r : radios_) add(*r);
         return chs;
     }
-    // Every frame: resync within kLampPollInterval when the playing speakers changed, then the beat.
+    // Every frame: resync within kLampPollInterval when the playing speakers or the loose plorts changed,
+    // then the beat.
     void TickPlorts(float dt) {
         plorts_.Debug(debug_marks::Wanted());
         if (!plorts_.Ready()) return;
@@ -2312,7 +2313,7 @@ private:
         plortPoll_ -= std::isfinite(dt) ? dt : 0.0f;
         if (plortPoll_ <= 0) {
             plortPoll_ = kLampPollInterval;
-            if (LampSignature() != plortSig_) SyncPlorts();
+            if (LampSignature() != plortSig_ || plorts_.Changed()) SyncPlorts();  // Changed: a plort was made or went away
         }
         plorts_.Tick(dt, BeatChannels());
     }
