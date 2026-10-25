@@ -1055,8 +1055,103 @@ void DrawNested(const Host& h, const ModuleView& nmv) {
     ImGui::EndDisabled();
 }
 
-// Misc > General, Ranch > General: one card per module, the module's switch in the card header, in two
-// columns. A stacked tab (Ranch) has its first column full width and the next two side by side under it.
+// A small heading inside a card, a faint rule from its end to the card's right edge.
+void SectionHeading(const char* text, bool first) {
+    const Palette& P = theme::Colors();
+    if (!first) ImGui::Dummy(ImVec2(0, U(6)));
+    const float avail = ImGui::GetContentRegionAvail().x;
+    {
+        FontScope f(theme::Display(), theme::kSmallSize + 1);
+        ImGui::PushStyleColor(ImGuiCol_Text, P.soft);
+        ImGui::TextUnformatted(text);
+        ImGui::PopStyleColor();
+    }
+    const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    const float y = std::round((a.y + b.y) * 0.5f), x0 = b.x + U(8), x1 = a.x + avail;
+    if (x1 > x0) ImGui::GetWindowDrawList()->AddLine(ImVec2(x0, y), ImVec2(x1, y), ImGui::GetColorU32(P.line), std::max(1.0f, U(1)));
+}
+
+// A card with sections (Tab::sections; Ranch > Upgrades): each a heading, an optional note, the card module's
+// groups for it (grayed while the card's module is off) and other modules, each as its switch row and then
+// its own rows (grayed while that module is off, and while the card's module is off if listed in needCard).
+// The card module's groups no section names follow at the end.
+void DrawCardSections(const Host& h, const Tab& tab, const ModuleView& card, bool cardOn,
+                      const std::vector<layout::CardSection>& secs, const std::vector<ModuleView>& views) {
+    const Palette& P = theme::Colors();
+    std::vector<const GroupView*> all;
+    for (const auto& g : card.groups) all.push_back(&g);
+    const Nesting n = BuildNesting(all, {});
+    auto anyShown = [](const ModuleView& mv, const GroupView& g, const Nesting& nest) {
+        return std::any_of(g.defs.begin(), g.defs.end(), [&](const settings::Def& d) { return RowShown(mv, d, nest, {}); });
+    };
+    std::set<std::string> named;
+    bool first = true;
+    for (const auto& sec : secs) {
+        std::vector<const GroupView*> groups;
+        for (const auto& name : sec.groups) {
+            named.insert(name);
+            for (const auto* g : all)
+                if (g->name == name && anyShown(card, *g, n)) groups.push_back(g);
+        }
+        std::vector<const ModuleView*> mods;
+        for (const auto& m : sec.modules)
+            if (const ModuleView* mv = FindView(views, m)) mods.push_back(mv);
+        if (groups.empty() && mods.empty()) continue;
+        SectionHeading(sec.title.c_str(), first);
+        first = false;
+        if (!sec.note.empty()) {
+            FontScope f(theme::Body(), theme::kSmallSize);
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, P.dim);
+            ImGui::TextUnformatted(sec.note.c_str());
+            ImGui::PopStyleColor();
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::BeginDisabled(!cardOn);
+        for (const auto* g : groups) DrawGroupRows(h, card, *g, n, {}, {});
+        ImGui::EndDisabled();
+        for (const ModuleView* mv : mods) {
+            const bool needsCard = std::find(sec.needCard.begin(), sec.needCard.end(), mv->module) != sec.needCard.end();
+            ImGui::PushID(mv->module.c_str());
+            ImGui::BeginDisabled(needsCard && !cardOn);
+            if (mv->hasEnabled) {
+                settings::Def d = mv->enabled;
+                const auto label = tab.switchLabel.find(mv->module);
+                const auto help = tab.cardHelp.find(mv->module);
+                const std::string lock = settings::LockReason(mv->module, "enabled");  // pinned by the module
+                if (help != tab.cardHelp.end()) d.tooltip = help->second;
+                if (!lock.empty()) d.tooltip = lock;
+                ImGui::BeginDisabled(!lock.empty());
+                DrawRow(h, d, label != tab.switchLabel.end() ? label->second : mv->title, false);
+                ImGui::EndDisabled();
+            }
+            bool failed = false;
+            const std::string status = ModuleStatus(mv->module, &failed);
+            if (failed) {
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.err), "%s failed: %s", mv->title.c_str(), status.c_str());
+                ImGui::PopTextWrapPos();
+            }
+            std::vector<const GroupView*> own;
+            for (const auto& g : mv->groups) own.push_back(&g);
+            const Nesting ownNest = BuildNesting(own, {});
+            ImGui::BeginDisabled(!ModuleOn(*mv));
+            for (const auto* g : own) DrawGroupRows(h, *mv, *g, ownNest, {}, {});
+            ImGui::EndDisabled();
+            ImGui::EndDisabled();
+            ImGui::PopID();
+        }
+    }
+    // Groups the layout does not place yet: after the sections, without a heading.
+    ImGui::BeginDisabled(!cardOn);
+    for (const auto* g : all)
+        if (!named.count(g->name)) DrawGroupRows(h, card, *g, n, {}, {});
+    ImGui::EndDisabled();
+}
+
+// Misc > General, Ranch > Upgrades: one card per module, the module's switch in the card header, in two
+// columns. A stacked tab has its first column full width and the next two side by side under it (unused since
+// round 12). A card with Tab::sections draws them (DrawCardSections).
 void DrawCardsPage(const Host& h, const Tab& tab, const std::vector<ModuleView>& views) {
     const Palette& P = theme::Colors();
     const float w = ColumnWidth();
@@ -1098,14 +1193,18 @@ void DrawCardsPage(const Host& h, const Tab& tab, const std::vector<ModuleView>&
                 ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(P.err), "Failed: %s", status.c_str());
                 ImGui::PopTextWrapPos();
             }
-            std::vector<const GroupView*> groups;
-            for (const auto& g : mv->groups) groups.push_back(&g);
-            const Nesting n = BuildNesting(groups, {});
-            ImGui::BeginDisabled(!on);  // grayed out and read-only while the module is off
-            // The card is named by its module: its groups get no headings (round 10), just one
-            // list of rows in group order.
-            for (const auto* g : groups) DrawGroupRows(h, *mv, *g, n, {}, {});
-            ImGui::EndDisabled();
+            if (const auto secs = tab.sections.find(m); secs != tab.sections.end()) {
+                DrawCardSections(h, tab, *mv, on, secs->second, views);
+            } else {
+                std::vector<const GroupView*> groups;
+                for (const auto& g : mv->groups) groups.push_back(&g);
+                const Nesting n = BuildNesting(groups, {});
+                ImGui::BeginDisabled(!on);  // grayed out and read-only while the module is off
+                // The card is named by its module: its groups get no headings (round 10), just one
+                // list of rows in group order.
+                for (const auto* g : groups) DrawGroupRows(h, *mv, *g, n, {}, {});
+                ImGui::EndDisabled();
+            }
             EndCard();
             ImGui::Dummy(ImVec2(0, U(kGap) - ImGui::GetStyle().ItemSpacing.y));
             ImGui::PopID();
@@ -2406,20 +2505,25 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     uintptr_t slotMenu = 0;  // right-clicked slot's item: its give menu opens after the loop (popup id outside the slot's id)
     int slotMenuIdx = -1;    // that slot
     nav::TabGroup slotNav("##slotnav");  // the slots are one Tab stop, the arrows move between them
+    // Each slot's item is its padded cell: the tile plus half the gap to each neighbour, so the cells
+    // touch and the tooltip does not flicker between slots (round 12). The tile is drawn inside it.
+    const float half = gap * 0.5f;
     for (int i = 0; i < n; ++i) {
         const sbx::Slot& sl = s.slots[static_cast<size_t>(i)];
         const int count = SlotCount(sl, i);
         ImGui::PushID(i);
-        if (i > 0) ImGui::SameLine(0, gap);
+        if (i > 0) ImGui::SameLine(0, 0);
+        const float cl = i > 0 ? half : 0.0f, cr = i < n - 1 ? half : 0.0f;
         slotNav.Item(static_cast<uint64_t>(i));
-        const bool pressed =
-            nav::Button("##slot", ImVec2(e, e), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+        const bool pressed = nav::Button("##slot", ImVec2(cl + e + cr, e),
+                                         ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
         slotNav.Done();
         const bool right = (pressed && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) || nav::ContextKey();
         const bool clicked = pressed && !right;
         const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
         const bool hot = hovered && (sl.unlocked || sl.unlockable);
-        const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+        const ImVec2 a(ImGui::GetItemRectMin().x + cl, ImGui::GetItemRectMin().y);
+        const ImVec2 b(a.x + e, ImGui::GetItemRectMax().y);
         if (clicked) {
             if (sl.unlocked) g_sbxSlot = i;
             else if (sl.unlockable) SbxRequest(sbx::Op::UnlockSlot, 0, i);

@@ -385,61 +385,68 @@ Result Draw(const char* id, const std::vector<Tile>& tiles, State& st, const Opt
     res.shown = static_cast<int>(shown.size());
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, Dark() ? Mix(P.card, IM_COL32_BLACK, 0.18f) : P.frame);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f * s, 6.0f * s));
+    // Each tile sits in a padded cell: the cell (tile plus half the gap on every side) is the item, the
+    // hover and the tooltip area, and the cells touch, so moving across the grid never leaves a tile
+    // (round 12: the tooltip flickered over the gaps). The window padding is short by that half gap, so
+    // the tiles stay where a 6 px padding and 6 px gaps put them.
+    const float gap = 6.0f * s, half = gap * 0.5f;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f * s - half, 6.0f * s - half));
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f * s);
     // The tiles are one Tab stop (the tile focused last, else the first); the arrows move tile by tile.
     // Flattened, so Tab and Shift+Tab leave the grid for the items around it (nav.h).
     nav::TabGroup tileNav("##tilenav");
     ImGui::BeginChild("##grid", ImVec2(0, std::floor(o.height * s)),
                       ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened);
-    const float gap = 6.0f * s;
     const float avail = ImGui::GetContentRegionAvail().x;
-    const int cols = std::max(1, static_cast<int>((avail + gap) / (o.tile * s + gap)));
-    const float tw = std::max(8.0f * s, std::floor((avail - gap * static_cast<float>(cols - 1)) / static_cast<float>(cols)));
+    const int cols = std::max(1, static_cast<int>(avail / (o.tile * s + gap)));
+    const float cell = std::max(8.0f * s + gap, std::floor(avail / static_cast<float>(cols)));
     ImDrawList* dl = ImGui::GetWindowDrawList();
     if (res.shown == 0) {
+        ImGui::SetCursorPos(ImVec2(ImGui::GetCursorPosX() + half, ImGui::GetCursorPosY() + half));
         ImGui::PushStyleColor(ImGuiCol_Text, P.dim);
         ImGui::TextUnformatted(o.empty);
         ImGui::PopStyleColor();
     }
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(gap, gap));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
     int col = 0, section = -1;
     const ImGuiIO& io = ImGui::GetIO();
     for (int k = 0; k < res.shown; ++k) {
         const int i = shown[static_cast<size_t>(k)];
         const Tile& t = tiles[static_cast<size_t>(i)];
         if (o.sections && t.section != section) {
-            // Section break: a heading (if any) and a rule across the grid.
+            // Section break: a heading (if any) and a rule across the grid. One spacer item from the cell
+            // row above to the cell row below (cells carry half a gap on each side).
             if (section >= 0 || (t.section >= 0 && static_cast<size_t>(t.section) < o.sections->size() &&
                                  !(*o.sections)[static_cast<size_t>(t.section)].empty())) {
                 const char* title = (t.section >= 0 && static_cast<size_t>(t.section) < o.sections->size())
                                         ? (*o.sections)[static_cast<size_t>(t.section)].c_str()
                                         : "";
-                if (section >= 0) ImGui::Dummy(ImVec2(0, 1.0f * s));
-                const ImVec2 p = ImGui::GetCursorScreenPos();
-                float x = p.x;
+                const float pre = section >= 0 ? half + gap + 1.0f * s : half;  // above the heading
+                const ImVec2 p0 = ImGui::GetCursorScreenPos();
+                const ImVec2 p(p0.x + half, p0.y + pre);
+                const float right = p0.x + avail - half;
                 if (*title) {
                     ImFont* f = theme::Body();
                     const float size = theme::kSmallSize * s * 0.9f;
                     const ImVec2 ts = f->CalcTextSizeA(size, FLT_MAX, 0.0f, title);
                     dl->AddText(f, size, p, P.soft, title);
-                    x += ts.x + 8.0f * s;
-                    ImGui::Dummy(ImVec2(avail, ts.y));
-                    dl->AddLine(ImVec2(x, p.y + ts.y * 0.55f), ImVec2(p.x + avail, p.y + ts.y * 0.55f), WithAlpha(P.soft, 0.35f),
+                    const float x = p.x + ts.x + 8.0f * s;
+                    ImGui::Dummy(ImVec2(avail, pre + ts.y + half));
+                    dl->AddLine(ImVec2(x, p.y + ts.y * 0.55f), ImVec2(right, p.y + ts.y * 0.55f), WithAlpha(P.soft, 0.35f),
                                 std::max(1.0f, s));
                 } else {
-                    ImGui::Dummy(ImVec2(avail, 2.0f * s));
-                    dl->AddLine(ImVec2(p.x, p.y + 1.0f * s), ImVec2(p.x + avail, p.y + 1.0f * s), WithAlpha(P.soft, 0.35f),
+                    ImGui::Dummy(ImVec2(avail, pre + 2.0f * s + half));
+                    dl->AddLine(ImVec2(p.x, p.y + 1.0f * s), ImVec2(right, p.y + 1.0f * s), WithAlpha(P.soft, 0.35f),
                                 std::max(1.0f, s));
                 }
             }
             section = t.section;
             col = 0;
         }
-        if (col > 0) ImGui::SameLine(0, gap);
+        if (col > 0) ImGui::SameLine(0, 0);
         ImGui::PushID(reinterpret_cast<const void*>(t.id));
         tileNav.Item(t.id);
-        if (nav::Button("##tile", ImVec2(tw, tw), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight)) {
+        if (nav::Button("##tile", ImVec2(cell, cell), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight)) {
             if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) res.rightClicked = i;
             else res.clicked = i;  // also Space / Enter on the focused tile
         }
@@ -461,7 +468,9 @@ Result Draw(const char* id, const std::vector<Tile>& tiles, State& st, const Opt
                 }
             }
         }
-        const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+        // The tile inside its cell.
+        const ImVec2 ca = ImGui::GetItemRectMin(), cb = ImGui::GetItemRectMax();
+        const ImVec2 a(ca.x + half, ca.y + half), b(cb.x - half, cb.y - half);
         if (ImGui::IsRectVisible(a, b))
             DrawTile(dl, a, b, t, hot || ImGui::IsItemActive(), o.selected != 0 && t.id == o.selected, s);
         nav::Ring(a, b, 6.0f * s);
