@@ -10,6 +10,9 @@
 //     component itself. The module calls StartDebugUI, marks the object DontDestroyOnLoad so it survives scene-group
 //     changes, and destroys it (Object.Destroy) when the option or the module is turned off.
 //
+//   * Entity hitboxes (hitboxes.h): wireframes of the colliders of entities near the camera through the overlay's
+//     world line segments (ui/hud.h); a physics query every 0.5 s, the shapes every frame while it is on.
+//
 // Fault policy: all game calls run in a main-thread frame callback, polled every kPollSeconds (no per-frame work, no
 // FindObjects of our own); the GameObject is held by a GC handle and checked with IsAlive before use. Direct method
 // pointers; no hooks.
@@ -27,6 +30,7 @@
 #include "core/module.h"
 #include "core/settings.h"
 #include "core/unity.h"
+#include "modules/debug_tools/hitboxes.h"
 
 namespace sr2::modules {
 namespace {
@@ -37,11 +41,17 @@ namespace main_thread = sr2::core::main_thread;
 
 constexpr const char* kModule = "debug_tools";
 constexpr const char* kFontOverlay = "font_overlay";
+constexpr const char* kHitboxes = "hitboxes";
+constexpr const char* kHitboxRange = "hitbox_range";
+constexpr const char* kHitboxTriggers = "hitbox_triggers";
 constexpr float kPollSeconds = 0.5f;  // reaction time to the toggle; also the liveness check interval
 constexpr int kMaxStartFailures = 3;  // stop retrying StartDebugUI after this many failed starts in a row
 
 std::atomic<bool> g_enabled{false};
 std::atomic<bool> g_fontOverlay{false};
+std::atomic<bool> g_hitboxes{false};
+std::atomic<float> g_hitboxRange{12.0f};
+std::atomic<bool> g_hitboxTriggers{false};
 
 class DebugTools final : public sr2::core::Module {
 public:
@@ -71,6 +81,7 @@ private:
     int starts_ = 0;
     int frameCb_ = 0;
     int onChange_ = 0;
+    bool hitboxesOk_ = false;
 };
 
 bool DebugTools::Setup(sr2::core::ModuleContext& ctx) {
@@ -105,16 +116,71 @@ bool DebugTools::Setup(sr2::core::ModuleContext& ctx) {
                 "naming the font(s) it is drawn with, including fallback fonts for missing characters. Labels near "
                 "the mouse are brighter. Purely visual; turn it off to remove it";
     settings::Register(d);
-    g_fontOverlay.store(settings::GetBool(kModule, kFontOverlay));
-    if (!onChange_)
-        onChange_ = settings::OnChange(kModule, [](const std::string&) { g_fontOverlay.store(settings::GetBool(kModule, kFontOverlay)); });
+    // Entity hitboxes (hitboxes.h; optional: the font overlay works without it).
+    std::string herr;
+    hitboxesOk_ = debug_tools::hitboxes::Setup(ctx, herr);
+    if (!hitboxesOk_) SR2_WARN("[{}] entity hitbox view unavailable ({})", kModule, herr);
+    {
+        settings::Def h;
+        h.module = kModule;
+        h.group = "Developer tools";
+        h.key = kHitboxes;
+        h.label = "Show entity hitboxes";
+        h.kind = settings::Kind::Bool;
+        h.def = 0;
+        h.min = 0;
+        h.max = 1;
+        h.step = 1;
+        h.tooltip = "Draws the colliders of things near you as wireframes: slimes, toys, food, plorts, gadgets and the "
+                    "mod's buildables. Green = solid, yellow = trigger zones, blue = mesh colliders (their bounding box). "
+                    "Hidden while this menu is open";
+        settings::Register(h);
+        settings::Def r;
+        r.module = kModule;
+        r.group = "Developer tools";
+        r.key = kHitboxRange;
+        r.label = "Hitbox range";
+        r.kind = settings::Kind::Float;
+        r.def = 12;
+        r.min = 2;
+        r.max = 40;
+        r.step = 1;
+        r.unit = " m";
+        r.parent = kHitboxes;
+        r.tooltip = "How far from the camera colliders are shown (the nearest 160 at most)";
+        settings::Register(r);
+        settings::Def t;
+        t.module = kModule;
+        t.group = "Developer tools";
+        t.key = kHitboxTriggers;
+        t.label = "Include trigger zones";
+        t.kind = settings::Kind::Bool;
+        t.def = 0;
+        t.min = 0;
+        t.max = 1;
+        t.step = 1;
+        t.parent = kHitboxes;
+        t.tooltip = "Also the invisible trigger volumes (pickup and interaction zones, slime attach spots)";
+        settings::Register(t);
+    }
+    auto readAll = [] {
+        g_fontOverlay.store(settings::GetBool(kModule, kFontOverlay));
+        g_hitboxes.store(settings::GetBool(kModule, kHitboxes));
+        g_hitboxRange.store(static_cast<float>(settings::GetFloat(kModule, kHitboxRange)));
+        g_hitboxTriggers.store(settings::GetBool(kModule, kHitboxTriggers));
+    };
+    readAll();
+    if (!onChange_) onChange_ = settings::OnChange(kModule, [readAll](const std::string&) { readAll(); });
     if (!frameCb_) frameCb_ = main_thread::AddFrameCallback(kModule, [this](float dt) { Tick(dt); });
-    SR2_INFO("[{}] setup ok (FontsUsedDebugUI.StartDebugUI at RVA 0x{:X}; font overlay {})", kModule,
-             sr2::il2cpp::Resolver::Rva(reinterpret_cast<void*>(start_)), g_fontOverlay.load() ? "on" : "off");
+    SR2_INFO("[{}] setup ok (FontsUsedDebugUI.StartDebugUI at RVA 0x{:X}; font overlay {}; entity hitboxes {})", kModule,
+             sr2::il2cpp::Resolver::Rva(reinterpret_cast<void*>(start_)), g_fontOverlay.load() ? "on" : "off",
+             !hitboxesOk_ ? "unavailable" : g_hitboxes.load() ? "on" : "off");
     return true;
 }
 
 void DebugTools::Tick(float dt) {
+    if (hitboxesOk_)
+        debug_tools::hitboxes::Tick(dt, g_enabled.load() && g_hitboxes.load(), g_hitboxRange.load(), g_hitboxTriggers.load());
     sincePoll_ += dt;
     if (sincePoll_ < kPollSeconds) return;
     sincePoll_ = 0;
