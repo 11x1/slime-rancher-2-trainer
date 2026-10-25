@@ -23,6 +23,7 @@ std::unique_ptr<sr2::core::Module> CreateDronePriceLimit();  // modules/drone_pr
 std::unique_ptr<sr2::core::Module> CreateSandbox();          // modules/sandbox/module.cpp
 std::unique_ptr<sr2::core::Module> CreateSlimeDj();          // modules/slime_dj/module.cpp
 std::unique_ptr<sr2::core::Module> CreateFreePlacement();    // modules/free_placement/module.cpp
+std::unique_ptr<sr2::core::Module> CreateGadgetStacking();   // modules/gadget_stacking/module.cpp
 std::unique_ptr<sr2::core::Module> CreateDiscordRpc();       // modules/discord_rpc/module.cpp
 std::unique_ptr<sr2::core::Module> CreateMiscTweaks();       // modules/misc_tweaks/module.cpp
 std::unique_ptr<sr2::core::Module> CreateDebugTools();       // modules/debug_tools/module.cpp
@@ -47,6 +48,7 @@ void RegisterBuiltinModules(ModuleManager& mm) {
     mm.Register(modules::CreateSandbox());
     mm.Register(modules::CreateSlimeDj());
     mm.Register(modules::CreateFreePlacement());
+    mm.Register(modules::CreateGadgetStacking());
     mm.Register(modules::CreateDiscordRpc());
     mm.Register(modules::CreateMiscTweaks());
     mm.Register(modules::CreateDebugTools());

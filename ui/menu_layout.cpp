@@ -117,11 +117,15 @@ std::vector<Category> Spec() {
     Tab general;
     general.title = "General";
     general.kind = TabKind::Cards;
-    general.columns = {{"quick_start", "free_placement", "debug_tools"}, {"instant_build", "quick_travel", "misc_tweaks"}};
+    general.columns = {{"quick_start", "free_placement", "gadget_stacking", "debug_tools"},
+                       {"instant_build", "quick_travel", "misc_tweaks"}};
     general.cardHelp = {
         {"free_placement",
          "Gadget mode ignores its placement limits: overlap, slope, distance, jumping. The cost and stacking rules "
          "stay, and placed gadgets are saved like any other."},
+        {"gadget_stacking",
+         "Gadget mode places decorations and gadgets on top of other placed gadgets: aim at one and the outline sits "
+         "on its top, and other gadgets in the way don't block. Picking up a gadget takes the ones on top along."},
         {"misc_tweaks",
          "Small speed-ups, each off until you turn it on: instant Fabricator purchases, no upgrade animation and a "
          "faster vacpack when shooting items out."},
