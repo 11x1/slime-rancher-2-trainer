@@ -268,10 +268,15 @@ void UpgradesTab(const Helpers& h, const ub::State& st) {
         const float col = static_cast<float>(i % static_cast<size_t>(cols));
         const float row = static_cast<float>(i / static_cast<size_t>(cols));
         const ImVec2 a(origin.x + col * (colW + gap), origin.y + row * (eh + gap)), b(a.x + colW, a.y + eh);
-        ImGui::SetCursorScreenPos(a);
+        // The entry's item is its padded cell (half the gap towards each neighbour), so the hover never
+        // drops out between entries (round 12); the entry is drawn inside it.
+        const float half = gap * 0.5f;
+        const float cl = col > 0 ? half : 0.0f, cr = col + 1 < static_cast<float>(cols) ? half : 0.0f;
+        const float ct = row > 0 ? half : 0.0f, cbm = row + 1 < static_cast<float>(rows) ? half : 0.0f;
+        ImGui::SetCursorScreenPos(ImVec2(a.x - cl, a.y - ct));
         ImGui::SetNextItemAllowOverlap();
         entryNav.Item(u.id);
-        const bool pressed = nav::Button("##entry", ImVec2(colW, eh), ImGuiButtonFlags_MouseButtonRight);
+        const bool pressed = nav::Button("##entry", ImVec2(cl + colW + cr, ct + eh + cbm), ImGuiButtonFlags_MouseButtonRight);
         entryNav.Done();
         const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem | ImGuiHoveredFlags_AllowWhenOverlappedByItem);
         const bool focused = nav::Focused();

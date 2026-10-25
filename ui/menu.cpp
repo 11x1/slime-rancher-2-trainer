@@ -2406,20 +2406,25 @@ void SandboxVacpack(const sbx::Snapshot& s, float w) {
     uintptr_t slotMenu = 0;  // right-clicked slot's item: its give menu opens after the loop (popup id outside the slot's id)
     int slotMenuIdx = -1;    // that slot
     nav::TabGroup slotNav("##slotnav");  // the slots are one Tab stop, the arrows move between them
+    // Each slot's item is its padded cell: the tile plus half the gap to each neighbour, so the cells
+    // touch and the tooltip does not flicker between slots (round 12). The tile is drawn inside it.
+    const float half = gap * 0.5f;
     for (int i = 0; i < n; ++i) {
         const sbx::Slot& sl = s.slots[static_cast<size_t>(i)];
         const int count = SlotCount(sl, i);
         ImGui::PushID(i);
-        if (i > 0) ImGui::SameLine(0, gap);
+        if (i > 0) ImGui::SameLine(0, 0);
+        const float cl = i > 0 ? half : 0.0f, cr = i < n - 1 ? half : 0.0f;
         slotNav.Item(static_cast<uint64_t>(i));
-        const bool pressed =
-            nav::Button("##slot", ImVec2(e, e), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+        const bool pressed = nav::Button("##slot", ImVec2(cl + e + cr, e),
+                                         ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
         slotNav.Done();
         const bool right = (pressed && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) || nav::ContextKey();
         const bool clicked = pressed && !right;
         const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
         const bool hot = hovered && (sl.unlocked || sl.unlockable);
-        const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+        const ImVec2 a(ImGui::GetItemRectMin().x + cl, ImGui::GetItemRectMin().y);
+        const ImVec2 b(a.x + e, ImGui::GetItemRectMax().y);
         if (clicked) {
             if (sl.unlocked) g_sbxSlot = i;
             else if (sl.unlockable) SbxRequest(sbx::Op::UnlockSlot, 0, i);
