@@ -102,7 +102,25 @@ that branch is merged).
 
 ### Dry run (2026-10-26, clone of the main repo, `--simulate-merge chore/icons-custom-only --build`)
 
-DRYRUN_RESULTS
+Clone: 533 refs (510 branches incl. 400+ `worktree-agent-*`, 21 `refs/remotes/origin/*`, the
+stash), 964 commits, no tags. After the simulated merge:
+- removed: 27 paths (all of them existed) and 49 blobs, 4 of them by id; 22 image blobs stay;
+- filter-repo rewrote 891 of 965 commits, dropped 1 that became empty (963 left), 511 refs left
+  (filter-repo drops the clone's `refs/remotes/origin/*` copies);
+- (a) paths left 0, removed blobs reachable 0, in the object store at all 0, image blobs left 22,
+  all on the keep list;
+- (b) develop's tree 1273fb2a36 is the same tree as before; 104/104 branches without removed files
+  at their tip keep their tree; 407 branch tips (old agent / feature branches made before
+  9d5f497 or still carrying the .inc) did hold removed files: they change, which is why they must
+  be merged or deleted first;
+- (c) clean build of the rewritten develop: exit 0, no warnings, verify_exports ok, `icons: ...
+  12 embedded, 0 local`.
+
+First changed commit: ec89888 (2026-10-23, "Overlay: Slime Rancher 2 theme ..."), not because it
+holds an icon but because it is one of 9 SSH-signed commits: fast-export drops commit signatures,
+so it and everything after it get new SHAs (the 9 lose their "Verified" signature). The first
+commit with icon data is 32a8786 (same day), so nothing earlier changes. Of GitHub's branches only
+develop and `feature/overlay-sr2-theme` (holds ec89888) change.
 
 ## Applying it for real (orchestrator, then the user)
 
