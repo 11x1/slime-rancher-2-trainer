@@ -84,3 +84,6 @@ From sr2mods.log (2026-10-25):
 - One WARN: `hen collector on plot ...: collector has no Region / TimeDirector / storage / audio / CollectPt - chickens are stored directly`.
 
 So building while the plot's region is unloaded or inactive falls back to direct storage for good. Defer the suction setup until the clone is active and its components resolve, or retry it later. Never lock in "stored directly" from a build done while inactive. Check `modules/custom_upgrades/NOTES.md` for how the suction worked when it was fixed before, so it doesn't regress a third time.
+
+## K. Beat walls from far away (`fix/beat-walls-range-r14`)
+User: "the walls dont react to music from far away :(". The corral beat walls stop dancing when the player is far from the music source, even though the corral's own Music Box or radio is playing. Find what limits it: the analysis may only run for audible or near speakers, a distance cutoff, the zone's wake or load size, or culling. Walls of a corral whose speaker is playing should dance at any distance where the walls are visible, within reasonable cost (no per-frame Find; cheap level or beat sampling for far sources). Check `modules/slime_dj/NOTES.md` first. The lamps (task F) share the beat sources, so keep the change in the wall path or in a shared helper both can use.
