@@ -74,6 +74,8 @@ Scientist Desk (DJ Booth base), Boombox (`model_boombox`, `Collision` ball, benc
 - methods: `UpgradeChain.Show(current, count)` 0x82ED90 - shows first `count` circles, highlight onto `_levels[current+1]` (12 levels at VIII -> IndexOutOfRange)
 - fields: UpgradeChain ("Upgrade Chain"): 8 circles Pip0..Pip7 (`_levels`, SDFGraphic[], 42 x 22 at x = 21 + 52 i, absolute, no layout group), empty `_rects`, highlight 54 x 34
 - methods: `FabricatorItemButton.ConfigurePips(unlocked, total)` 0x806CE0 (`Configure` inlined) - walks the array only; `FabricatorItemButtonPips` 8 pips 22 x 11, two rows of four, pitch 24 / -14
+- data (menulayer_fabricator scene bundle, UnityPy): `FabricatorItemDetails` on "Real Details" (961 x 732); `_icon` = GameObject "Image": uGUI Image, Simple, preserveAspect, default material, RectTransform anchored right, stretched vertically, size 440 x (732 - 206) = 440 x 526 in the 1920 x 1080 reference; also a `UIImageDynamicLoader` (`_sprite`, `_onSetSprite`, `_releaseAssetOnDisable`, `_findLoaderInParent`, `_loadThroughComponent`). A 512 px full art draws at ~440 px (0.86x). Grid tile icons: 105 px items, icon inset 20 -> 65 px
+- gotchas: while loading, the details image shows a 160 px placeholder sprite `iconEmpty` (log, round 12: gadget_look took it for the loaded full art)
 - mod: gadget_look.cpp (SetItem: card picture), fabricator_levels.cpp (pre-hooks on Show and ConfigurePips)
 
 ### Type groups (identifiabletypegroups_assets_*.bundle, UnityPy)

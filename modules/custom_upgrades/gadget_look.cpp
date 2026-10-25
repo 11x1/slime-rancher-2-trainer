@@ -34,6 +34,7 @@ constexpr const char* kImage = "Assembly-CSharp";
 constexpr const char* kCore = "UnityEngine.CoreModule";
 constexpr const char* kTag = " [sr2look]";
 constexpr size_t kMax = 24;
+constexpr float kMinFullArt = 256.0f;  // a loaded Fabricator full art is 512 px; anything smaller is still loading
 
 struct Vec2 {
     float x, y;
@@ -97,6 +98,7 @@ struct Impl {
     };
     std::map<Il2CppObject*, ArtTint> artTints;
     std::set<Il2CppObject*> pinnedImages;  // details images we watch (pinned once, never freed)
+    std::set<Il2CppObject*> loggedPictures;  // definitions whose details picture was logged
     Il2CppObject* artImage = nullptr;
     Il2CppObject* artDef = nullptr;
     float artWait = 0;
@@ -116,7 +118,8 @@ struct Impl {
                       *spritePpu = nullptr, *spriteCreate = nullptr, *texWidth = nullptr, *texHeight = nullptr,
                       *rtGetTemp = nullptr, *rtRelease = nullptr, *rtGetActive = nullptr, *rtSetActive = nullptr,
                       *blit = nullptr, *tex2dCtor = nullptr, *texRead = nullptr, *texGetPixels = nullptr,
-                      *texSetPixels = nullptr, *texApply = nullptr, *setHideFlags = nullptr;
+                      *texSetPixels = nullptr, *texApply = nullptr, *setHideFlags = nullptr, *texSetFilter = nullptr,
+                      *texSetMipBias = nullptr;
     Il2CppClass* rendererClass = nullptr, *tex2dClass = nullptr;
     using ObjectNewFn = Il2CppObject* (*)(Il2CppClass*);
     ObjectNewFn objectNew = nullptr;
@@ -157,6 +160,7 @@ struct Impl {
     Il2CppObject* PlacedLabelFor(Il2CppObject* director, Il2CppObject* def);
     void ArtFrame(float dt);
     void DropArt(Il2CppObject* def, Slot* s, const std::string& why);
+    void LogPicture(Il2CppObject* def, Il2CppObject* sprite);
 };
 
 Impl* g = nullptr;
@@ -236,6 +240,7 @@ void SetItemDetour(Il2CppObject* self, Il2CppObject* item, const MethodInfo* mi)
         Il2CppObject* def = s->def.load(std::memory_order_acquire);
         if (art || !g->artTints.count(def) || !g->imageGetSprite) {
             g->Call(g->imageSetSprite, image, {art ? art : icon}, "Image.set_sprite");
+            g->LogPicture(def, art ? art : icon);
             return;
         }
         // Full art still to recolour: the loader shows our icon (the item's) and puts the base's full art on
@@ -259,7 +264,22 @@ void Impl::DropArt(Il2CppObject* def, Slot* s, const std::string& why) {
     Il2CppObject* icon = s ? s->icon.load(std::memory_order_acquire) : nullptr;
     if (icon && unity::IsAlive(artImage)) Call(imageSetSprite, artImage, {icon}, "Image.set_sprite");
     SR2_INFO("[{}] gadget look: '{}' card picture stays the icon ({})", module, unity::GetName(def), why);
+    LogPicture(def, icon);
     artImage = nullptr;
+}
+
+// Once per definition: which sprite the details picture shows and how big it is (round 13: "pixelated" /
+// "blurry" details pictures; the 440 px box wants a 512 px sprite, as the game's full art is).
+void Impl::LogPicture(Il2CppObject* def, Il2CppObject* sprite) {
+    if (!def || !unity::IsAlive(sprite) || !loggedPictures.insert(def).second) return;
+    bool ok = false;
+    const Rect rc = Value<Rect>(Call(spriteRect, sprite, {}, "Sprite.get_rect", &ok));
+    Il2CppObject* tex = ok ? Call(spriteTexture, sprite, {}, "Sprite.get_texture", &ok) : nullptr;
+    const int tw = ok && unity::IsAlive(tex) ? Value<int32_t>(Call(texWidth, tex, {}, "Texture.get_width")) : 0;
+    const int th = ok && unity::IsAlive(tex) ? Value<int32_t>(Call(texHeight, tex, {}, "Texture.get_height")) : 0;
+    SR2_INFO("[{}] gadget look: '{}' details picture shown = '{}' ({:.0f}x{:.0f} px of a {}x{} texture{})", module,
+             unity::GetName(def), unity::GetName(sprite), rc.w, rc.h, tw, th,
+             rc.w < kMinFullArt && rc.h < kMinFullArt ? "; smaller than the game's 512 px full art: soft when stretched" : "");
 }
 
 // Waits (up to 10 s) for the details image to show something other than our icon: the loaded full art.
@@ -279,10 +299,12 @@ void Impl::ArtFrame(float dt) {
     bool ok = false;
     Il2CppObject* shown = Call(imageGetSprite, artImage, {}, "Image.get_sprite", &ok);
     Il2CppObject* icon = s->icon.load(std::memory_order_acquire);
-    // The full art is the bigger picture; anything else (our icon, nothing yet) means still loading.
+    // The full art is the bigger picture (512 px); anything else means still loading: our icon, nothing yet, or
+    // the loader's own 160 px placeholder 'iconEmpty' it shows while loading (round 12: the Slime Radio's card
+    // picture was 'iconEmpty' recoloured, a small grey box stretched to the 440 px details box).
     const float iconW = icon ? Value<Rect>(Call(spriteRect, icon, {}, "Sprite.get_rect")).w : 0.0f;
     const float shownW = ok && unity::IsAlive(shown) && shown != icon ? Value<Rect>(Call(spriteRect, shown, {}, "Sprite.get_rect", &ok)).w : 0.0f;
-    if (!ok || shownW <= iconW) {
+    if (!ok || shownW <= iconW || shownW < kMinFullArt || unity::GetName(shown) == "iconEmpty") {
         if (artWait >= 10.0f) DropArt(artDef, s, "the full art did not load within 10 s");
         return;
     }
@@ -297,6 +319,7 @@ void Impl::ArtFrame(float dt) {
     Call(imageSetSprite, artImage, {art}, "Image.set_sprite");
     SR2_INFO("[{}] gadget look: '{}' card picture = its full art '{}' recoloured (after {:.1f} s)", module,
              unity::GetName(artDef), unity::GetName(shown), artWait);
+    LogPicture(artDef, art);
     artImage = nullptr;
 }
 
@@ -399,6 +422,8 @@ bool Setup(sr2::core::ModuleContext& ctx, const char* module, std::string& why, 
     p->texGetPixels = method(p->tex2dClass, "GetPixels32", 0);
     p->texSetPixels = byParams(p->tex2dClass, "SetPixels32", {"UnityEngine.Color32[]"});
     p->texApply = method(p->tex2dClass, "Apply", 0);
+    p->texSetFilter = R.Method(texture, "set_filterMode", 1);   // optional (sharpness, TintedSprite)
+    p->texSetMipBias = R.Method(texture, "set_mipMapBias", 1);  // optional (sharpness, TintedSprite)
     p->setHideFlags = method(uobject, "set_hideFlags", 1);
     // hooks
     const MethodInfo* descMi = method(gadgetDef, "get_LocalizedDescription", 0);
@@ -617,7 +642,7 @@ Il2CppObject* TintedSprite(Il2CppObject* sprite, Rgb tint, float amount, std::st
     if (ok) copy = p.objectNew(p.tex2dClass);
     if (copy) {
         int32_t cw = cwFull, ch = chFull, cf = 4 /* RGBA32 */;
-        bool mip = false, linear = false;
+        bool mip = true, linear = false;  // mips + trilinear + bias -1 below: sampled like the game's full art
         p.Call(p.tex2dCtor, copy, {&cw, &ch, &cf, &mip, &linear}, "Texture2D..ctor", &ok);
         Rect rr{static_cast<float>(x), static_cast<float>(y), static_cast<float>(w), static_cast<float>(h)};
         int32_t dx = ox, dy = oy;
@@ -655,7 +680,11 @@ Il2CppObject* TintedSprite(Il2CppObject* sprite, Rgb tint, float amount, std::st
         c[i] = {mix(c[i].r, tint.r), mix(c[i].g, tint.g), mix(c[i].b, tint.b), c[i].a};
     }
     p.Call(p.texSetPixels, copy, {px}, "Texture2D.SetPixels32", &ok);
-    if (ok) p.Call(p.texApply, copy, {}, "Texture2D.Apply", &ok);
+    if (ok) p.Call(p.texApply, copy, {}, "Texture2D.Apply", &ok);  // Apply(): mips too
+    int32_t trilinear = 2;
+    float bias = -1.0f;
+    if (ok && p.texSetFilter) p.Call(p.texSetFilter, copy, {&trilinear}, "Texture.set_filterMode");
+    if (ok && p.texSetMipBias) p.Call(p.texSetMipBias, copy, {&bias}, "Texture.set_mipMapBias");
     Rect rect{0, 0, static_cast<float>(cwFull), static_cast<float>(chFull)};
     Vec2 pivot{full.w > 0 ? (pivotPx.x + static_cast<float>(padX)) / static_cast<float>(cwFull) : 0.5f,
                full.h > 0 ? (pivotPx.y + static_cast<float>(padY)) / static_cast<float>(chFull) : 0.5f};

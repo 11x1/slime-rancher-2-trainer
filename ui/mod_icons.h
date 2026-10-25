@@ -4,9 +4,10 @@
 // (custom plot upgrades, the Options "Mods" tab).
 //
 // Get() decodes the PNG natively (stb_image), creates a Texture2D (RGBA32, sRGB, mip chain,
-// trilinear, clamp) and a Sprite.Create over it, the first time an icon is asked for. The
-// texture and sprite are flagged DontUnloadUnusedAsset and held by never-freed GC handles,
-// so they live for the session; the result is cached per icon.
+// trilinear, mip bias -1 like the game's own full art, clamp, outside the texture-quality
+// mip limit) and a Sprite.Create over it, the first time an icon is asked for. The texture
+// and sprite are flagged DontUnloadUnusedAsset and held by never-freed GC handles, so they
+// live for the session; the result is cached per icon.
 //
 // Main thread only. Returns nullptr when the icon cannot be made (unknown name, not on
 // the main thread, a lookup missing, Unity threw): the caller keeps its fallback sprite.
